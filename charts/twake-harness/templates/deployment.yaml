@@ -1,0 +1,87 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ .Release.Name }}
+  labels:
+    {{- include "twake-harness.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "twake-harness.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "twake-harness.labels" . | nindent 8 }}
+      annotations:
+        {{- if and .Values.secretEnv (not .Values.existingSecret) }}
+        checksum/env: {{ include (print $.Template.BasePath "/secret.yaml") . | sha256sum }}
+        {{- end }}
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ .Release.Name }}
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10000
+        runAsGroup: 10000
+        fsGroup: 10000
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: harness
+          image: {{ include "twake-harness.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: [ALL]
+          env:
+            - name: HARNESS_ROLE
+              value: {{ .Values.role | quote }}
+            - name: HOST
+              value: 0.0.0.0
+            - name: PORT
+              value: {{ .Values.service.port | quote }}
+            - name: AUTH_JWKS_URL
+              value: {{ .Values.config.authJwksUrl | quote }}
+            - name: AUTH_ISSUER
+              value: {{ .Values.config.authIssuer | quote }}
+            - name: AUTH_AUDIENCE
+              value: {{ .Values.config.authAudience | quote }}
+            - name: LOG_LEVEL
+              value: {{ .Values.config.logLevel | quote }}
+          envFrom:
+            - secretRef:
+                name: {{ include "twake-harness.secretName" . }}
+          ports:
+            - name: http
+              containerPort: {{ .Values.service.port }}
+          startupProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 5
+            failureThreshold: 24
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 30
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: http
+            periodSeconds: 10
+          {{- with .Values.resources }}
+          resources:
+            {{- toYaml . | nindent 12 }}
+          {{- end }}
