@@ -29,6 +29,15 @@ export interface Config {
 		readonly maxToolCalls: number;
 		readonly memoryNudgeInterval: number;
 	};
+	readonly matrix: {
+		readonly serverName: string;
+		readonly appserviceId: string;
+		readonly senderLocalpart: string;
+		readonly assistantPrefix: string;
+		// The token APISIX injects on the matrix route; set it only when the harness sends it itself
+		readonly asToken: string;
+		readonly hsToken: string;
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -47,6 +56,12 @@ const envSchema = z.object({
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
+	MATRIX_SERVER_NAME: z.string().default(''),
+	MATRIX_APPSERVICE_ID: z.string().min(1).default('twake-harness'),
+	MATRIX_SENDER_LOCALPART: z.string().min(1).default('twake-space-assistant'),
+	MATRIX_ASSISTANT_PREFIX: z.string().min(1).default('twake-space-assistant-'),
+	MATRIX_AS_TOKEN: z.string().default('injected-by-apisix'),
+	MATRIX_HS_TOKEN: z.string().default(''),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -59,6 +74,14 @@ export function loadConfig(env: Env): Config {
 		throw new Error(`invalid configuration: ${issues.join('; ')}`);
 	}
 	const values = parsed.data;
+	if (
+		values.HARNESS_ROLE === 'matrix' &&
+		(values.MATRIX_SERVER_NAME === '' || values.MATRIX_HS_TOKEN === '')
+	) {
+		throw new Error(
+			'invalid configuration: the matrix role needs MATRIX_SERVER_NAME and MATRIX_HS_TOKEN'
+		);
+	}
 	return {
 		role: values.HARNESS_ROLE,
 		host: values.HOST,
@@ -81,6 +104,14 @@ export function loadConfig(env: Env): Config {
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL
+		},
+		matrix: {
+			serverName: values.MATRIX_SERVER_NAME,
+			appserviceId: values.MATRIX_APPSERVICE_ID,
+			senderLocalpart: values.MATRIX_SENDER_LOCALPART,
+			assistantPrefix: values.MATRIX_ASSISTANT_PREFIX,
+			asToken: values.MATRIX_AS_TOKEN,
+			hsToken: values.MATRIX_HS_TOKEN
 		},
 		logLevel: values.LOG_LEVEL
 	};

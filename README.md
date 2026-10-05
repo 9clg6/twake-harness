@@ -43,3 +43,12 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `LOG_LEVEL`                    | pino level, `info` by default                                   |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
+
+## Roles
+
+One image, one role per deployment, chosen by `HARNESS_ROLE`:
+
+- `api` serves the HTTP API behind APISIX.
+- `matrix` is the Matrix application service: it receives what Synapse pushes, answers as the creator user and the assistants, and calls Synapse through the `matrix` route of APISIX. `npm run matrix:registration` prints the registration file Synapse loads, given `MATRIX_APPSERVICE_URL`, the APISIX route Synapse pushes to.
+
+The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
