@@ -4,31 +4,18 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 
 import { z } from 'zod';
 
-import { makeTurnGate } from './agent/gate.js';
-import { DEFAULT_SYSTEM_PROMPT } from './agent/persona.js';
-import { buildSystemPrompt } from './agent/prompt.js';
-import {
-	clarifyTool,
-	makeToolRegistry,
-	memoryTool,
-	runTool,
-	sessionsListTool,
-	sessionsReadTool
-} from './agent/tools.js';
-import { runTurn, TurnError } from './agent/turn.js';
+import { makeAgentService, type AgentService } from './agent/service.js';
+import { runTool } from './agent/tools.js';
+import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import { withPrincipal, type Db } from './db/client.js';
-import { LlmError, makeLlmClient, type LlmClient } from './llm/client.js';
+import type { LlmClient } from './llm/client.js';
+import { makeMatrixAdmin } from './matrix/admin.js';
 import { listMemory } from './memory/repository.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
-import {
-	createSession,
-	findSession,
-	listSessionIds,
-	saveSessionMessages
-} from './sessions/repository.js';
+import { findSession, listSessionIds } from './sessions/repository.js';
 
 declare module 'fastify' {
 	interface FastifyRequest {
@@ -42,7 +29,11 @@ export interface AppOptions {
 	readonly logStream?: Writable;
 	readonly authenticator?: Authenticator;
 	readonly llm?: LlmClient;
+	readonly assistants?: AssistantService;
+	readonly agent?: AgentService;
 }
+
+const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
 
 const chatBodySchema = z
 	.object({
@@ -81,17 +72,10 @@ function principalOf(request: FastifyRequest): Principal {
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	const { config, db } = options;
 	const authenticate = options.authenticator ?? makeJwtAuthenticator(config.auth);
-	const llm =
-		options.llm ??
-		makeLlmClient({
-			baseUrl: config.apisix.baseUrl,
-			consumerKey: config.apisix.consumerKey,
-			model: config.llm.model,
-			maxTokens: config.llm.maxTokens,
-			timeoutMs: config.llm.timeoutMs
-		});
-	const tools = makeToolRegistry([clarifyTool, memoryTool, sessionsListTool, sessionsReadTool]);
-	const gate = makeTurnGate();
+	const agent =
+		options.agent ??
+		makeAgentService({ config, db, ...(options.llm === undefined ? {} : { llm: options.llm }) });
+	const tools = agent.tools;
 
 	async function loadPrincipal(principal: Principal): Promise<PrincipalRecord> {
 		return withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
@@ -104,6 +88,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		genReqId: requestIdOf,
 		requestIdHeader: false
 	});
+
+	const assistants =
+		options.assistants ??
+		makeAssistantService({
+			config,
+			db,
+			log: app.log,
+			admin: makeMatrixAdmin({
+				apisixBaseUrl: config.apisix.baseUrl,
+				consumerKey: config.apisix.consumerKey,
+				asToken: config.matrix.asToken
+			})
+		});
 
 	app.decorateRequest('principal', null);
 	app.addHook('onSend', async (request, reply) => {
@@ -128,6 +125,37 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				const principal = principalOf(request);
 				const record = await withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
 				return { user: record.id, actions: record.actions };
+			});
+
+			// The same operations as the creator conversation, for the Twake Chat front
+			scope.post('/assistants', async (request, reply) => {
+				const principal = principalOf(request);
+				const parsed = assistantBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const created = await assistants.create(principal.id, parsed.data.name);
+				if (!created.ok) {
+					return created.reason === 'exists'
+						? reply.code(409).send({ error: 'assistant already exists' })
+						: reply.code(400).send({ error: 'invalid request' });
+				}
+				return reply.code(201).send(created.assistant);
+			});
+
+			scope.get('/assistants/me', async (request, reply) => {
+				const assistant = await assistants.find(principalOf(request).id);
+				return assistant === null ? reply.code(404).send(RESOURCE_UNAVAILABLE) : assistant;
+			});
+
+			scope.put('/assistants/me', async (request, reply) => {
+				const parsed = assistantBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const renamed = await assistants.rename(principalOf(request).id, parsed.data.name);
+				return renamed === null ? reply.code(404).send(RESOURCE_UNAVAILABLE) : renamed;
+			});
+
+			scope.delete('/assistants/me', async (request, reply) => {
+				const removed = await assistants.remove(principalOf(request).id);
+				return removed ? reply.code(204).send() : reply.code(404).send(RESOURCE_UNAVAILABLE);
 			});
 
 			scope.get('/sessions', async (request, reply) => {
@@ -189,61 +217,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					return reply.code(400).send({ error: 'invalid request' });
 				}
 				const body = parsed.data;
-				return gate.run(principal.id, async () => {
-					// A short transaction settles rights and the session; the model call runs outside it.
-					const opened = await withPrincipal(db, principal, async (tx) => {
-						const record = await ensurePrincipal(tx, principal);
-						if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
-						if (body.session_id === undefined) {
-							return {
-								kind: 'ok' as const,
-								session: await createSession(tx, principal.id),
-								actions: record.actions
-							};
-						}
-						const session = await findSession(tx, body.session_id);
-						return session === null
-							? { kind: 'missing' as const }
-							: { kind: 'ok' as const, session, actions: record.actions };
-					});
-					if (opened.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
-					if (opened.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
-					const session = opened.session;
-					const actions = opened.actions;
-					const memory = actions.includes('memory.read_own')
-						? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
-						: { memory: [], user: [] };
-					const log = request.log.child({ session: session.id, principal: principal.id });
-					log.info({ messageLength: body.message.length }, 'turn started');
-					try {
-						const turn = await runTurn(
-							{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
-							{
-								systemPrompt: buildSystemPrompt({
-									persona: DEFAULT_SYSTEM_PROMPT,
-									memory,
-									history: session.messages,
-									nudgeInterval: config.turn.memoryNudgeInterval
-								}),
-								history: session.messages,
-								message: body.message,
-								context: { principalId: principal.id, actions, db }
-							}
-						);
-						const saved = await withPrincipal(db, principal, (tx) =>
-							saveSessionMessages(tx, session.id, turn.messages)
-						);
-						if (!saved) return reply.code(404).send(RESOURCE_UNAVAILABLE);
-						log.info({ answerLength: turn.answer.length }, 'turn finished');
-						return { session_id: session.id, answer: turn.answer, model: llm.model };
-					} catch (err: unknown) {
-						if (err instanceof TurnError || err instanceof LlmError) {
-							log.error({ err }, 'turn failed');
-							return reply.code(502).send({ error: 'execution failed' });
-						}
-						throw err;
-					}
+				const result = await agent.runOwnerTurn({
+					principal,
+					target:
+						body.session_id === undefined ? { kind: 'new' } : { kind: 'id', id: body.session_id },
+					message: body.message,
+					log: request.log
 				});
+				if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
+				if (result.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				if (result.kind === 'failed') return reply.code(502).send({ error: 'execution failed' });
+				return { session_id: result.sessionId, answer: result.answer, model: result.model };
 			});
 		},
 		{ prefix: '/v1' }

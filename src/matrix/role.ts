@@ -7,9 +7,14 @@ import {
 } from 'matrix-bot-sdk';
 import type { FastifyBaseLogger } from 'fastify';
 
+import { findDialog, saveDialog } from '../assistants/repository.js';
+import { enqueueJob } from '../jobs/queue.js';
+import { startJobWorker, type JobWorker } from '../jobs/worker.js';
+import { makeAssistantService, type AssistantService } from '../assistants/service.js';
 import type { Config } from '../config.js';
-import type { Db } from '../db/client.js';
-import { helpText, parseCreatorCommand } from './creator.js';
+import { withPrincipal, type Db } from '../db/client.js';
+import { makeMatrixAdmin } from './admin.js';
+import { helpText, runCreatorTurn } from './creator.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeAppserviceStorage } from './storage.js';
 
@@ -19,11 +24,13 @@ export interface MatrixRoleOptions {
 	readonly log: FastifyBaseLogger;
 	readonly port: number;
 	readonly bindAddress?: string;
+	readonly pollIntervalMs?: number;
 }
 
 export interface MatrixRole {
 	readonly appservice: Appservice;
 	readonly creatorUserId: string;
+	readonly assistants: AssistantService;
 	stop(): Promise<void>;
 }
 
@@ -31,7 +38,24 @@ interface RoomEvent {
 	readonly type?: string;
 	readonly sender?: string;
 	readonly state_key?: string;
+	readonly event_id?: string;
 	readonly content?: Record<string, unknown>;
+}
+
+interface SendJob {
+	readonly asUserId: string;
+	readonly roomId: string;
+	readonly text: string;
+}
+
+function isSendJob(value: unknown): value is SendJob {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		typeof (value as SendJob).asUserId === 'string' &&
+		typeof (value as SendJob).roomId === 'string' &&
+		typeof (value as SendJob).text === 'string'
+	);
 }
 
 function textOf(event: RoomEvent): string | null {
@@ -39,6 +63,24 @@ function textOf(event: RoomEvent): string | null {
 	return content['msgtype'] === 'm.text' && typeof content['body'] === 'string'
 		? content['body']
 		: null;
+}
+
+const LOCALPART = /^[a-z0-9._=\-/+]+$/;
+
+// The owner of a conversation is the localpart of a user of our own homeserver, which is also
+// their principal identity everywhere else in the harness.
+export function principalOfSender(config: Config, sender: string): string | null {
+	const match = /^@([^:]+):(.+)$/.exec(sender);
+	if (match === null) return null;
+	const [, localpart, server] = match;
+	if (
+		localpart === undefined ||
+		server !== config.matrix.serverName ||
+		!LOCALPART.test(localpart)
+	) {
+		return null;
+	}
+	return localpart;
 }
 
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
@@ -67,6 +109,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		storage: makeAppserviceStorage(db)
 	});
 	const creator = creatorUserId(config);
+	const admin = makeMatrixAdmin({
+		apisixBaseUrl: config.apisix.baseUrl,
+		consumerKey: config.apisix.consumerKey,
+		asToken: config.matrix.asToken
+	});
+	const assistants = makeAssistantService({ config, db, admin, log });
 
 	// Synapse checks the application service is alive before it pushes anything (MSC2659).
 	appservice.expressAppInstance.post('/_matrix/app/v1/ping', (req, res) => {
@@ -116,20 +164,61 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (invited === creator) await appservice.botIntent.sendText(roomId, helpText());
 	});
 
+	// The rooms of the assistants, kept as an index so a message is routed to its owner first
+	async function assistantRoom(roomId: string): Promise<{ owner: string; userId: string } | null> {
+		const rows = await db.sql<{ owner: string; user_id: string }[]>`
+			select owner, user_id from assistant_rooms where room_id = ${roomId}`;
+		const row = rows[0];
+		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
+	}
+
 	appservice.on('room.message', async (roomId: string, event: MatrixEvent<unknown> | RoomEvent) => {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		const text = textOf(raw);
 		if (text === null) return;
+		const room = await assistantRoom(roomId);
+		if (room !== null) {
+			// An assistant's room: only its owner is heard, everyone else is ignored and logged
+			const owner = principalOfSender(config, sender);
+			if (owner === null || owner !== room.owner) {
+				log.info({ roomId, sender, owner: room.owner }, 'assistant ignored a foreign sender');
+				return;
+			}
+			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
+			await enqueueJob(db, {
+				kind: 'turn',
+				payload: { owner, roomId, eventId, text },
+				dedupKey: `turn:${eventId}`
+			});
+			log.info({ roomId, owner, eventId }, 'turn queued');
+			return;
+		}
 		if (!(await creatorIsInRoom(roomId))) return;
-		const command = parseCreatorCommand(text);
-		log.info({ roomId, sender, command: command.kind }, 'creator command');
-		const reply =
-			command.kind === 'help'
-				? helpText()
-				: `I did not understand « ${command.text} ». Send /help for the commands.`;
-		await appservice.botIntent.sendText(roomId, reply);
+		const owner = principalOfSender(config, sender);
+		if (owner === null) {
+			log.info({ roomId, sender }, 'creator ignored a foreign sender');
+			return;
+		}
+		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
+		const turn = await runCreatorTurn({ owner, text, state }, assistants);
+		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
+		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
+		await appservice.botIntent.sendText(roomId, turn.reply);
+	});
+
+	// Answers computed by the api role, sent as the assistant
+	const sender: JobWorker = startJobWorker({
+		db,
+		log,
+		kinds: ['send'],
+		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+		handler: async (job) => {
+			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
+			await admin.sendText(job.payload.asUserId, job.payload.roomId, job.payload.text);
+			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
+		}
 	});
 
 	await appservice.begin();
@@ -137,7 +226,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	return {
 		appservice,
 		creatorUserId: creator,
+		assistants,
 		stop: async () => {
+			await sender.stop();
 			appservice.stop();
 		}
 	};

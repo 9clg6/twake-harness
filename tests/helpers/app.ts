@@ -60,7 +60,7 @@ export interface TestHarness {
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
 	await db.sql.unsafe(
-		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users'
+		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms'
 	);
 }
 

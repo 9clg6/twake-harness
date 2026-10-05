@@ -1,3 +1,5 @@
+import { makeAgentService } from './agent/service.js';
+import { startTurnWorker } from './agent/turn-worker.js';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { makeDb } from './db/client.js';
@@ -27,10 +29,13 @@ if (config.role === 'matrix') {
 	process.on('SIGTERM', () => void stop('SIGTERM'));
 	process.on('SIGINT', () => void stop('SIGINT'));
 } else {
-	const app = await buildApp({ config, db });
+	const agent = makeAgentService({ config, db });
+	const app = await buildApp({ config, db, agent });
 	app.log.info({ role: config.role, applied: report.applied }, 'harness starting');
+	const worker = startTurnWorker({ db, agent, log: app.log });
 	const shutdown = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
+		await worker.stop();
 		await app.close();
 		await db.close();
 		process.exit(0);

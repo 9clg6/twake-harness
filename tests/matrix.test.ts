@@ -55,7 +55,7 @@ describe('the matrix role as an application service', () => {
 		expect(replies).toHaveLength(2);
 		expect(replies[1]).toContain('/newbot');
 		expect(
-			h.logLines().some((line) => line['msg'] === 'creator command' && line['command'] === 'help')
+			h.logLines().some((line) => line['msg'] === 'creator command' && line['command'] === '/help')
 		).toBe(true);
 	});
 
