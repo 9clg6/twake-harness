@@ -43,6 +43,11 @@ export interface TestSynapse {
 		sender: string,
 		predicate: (text: string) => boolean
 	): Promise<string>;
+	pendingInvites(user: MatrixUser): Promise<{ roomId: string; inviter: string }[]>;
+	joinRoom(user: MatrixUser, roomId: string): Promise<void>;
+	joinedMembers(user: MatrixUser, roomId: string): Promise<string[]>;
+	displayName(userId: string): Promise<string | null>;
+	whoami(accessToken: string): Promise<number>;
 	logs(): Promise<string>;
 	stop(): Promise<void>;
 }
@@ -68,10 +73,19 @@ function sleep(ms: number): Promise<void> {
 const GENEROUS = { per_second: 1000, burst_count: 1000 };
 
 // A real Synapse, configured with the harness registration, that pushes to this host.
+// The containers run as the host user, so the files they write in the shared directory stay
+// readable on Linux hosts, where a bind mount keeps the container's ownership.
+function hostIdentity(): { UID: string; GID: string } {
+	return {
+		UID: String(process.getuid?.() ?? 1000),
+		GID: String(process.getgid?.() ?? 1000)
+	};
+}
+
 export async function startTestSynapse(registration: AppserviceRegistration): Promise<TestSynapse> {
 	const dir = await mkdtemp(join(tmpdir(), 'synapse-'));
 	await new GenericContainer(IMAGE)
-		.withEnvironment({ SYNAPSE_SERVER_NAME, SYNAPSE_REPORT_STATS: 'no' })
+		.withEnvironment({ SYNAPSE_SERVER_NAME, SYNAPSE_REPORT_STATS: 'no', ...hostIdentity() })
 		.withBindMounts([{ source: dir, target: '/data' }])
 		.withCommand(['generate'])
 		.withWaitStrategy(Wait.forOneShotStartup())
@@ -97,6 +111,7 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 	await writeFile(configPath, dump(config));
 	await writeFile(join(dir, 'harness.yaml'), dump(registration.file));
 	const container: StartedTestContainer = await new GenericContainer(IMAGE)
+		.withEnvironment(hostIdentity())
 		.withBindMounts([{ source: dir, target: '/data' }])
 		.withExposedPorts(8008)
 		.withExtraHosts([{ host: 'host.docker.internal', ipAddress: 'host-gateway' }])
@@ -202,6 +217,55 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		throw new Error(`no message from ${sender} in ${roomId} matched within 15 s`);
 	}
 
+	async function pendingInvites(user: MatrixUser): Promise<{ roomId: string; inviter: string }[]> {
+		const res = await request(user, 'GET', '/_matrix/client/v3/sync?timeout=0');
+		const invites = ((res.body['rooms'] as Record<string, unknown> | undefined)?.['invite'] ??
+			{}) as Record<
+			string,
+			{ invite_state?: { events?: { type: string; sender: string; state_key?: string }[] } }
+		>;
+		return Object.entries(invites).map(([roomId, room]) => {
+			const member = (room.invite_state?.events ?? []).find(
+				(e) => e.type === 'm.room.member' && e.state_key === user.userId
+			);
+			return { roomId, inviter: member?.sender ?? '' };
+		});
+	}
+
+	async function joinRoom(user: MatrixUser, roomId: string): Promise<void> {
+		const res = await request(
+			user,
+			'POST',
+			`/_matrix/client/v3/join/${encodeURIComponent(roomId)}`,
+			{}
+		);
+		if (res.status !== 200) throw new Error(`join failed: ${JSON.stringify(res.body)}`);
+	}
+
+	async function joinedMembers(user: MatrixUser, roomId: string): Promise<string[]> {
+		const res = await request(
+			user,
+			'GET',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/joined_members`
+		);
+		return Object.keys((res.body['joined'] as Record<string, unknown> | undefined) ?? {});
+	}
+
+	async function displayName(userId: string): Promise<string | null> {
+		const res = await request(
+			null,
+			'GET',
+			`/_matrix/client/v3/profile/${encodeURIComponent(userId)}/displayname`
+		);
+		const name = res.body['displayname'];
+		return typeof name === 'string' ? name : null;
+	}
+
+	async function whoami(accessToken: string): Promise<number> {
+		return (await request({ userId: '', accessToken }, 'GET', '/_matrix/client/v3/account/whoami'))
+			.status;
+	}
+
 	return {
 		url,
 		registerUser,
@@ -210,6 +274,11 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		sendText,
 		messagesFrom,
 		waitForMessage,
+		pendingInvites,
+		joinRoom,
+		joinedMembers,
+		displayName,
+		whoami,
 		logs: async () => {
 			const stream = await container.logs();
 			const chunks: string[] = [];
