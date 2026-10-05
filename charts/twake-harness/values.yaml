@@ -14,9 +14,12 @@ config:
   authJwksUrl: ''
   authIssuer: ''
   authAudience: ''
+  # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
+  apisixBaseUrl: ''
+  llmModel: qwen3.8
   logLevel: info
 
-# Rendered into a Secret and injected as environment, for DATABASE_URL and the other secrets
+# Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY and the other secrets
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''
