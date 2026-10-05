@@ -1,0 +1,159 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
+
+import { startTestHarness, type TestHarness } from './helpers/app.js';
+import { echoScript, type ChatRequest } from './helpers/fake-apisix.js';
+
+interface ChatReply {
+	session_id: string;
+	answer: string;
+	model: string;
+}
+
+describe('a chat turn with the scripted model', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		h = await startTestHarness();
+	});
+	afterAll(async () => {
+		await h.close();
+	});
+	beforeEach(() => {
+		h.apisix.llm.calls.length = 0;
+		h.apisix.llm.script = echoScript;
+	});
+
+	async function chat(
+		sub: string,
+		body: Record<string, unknown>,
+		requestId?: string
+	): Promise<{ status: number; body: ChatReply & { error?: string } }> {
+		const headers: Record<string, string> = {
+			authorization: `Bearer ${await h.issuer.mint({ sub })}`
+		};
+		if (requestId !== undefined) headers['x-request-id'] = requestId;
+		const res = await h.app.inject({ method: 'POST', url: '/v1/chat', headers, payload: body });
+		return { status: res.statusCode, body: res.json() };
+	}
+
+	it('answers a new message and opens a session the caller owns', async () => {
+		const { status, body } = await chat('alice', { message: 'Bonjour' });
+		expect(status).toBe(200);
+		expect(body.answer).toBe('echo: Bonjour');
+		expect(body.model).toBe('qwen3.8');
+		expect(body.session_id).toMatch(/^[0-9a-f]{32}$/);
+		const call = h.apisix.llm.calls[0];
+		expect(call?.apiKey).toBe(h.apisix.consumerKey);
+		expect(call?.request.model).toBe('qwen3.8');
+		expect(call?.request.messages[0]?.role).toBe('system');
+		expect(call?.request.messages.at(-1)).toMatchObject({ role: 'user', content: 'Bonjour' });
+	});
+
+	it('continues a session with its history, so the model can recall an earlier value', async () => {
+		const marker = `PRIVATE_${Date.now()}`;
+		h.apisix.llm.script = (request: ChatRequest) => {
+			const history = request.messages.map((m) => m.content ?? '').join('\n');
+			const found = /PRIVATE_\d+/.exec(history);
+			return { content: found === null ? 'nothing' : found[0] };
+		};
+		const first = await chat('alice', { message: `Remember ${marker}` });
+		const second = await chat('alice', {
+			session_id: first.body.session_id,
+			message: 'What was the value?'
+		});
+		expect(second.status).toBe(200);
+		expect(second.body.session_id).toBe(first.body.session_id);
+		expect(second.body.answer).toBe(marker);
+		const lastCall = h.apisix.llm.calls.at(-1);
+		expect(lastCall?.request.messages.some((m) => m.content === `Remember ${marker}`)).toBe(true);
+	});
+
+	it('refuses a session that is not mine, or does not exist, before any model call', async () => {
+		const own = await chat('alice', { message: 'hello' });
+		h.apisix.llm.calls.length = 0;
+		const foreign = await chat('bob', { session_id: own.body.session_id, message: 'hi' });
+		expect(foreign.status).toBe(404);
+		const missing = await chat('bob', { session_id: '0'.repeat(32), message: 'hi' });
+		expect(missing.status).toBe(404);
+		expect(missing.body).toEqual(foreign.body);
+		expect(h.apisix.llm.calls).toHaveLength(0);
+	});
+
+	it('refuses a malformed body', async () => {
+		const res = await chat('alice', { message: 'x', user_id: 'bob' });
+		expect(res.status).toBe(400);
+		expect((await chat('alice', {})).status).toBe(400);
+	});
+
+	it('keeps the reasoning out of the answer and writes it in full to the logs', async () => {
+		h.apisix.llm.script = () => ({
+			reasoning: 'Let me think about alpha and beta.',
+			content: '<think>hidden deliberation</think>The answer is 42.'
+		});
+		const { body } = await chat('alice', { message: 'question' }, 'turn-reasoning');
+		expect(body.answer).toBe('The answer is 42.');
+		expect(body.answer).not.toContain('think');
+		const lines = h.logLines().filter((line) => line['reqId'] === 'turn-reasoning');
+		const modelLine = lines.find((line) => line['msg'] === 'model answered');
+		expect(modelLine?.['reasoning']).toContain('Let me think about alpha and beta.');
+		expect(modelLine?.['reasoning']).toContain('hidden deliberation');
+		const promptLine = lines.find((line) => line['msg'] === 'model asked');
+		expect(JSON.stringify(promptLine?.['messages'])).toContain('question');
+	});
+
+	it('runs a tool call from the model and logs it, ending the turn on a clarification', async () => {
+		h.apisix.llm.script = (_request, index) =>
+			index === 0
+				? {
+						toolCalls: [
+							{
+								id: 'call_1',
+								type: 'function',
+								function: {
+									name: 'clarify',
+									arguments: JSON.stringify({ question: 'Which file?' })
+								}
+							}
+						]
+					}
+				: { content: 'should not be reached' };
+		const { body } = await chat('alice', { message: 'open it' }, 'turn-tool');
+		expect(body.answer).toBe('Which file?');
+		expect(h.apisix.llm.calls).toHaveLength(1);
+		const toolLine = h
+			.logLines()
+			.find((line) => line['reqId'] === 'turn-tool' && line['msg'] === 'tool called');
+		expect(toolLine?.['tool']).toBe('clarify');
+		expect(toolLine?.['arguments']).toEqual({ question: 'Which file?' });
+	});
+
+	it('stops a model that keeps calling tools after the allowed number of calls', async () => {
+		h.apisix.llm.script = () => ({
+			toolCalls: [
+				{
+					id: 'loop',
+					type: 'function',
+					function: { name: 'unknown_tool', arguments: '{}' }
+				}
+			]
+		});
+		const { status, body } = await chat('alice', { message: 'loop' });
+		expect(status).toBe(502);
+		expect(body.error).toBe('execution failed');
+		expect(h.apisix.llm.calls.length).toBeLessThanOrEqual(7);
+	});
+
+	it('serializes the turns of one user and lets two users run in parallel', async () => {
+		h.apisix.llm.script = () => ({ content: 'ok', delayMs: 200 });
+		const sameUser = await Promise.all([
+			chat('alice', { message: '1' }),
+			chat('alice', { message: '2' })
+		]);
+		expect(sameUser.every((r) => r.status === 200)).toBe(true);
+		const [a, b] = h.apisix.llm.calls;
+		expect(a !== undefined && b !== undefined && b.startedAt >= a.finishedAt).toBe(true);
+		h.apisix.llm.calls.length = 0;
+		await Promise.all([chat('carol', { message: '1' }), chat('dave', { message: '2' })]);
+		const [c, d] = h.apisix.llm.calls;
+		expect(c !== undefined && d !== undefined && d.startedAt < c.finishedAt).toBe(true);
+	});
+});

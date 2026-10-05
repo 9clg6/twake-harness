@@ -16,6 +16,18 @@ export interface Config {
 		readonly issuer: string;
 		readonly audience: string;
 	};
+	readonly apisix: {
+		readonly baseUrl: URL;
+		readonly consumerKey: string;
+	};
+	readonly llm: {
+		readonly model: string;
+		readonly maxTokens: number;
+		readonly timeoutMs: number;
+	};
+	readonly turn: {
+		readonly maxToolCalls: number;
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -27,6 +39,12 @@ const envSchema = z.object({
 	AUTH_JWKS_URL: z.url(),
 	AUTH_ISSUER: z.string().min(1),
 	AUTH_AUDIENCE: z.string().min(1),
+	APISIX_BASE_URL: z.url(),
+	APISIX_CONSUMER_KEY: z.string().min(1),
+	LLM_MODEL: z.string().min(1).default('qwen3.8'),
+	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(1024),
+	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
+	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -48,6 +66,18 @@ export function loadConfig(env: Env): Config {
 			jwksUrl: new URL(values.AUTH_JWKS_URL),
 			issuer: values.AUTH_ISSUER,
 			audience: values.AUTH_AUDIENCE
+		},
+		apisix: {
+			baseUrl: new URL(values.APISIX_BASE_URL),
+			consumerKey: values.APISIX_CONSUMER_KEY
+		},
+		llm: {
+			model: values.LLM_MODEL,
+			maxTokens: values.LLM_MAX_TOKENS,
+			timeoutMs: values.LLM_TIMEOUT_MS
+		},
+		turn: {
+			maxToolCalls: values.TURN_MAX_TOOL_CALLS
 		},
 		logLevel: values.LOG_LEVEL
 	};

@@ -1,4 +1,4 @@
-import type { Tx } from '../db/client.js';
+import { readJsonColumn, type Tx } from '../db/client.js';
 import type { Principal } from './principal.js';
 
 export const DEFAULT_ACTIONS: readonly string[] = [
@@ -24,7 +24,8 @@ function isStringArray(value: unknown): value is string[] {
 }
 
 function normalizePrincipalRow(row: PrincipalRow): PrincipalRecord {
-	return { id: row.id, actions: isStringArray(row.actions) ? row.actions : [] };
+	const actions = readJsonColumn(row.actions);
+	return { id: row.id, actions: isStringArray(actions) ? actions : [] };
 }
 
 // Idempotent: the first request of a subject creates it with the default rights, later requests
