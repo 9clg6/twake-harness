@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { LlmClient, LlmMessage } from '../llm/client.js';
-import type { ToolContext, ToolRegistry } from './tools.js';
+import { runTool, type ToolContext, type ToolRegistry } from './tools.js';
 
 export interface TurnInput {
 	readonly systemPrompt: string;
@@ -78,7 +78,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					? { result: { error: `unknown tool ${call.function.name}` } }
 					: args === null
 						? { result: { error: 'arguments are not valid JSON' } }
-						: await tool.run(args, input.context);
+						: await runTool(tool, args, input.context);
 			deps.log.info(
 				{ tool: call.function.name, arguments: args, result: outcome.result },
 				'tool called'
