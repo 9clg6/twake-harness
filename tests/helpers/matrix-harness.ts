@@ -1,5 +1,7 @@
 import { PassThrough } from 'node:stream';
 
+import { makeAgentService } from '../../src/agent/service.js';
+import { startTurnWorker } from '../../src/agent/turn-worker.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
@@ -55,9 +57,18 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
-	const app = await buildApp({ config, db, logStream });
+	const agent = makeAgentService({ config, db });
+	const app = await buildApp({ config, db, logStream, agent });
 	await app.ready();
-	const role = await startMatrixRole({ config, db, log: app.log, port, bindAddress: '0.0.0.0' });
+	const worker = startTurnWorker({ db, agent, log: app.log, pollIntervalMs: 100 });
+	const role = await startMatrixRole({
+		config,
+		db,
+		log: app.log,
+		port,
+		bindAddress: '0.0.0.0',
+		pollIntervalMs: 100
+	});
 	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
 	return {
 		synapse,
@@ -76,6 +87,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 				.filter((line) => line.length > 0)
 				.map((line) => JSON.parse(line) as Record<string, unknown>),
 		close: async () => {
+			await worker.stop();
 			await role.stop();
 			await app.close();
 			await db.close();

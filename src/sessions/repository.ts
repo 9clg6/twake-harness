@@ -58,3 +58,19 @@ export async function listSessionIds(tx: Tx): Promise<string[]> {
 	const rows = await tx.sql<{ id: string }[]>`select id from sessions order by updated_at desc`;
 	return rows.map((row) => row.id);
 }
+
+// The conversation of an owner with their assistant in one room is one session, created on
+// the first message.
+export async function ensureRoomSession(
+	tx: Tx,
+	owner: string,
+	roomId: string
+): Promise<SessionRecord> {
+	const rows = await tx.sql<SessionRow[]>`
+		select id, owner, messages from sessions where owner = ${owner} and room_id = ${roomId}`;
+	const row = rows[0];
+	if (row !== undefined) return normalizeSessionRow(row);
+	const id = makeSessionId();
+	await tx.sql`insert into sessions (id, owner, room_id) values (${id}, ${owner}, ${roomId})`;
+	return { id, owner, messages: [] };
+}

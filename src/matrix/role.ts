@@ -8,6 +8,8 @@ import {
 import type { FastifyBaseLogger } from 'fastify';
 
 import { findDialog, saveDialog } from '../assistants/repository.js';
+import { enqueueJob } from '../jobs/queue.js';
+import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
@@ -22,6 +24,7 @@ export interface MatrixRoleOptions {
 	readonly log: FastifyBaseLogger;
 	readonly port: number;
 	readonly bindAddress?: string;
+	readonly pollIntervalMs?: number;
 }
 
 export interface MatrixRole {
@@ -35,7 +38,24 @@ interface RoomEvent {
 	readonly type?: string;
 	readonly sender?: string;
 	readonly state_key?: string;
+	readonly event_id?: string;
 	readonly content?: Record<string, unknown>;
+}
+
+interface SendJob {
+	readonly asUserId: string;
+	readonly roomId: string;
+	readonly text: string;
+}
+
+function isSendJob(value: unknown): value is SendJob {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		typeof (value as SendJob).asUserId === 'string' &&
+		typeof (value as SendJob).roomId === 'string' &&
+		typeof (value as SendJob).text === 'string'
+	);
 }
 
 function textOf(event: RoomEvent): string | null {
@@ -144,12 +164,37 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (invited === creator) await appservice.botIntent.sendText(roomId, helpText());
 	});
 
+	// The rooms of the assistants, kept as an index so a message is routed to its owner first
+	async function assistantRoom(roomId: string): Promise<{ owner: string; userId: string } | null> {
+		const rows = await db.sql<{ owner: string; user_id: string }[]>`
+			select owner, user_id from assistant_rooms where room_id = ${roomId}`;
+		const row = rows[0];
+		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
+	}
+
 	appservice.on('room.message', async (roomId: string, event: MatrixEvent<unknown> | RoomEvent) => {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		const text = textOf(raw);
 		if (text === null) return;
+		const room = await assistantRoom(roomId);
+		if (room !== null) {
+			// An assistant's room: only its owner is heard, everyone else is ignored and logged
+			const owner = principalOfSender(config, sender);
+			if (owner === null || owner !== room.owner) {
+				log.info({ roomId, sender, owner: room.owner }, 'assistant ignored a foreign sender');
+				return;
+			}
+			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
+			await enqueueJob(db, {
+				kind: 'turn',
+				payload: { owner, roomId, eventId, text },
+				dedupKey: `turn:${eventId}`
+			});
+			log.info({ roomId, owner, eventId }, 'turn queued');
+			return;
+		}
 		if (!(await creatorIsInRoom(roomId))) return;
 		const owner = principalOfSender(config, sender);
 		if (owner === null) {
@@ -163,6 +208,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		await appservice.botIntent.sendText(roomId, turn.reply);
 	});
 
+	// Answers computed by the api role, sent as the assistant
+	const sender: JobWorker = startJobWorker({
+		db,
+		log,
+		kinds: ['send'],
+		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+		handler: async (job) => {
+			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
+			await admin.sendText(job.payload.asUserId, job.payload.roomId, job.payload.text);
+			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
+		}
+	});
+
 	await appservice.begin();
 	log.info({ port: options.port, creator, homeserverUrl }, 'matrix role listening');
 	return {
@@ -170,6 +228,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		creatorUserId: creator,
 		assistants,
 		stop: async () => {
+			await sender.stop();
 			appservice.stop();
 		}
 	};
