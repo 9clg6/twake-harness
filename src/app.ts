@@ -6,15 +6,29 @@ import { z } from 'zod';
 
 import { makeTurnGate } from './agent/gate.js';
 import { DEFAULT_SYSTEM_PROMPT } from './agent/persona.js';
-import { clarifyTool, makeToolRegistry } from './agent/tools.js';
+import { buildSystemPrompt } from './agent/prompt.js';
+import {
+	clarifyTool,
+	makeToolRegistry,
+	memoryTool,
+	runTool,
+	sessionsListTool,
+	sessionsReadTool
+} from './agent/tools.js';
 import { runTurn, TurnError } from './agent/turn.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import { withPrincipal, type Db } from './db/client.js';
 import { LlmError, makeLlmClient, type LlmClient } from './llm/client.js';
+import { listMemory } from './memory/repository.js';
 import type { Principal } from './principals/principal.js';
-import { ensurePrincipal } from './principals/repository.js';
-import { createSession, findSession, saveSessionMessages } from './sessions/repository.js';
+import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
+import {
+	createSession,
+	findSession,
+	listSessionIds,
+	saveSessionMessages
+} from './sessions/repository.js';
 
 declare module 'fastify' {
 	interface FastifyRequest {
@@ -40,7 +54,13 @@ const chatBodySchema = z
 	})
 	.strict();
 
+const toolBodySchema = z
+	.object({ tool: z.string().min(1), arguments: z.unknown().optional() })
+	.strict();
+
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
+const FORBIDDEN = { error: 'forbidden' } as const;
+const SESSION_ID = /^[0-9a-f]{32}$/;
 
 const REQUEST_ID_HEADER = 'x-request-id';
 
@@ -70,8 +90,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			maxTokens: config.llm.maxTokens,
 			timeoutMs: config.llm.timeoutMs
 		});
-	const tools = makeToolRegistry([clarifyTool]);
+	const tools = makeToolRegistry([clarifyTool, memoryTool, sessionsListTool, sessionsReadTool]);
 	const gate = makeTurnGate();
+
+	async function loadPrincipal(principal: Principal): Promise<PrincipalRecord> {
+		return withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
+	}
 	const app = Fastify({
 		logger: {
 			level: config.logLevel,
@@ -106,6 +130,58 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				return { user: record.id, actions: record.actions };
 			});
 
+			scope.get('/sessions', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('sessions.read_own')) return reply.code(403).send(FORBIDDEN);
+				const sessions = await withPrincipal(db, principal, (tx) => listSessionIds(tx));
+				return { sessions };
+			});
+
+			scope.get<{ Params: { id: string } }>('/sessions/:id', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('sessions.read_own')) return reply.code(403).send(FORBIDDEN);
+				if (!SESSION_ID.test(request.params.id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				const session = await withPrincipal(db, principal, (tx) =>
+					findSession(tx, request.params.id)
+				);
+				if (session === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				return { messages: session.messages };
+			});
+
+			scope.get('/memory', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('memory.read_own')) return reply.code(403).send(FORBIDDEN);
+				return withPrincipal(db, principal, (tx) => listMemory(tx, principal.id));
+			});
+
+			// Direct tool calls, under the same rules as the model's: identity from the token only,
+			// unknown tools and unknown arguments refused, ownership enforced by the database.
+			scope.post('/tool', async (request, reply) => {
+				const principal = principalOf(request);
+				const parsed = toolBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const tool = tools.find(parsed.data.tool);
+				if (tool === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				const record = await loadPrincipal(principal);
+				if (tool.requiredAction !== null && !record.actions.includes(tool.requiredAction)) {
+					return reply.code(403).send(FORBIDDEN);
+				}
+				const outcome = await runTool(tool, parsed.data.arguments ?? {}, {
+					principalId: principal.id,
+					actions: record.actions,
+					db
+				});
+				request.log.info(
+					{ tool: parsed.data.tool, arguments: parsed.data.arguments, result: outcome.result },
+					'tool called'
+				);
+				if (outcome.denied === true) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				return outcome.result;
+			});
+
 			scope.post('/chat', async (request, reply) => {
 				const principal = principalOf(request);
 				const parsed = chatBodySchema.safeParse(request.body);
@@ -119,26 +195,39 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 						const record = await ensurePrincipal(tx, principal);
 						if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
 						if (body.session_id === undefined) {
-							return { kind: 'ok' as const, session: await createSession(tx, principal.id) };
+							return {
+								kind: 'ok' as const,
+								session: await createSession(tx, principal.id),
+								actions: record.actions
+							};
 						}
 						const session = await findSession(tx, body.session_id);
 						return session === null
 							? { kind: 'missing' as const }
-							: { kind: 'ok' as const, session };
+							: { kind: 'ok' as const, session, actions: record.actions };
 					});
-					if (opened.kind === 'forbidden') return reply.code(403).send({ error: 'forbidden' });
+					if (opened.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
 					if (opened.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const session = opened.session;
+					const actions = opened.actions;
+					const memory = actions.includes('memory.read_own')
+						? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
+						: { memory: [], user: [] };
 					const log = request.log.child({ session: session.id, principal: principal.id });
 					log.info({ messageLength: body.message.length }, 'turn started');
 					try {
 						const turn = await runTurn(
 							{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
 							{
-								systemPrompt: DEFAULT_SYSTEM_PROMPT,
+								systemPrompt: buildSystemPrompt({
+									persona: DEFAULT_SYSTEM_PROMPT,
+									memory,
+									history: session.messages,
+									nudgeInterval: config.turn.memoryNudgeInterval
+								}),
 								history: session.messages,
 								message: body.message,
-								context: { principalId: principal.id }
+								context: { principalId: principal.id, actions, db }
 							}
 						);
 						const saved = await withPrincipal(db, principal, (tx) =>

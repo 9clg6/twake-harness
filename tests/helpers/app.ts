@@ -26,8 +26,8 @@ export const TEST_DATABASE_URL: string = appDatabaseUrl(ADMIN_DATABASE_URL);
 
 let appRoleReady = false;
 
-async function ensureAppRole(): Promise<void> {
-	if (appRoleReady) return;
+async function ensureAppRole(keepSchema: boolean): Promise<void> {
+	if (appRoleReady || keepSchema) return;
 	const admin = makeDb(ADMIN_DATABASE_URL);
 	try {
 		await admin.sql.unsafe(`do $$ begin
@@ -59,11 +59,16 @@ export interface TestHarness {
 
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
-	await db.sql.unsafe('truncate table principals, sessions');
+	await db.sql.unsafe('truncate table principals, sessions, memory_entries');
 }
 
-export async function startTestHarness(): Promise<TestHarness> {
-	await ensureAppRole();
+export interface StartOptions {
+	// Keep the rows of a previous harness, to check what survives a restart
+	readonly keepData?: boolean;
+}
+
+export async function startTestHarness(options: StartOptions = {}): Promise<TestHarness> {
+	await ensureAppRole(options.keepData === true);
 	const issuer = await startTestIssuer();
 	const apisix = await startFakeApisix();
 	const config = loadConfig({
@@ -78,7 +83,11 @@ export async function startTestHarness(): Promise<TestHarness> {
 		LOG_LEVEL: 'info'
 	});
 	const db = makeDb(config.databaseUrl);
-	await resetDatabase(db);
+	if (options.keepData === true) {
+		await runMigrations(db);
+	} else {
+		await resetDatabase(db);
+	}
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));

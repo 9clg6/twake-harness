@@ -27,6 +27,7 @@ export interface Config {
 	};
 	readonly turn: {
 		readonly maxToolCalls: number;
+		readonly memoryNudgeInterval: number;
 	};
 	readonly logLevel: LogLevel;
 }
@@ -45,6 +46,7 @@ const envSchema = z.object({
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(1024),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
+	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -77,7 +79,8 @@ export function loadConfig(env: Env): Config {
 			timeoutMs: values.LLM_TIMEOUT_MS
 		},
 		turn: {
-			maxToolCalls: values.TURN_MAX_TOOL_CALLS
+			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
+			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL
 		},
 		logLevel: values.LOG_LEVEL
 	};

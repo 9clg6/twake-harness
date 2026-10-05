@@ -53,3 +53,8 @@ export async function saveSessionMessages(
 		where id = ${id}`;
 	return result.count === 1;
 }
+
+export async function listSessionIds(tx: Tx): Promise<string[]> {
+	const rows = await tx.sql<{ id: string }[]>`select id from sessions order by updated_at desc`;
+	return rows.map((row) => row.id);
+}
