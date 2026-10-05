@@ -5,6 +5,7 @@ import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
 import { runMigrations } from '../../src/db/migrate.js';
+import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
 
 // The container's own user is a superuser, which bypasses row-level security. Tests therefore run
@@ -50,6 +51,7 @@ export interface TestHarness {
 	readonly app: FastifyInstance;
 	readonly db: Db;
 	readonly issuer: TestIssuer;
+	readonly apisix: FakeApisix;
 	readonly config: Config;
 	logLines(): Record<string, unknown>[];
 	close(): Promise<void>;
@@ -57,18 +59,22 @@ export interface TestHarness {
 
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
-	await db.sql.unsafe('truncate table principals');
+	await db.sql.unsafe('truncate table principals, sessions');
 }
 
 export async function startTestHarness(): Promise<TestHarness> {
 	await ensureAppRole();
 	const issuer = await startTestIssuer();
+	const apisix = await startFakeApisix();
 	const config = loadConfig({
 		HARNESS_ROLE: 'api',
 		DATABASE_URL: TEST_DATABASE_URL,
 		AUTH_JWKS_URL: issuer.jwksUrl.toString(),
 		AUTH_ISSUER: issuer.issuer,
 		AUTH_AUDIENCE: issuer.audience,
+		APISIX_BASE_URL: apisix.baseUrl,
+		APISIX_CONSUMER_KEY: apisix.consumerKey,
+		LLM_MODEL: 'qwen3.8',
 		LOG_LEVEL: 'info'
 	});
 	const db = makeDb(config.databaseUrl);
@@ -82,6 +88,7 @@ export async function startTestHarness(): Promise<TestHarness> {
 		app,
 		db,
 		issuer,
+		apisix,
 		config,
 		logLines: () =>
 			chunks
@@ -93,6 +100,7 @@ export async function startTestHarness(): Promise<TestHarness> {
 			await app.close();
 			await db.close();
 			await issuer.close();
+			await apisix.close();
 		}
 	};
 }

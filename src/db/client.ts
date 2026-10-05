@@ -32,3 +32,14 @@ export async function withPrincipal<T>(
 		return run({ sql });
 	}) as Promise<T>;
 }
+
+// Inside a transaction, the driver hands json columns back as text: read them the same way
+// everywhere so that a row never changes shape with the query that fetched it.
+export function readJsonColumn(value: unknown): unknown {
+	if (typeof value !== 'string') return value;
+	try {
+		return JSON.parse(value) as unknown;
+	} catch {
+		return value;
+	}
+}
