@@ -94,6 +94,9 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			await withPrincipal(db, { id: owner }, (tx) =>
 				saveAssistant(tx, { owner, userId, name, deviceId, accessToken, roomId })
 			);
+			await db.sql`
+				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${userId})
+				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
 			log.info({ owner, userId, roomId, named }, 'assistant created');
 			return {
 				ok: true,
@@ -125,6 +128,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			}
 			await admin.logoutDevice(record.accessToken);
 			await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
+			await db.sql`delete from assistant_rooms where owner = ${owner}`;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
 		}
