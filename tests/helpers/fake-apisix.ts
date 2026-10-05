@@ -44,6 +44,8 @@ export interface FakeApisix {
 		calls: RecordedCall[];
 		script: LlmScript;
 	};
+	// Where the /matrix route forwards, once a homeserver is up
+	matrixUpstream: string | null;
 	close(): Promise<void>;
 }
 
@@ -81,12 +83,40 @@ function sleep(ms: number): Promise<void> {
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
+	const fake = { matrixUpstream: null as string | null };
 	const server: Server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? '/', 'http://fake');
 		const apiKeyHeader = req.headers['apikey'];
 		const apiKey = typeof apiKeyHeader === 'string' ? apiKeyHeader : null;
 		if (apiKey !== consumerKey) {
 			sendJson(res, 401, { message: 'Missing API key found in request' });
+			return;
+		}
+		if (url.pathname.startsWith('/matrix/')) {
+			if (fake.matrixUpstream === null) {
+				sendJson(res, 502, { error: 'no matrix upstream' });
+				return;
+			}
+			const chunks: Buffer[] = [];
+			for await (const chunk of req) chunks.push(chunk as Buffer);
+			const target = `${fake.matrixUpstream}${url.pathname.slice('/matrix'.length)}${url.search}`;
+			const headers: Record<string, string> = {};
+			for (const [name, value] of Object.entries(req.headers)) {
+				if (
+					typeof value === 'string' &&
+					!['host', 'apikey', 'content-length', 'connection'].includes(name)
+				) {
+					headers[name] = value;
+				}
+			}
+			const upstream = await fetch(target, {
+				method: req.method ?? 'GET',
+				headers,
+				...(chunks.length === 0 ? {} : { body: Buffer.concat(chunks) })
+			});
+			res.statusCode = upstream.status;
+			res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
+			res.end(Buffer.from(await upstream.arrayBuffer()));
 			return;
 		}
 		if (req.method === 'POST' && url.pathname === '/llm/v1/chat/completions') {
@@ -127,6 +157,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		baseUrl: `http://127.0.0.1:${address.port}`,
 		consumerKey,
 		llm,
+		get matrixUpstream() {
+			return fake.matrixUpstream;
+		},
+		set matrixUpstream(value: string | null) {
+			fake.matrixUpstream = value;
+		},
 		close: () =>
 			new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())))
 	};
