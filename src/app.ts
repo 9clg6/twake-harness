@@ -16,10 +16,12 @@ import {
 	sessionsReadTool
 } from './agent/tools.js';
 import { runTurn, TurnError } from './agent/turn.js';
+import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import { withPrincipal, type Db } from './db/client.js';
 import { LlmError, makeLlmClient, type LlmClient } from './llm/client.js';
+import { makeMatrixAdmin } from './matrix/admin.js';
 import { listMemory } from './memory/repository.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
@@ -42,7 +44,10 @@ export interface AppOptions {
 	readonly logStream?: Writable;
 	readonly authenticator?: Authenticator;
 	readonly llm?: LlmClient;
+	readonly assistants?: AssistantService;
 }
+
+const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
 
 const chatBodySchema = z
 	.object({
@@ -105,6 +110,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		requestIdHeader: false
 	});
 
+	const assistants =
+		options.assistants ??
+		makeAssistantService({
+			config,
+			db,
+			log: app.log,
+			admin: makeMatrixAdmin({
+				apisixBaseUrl: config.apisix.baseUrl,
+				consumerKey: config.apisix.consumerKey,
+				asToken: config.matrix.asToken
+			})
+		});
+
 	app.decorateRequest('principal', null);
 	app.addHook('onSend', async (request, reply) => {
 		reply.header(REQUEST_ID_HEADER, request.id);
@@ -128,6 +146,37 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				const principal = principalOf(request);
 				const record = await withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
 				return { user: record.id, actions: record.actions };
+			});
+
+			// The same operations as the creator conversation, for the Twake Chat front
+			scope.post('/assistants', async (request, reply) => {
+				const principal = principalOf(request);
+				const parsed = assistantBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const created = await assistants.create(principal.id, parsed.data.name);
+				if (!created.ok) {
+					return created.reason === 'exists'
+						? reply.code(409).send({ error: 'assistant already exists' })
+						: reply.code(400).send({ error: 'invalid request' });
+				}
+				return reply.code(201).send(created.assistant);
+			});
+
+			scope.get('/assistants/me', async (request, reply) => {
+				const assistant = await assistants.find(principalOf(request).id);
+				return assistant === null ? reply.code(404).send(RESOURCE_UNAVAILABLE) : assistant;
+			});
+
+			scope.put('/assistants/me', async (request, reply) => {
+				const parsed = assistantBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const renamed = await assistants.rename(principalOf(request).id, parsed.data.name);
+				return renamed === null ? reply.code(404).send(RESOURCE_UNAVAILABLE) : renamed;
+			});
+
+			scope.delete('/assistants/me', async (request, reply) => {
+				const removed = await assistants.remove(principalOf(request).id);
+				return removed ? reply.code(204).send() : reply.code(404).send(RESOURCE_UNAVAILABLE);
 			});
 
 			scope.get('/sessions', async (request, reply) => {

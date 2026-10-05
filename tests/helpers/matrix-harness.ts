@@ -6,7 +6,9 @@ import { makeDb, type Db } from '../../src/db/client.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
 import { resetDatabase, TEST_DATABASE_URL } from './app.js';
+import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
+import { startTestIssuer, type TestIssuer } from './jwks-server.js';
 import { freePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
 
 export interface MatrixTestHarness {
@@ -17,6 +19,9 @@ export interface MatrixTestHarness {
 	readonly db: Db;
 	readonly port: number;
 	readonly hsToken: string;
+	readonly issuer: TestIssuer;
+	// The api role on the same database, driven over HTTP
+	readonly api: TestClient;
 	logLines(): Record<string, unknown>[];
 	close(): Promise<void>;
 }
@@ -27,12 +32,13 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	const asToken = 'as-token-test';
 	const hsToken = 'hs-token-test';
 	const apisix = await startFakeApisix();
+	const issuer = await startTestIssuer();
 	const config = loadConfig({
 		HARNESS_ROLE: 'matrix',
 		DATABASE_URL: TEST_DATABASE_URL,
-		AUTH_JWKS_URL: 'http://127.0.0.1:1/jwks.json',
-		AUTH_ISSUER: 'x',
-		AUTH_AUDIENCE: 'y',
+		AUTH_JWKS_URL: issuer.jwksUrl.toString(),
+		AUTH_ISSUER: issuer.issuer,
+		AUTH_AUDIENCE: issuer.audience,
 		APISIX_BASE_URL: apisix.baseUrl,
 		APISIX_CONSUMER_KEY: apisix.consumerKey,
 		MATRIX_SERVER_NAME: SYNAPSE_SERVER_NAME,
@@ -50,7 +56,9 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
 	const app = await buildApp({ config, db, logStream });
+	await app.ready();
 	const role = await startMatrixRole({ config, db, log: app.log, port, bindAddress: '0.0.0.0' });
+	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
 	return {
 		synapse,
 		apisix,
@@ -59,6 +67,8 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		db,
 		port,
 		hsToken,
+		issuer,
+		api,
 		logLines: () =>
 			chunks
 				.join('')
@@ -71,6 +81,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 			await db.close();
 			await synapse.stop();
 			await apisix.close();
+			await issuer.close();
 		}
 	};
 }
