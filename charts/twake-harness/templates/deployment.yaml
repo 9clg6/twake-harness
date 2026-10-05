@@ -63,6 +63,16 @@ spec:
               value: {{ .Values.config.llmModel | quote }}
             - name: LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
+            {{- if eq .Values.role "matrix" }}
+            - name: MATRIX_SERVER_NAME
+              value: {{ .Values.config.matrixServerName | quote }}
+            - name: MATRIX_APPSERVICE_ID
+              value: {{ .Values.config.matrixAppserviceId | quote }}
+            - name: MATRIX_SENDER_LOCALPART
+              value: {{ .Values.config.matrixSenderLocalpart | quote }}
+            - name: MATRIX_ASSISTANT_PREFIX
+              value: {{ .Values.config.matrixAssistantPrefix | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "twake-harness.secretName" . }}

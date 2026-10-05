@@ -18,8 +18,14 @@ config:
   apisixBaseUrl: ''
   llmModel: qwen3.8
   logLevel: info
+  # The matrix role: the homeserver's name and the application service identity
+  matrixServerName: ''
+  matrixAppserviceId: twake-harness
+  matrixSenderLocalpart: twake-space-assistant
+  matrixAssistantPrefix: twake-space-assistant-
 
-# Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY and the other secrets
+# Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY, and for the
+# matrix role MATRIX_HS_TOKEN (and MATRIX_AS_TOKEN when APISIX does not inject it)
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''
