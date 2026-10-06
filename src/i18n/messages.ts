@@ -60,6 +60,9 @@ export interface Messages {
 	// How the model addresses the person writing to it, told in that language, when the language
 	// marks it: null when it does not
 	readonly addressing: string | null;
+	// How the owner's assistant finds an invitation the conversation does not hold, as after a
+	// restart or in a new session: it searches the events, then reads the one it found
+	readonly lookup: string;
 }
 
 const ENGLISH: Messages = {
@@ -126,7 +129,9 @@ const ENGLISH: Messages = {
 			`In ISO 8601: ${iso}.`,
 			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.'
 		].join('\n'),
-	addressing: null
+	addressing: null,
+	lookup:
+		'To find an invitation that is not in this conversation, search for it with list_events, then read it with read_event before you speak of it or act on it.'
 };
 
 // Tutoiement, as Hermes spoke. The name is chosen by the user, so no word around it agrees in
@@ -199,7 +204,9 @@ const FRENCH: Messages = {
 			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
 		].join('\n'),
 	addressing:
-		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer."
+		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer.",
+	lookup:
+		"Pour retrouver une invitation qui n'est pas dans cette conversation, cherche-la avec list_events, puis lis-la avec read_event avant d'en parler ou d'agir."
 };
 
 const CATALOG: Readonly<Record<Locale, Messages>> = { en: ENGLISH, fr: FRENCH };

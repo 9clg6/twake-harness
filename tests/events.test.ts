@@ -173,21 +173,24 @@ describe('an event wakes my assistant', () => {
 		expect(eventPrompt).toContain('time zone UTC');
 		expect(eventPrompt).toMatch(/In ISO 8601: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00\./);
 		// Through the same contract path as the model's calls: in the owner's name, linked to the
-		// turn, each contract named by its first tag, the paths never doubled
+		// event by its bare id, the one the dispatcher posted and audited, each contract named by its
+		// first tag, the paths never doubled
 		for (const [call, contract] of [
 			[read[0], 'events.read.v1'],
 			[slot[0], 'calendar.freebusy.read.v1']
 		] as const) {
 			expect(call?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
-			expect(call?.headers['x-correlation-id']).toBe('event:evt-1');
+			expect(call?.headers['x-correlation-id']).toBe('evt-1');
 			expect(call?.headers['x-twake-contract']).toBe(contract);
 		}
+		// The turn's log lines carry the same id
 		expect(
 			h
 				.logLines()
 				.some(
 					(l) =>
 						l['msg'] === 'invitation checked' &&
+						l['reqId'] === 'evt-1' &&
 						l['eventStatus'] === 200 &&
 						l['freeBusyStatus'] === 200 &&
 						l['reason'] === null
@@ -286,6 +289,39 @@ describe('an event wakes my assistant', () => {
 		expect(told).toBe(
 			`[event] A new event of type "${type}" has arrived (id evt-upd). Read it with the contracts and tell me what it is about.`
 		);
+	});
+
+	it('links the calls the model makes in an event turn to the event by its bare id', async () => {
+		const before = h.apisix.llm.script;
+		h.apisix.llm.script = (request: ChatRequest) => {
+			if (request.messages.at(-1)?.role === 'tool') return { content: 'Read evt-corr' };
+			return {
+				toolCalls: [
+					{
+						id: 'call_read',
+						type: 'function',
+						function: { name: 'read_event', arguments: JSON.stringify({ event_id: 'evt-corr' }) }
+					}
+				]
+			};
+		};
+		try {
+			const posted = await h.api.post('dispatcher', '/v1/events', {
+				...EVENT,
+				event_id: 'evt-corr',
+				type: 'com.twake.calendar.event.updated.v1'
+			});
+			expect(posted.status).toBe(202);
+			await client.waitForMessage(room, assistantId, (t) => t.includes('Read evt-corr'));
+			const read = h.apisix.contracts.calls.filter(
+				(c) => c.path === '/contracts/v1/events/evt-corr'
+			);
+			expect(read).toHaveLength(1);
+			expect(read[0]?.headers['x-correlation-id']).toBe('evt-corr');
+			expect(read[0]?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
+		} finally {
+			h.apisix.llm.script = before;
+		}
 	});
 
 	it('lets an event make its assistant read, never act: acting waits for the owner', async () => {
