@@ -1,10 +1,5 @@
 import type { Tx } from '../db/client.js';
-
-// What a contract call does in its application: reading for a GET contract, writing otherwise
-export type ConsentLevel = 'read' | 'write';
-
-// Why a call waits for its owner
-export type WaitReason = 'consent';
+import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
 
 export async function hasConsent(
 	tx: Tx,
@@ -15,6 +10,19 @@ export async function hasConsent(
 	const rows = await tx.sql`
 		select 1 from consents where owner = ${owner} and domain = ${domain} and level = ${level}`;
 	return rows.length > 0;
+}
+
+export async function grantConsent(
+	tx: Tx,
+	owner: string,
+	domain: string,
+	level: ConsentLevel,
+	source: ConsentSource
+): Promise<void> {
+	await tx.sql`
+		insert into consents (owner, domain, level, granted_by)
+		values (${owner}, ${domain}, ${level}, ${source})
+		on conflict do nothing`;
 }
 
 export interface PendingCallInput {

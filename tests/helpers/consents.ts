@@ -1,4 +1,5 @@
-import type { ConsentLevel } from '../../src/consents/repository.js';
+import type { ConsentLevel } from '../../src/consents/consent.js';
+import { grantConsent as grant } from '../../src/consents/repository.js';
 import { withPrincipal, type Db } from '../../src/db/client.js';
 
 // Lets an owner's assistant use an application without asking, as the owner's consent would:
@@ -9,12 +10,5 @@ export async function grantConsent(
 	domain: string,
 	level: ConsentLevel
 ): Promise<void> {
-	await withPrincipal(
-		db,
-		{ id: owner },
-		(tx) => tx.sql`
-			insert into consents (owner, domain, level, granted_by)
-			values (${owner}, ${domain}, ${level}, 'api')
-			on conflict do nothing`
-	);
+	await withPrincipal(db, { id: owner }, (tx) => grant(tx, owner, domain, level, 'api'));
 }

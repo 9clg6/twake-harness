@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import type { ConsentLevel } from '../consents/repository.js';
+import type { ConsentLevel } from '../consents/consent.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 
