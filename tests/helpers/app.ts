@@ -47,8 +47,14 @@ async function ensureAppRole(keepSchema: boolean): Promise<void> {
 	appRoleReady = true;
 }
 
+// How many api replicas serve the suite, all on the same database; the client spreads its
+// requests over them, so every suite also runs as it would behind a load balancer
+export const TEST_REPLICAS: number = Math.max(1, Number(process.env['TEST_REPLICAS'] ?? '1'));
+
 export interface TestHarness {
 	readonly app: FastifyInstance;
+	// Every replica, the first being `app`
+	readonly apps: readonly FastifyInstance[];
 	readonly db: Db;
 	readonly issuer: TestIssuer;
 	readonly apisix: FakeApisix;
@@ -60,7 +66,7 @@ export interface TestHarness {
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
 	await db.sql.unsafe(
-		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily'
+		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily, usage_window, usage_window_global'
 	);
 }
 
@@ -97,10 +103,17 @@ export async function startTestHarness(options: StartOptions = {}): Promise<Test
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
-	const app = await buildApp({ config, db, logStream });
-	await app.ready();
+	const apps: FastifyInstance[] = [];
+	for (let i = 0; i < TEST_REPLICAS; i += 1) {
+		const app = await buildApp({ config, db, logStream });
+		await app.ready();
+		apps.push(app);
+	}
+	const app = apps[0];
+	if (app === undefined) throw new Error('no replica started');
 	return {
 		app,
+		apps,
 		db,
 		issuer,
 		apisix,
@@ -112,7 +125,7 @@ export async function startTestHarness(options: StartOptions = {}): Promise<Test
 				.filter((line) => line.length > 0)
 				.map((line) => JSON.parse(line) as Record<string, unknown>),
 		close: async () => {
-			await app.close();
+			for (const replica of apps) await replica.close();
 			await db.close();
 			await issuer.close();
 			await apisix.close();

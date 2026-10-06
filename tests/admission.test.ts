@@ -17,7 +17,8 @@ describe('admission: nobody saturates the replica', () => {
 				ADMISSION_GLOBAL_PER_MINUTE: '1000'
 			}
 		});
-		c = makeClient(h);
+		// The queue, the turns in flight and the metrics are this replica's: one replica is observed
+		c = makeClient({ app: h.app, apps: [h.app], issuer: h.issuer });
 	});
 	afterAll(async () => {
 		await h.close();

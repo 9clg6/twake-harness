@@ -61,7 +61,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				result.kind === 'ok' ? result.answer : result.kind === 'busy' ? BUSY_TEXT : FAILURE_TEXT;
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			const payload: SendPayload = { asUserId: assistant.userId, roomId, text: answer };
-			await enqueueJob(db, { kind: 'send', payload, dedupKey: `send:${eventId}` });
+			await enqueueJob(db, {
+				kind: 'send',
+				payload,
+				dedupKey: `send:${eventId}`,
+				groupKey: `send:${roomId}`
+			});
 		}
 	});
 }

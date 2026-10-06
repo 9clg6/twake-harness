@@ -58,7 +58,7 @@ describe('contracts as tools', () => {
 		h = await startTestHarness();
 		c = makeClient(h);
 		h.apisix.contracts.spec = CATALOG;
-		expect(await h.app.agent.contracts.load()).toBe(2);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 	});
 	afterAll(async () => {
 		await h.close();
@@ -214,10 +214,10 @@ describe('contracts as tools', () => {
 				}
 			}
 		};
-		expect(await h.app.agent.contracts.load()).toBe(3);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		expect(h.app.agent.contracts.contracts.map((x) => x.id)).toContain('drive.file.read.v1');
 		h.apisix.contracts.spec = null;
-		expect(await h.app.agent.contracts.load()).toBe(3);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		expect(
 			h
 				.logLines()

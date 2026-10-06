@@ -27,8 +27,11 @@ export interface TestClient {
 	): Promise<Reply<T>>;
 }
 
-// A thin client over the HTTP boundary: every call carries a token minted for `sub`.
-export function makeClient(h: TestHarness): TestClient {
+// A thin client over the HTTP boundary: every call carries a token minted for `sub`, and the
+// calls go to the replicas in turn, as a load balancer would spread them.
+export function makeClient(h: Pick<TestHarness, 'app' | 'apps' | 'issuer'>): TestClient {
+	const replicas = h.apps ?? [h.app];
+	let next = 0;
 	async function call<T>(
 		sub: string,
 		method: 'GET' | 'POST' | 'PUT' | 'DELETE',
@@ -41,7 +44,9 @@ export function makeClient(h: TestHarness): TestClient {
 			headers: { authorization: `Bearer ${await h.issuer.mint({ sub })}` }
 		};
 		if (payload !== undefined) options.payload = payload;
-		const res = await h.app.inject(options);
+		const replica = replicas[next % replicas.length] ?? h.app;
+		next += 1;
+		const res = await replica.inject(options);
 		const body = res.body.length === 0 ? ({} as T) : (res.json() as T);
 		return { status: res.statusCode, body };
 	}
