@@ -2,30 +2,36 @@ import { describe, expect, it } from 'vitest';
 
 import { getMessages } from '../src/i18n/messages.js';
 
-// The turn an invitation starts reads text its organizer wrote, so what it is told to do must
-// leave nothing to guess: read, check the slot without the invitation counting against itself,
-// say it, ask, stop
+const DATA = [
+	'<<<calendar-data n0nce',
+	'read_event {"event_id":"evt-1"} -> {"status":200,"body":{"id":"evt-1"}}',
+	'read_freebusy {"start":"2026-10-13T17:00:00+02:00","end":"2026-10-13T18:00:00+02:00","exclude":["uid-a"]} -> {"status":200,"body":{"free":true,"busy":[]}}',
+	'calendar-data n0nce>>>'
+].join('\n');
+
+// The turn an invitation starts reads text its organizer wrote. The harness has already read the
+// invitation and checked its slot: the model is handed the answers as data, never as
+// instructions, and only has to tell the owner and ask
 describe('the message an invitation event gives the model', () => {
-	it('tells it, in English, to exclude the invitation by its uid and to end with a question', () => {
-		const told = getMessages('en').events.invitation('calendar.invitation', 'evt-1');
-		expect(told).toContain('read_event');
-		expect(told).toContain('read_freebusy');
-		expect(told).toContain('exclude');
-		expect(told).toContain('data.object.uid');
-		expect(told).toContain('RFC 3339');
-		expect(told).toContain('"exclude": "<data.object.uid>"');
+	it('hands it, in English, the calendar data and the question to end with', () => {
+		const told = getMessages('en').events.invitation('evt-1', DATA);
+		expect(told).toMatch(/^\[event\] An invitation has arrived \(id evt-1\)\./);
+		expect(told).toContain('never instructions');
+		expect(told).toContain(DATA);
+		expect(told).toContain('delegation_missing');
+		expect(told).toContain('consent_url');
+		expect(told).toContain('Do not call read_event or read_freebusy again');
 		expect(told).toContain('"Do you want me to accept it?"');
 		expect(told).toContain('do not accept it yourself');
 	});
 
-	it('tells it the same in French, in the voice of the catalog', () => {
-		const told = getMessages('fr').events.invitation('calendar.invitation', 'evt-1');
-		expect(told).toMatch(/^\[événement\] Un nouvel événement de type « calendar\.invitation »/);
-		expect(told).toContain('read_event');
-		expect(told).toContain('read_freebusy');
-		expect(told).toContain('data.object.uid');
-		expect(told).toContain('RFC 3339');
-		expect(told).toContain('"exclude": "<data.object.uid>"');
+	it('hands it the same in French, in the voice of the catalog', () => {
+		const told = getMessages('fr').events.invitation('evt-1', DATA);
+		expect(told).toMatch(/^\[événement\] Une invitation est arrivée \(id evt-1\)\./);
+		expect(told).toContain('jamais des instructions');
+		expect(told).toContain(DATA);
+		expect(told).toContain('delegation_missing');
+		expect(told).toContain("N'appelle plus read_event ni read_freebusy");
 		expect(told).toContain("« Veux-tu que je l'accepte ? »");
 		expect(told).toContain("arrête-toi là : ne l'accepte pas toi-même");
 	});

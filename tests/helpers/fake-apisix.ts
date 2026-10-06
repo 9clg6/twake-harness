@@ -34,6 +34,8 @@ export interface ScriptedReply {
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
 
 export interface RecordedCall {
+	// The order of arrival, shared with the contract calls
+	readonly seq: number;
 	readonly startedAt: number;
 	readonly finishedAt: number;
 	readonly apiKey: string | null;
@@ -41,6 +43,8 @@ export interface RecordedCall {
 }
 
 export interface ContractCall {
+	// The order of arrival, shared with the model calls
+	readonly seq: number;
 	readonly method: string;
 	// The whole path the gateway received, as APISIX matches its routes on it
 	readonly path: string;
@@ -170,6 +174,48 @@ function contractRoutes(spec: unknown, mount: string): ContractRoute[] {
 	return routes;
 }
 
+// The calendar contracts as the contracts service publishes them, behind the gateway: absolute
+// paths, the versioned contract in tags[0], the verbs as operationIds, and exclude a plain array
+// of UIDs, the only list shape APISIX's validator turns a query value into
+export const CALENDAR_CATALOG = {
+	openapi: '3.1.0',
+	paths: {
+		'/contracts/v1/events/{event_id}': {
+			get: {
+				operationId: 'read_event',
+				summary: 'Read one event of the user',
+				tags: ['events.read.v1'],
+				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+			}
+		},
+		'/contracts/v1/calendar/freebusy': {
+			get: {
+				operationId: 'read_freebusy',
+				summary: 'Tell whether the user is free over a period',
+				tags: ['calendar.freebusy.read.v1'],
+				parameters: [
+					{ name: 'start', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'end', in: 'query', required: true, schema: { type: 'string' } },
+					{
+						name: 'exclude',
+						in: 'query',
+						required: false,
+						schema: { type: 'array', items: { type: 'string' } }
+					}
+				]
+			}
+		},
+		'/contracts/v1/calendar/invitations/{event_id}/accept': {
+			post: {
+				operationId: 'accept_invitation',
+				summary: 'Accept an invitation, once the user has said yes to this very invitation',
+				tags: ['calendar.invitation.accept.v1'],
+				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+			}
+		}
+	}
+};
+
 export interface InvitationFields {
 	readonly id: string;
 	readonly uid: string;
@@ -214,6 +260,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
 	const fake = { matrixUpstream: null as string | null };
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
+	// One counter for the model and the contract calls, to tell which came first
+	let seq = 0;
 	const contracts: FakeApisix['contracts'] = {
 		spec: null,
 		mount: '',
@@ -348,6 +396,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 				if (typeof value === 'string') headers[name] = value;
 			}
 			const call: ContractCall = {
+				seq: ++seq,
 				method: req.method ?? 'GET',
 				path: url.pathname,
 				query: queryOf(url.searchParams),
@@ -368,10 +417,11 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		}
 		if (req.method === 'POST' && url.pathname === '/llm/v1/chat/completions') {
 			const startedAt = Date.now();
+			const callSeq = ++seq;
 			const request = (await readJson(req)) as ChatRequest;
 			const reply = llm.script(request, llm.calls.length);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
-			llm.calls.push({ startedAt, finishedAt: Date.now(), apiKey, request });
+			llm.calls.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
 			const message: Record<string, unknown> = {
 				role: 'assistant',
 				content: reply.content ?? null
