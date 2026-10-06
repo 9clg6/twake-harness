@@ -118,8 +118,6 @@ describe('an event wakes my assistant', () => {
 		// checked its slot, so it calls no tool
 		h.apisix.llm.script = (request: ChatRequest) => {
 			const told = lastUser(request);
-			const consent = /"consent_url":"([^"]+)"/.exec(told)?.[1];
-			if (consent !== undefined) return { content: `Consent needed: ${consent}` };
 			const title = /"title":"([^"]+)"/.exec(told)?.[1];
 			if (title !== undefined) {
 				const free = told.includes('"free":true') ? 'free' : 'busy';
@@ -261,34 +259,37 @@ describe('an event wakes my assistant', () => {
 		await sleep(1000);
 		expect(h.apisix.llm.calls.length).toBe(calls);
 	});
-	it('hands the model what the broker answered when the owner gave no consent, and checks nothing more', async () => {
+	it("sends the owner the broker's link itself when they never let their assistant act for them, and checks nothing more", async () => {
 		const slots = h.apisix.contracts.calls.filter((c) => c.path.endsWith('/freebusy')).length;
 		const posted = await h.api.post('dispatcher', '/v1/events', { ...EVENT, event_id: 'evt-401' });
 		expect(posted.status).toBe(202);
-		const answer = await client.waitForMessage(room, assistantId, (t) => t.includes('Consent'));
-		expect(answer).toBe(`Consent needed: ${CONSENT_URL}`);
+		const request = await client.waitForMessage(room, assistantId, (t) => t.includes(CONSENT_URL));
+		expect(request).toBe(
+			`I need your permission to act on your behalf in your applications, and you have not given it yet. Give it here: ${CONSENT_URL}\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`
+		);
 		expect(
 			h.apisix.contracts.calls.filter((c) => c.path === '/contracts/v1/events/evt-401')
 		).toHaveLength(1);
 		expect(h.apisix.contracts.calls.filter((c) => c.path.endsWith('/freebusy'))).toHaveLength(
 			slots
 		);
-		const told = lastUser(turnCalls(h.apisix.llm.calls, 'evt-401')[0]?.request);
-		expect(told).toContain('"status":401');
-		expect(told).toContain('"code":"delegation_missing"');
-		expect(told).toContain(`"consent_url":"${CONSENT_URL}"`);
-		expect(told).toContain('read_freebusy: not called, the invitation could not be read');
+		// The harness asked before the model spoke: no model was told of the broker's refusal
+		expect(turnCalls(h.apisix.llm.calls, 'evt-401')).toHaveLength(0);
 		expect(
 			h
 				.logLines()
 				.some(
 					(l) =>
 						l['msg'] === 'invitation checked' &&
-						l['eventStatus'] === 401 &&
 						l['freeBusyStatus'] === null &&
 						l['reason'] === 'the invitation could not be read'
 				)
 		).toBe(true);
+		// Alice lets it go, so that her next messages in the room are hers, not answers to it
+		const asked = client.messages.find((m) => m.roomId === room && m.body === request);
+		if (asked === undefined) throw new Error('no request');
+		await client.react(room, asked.eventId, '❌');
+		await client.waitForMessage(room, assistantId, (t) => t === 'All right, I will not do it.');
 	});
 
 	it('tells the model of any other event as it is, without reading it first', async () => {

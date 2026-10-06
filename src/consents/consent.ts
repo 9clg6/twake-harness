@@ -2,7 +2,13 @@
 // allows each level of each application on its own
 export type ConsentLevel = 'read' | 'write';
 
-export type WaitReason = 'consent';
+// Why a call waits for its owner: an application they never allowed, or the platform's own
+// permission for their assistant to act for them, which its broker lacks
+export type WaitReason = 'consent' | 'delegation';
+
+// Why the platform's broker refused to act for an owner: they never gave their assistant that
+// permission, or the one they gave expired
+export type DelegationCode = 'delegation_missing' | 'delegation_expired';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 

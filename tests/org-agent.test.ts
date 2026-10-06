@@ -192,4 +192,39 @@ describe('the organization agent', () => {
 			h.apisix.matrixFault = null;
 		}
 	});
+
+	it("hands its model the platform broker's refusal as data, since nobody could give that permission for the organization", async () => {
+		const handler = h.apisix.contracts.handler;
+		const script = h.apisix.llm.script;
+		h.apisix.contracts.handler = () => ({
+			status: 401,
+			body: {
+				type: 'urn:twake:problem:delegation_missing',
+				title: 'Delegation missing',
+				status: 401,
+				code: 'delegation_missing',
+				consent_url: 'https://agent-consent.test.local/consent'
+			}
+		});
+		h.apisix.llm.script = (request, index) => {
+			const last = request.messages.at(-1);
+			return last?.role === 'tool'
+				? { content: `Refused: ${last.content ?? ''}` }
+				: script(request, index);
+		};
+		try {
+			await aliceClient.sendText(room, 'what is our usage today?');
+			const answer = await aliceClient.waitForMessage(room, orgId, (t) => t.startsWith('Refused:'));
+			expect(JSON.parse(answer.slice('Refused: '.length))).toMatchObject({
+				status: 401,
+				body: { code: 'delegation_missing' }
+			});
+			expect(h.logLines().some((l) => l['msg'] === 'contract call waits for its owner')).toBe(
+				false
+			);
+		} finally {
+			h.apisix.contracts.handler = handler;
+			h.apisix.llm.script = script;
+		}
+	});
 });

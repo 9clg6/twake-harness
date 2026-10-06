@@ -81,7 +81,7 @@ interface SubjectRow {
 
 // Every reason a call may wait for, so that a reason read back is known for one: a reason added
 // to WaitReason and missing here fails the build
-const WAIT_REASONS: Readonly<Record<WaitReason, true>> = { consent: true };
+const WAIT_REASONS: Readonly<Record<WaitReason, true>> = { consent: true, delegation: true };
 
 function isWaitReason(value: string): value is WaitReason {
 	return Object.hasOwn(WAIT_REASONS, value);

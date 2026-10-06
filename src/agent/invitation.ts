@@ -177,8 +177,8 @@ function described(
 // Before the model speaks about an invitation, the harness reads it and checks its slot itself,
 // through the same contracts and in the same context as the model would: whether the owner is
 // free is the heart of the proposal, so it does not depend on the model choosing to call a tool.
-// What came back is handed to the model as data: an error, such as the broker's
-// delegation_missing with its consent_url, too, for the model to relay.
+// What came back is handed to the model as data, an error too; a read that waits for its owner,
+// such as one the platform's broker refused, leaves the owner to the harness's own question.
 export async function checkInvitation(
 	run: ToolRunner,
 	eventId: string,
