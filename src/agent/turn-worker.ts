@@ -5,6 +5,7 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { findAssistant } from '../assistants/repository.js';
+import type { Messages } from '../i18n/messages.js';
 import type { AgentService } from './service.js';
 
 const turnPayload = z.object({
@@ -31,18 +32,16 @@ export interface TurnWorkerOptions {
 	readonly db: Db;
 	readonly agent: AgentService;
 	readonly log: FastifyBaseLogger;
+	// The fixed texts a failed or refused turn answers with, in the deployment's language
+	readonly messages: Messages;
 	readonly pollIntervalMs?: number;
 	// How many turns this replica runs at once
 	readonly concurrency?: number;
 }
 
-const FAILURE_TEXT = 'Something went wrong on my side. Please try again in a moment.';
-const BUSY_TEXT =
-	'I am busy right now and cannot take this message. Please send it again in a moment.';
-
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
-	const { db, agent, log } = options;
+	const { db, agent, log, messages } = options;
 	return startJobWorker({
 		db,
 		log,
@@ -71,10 +70,15 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				message: text,
 				log: turnLog,
 				correlationId: eventId,
-				origin
+				origin,
+				assistantName: assistant.name
 			});
 			const answer =
-				result.kind === 'ok' ? result.answer : result.kind === 'busy' ? BUSY_TEXT : FAILURE_TEXT;
+				result.kind === 'ok'
+					? result.answer
+					: result.kind === 'busy'
+						? messages.notices.busy
+						: messages.notices.turnFailed;
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			// A turn woken by an event posted to the API answers no message of the room
 			const payload: SendPayload = {

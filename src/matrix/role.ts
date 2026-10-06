@@ -24,6 +24,7 @@ import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
@@ -74,9 +75,6 @@ interface SendJob {
 	readonly outcome?: TurnOutcome;
 }
 
-const RECOVERED_TEXT =
-	'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.';
-const NO_ESCROW_TEXT = 'I found no escrow to recover from; my identity is new from here on.';
 const recoverPayload = z.object({ owner: z.string().min(1) });
 
 // A sync that brings the to-device messages and the device lists, and nothing of the rooms
@@ -126,6 +124,7 @@ function textOf(event: RoomEvent): string | null {
 
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
 	const { config, db, log } = options;
+	const messages = getMessages(config.locale);
 	LogService.setLogger({
 		trace: () => undefined,
 		debug: () => undefined,
@@ -402,7 +401,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		// Synapse delivers nothing sent before the join, so the creator opens the conversation
 		// itself rather than let a first message go unanswered.
-		if (invited === creator) await appservice.botIntent.sendEvent(roomId, makeRichText(helpText()));
+		if (invited === creator)
+			await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(messages)));
 	});
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
@@ -511,7 +511,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
-		const turn = await runCreatorTurn({ owner, text, state }, assistants);
+		const turn = await runCreatorTurn({ owner, text, state }, assistants, messages);
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
 		await appservice.botIntent.sendEvent(roomId, makeRichText(turn.reply));
@@ -541,7 +541,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			payload: {
 				asUserId: assistant.userId,
 				roomId: assistant.roomId,
-				text: result === 'recovered' ? RECOVERED_TEXT : NO_ESCROW_TEXT
+				text: result === 'recovered' ? messages.notices.recovered : messages.notices.noEscrow
 			},
 			dedupKey: `recover-notice:${owner}:${Date.now()}`,
 			groupKey: `send:${assistant.roomId}`

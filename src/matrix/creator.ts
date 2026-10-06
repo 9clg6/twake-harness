@@ -1,27 +1,12 @@
 import type { AssistantService } from '../assistants/service.js';
 import type { DialogState } from '../assistants/repository.js';
+import type { Messages } from '../i18n/messages.js';
 
-// What the creator answers when an assistant cannot be created
-const CREATE_REFUSALS = {
-	invalid_name: 'That name is not usable: one line, 64 characters at most. Which name?',
-	exists: 'You already have an assistant. Send /mybot to see it.',
-	not_on_homeserver: 'Your account is not on this homeserver, so I cannot open a room with you.'
-} as const;
-
-export const CREATOR_COMMANDS: readonly { readonly command: string; readonly help: string }[] = [
-	{ command: '/newbot', help: 'create your assistant' },
-	{ command: '/mybot', help: 'show your assistant' },
-	{ command: '/rename <name>', help: 'rename your assistant' },
-	{ command: '/delete', help: 'delete your assistant' },
-	{ command: '/recover', help: 'recover the encryption keys of your assistant' },
-	{ command: '/help', help: 'this list' }
-];
-
-export function helpText(): string {
-	return [
-		'I create and manage your Twake Space assistant. Commands:',
-		...CREATOR_COMMANDS.map((c) => `${c.command}: ${c.help}`)
-	].join('\n');
+export function helpText(messages: Messages): string {
+	const { helpHeader, commands, commandSeparator } = messages.creator;
+	return [helpHeader, ...commands.map((c) => `${c.command}${commandSeparator}${c.help}`)].join(
+		'\n'
+	);
 }
 
 export interface CreatorTurn {
@@ -39,8 +24,10 @@ export interface CreatorInput {
 // The creator conversation, like a bot factory: one command per message, one question at a time.
 export async function runCreatorTurn(
 	input: CreatorInput,
-	assistants: AssistantService
+	assistants: AssistantService,
+	messages: Messages
 ): Promise<CreatorTurn> {
+	const say = messages.creator;
 	const text = input.text.trim();
 	const [word = '', ...rest] = text.split(/\s+/);
 	const command = word.toLowerCase();
@@ -52,13 +39,13 @@ export async function runCreatorTurn(
 			return {
 				command: 'name',
 				nextState: created.reason === 'invalid_name' ? 'awaiting_name' : null,
-				reply: CREATE_REFUSALS[created.reason]
+				reply: say.refusals[created.reason]
 			};
 		}
 		return {
 			command: 'name',
 			nextState: null,
-			reply: `Done. Your assistant ${created.assistant.name} is ${created.assistant.userId}. It has opened a private conversation with you: ${created.assistant.link}`
+			reply: say.created(created.assistant.name, created.assistant.userId, created.assistant.link)
 		};
 	}
 
@@ -68,13 +55,13 @@ export async function runCreatorTurn(
 				return {
 					command,
 					nextState: null,
-					reply: 'You already have an assistant. Send /mybot to see it, or /delete first.'
+					reply: say.alreadyHasOne
 				};
 			}
 			return {
 				command,
 				nextState: 'awaiting_name',
-				reply: 'Which name do you want for your assistant?'
+				reply: say.askName
 			};
 		}
 		case '/mybot': {
@@ -84,21 +71,17 @@ export async function runCreatorTurn(
 				nextState: null,
 				reply:
 					assistant === null
-						? 'You have no assistant yet. Send /newbot to create one.'
-						: `Your assistant ${assistant.name} is ${assistant.userId}: ${assistant.link}`
+						? say.noneYet
+						: say.mine(assistant.name, assistant.userId, assistant.link)
 			};
 		}
 		case '/rename': {
-			if (argument.length === 0)
-				return { command, nextState: null, reply: 'Send /rename followed by the new name.' };
+			if (argument.length === 0) return { command, nextState: null, reply: say.renameUsage };
 			const renamed = await assistants.rename(input.owner, argument);
 			return {
 				command,
 				nextState: null,
-				reply:
-					renamed === null
-						? 'Nothing to rename: you have no assistant, or that name is not usable.'
-						: `Your assistant is now called ${renamed.name}.`
+				reply: renamed === null ? say.renameRefused : say.renamed(renamed.name)
 			};
 		}
 		case '/delete': {
@@ -106,23 +89,21 @@ export async function runCreatorTurn(
 			return {
 				command,
 				nextState: null,
-				reply: removed
-					? 'Your assistant is deleted. Send /newbot when you want a new one.'
-					: 'You have no assistant to delete.'
+				reply: removed ? say.deleted : say.nothingToDelete
 			};
 		}
 		case '/recover':
-			return { command, nextState: null, reply: 'Key recovery is not available yet.' };
+			return { command, nextState: null, reply: say.recoveryUnavailable };
 		case '/help':
 		case 'help':
 		case 'aide':
 		case '/start':
-			return { command: '/help', nextState: null, reply: helpText() };
+			return { command: '/help', nextState: null, reply: helpText(messages) };
 		default:
 			return {
 				command: 'unknown',
 				nextState: input.state,
-				reply: `I did not understand « ${text} ». Send /help for the commands.`
+				reply: say.notUnderstood(text)
 			};
 	}
 }

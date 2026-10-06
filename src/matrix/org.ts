@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { saveAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
+import { getMessages } from '../i18n/messages.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
@@ -16,7 +17,7 @@ export function isOrgMember(config: Config, userId: string): boolean {
 }
 
 export function orgGreeting(config: Config): string {
-	return `Hello, I am ${config.org.name}, the organization agent. Ask me about the organization; I answer its members only.`;
+	return getMessages(config.locale).orgGreeting(config.org.name);
 }
 
 export interface OrgAgentDeps {

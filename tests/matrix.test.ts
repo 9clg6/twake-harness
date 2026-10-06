@@ -44,6 +44,13 @@ describe('the matrix role as an application service', () => {
 			t.includes('/newbot')
 		);
 		expect(greeting).toContain('/delete');
+		// English unless the deployment chose another language
+		expect(greeting.split('\n').slice(0, 4)).toEqual([
+			'I create and manage your Twake Space assistant. Commands:',
+			'/newbot: create your assistant',
+			'/mybot: show your assistant',
+			'/rename <name>: rename your assistant'
+		]);
 		await sleep(1000);
 		expect(await h.synapse.messagesFrom(alice, roomId, h.role.creatorUserId)).toHaveLength(1);
 		await h.synapse.sendText(alice, roomId, 'help');
