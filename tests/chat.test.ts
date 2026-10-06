@@ -84,7 +84,7 @@ describe('a chat turn with the scripted model', () => {
 		expect((await chat('alice', {})).status).toBe(400);
 	});
 
-	it('keeps the reasoning out of the answer and writes it in full to the logs', async () => {
+	it('keeps the reasoning out of the answer and out of the info logs', async () => {
 		h.apisix.llm.script = () => ({
 			reasoning: 'Let me think about alpha and beta.',
 			content: '<think>hidden deliberation</think>The answer is 42.'
@@ -94,13 +94,17 @@ describe('a chat turn with the scripted model', () => {
 		expect(body.answer).not.toContain('think');
 		const lines = h.logLines().filter((line) => line['reqId'] === 'turn-reasoning');
 		const modelLine = lines.find((line) => line['msg'] === 'model answered');
-		expect(modelLine?.['reasoning']).toContain('Let me think about alpha and beta.');
-		expect(modelLine?.['reasoning']).toContain('hidden deliberation');
+		expect(modelLine?.['hasReasoning']).toBe(true);
+		expect(modelLine?.['answerLength']).toBe('The answer is 42.'.length);
 		const promptLine = lines.find((line) => line['msg'] === 'model asked');
-		expect(JSON.stringify(promptLine?.['messages'])).toContain('question');
+		expect(promptLine?.['messageCount']).toBeGreaterThanOrEqual(2);
+		expect(promptLine?.['messages']).toBeUndefined();
+		const text = JSON.stringify(lines);
+		expect(text).not.toContain('alpha and beta');
+		expect(text).not.toContain('hidden deliberation');
 	});
 
-	it('runs a tool call from the model and logs it, ending the turn on a clarification', async () => {
+	it('runs a tool call from the model and logs its outcome, ending the turn on a clarification', async () => {
 		h.apisix.llm.script = (_request, index) =>
 			index === 0
 				? {
@@ -123,7 +127,8 @@ describe('a chat turn with the scripted model', () => {
 			.logLines()
 			.find((line) => line['reqId'] === 'turn-tool' && line['msg'] === 'tool called');
 		expect(toolLine?.['tool']).toBe('clarify');
-		expect(toolLine?.['arguments']).toEqual({ question: 'Which file?' });
+		expect(toolLine?.['status']).toBe('final');
+		expect(toolLine?.['arguments']).toBeUndefined();
 	});
 
 	it('stops a model that keeps calling tools after the allowed number of calls', async () => {

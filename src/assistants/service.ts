@@ -105,7 +105,9 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (record === null) return null;
 			await admin.setDisplayName(record.userId, name);
 			await withPrincipal(db, { id: owner }, (tx) => renameAssistant(tx, owner, name));
-			log.info({ owner, userId: record.userId, name }, 'assistant renamed');
+			// The name is the owner's own text: only debug carries it, as with conversations
+			log.info({ owner, userId: record.userId }, 'assistant renamed');
+			log.debug({ owner, userId: record.userId, name }, 'assistant renamed');
 			return toView({ ...record, name });
 		},
 		async remove(owner) {
