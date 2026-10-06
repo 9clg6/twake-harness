@@ -34,10 +34,18 @@ export async function findAssistant(tx: Tx, owner: string): Promise<AssistantRec
 	return row === undefined ? null : normalize(row);
 }
 
+// Saves the owner's assistant. A deleted row of another principal may still name its Matrix
+// account, as one an earlier build left under the owner's old principal: it is purged first, which
+// the reclaim policies allow for that row only, while app.reclaim_user_id names the account.
 export async function saveAssistant(
 	tx: Tx,
 	record: Omit<AssistantRecord, 'deletedAt'>
-): Promise<void> {
+): Promise<{ readonly reclaimed: number }> {
+	await tx.sql`select set_config('app.reclaim_user_id', ${record.userId}, true)`;
+	const purged = await tx.sql`
+		delete from assistants
+		where user_id = ${record.userId} and deleted_at is not null and owner <> ${record.owner}`;
+	await tx.sql`select set_config('app.reclaim_user_id', '', true)`;
 	await tx.sql`
 		insert into assistants (owner, user_id, name, room_id)
 		values (${record.owner}, ${record.userId}, ${record.name}, ${record.roomId})
@@ -46,6 +54,7 @@ export async function saveAssistant(
 			name = excluded.name,
 			room_id = excluded.room_id,
 			deleted_at = null`;
+	return { reclaimed: purged.count };
 }
 
 export async function setAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {

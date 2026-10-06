@@ -80,6 +80,13 @@ describe('an assistant creation that fails', () => {
 		// The name is the owner's own text, which an error log never carries
 		expect(JSON.stringify(failures)).not.toContain('Jarvis');
 
+		// A live assistant's account is never taken back: the row of the old principal is still there
+		const kept = await withPrincipal(
+			h.db,
+			{ id: legacyOwner },
+			(tx) => tx.sql`select deleted_at from assistants where owner = ${legacyOwner}`
+		);
+		expect(kept).toEqual([{ deleted_at: null }]);
 		// The dialog started over: the same text is no longer taken for a name
 		expect(await ask('Jarvis')).toContain('did not understand');
 		// Nothing half-made: the save failed before any room was created, so no invitation reached
@@ -92,13 +99,31 @@ describe('an assistant creation that fails', () => {
 		expect(health.status).toBe(200);
 	}, 120_000);
 
-	it('creates the assistant on the next /newbot once the account is free, and it answers', async () => {
+	it('creates the assistant on the next /newbot once the old row is deleted, and it answers', async () => {
+		// As the /delete of the earlier build left it: deleted, still naming the account
 		await withPrincipal(h.db, { id: legacyOwner }, async (tx) => {
-			await tx.sql`delete from assistants where owner = ${legacyOwner}`;
+			await tx.sql`update assistants set deleted_at = now() where owner = ${legacyOwner}`;
 		});
 		expect(await ask('/newbot')).toMatch(/name/i);
 		const done = await ask('Jarvis');
 		expect(done).toContain(assistantId);
+		// The deleted row of the old principal gave the account back, and is gone
+		const legacy = await withPrincipal(
+			h.db,
+			{ id: legacyOwner },
+			(tx) => tx.sql`select owner from assistants`
+		);
+		expect(legacy).toHaveLength(0);
+		expect(
+			h
+				.logLines()
+				.some(
+					(line) =>
+						line['msg'] === 'assistant created' &&
+						line['owner'] === owner &&
+						line['reclaimed'] === 1
+				)
+		).toBe(true);
 		let invites = await invitesFromAssistant();
 		for (let i = 0; i < 40 && invites.length === 0; i += 1) {
 			await sleep(250);
@@ -114,4 +139,23 @@ describe('an assistant creation that fails', () => {
 		);
 		expect(answer).toContain('still there?');
 	}, 180_000);
+
+	it('takes the account back from a deleted row of the old principal on the first try', async () => {
+		await h.synapse.registerUser('bob');
+		const bobAssistant = '@twake-space-assistant-bob:test.local';
+		await withPrincipal(h.db, { id: 'bob' }, async (tx) => {
+			await tx.sql`insert into assistants (owner, user_id, name, deleted_at) values (${'bob'}, ${bobAssistant}, ${'Lucie'}, now())`;
+		});
+		const created = await h.api.post<{ userId: string }>('bob@test.local', '/v1/assistants', {
+			name: 'Vision'
+		});
+		expect(created.status).toBe(201);
+		expect(created.body.userId).toBe(bobAssistant);
+		const legacy = await withPrincipal(
+			h.db,
+			{ id: 'bob' },
+			(tx) => tx.sql`select owner from assistants`
+		);
+		expect(legacy).toHaveLength(0);
+	}, 120_000);
 });

@@ -116,7 +116,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				const named = await admin.setDisplayName(userId, name);
 				// Saved before its room exists: a save that fails, as when another row still holds the
 				// account, leaves nothing behind on the homeserver
-				await withPrincipal(db, { id: owner }, (tx) =>
+				const { reclaimed } = await withPrincipal(db, { id: owner }, (tx) =>
 					saveAssistant(tx, { owner, userId, name, roomId: null })
 				);
 				saved = true;
@@ -129,7 +129,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 					await setAssistantRoomId(tx, owner, opened);
 					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
 				});
-				log.info({ owner, userId, roomId: opened, named }, 'assistant created');
+				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
 				return {
 					ok: true,
 					assistant: toView({ owner, userId, name, roomId: opened, deletedAt: null })
