@@ -71,7 +71,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	return {
 		definition,
 		argumentKeys,
-		requiredAction: contract.method === 'get' ? CALL_CONTRACTS : ACT_THROUGH_CONTRACTS,
+		requiredAction: contract.level === 'read' ? CALL_CONTRACTS : ACT_THROUGH_CONTRACTS,
 		run: async (args, context): Promise<ToolOutcome> => {
 			const values =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
