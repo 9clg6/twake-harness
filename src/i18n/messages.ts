@@ -42,6 +42,13 @@ export interface Messages {
 		readonly noEscrow: string;
 	};
 	orgGreeting(name: string): string;
+	// What the assistant is told, as its owner's message, when a dispatcher posts an event: the
+	// model reads it, the owner never does. An invitation is proposed, never accepted: only the
+	// owner's answer, in a turn of their own in the room, can accept it.
+	readonly events: {
+		invitation(type: string, eventId: string): string;
+		other(type: string, eventId: string): string;
+	};
 }
 
 const ENGLISH: Messages = {
@@ -85,7 +92,13 @@ const ENGLISH: Messages = {
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.'
 	},
 	orgGreeting: (name) =>
-		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`
+		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
+	events: {
+		invitation: (type, eventId) =>
+			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with read_event, then check the slot with read_freebusy, passing the invitation uid (data.object.uid) as exclude. Tell me in a few words, in the language of our conversation, who invites me, to what and when, and whether I am free or what it conflicts with. Then ask me whether to accept it and stop there: do not accept it yourself, I will answer you here.`,
+		other: (type, eventId) =>
+			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`
+	}
 };
 
 // Tutoiement, as Hermes spoke. The name is chosen by the user, so no word around it agrees in
@@ -135,7 +148,13 @@ const FRENCH: Messages = {
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant."
 	},
 	orgGreeting: (name) =>
-		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`
+		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,
+	events: {
+		invitation: (type, eventId) =>
+			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec read_event, puis vérifie le créneau avec read_freebusy, en passant l'uid de l'invitation (data.object.uid) en exclude. Dis-moi en quelques mots, dans la langue de notre conversation, qui m'invite, à quoi et quand, et si je suis libre ou avec quoi cela entre en conflit. Demande-moi ensuite si je l'accepte, et arrête-toi là : ne l'accepte pas toi-même, je te répondrai ici.`,
+		other: (type, eventId) =>
+			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec les contrats et dis-moi de quoi il s'agit.`
+	}
 };
 
 const CATALOG: Readonly<Record<Locale, Messages>> = { en: ENGLISH, fr: FRENCH };
