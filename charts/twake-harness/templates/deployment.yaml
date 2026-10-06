@@ -161,7 +161,7 @@ spec:
           projected:
             sources:
               - serviceAccountToken:
-                  audience: openbao
+                  audience: {{ .Values.config.openbaoTokenAudience | quote }}
                   expirationSeconds: 3600
                   path: token
         {{- end }}

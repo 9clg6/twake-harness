@@ -62,7 +62,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				principal: { id: owner },
 				target: { kind: 'room', roomId },
 				message: text,
-				log: turnLog
+				log: turnLog,
+				correlationId: eventId
 			});
 			const answer =
 				result.kind === 'ok' ? result.answer : result.kind === 'busy' ? BUSY_TEXT : FAILURE_TEXT;

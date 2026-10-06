@@ -58,6 +58,8 @@ config:
   openbaoEscrowPrefix: twake-harness/assistants
   openbaoAuthPath: auth/kubernetes/login
   openbaoK8sRole: twake-harness
+  # The audience of the projected token the role presents to OpenBao
+  openbaoTokenAudience: twake-harness-openbao
   # The matrix role: the homeserver's name and the application service identity
   matrixServerName: ''
   matrixAppserviceId: twake-harness
@@ -66,6 +68,7 @@ config:
 
 # Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY, and for the
 # matrix role MATRIX_HS_TOKEN (and MATRIX_AS_TOKEN when APISIX does not inject it)
+# and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''

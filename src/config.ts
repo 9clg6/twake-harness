@@ -74,6 +74,10 @@ export interface Config {
 		// The service clients, by their token subject, allowed to post events for an owner
 		readonly clientIds: readonly string[];
 	};
+	readonly gateway: {
+		// The secret the gateway sets on every request it forwards, when the API is only behind it
+		readonly sharedSecret: string | null;
+	};
 	readonly escrow: {
 		// The assistants' secrets (cross-signing keys, backup key) escrowed in the platform OpenBao
 		readonly enabled: boolean;
@@ -132,6 +136,7 @@ const envSchema = z.object({
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
+	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
 	OPENBAO_KV_MOUNT: z.string().min(1).default('secret'),
@@ -233,6 +238,9 @@ export function loadConfig(env: Env): Config {
 			clientIds: values.EVENTS_CLIENT_IDS.split(',')
 				.map((id) => id.trim())
 				.filter((id) => id.length > 0)
+		},
+		gateway: {
+			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
 		escrow: {
 			enabled: values.ESCROW_ENABLED === 'true',

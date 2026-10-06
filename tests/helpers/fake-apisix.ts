@@ -242,7 +242,9 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			return;
 		}
 		if (req.method === 'POST' && url.pathname === '/audit') {
-			audit.push(await readJson(req));
+			// The relay takes one record or a batch; both are kept flat here
+			const posted = await readJson(req);
+			audit.push(...(Array.isArray(posted) ? posted : [posted]));
 			sendJson(res, 200, {});
 			return;
 		}

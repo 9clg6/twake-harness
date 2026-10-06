@@ -44,6 +44,8 @@ export interface OwnerTurnInput {
 	readonly target: SessionTarget;
 	readonly message: string;
 	readonly log: FastifyBaseLogger;
+	// What links the turn's calls in the audit: the request id, or the Matrix event id
+	readonly correlationId?: string;
 }
 
 export type OwnerTurnResult =
@@ -157,7 +159,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						}),
 						history: session.messages,
 						message,
-						context: { principalId: principal.id, actions, db }
+						context: {
+							principalId: principal.id,
+							actions,
+							db,
+							...(input.correlationId === undefined ? {} : { correlationId: input.correlationId })
+						}
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>

@@ -32,6 +32,8 @@ export interface ToolContext {
 	readonly principalId: string;
 	readonly actions: readonly string[];
 	readonly db: Db;
+	// What links this turn's calls in the audit: the request id, or the Matrix event id
+	readonly correlationId?: string;
 }
 
 export interface Tool {
