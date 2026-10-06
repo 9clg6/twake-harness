@@ -53,11 +53,12 @@ export interface Messages {
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
-		// The application by the name the catalog gives it in this language, or else by its id,
-		// and what reading covers there when the catalog says
+		// The application as the catalog names it, or else by its id, and what reading covers there
+		// when the catalog says, both from labelOf
 		firstRead(application: string, covers: string | null): string;
-		// Asked before the assistant first writes in an application, even one its owner lets it read
-		firstWrite(domain: string): string;
+		// Asked before the assistant first writes in an application, even one its owner lets it read:
+		// the application as for reading, and what writing covers there when the catalog says
+		firstWrite(application: string, covers: string | null): string;
 		// The two buttons under a question: the assistant's own reactions, which a tap repeats
 		readonly buttons: { readonly yes: string; readonly no: string };
 		// The words that answer a question, alone in a message
@@ -157,8 +158,13 @@ const ENGLISH: Messages = {
 				covers,
 				'Do you allow it? Answer with the buttons below, or reply yes or no.'
 			),
-		firstWrite: (domain) =>
-			`This is the first time I need to change your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`,
+		firstWrite: (application, covers) =>
+			firstUse(
+				`This is the first time I need to change your data in ${application}.`,
+				'Writing:',
+				covers,
+				'Do you allow it? Answer with the buttons below, or reply yes or no.'
+			),
 		buttons: { yes: '✅ YES', no: '❌ NO' },
 		yes: 'yes',
 		no: 'no',
@@ -249,8 +255,13 @@ const FRENCH: Messages = {
 				covers,
 				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
 			),
-		firstWrite: (domain) =>
-			`C'est la première fois que j'ai besoin de modifier tes données dans ${domain}. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.`,
+		firstWrite: (application, covers) =>
+			firstUse(
+				`C'est la première fois que j'ai besoin de modifier tes données dans ${application}.`,
+				'Écriture :',
+				covers,
+				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+			),
 		buttons: { yes: '✅ OUI', no: '❌ NON' },
 		yes: 'oui',
 		no: 'non',

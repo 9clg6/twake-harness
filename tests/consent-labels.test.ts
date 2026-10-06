@@ -5,6 +5,24 @@ import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 
 const APPLICATIONS = ['mail', 'drive', 'photos', 'tasks', 'notes', 'wiki', 'boards'];
 
+// One read contract per application, and one write in Mail
+const READS_CATALOG = readCatalog(APPLICATIONS) as { paths: Record<string, unknown> };
+const CATALOG = {
+	...READS_CATALOG,
+	paths: {
+		...READS_CATALOG.paths,
+		'/contracts/v1/mail/items/{item_id}/archive': {
+			post: {
+				operationId: 'archive_mail',
+				summary: "Archives one of the user's mails",
+				tags: ['mail.item.archive.v1'],
+				parameters: [{ name: 'item_id', in: 'path', required: true, schema: { type: 'string' } }]
+			}
+		}
+	}
+};
+const CONTRACTS = APPLICATIONS.length + 1;
+
 // How the contracts service names its applications to their owners. Mail is named apart in each
 // language, to tell which one the owner reads; Drive is described in English only, the
 // deployment's language, and Wiki in French only; Photos by its name alone, and Tasks and Notes
@@ -45,6 +63,10 @@ const READS: Record<string, string> = {
 	'Cherche le plan dans mon drive': 'search_drive',
 	'Ouvre mon wiki': 'search_wiki'
 };
+const WRITES: Record<string, string> = {
+	'Archive the newsletter': 'archive_mail',
+	"Archive la lettre d'information": 'archive_mail'
+};
 
 function model(request: ChatRequest): ScriptedReply {
 	const last = request.messages.at(-1);
@@ -55,6 +77,8 @@ function model(request: ChatRequest): ScriptedReply {
 	}
 	const read = READS[content];
 	if (read !== undefined) return { toolCalls: call(read, { q: 'budget' }) };
+	const write = WRITES[content];
+	if (write !== undefined) return { toolCalls: call(write, { item_id: 'newsletter-42' }) };
 	return { content: `Heard: ${content}` };
 }
 
@@ -75,8 +99,8 @@ describe('the question names the application in plain words', () => {
 
 	// The gateway serves this catalog, and every replica of the api role refreshes its own
 	async function serve(domains: unknown): Promise<void> {
-		r.h.apisix.contracts.spec = { ...readCatalog(APPLICATIONS), 'x-twake-domains': domains };
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(APPLICATIONS.length);
+		r.h.apisix.contracts.spec = { ...CATALOG, 'x-twake-domains': domains };
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(CONTRACTS);
 	}
 
 	// What the harness asks after Alice's message, as her client receives it
@@ -125,6 +149,17 @@ describe('the question names the application in plain words', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
+	it('names the application and says what writing covers there, before its first write', async () => {
+		expect(await askedAfter('Archive the newsletter')).toEqual(
+			shown(
+				'This is the first time I need to change your data in Twake Mail.',
+				'Writing: move, archive and delete your mail',
+				HOW_TO_ANSWER.en
+			)
+		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
 	it("names an application by its id when the catalog names it neither in my language nor in the deployment's", async () => {
 		expect(await askedAfter('Search my notes')).toEqual(
 			shown(`This is the first time I need to read your data in notes. ${HOW_TO_ANSWER.en}`)
@@ -148,7 +183,7 @@ describe('the question names the application in plain words', () => {
 		expect(await askedAfter('Show my tasks')).toEqual(described);
 		// A refresh that fails keeps the catalog as it was, its words included
 		r.h.apisix.contracts.spec = null;
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(APPLICATIONS.length);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(CONTRACTS);
 		expect(await askedAfter('Show my tasks')).toEqual(described);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
@@ -265,6 +300,13 @@ describe('the question names the application in plain words', () => {
 			shown(
 				"C'est la première fois que j'ai besoin de lire tes données dans Messagerie Twake.",
 				'Lecture : lister, chercher et lire tes mails',
+				HOW_TO_ANSWER.fr
+			)
+		);
+		expect(await askedAfter("Archive la lettre d'information", opening)).toEqual(
+			shown(
+				"C'est la première fois que j'ai besoin de modifier tes données dans Messagerie Twake.",
+				'Écriture : déplacer, archiver et supprimer tes mails',
 				HOW_TO_ANSWER.fr
 			)
 		);

@@ -118,8 +118,8 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					},
 					'contract call waits for its owner'
 				);
-				// The read question names the application as the catalog does in its owner's
-				// language, and says what reading covers there
+				// The question names the application as the catalog does in its owner's language,
+				// and says what the level covers there
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				const { consent } = getMessages(locale);
 				const application = labelOf(
@@ -139,7 +139,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					final:
 						contract.level === 'read'
 							? consent.firstRead(application.name, application.covers)
-							: consent.firstWrite(contract.domain),
+							: consent.firstWrite(application.name, application.covers),
 					pendingCallId
 				};
 			}
