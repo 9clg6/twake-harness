@@ -48,6 +48,8 @@ config:
   orgAgentName: Twake Space
   orgAgentPersona: ''
   orgAgentMembers: ''
+  # The service clients, by token subject, allowed to post events for an owner (comma separated)
+  eventsClientIds: ''
   # The matrix role: the homeserver's name and the application service identity
   matrixServerName: ''
   matrixAppserviceId: twake-harness

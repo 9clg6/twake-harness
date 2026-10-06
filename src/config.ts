@@ -70,6 +70,10 @@ export interface Config {
 		// The Matrix identifiers of the members it answers
 		readonly members: readonly string[];
 	};
+	readonly events: {
+		// The service clients, by their token subject, allowed to post events for an owner
+		readonly clientIds: readonly string[];
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -115,6 +119,7 @@ const envSchema = z.object({
 			'You are the organization agent of Twake Space. You answer the members of the organization about the organization, its usage and its practices.'
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
+	EVENTS_CLIENT_IDS: z.string().default(''),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -199,6 +204,11 @@ export function loadConfig(env: Env): Config {
 			name: values.ORG_AGENT_NAME,
 			persona: values.ORG_AGENT_PERSONA,
 			members: values.ORG_AGENT_MEMBERS.split(',')
+				.map((id) => id.trim())
+				.filter((id) => id.length > 0)
+		},
+		events: {
+			clientIds: values.EVENTS_CLIENT_IDS.split(',')
 				.map((id) => id.trim())
 				.filter((id) => id.length > 0)
 		},

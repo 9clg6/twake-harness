@@ -70,6 +70,10 @@ The assistants' rooms are created encrypted and every message in them is encrypt
 
 With `ORG_AGENT_ENABLED`, the matrix role runs one more bot, the organization agent: a Matrix user in the assistants' namespace (`ORG_AGENT_LOCALPART`), with its own name and persona, that joins the direct messages of the members named in `ORG_AGENT_MEMBERS` and nobody else, greets them, and answers each of them with the member's identifier in front of the message. It acts under the organization principal, `org`, so its memory is the organization's and its skills library is the organization's; no token can carry that subject. Its contract calls carry no owner header: the gateway sees the harness key alone.
 
+### Events
+
+The dispatcher wakes an assistant by posting an event to `POST /v1/events` with the owner's identifier, the event's id and its type, under a token of one of the service clients named in `EVENTS_CLIENT_IDS` (by subject); a user's token is refused. The harness queues a turn in the owner's room, deduplicated on the event id, in which the assistant reads the event through the contracts and tells the owner. An event for a user without an assistant is refused and logged.
+
 ### Skills
 
 Skills follow the Agent Skills format: a name, a description and Markdown instructions. Each user has a library, the organization has one, and every skill has exactly one owner. The system prompt lists the skills a user may read, with their descriptions; the model reads one with `scoped_skills_read` when it applies and searches them with `skills_search`. What the assistant learns becomes a proposal through `skills_propose`, invisible to the model until its owner approves it (`POST /v1/skills/proposals/:id/approve`). An administrator, a principal with the `skills.admin` right, writes organization skills (`POST /v1/org/skills`) and promotes a user's proposal into the organization library by copy (`POST /v1/org/skills/promote/:id`), leaving the user's library untouched. Row-level security enforces all of it: a user never sees another user's skill, and the organization's are written by administrators only.

@@ -87,6 +87,8 @@ spec:
             {{- end }}
             - name: ORG_AGENT_MEMBERS
               value: {{ .Values.config.orgAgentMembers | quote }}
+            - name: EVENTS_CLIENT_IDS
+              value: {{ .Values.config.eventsClientIds | quote }}
             {{- if eq .Values.role "matrix" }}
             - name: MATRIX_SERVER_NAME
               value: {{ .Values.config.matrixServerName | quote }}

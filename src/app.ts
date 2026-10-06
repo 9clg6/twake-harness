@@ -6,10 +6,13 @@ import { z } from 'zod';
 
 import { makeAgentService, type AgentService } from './agent/service.js';
 import { runTool } from './agent/tools.js';
+import type { TurnPayload } from './agent/turn-worker.js';
+import { findAssistant } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import { withPrincipal, type Db } from './db/client.js';
+import { enqueueJob } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
 import { listMemory } from './memory/repository.js';
@@ -71,6 +74,17 @@ const skillBodySchema = z
 
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
+
+const eventSchema = z.object({
+	owner: z.string().min(1).max(128),
+	event_id: z.string().min(1).max(200),
+	type: z.string().min(1).max(100)
+});
+
+// What the assistant is told when an event arrives, as a message of its owner in their room
+function eventMessage(type: string, eventId: string): string {
+	return `[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`;
+}
 const SESSION_ID = /^[0-9a-f]{32}$/;
 
 const REQUEST_ID_HEADER = 'x-request-id';
@@ -135,6 +149,50 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	});
 
 	app.get('/health', async () => ({ status: 'ok' }));
+
+	// An event the dispatcher posts for an owner wakes their assistant: the turn runs in the
+	// owner's room, reads the event through the contracts and tells the owner. Only the service
+	// clients named in the settings may post one, never a user.
+	app.post('/v1/events', async (request, reply) => {
+		const auth = await authenticate(request.headers.authorization);
+		if (!auth.ok) {
+			request.log.info({ reason: auth.reason }, 'event refused');
+			return reply.code(401).send({ error: 'invalid token' });
+		}
+		const client = auth.principal.id;
+		if (!config.events.clientIds.includes(client)) {
+			request.log.info({ client, reason: 'not_a_dispatcher' }, 'event refused');
+			return reply.code(403).send(FORBIDDEN);
+		}
+		const parsed = eventSchema.safeParse(request.body);
+		if (!parsed.success) return reply.code(400).send({ error: 'invalid event' });
+		const { owner, event_id: eventId, type } = parsed.data;
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
+			request.log.info({ client, owner, eventId, reason: 'no_assistant' }, 'event refused');
+			return reply.code(404).send({ error: 'no assistant' });
+		}
+		const seen = await db.sql`
+			insert into events_seen (event_id, owner) values (${eventId}, ${owner}) on conflict (event_id) do nothing`;
+		if (seen.count === 0) {
+			request.log.info({ client, owner, eventId, type }, 'event duplicate');
+			return reply.code(200).send({ queued: false, duplicate: true });
+		}
+		const payload: TurnPayload = {
+			owner,
+			roomId: assistant.roomId,
+			eventId: `event:${eventId}`,
+			text: eventMessage(type, eventId)
+		};
+		await enqueueJob(db, {
+			kind: 'turn',
+			payload,
+			dedupKey: `event:${eventId}`,
+			groupKey: `turn:${owner}`
+		});
+		request.log.info({ client, owner, eventId, type }, 'event queued');
+		return reply.code(202).send({ queued: true, duplicate: false });
+	});
 
 	// Prometheus exposition: what the autoscaler and the dashboards read
 	app.get('/metrics', async (_request, reply) => {
