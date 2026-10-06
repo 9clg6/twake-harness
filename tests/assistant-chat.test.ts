@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
+import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
@@ -43,6 +43,14 @@ describe('talking to my assistant in Matrix', () => {
 		return client.messages
 			.filter((m) => m.roomId === room && m.sender === assistantId)
 			.map((m) => m.body);
+	}
+
+	function lastAnswer(): DecryptedMessage {
+		const last = client.messages
+			.filter((m) => m.roomId === room && m.sender === assistantId)
+			.at(-1);
+		if (last === undefined) throw new Error('the assistant has not answered yet');
+		return last;
 	}
 
 	async function answersAfter(count: number): Promise<string[]> {
@@ -138,5 +146,42 @@ describe('talking to my assistant in Matrix', () => {
 		await client.sendText(room, 'break');
 		const all = await answersAfter(before);
 		expect(all.at(-1)).toMatch(/try again/i);
+	});
+
+	it('sends its answers as rich text, the markdown kept as the plain body', async () => {
+		const markdown =
+			'Some **bold** words\n\n- one\n- two\n\nUse /rename <name>, see [the docs](https://docs.example.org) or https://example.org';
+		h.apisix.llm.script = () => ({ content: markdown });
+		const before = answers().length;
+		await client.sendText(room, 'format please');
+		await answersAfter(before);
+		const answer = lastAnswer();
+		expect(answer.body).toBe(markdown);
+		expect(answer.content['format']).toBe('org.matrix.custom.html');
+		const html = String(answer.content['formatted_body']);
+		expect(html).toContain('<strong>bold</strong>');
+		expect(html).toMatch(/<ul>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ul>/);
+		expect(html).toContain('<a href="https://docs.example.org">the docs</a>');
+		expect(html).toContain('<a href="https://example.org">https://example.org</a>');
+		// A placeholder in angle brackets stays text: it is not taken for a tag and dropped
+		expect(html).toContain('/rename &lt;name&gt;');
+	});
+
+	it('keeps only the HTML a Matrix client may render, whatever the model writes', async () => {
+		h.apisix.llm.script = () => ({
+			content:
+				'Hi <script>alert(1)</script><img src="https://tracker.example/p.png"> <a href="https://ok.example" onclick="steal()">ok</a> <b>kept</b>'
+		});
+		const before = answers().length;
+		await client.sendText(room, 'html please');
+		await answersAfter(before);
+		const html = String(lastAnswer().content['formatted_body']);
+		expect(html).not.toMatch(/<script/i);
+		expect(html).not.toContain('alert(1)');
+		expect(html).not.toMatch(/<img/i);
+		expect(html).not.toContain('tracker.example');
+		expect(html).not.toContain('onclick');
+		expect(html).toContain('<a href="https://ok.example">ok</a>');
+		expect(html).toContain('<b>kept</b>');
 	});
 });

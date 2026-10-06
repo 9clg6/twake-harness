@@ -31,6 +31,7 @@ import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
 import { helpText, runCreatorTurn } from './creator.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
+import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeAppserviceStorage } from './storage.js';
 
@@ -373,7 +374,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		// Synapse delivers nothing sent before the join, so the creator opens the conversation
 		// itself rather than let a first message go unanswered.
-		if (invited === creator) await appservice.botIntent.sendText(roomId, helpText());
+		if (invited === creator) await appservice.botIntent.sendEvent(roomId, makeRichText(helpText()));
 	});
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
@@ -460,7 +461,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const turn = await runCreatorTurn({ owner, text, state }, assistants);
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
-		await appservice.botIntent.sendText(roomId, turn.reply);
+		await appservice.botIntent.sendEvent(roomId, makeRichText(turn.reply));
 	}
 
 	// Answers computed by the api role, sent as the assistant through its intent, which encrypts
@@ -512,7 +513,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			const room = await assistantRoom(job.payload.roomId);
 			if (room !== null) await escrowOnceReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
-			await intent.sendText(job.payload.roomId, job.payload.text);
+			await intent.sendEvent(job.payload.roomId, makeRichText(job.payload.text));
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (room !== null) backupInBackground(room.userId, room.owner);
 		}
