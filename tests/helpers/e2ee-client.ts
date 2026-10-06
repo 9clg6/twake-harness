@@ -21,6 +21,8 @@ export interface E2eeClient {
 	readonly client: MatrixClient;
 	readonly messages: DecryptedMessage[];
 	joinRoom(roomId: string): Promise<void>;
+	// Opens an encrypted direct message with someone, as Twake Chat does
+	createDirectRoom(userId: string): Promise<string>;
 	sendText(roomId: string, text: string): Promise<void>;
 	waitForMessage(
 		roomId: string,
@@ -60,6 +62,19 @@ export async function startE2eeClient(
 		joinRoom: async (roomId) => {
 			await client.joinRoom(roomId);
 		},
+		createDirectRoom: (userId) =>
+			client.createRoom({
+				invite: [userId],
+				is_direct: true,
+				preset: 'trusted_private_chat',
+				initial_state: [
+					{
+						type: 'm.room.encryption',
+						state_key: '',
+						content: { algorithm: 'm.megolm.v1.aes-sha2' }
+					}
+				]
+			}),
 		sendText: async (roomId, text) => {
 			await client.sendText(roomId, text);
 		},

@@ -49,7 +49,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			if (!parsed.success) throw new Error('turn payload is malformed');
 			const { owner, roomId, eventId, text } = parsed.data;
 			const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-			if (assistant === null || assistant.deletedAt !== null || assistant.roomId !== roomId) {
+			const rooms =
+				assistant === null || assistant.deletedAt !== null
+					? []
+					: await db.sql`select 1 from assistant_rooms where room_id = ${roomId} and owner = ${owner}`;
+			if (assistant === null || rooms.length === 0) {
 				log.info({ owner, roomId }, 'turn dropped: no assistant for this room');
 				return;
 			}

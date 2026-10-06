@@ -66,6 +66,10 @@ A turn is admitted before any model call. The turns per minute of a user, those 
 
 The assistants' rooms are created encrypted and every message in them is encrypted end to end. The matrix role holds one encryption store per assistant on its volume, acts as each assistant's device through the application service (device masquerading, MSC3202), and receives the key shares Synapse pushes with the transactions (MSC2409), so no assistant runs a sync loop. Both flags are enabled on the Synapse the harness is registered with. The fallback, had push proved unworkable, would have been one sync loop per assistant; it was not needed. An assistant's encryption state is prepared when the role starts and when it is invited, so a key share that arrives while the role was away is not lost: Synapse redelivers the transaction and the message is answered once the role is back.
 
+### Organization agent
+
+With `ORG_AGENT_ENABLED`, the matrix role runs one more bot, the organization agent: a Matrix user in the assistants' namespace (`ORG_AGENT_LOCALPART`), with its own name and persona, that joins the direct messages of the members named in `ORG_AGENT_MEMBERS` and nobody else, greets them, and answers each of them with the member's identifier in front of the message. It acts under the organization principal, `org`, so its memory is the organization's and its skills library is the organization's; no token can carry that subject. Its contract calls carry no owner header: the gateway sees the harness key alone.
+
 ### Events
 
 The dispatcher wakes an assistant by posting an event to `POST /v1/events` with the owner's identifier, the event's id and its type, under a token of one of the service clients named in `EVENTS_CLIENT_IDS` (by subject); a user's token is refused. The harness queues a turn in the owner's room, deduplicated on the event id, in which the assistant reads the event through the contracts and tells the owner. An event for a user without an assistant is refused and logged.

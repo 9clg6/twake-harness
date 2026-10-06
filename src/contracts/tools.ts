@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
+import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
 import { toolParametersOf, type ContractDefinition } from './openapi.js';
@@ -85,11 +86,14 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			}
 			const url = joinPath(config.apisix.baseUrl, config.contracts.basePath, path);
 			url.search = query.toString();
+			// The organization agent calls with the harness key alone: it acts for no user
 			const headers: Record<string, string> = {
 				apikey: config.apisix.consumerKey,
-				'x-twake-on-behalf-of': context.principalId,
 				'x-twake-contract': contract.id
 			};
+			if (context.principalId !== ORGANIZATION_PRINCIPAL) {
+				headers['x-twake-on-behalf-of'] = context.principalId;
+			}
 			const body = contract.bodySchema === null ? undefined : JSON.stringify(values['body'] ?? {});
 			if (body !== undefined) headers['content-type'] = 'application/json';
 			let status = 0;
