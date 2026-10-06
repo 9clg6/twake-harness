@@ -13,6 +13,7 @@ export interface TurnInput {
 export interface TurnOutput {
 	readonly answer: string;
 	readonly messages: readonly LlmMessage[];
+	readonly tokens: number;
 }
 
 export interface TurnDeps {
@@ -40,10 +41,12 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	const messages: LlmMessage[] = [...input.history, { role: 'user', content: input.message }];
 	const system: LlmMessage = { role: 'system', content: input.systemPrompt };
 	let toolCalls = 0;
+	let tokens = 0;
 	for (let iteration = 0; iteration <= deps.maxToolCalls; iteration += 1) {
 		const prompt = [system, ...messages];
 		deps.log.info({ iteration, messages: prompt }, 'model asked');
 		const completion = await deps.llm.complete(prompt, deps.tools.definitions);
+		tokens += (completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
 		deps.log.info(
 			{
 				iteration,
@@ -59,7 +62,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			const answer = completion.content ?? '';
 			if (answer.length === 0) throw new TurnError('the model answered nothing');
 			messages.push({ role: 'assistant', content: answer });
-			return { answer, messages };
+			return { answer, messages, tokens };
 		}
 		messages.push({
 			role: 'assistant',
@@ -91,7 +94,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			});
 			if (outcome.final !== undefined) {
 				messages.push({ role: 'assistant', content: outcome.final });
-				return { answer: outcome.final, messages };
+				return { answer: outcome.final, messages, tokens };
 			}
 		}
 	}

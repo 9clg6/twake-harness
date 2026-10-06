@@ -14,6 +14,7 @@ import {
 	saveSessionMessages,
 	type SessionRecord
 } from '../sessions/repository.js';
+import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import { DEFAULT_SYSTEM_PROMPT } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
@@ -22,6 +23,7 @@ import {
 	clarifyTool,
 	makeToolRegistry,
 	memoryTool,
+	sessionSearchTool,
 	sessionsListTool,
 	sessionsReadTool,
 	skillsListTool,
@@ -53,6 +55,7 @@ export type OwnerTurnResult =
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
+	| { readonly kind: 'busy'; readonly reason: RefusalReason }
 	| { readonly kind: 'failed'; readonly error: string };
 
 export interface AgentService {
@@ -60,6 +63,7 @@ export interface AgentService {
 	readonly tools: ToolRegistry;
 	readonly gate: TurnGate;
 	readonly contracts: ContractCatalog;
+	readonly admission: Admission;
 	runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult>;
 }
 
@@ -88,6 +92,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			memoryTool,
 			sessionsListTool,
 			sessionsReadTool,
+			sessionSearchTool,
 			skillsListTool,
 			skillsSearchTool,
 			skillsReadTool,
@@ -96,10 +101,23 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		() => contracts.tools
 	);
 	const gate = makeTurnGate();
+	const admission = makeAdmission(config, db, deps.log);
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
+		const { principal } = input;
+		// Admitted before anything else runs; the slot is held until the turn ends
+		const decision = await admission.admit(principal.id);
+		if (!decision.ok) return { kind: 'busy', reason: decision.reason };
+		try {
+			return await gate.run(principal.id, () => runAdmittedTurn(input));
+		} finally {
+			decision.release();
+		}
+	}
+
+	async function runAdmittedTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
 		const { principal, target, message } = input;
-		return gate.run(principal.id, async () => {
+		{
 			// A short transaction settles rights and the session; the model call runs outside it.
 			const opened = await withPrincipal(db, principal, async (tx) => {
 				const record = await ensurePrincipal(tx, principal);
@@ -143,7 +161,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					saveSessionMessages(tx, session.id, turn.messages)
 				);
 				if (!saved) return { kind: 'missing' };
-				log.info({ answerLength: turn.answer.length }, 'turn finished');
+				await admission.recordUsage(principal.id, turn.tokens);
+				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
 				return { kind: 'ok', sessionId: session.id, answer: turn.answer, model: llm.model };
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {
@@ -152,8 +171,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				}
 				throw err;
 			}
-		});
+		}
 	}
 
-	return { llm, tools, gate, contracts, runOwnerTurn };
+	return { llm, tools, gate, contracts, admission, runOwnerTurn };
 }

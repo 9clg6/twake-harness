@@ -136,6 +136,27 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 	app.get('/health', async () => ({ status: 'ok' }));
 
+	// Prometheus exposition: what the autoscaler and the dashboards read
+	app.get('/metrics', async (_request, reply) => {
+		const snapshot = agent.admission.snapshot();
+		const assistants = await db.sql<
+			{ n: number }[]
+		>`select count(*)::int as n from assistant_rooms`;
+		const lines = [
+			'# TYPE harness_turns_inflight gauge',
+			`harness_turns_inflight ${snapshot.inflight}`,
+			'# TYPE harness_turns_queued gauge',
+			`harness_turns_queued ${snapshot.queued}`,
+			'# TYPE harness_turns_refused_total counter',
+			...Object.entries(snapshot.refused).map(
+				([reason, n]) => `harness_turns_refused_total{reason="${reason}"} ${n}`
+			),
+			'# TYPE harness_assistants_held gauge',
+			`harness_assistants_held ${assistants[0]?.n ?? 0}`
+		];
+		return reply.type('text/plain; version=0.0.4').send(`${lines.join('\n')}\n`);
+	});
+
 	await app.register(
 		async (scope) => {
 			// Identity is settled before any other work: a refused token never reaches the database.
@@ -371,6 +392,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				});
 				if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
 				if (result.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				if (result.kind === 'busy')
+					return reply.code(429).send({ error: 'busy', reason: result.reason });
 				if (result.kind === 'failed') return reply.code(502).send({ error: 'execution failed' });
 				return { session_id: result.sessionId, answer: result.answer, model: result.model };
 			});

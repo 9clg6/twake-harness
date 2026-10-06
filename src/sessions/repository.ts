@@ -74,3 +74,32 @@ export async function ensureRoomSession(
 	await tx.sql`insert into sessions (id, owner, room_id) values (${id}, ${owner}, ${roomId})`;
 	return { id, owner, messages: [] };
 }
+
+export interface SessionMatch {
+	readonly id: string;
+	readonly updatedAt: Date;
+	readonly snippet: string;
+}
+
+interface MatchRow {
+	id: string;
+	updated_at: Date;
+	messages: unknown;
+}
+
+// Words of past conversations of the owner, the newest first; the policy keeps it to theirs
+export async function searchSessions(tx: Tx, query: string, limit = 10): Promise<SessionMatch[]> {
+	const pattern = `%${query.toLowerCase()}%`;
+	const rows = await tx.sql<MatchRow[]>`
+		select id, updated_at, messages from sessions
+		where lower(messages::text) like ${pattern}
+		order by updated_at desc limit ${limit}`;
+	return rows.map((row) => {
+		const messages = readJsonColumn(row.messages);
+		const texts = Array.isArray(messages)
+			? (messages as LlmMessage[]).map((m) => (typeof m.content === 'string' ? m.content : ''))
+			: [];
+		const hit = texts.find((t) => t.toLowerCase().includes(query.toLowerCase())) ?? '';
+		return { id: row.id, updatedAt: row.updated_at, snippet: hit.slice(0, 200) };
+	});
+}

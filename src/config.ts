@@ -29,6 +29,19 @@ export interface Config {
 		readonly maxToolCalls: number;
 		readonly memoryNudgeInterval: number;
 	};
+	readonly curation: {
+		readonly intervalMs: number;
+	};
+	readonly admission: {
+		// Turns running at once in this replica, and the queue behind them
+		readonly maxInflight: number;
+		// Per user: one running turn, then this many waiting; beyond, the user is told to come back
+		readonly userQueue: number;
+		readonly userPerMinute: number;
+		readonly userDailyTokens: number;
+		// The AI Gateway's own rate, respected before it refuses us
+		readonly globalPerMinute: number;
+	};
 	readonly contracts: {
 		// Paths under the APISIX address: the curated OpenAPI, the contracts, the audit route
 		readonly openapiPath: string;
@@ -64,6 +77,12 @@ const envSchema = z.object({
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
+	CURATION_INTERVAL_MS: z.coerce.number().int().min(0).default(86_400_000),
+	ADMISSION_MAX_INFLIGHT: z.coerce.number().int().min(1).default(32),
+	ADMISSION_USER_QUEUE: z.coerce.number().int().min(0).default(2),
+	ADMISSION_USER_PER_MINUTE: z.coerce.number().int().min(1).default(10),
+	ADMISSION_USER_DAILY_TOKENS: z.coerce.number().int().min(1).default(200_000),
+	ADMISSION_GLOBAL_PER_MINUTE: z.coerce.number().int().min(1).default(400),
 	CONTRACTS_OPENAPI_PATH: z.string().min(1).default('contracts/openapi.json'),
 	CONTRACTS_BASE_PATH: z.string().min(1).default('contracts'),
 	AUDIT_PATH: z.string().min(1).default('audit'),
@@ -117,6 +136,16 @@ export function loadConfig(env: Env): Config {
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL
+		},
+		curation: {
+			intervalMs: values.CURATION_INTERVAL_MS
+		},
+		admission: {
+			maxInflight: values.ADMISSION_MAX_INFLIGHT,
+			userQueue: values.ADMISSION_USER_QUEUE,
+			userPerMinute: values.ADMISSION_USER_PER_MINUTE,
+			userDailyTokens: values.ADMISSION_USER_DAILY_TOKENS,
+			globalPerMinute: values.ADMISSION_GLOBAL_PER_MINUTE
 		},
 		contracts: {
 			openapiPath: values.CONTRACTS_OPENAPI_PATH,

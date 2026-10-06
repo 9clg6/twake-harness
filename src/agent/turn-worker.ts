@@ -30,6 +30,8 @@ export interface TurnWorkerOptions {
 }
 
 const FAILURE_TEXT = 'Something went wrong on my side. Please try again in a moment.';
+const BUSY_TEXT =
+	'I am busy right now and cannot take this message. Please send it again in a moment.';
 
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
@@ -55,7 +57,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				message: text,
 				log: turnLog
 			});
-			const answer = result.kind === 'ok' ? result.answer : FAILURE_TEXT;
+			const answer =
+				result.kind === 'ok' ? result.answer : result.kind === 'busy' ? BUSY_TEXT : FAILURE_TEXT;
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			const payload: SendPayload = { asUserId: assistant.userId, roomId, text: answer };
 			await enqueueJob(db, { kind: 'send', payload, dedupKey: `send:${eventId}` });

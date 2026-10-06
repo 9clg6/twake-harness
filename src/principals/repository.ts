@@ -36,6 +36,7 @@ export async function ensurePrincipal(tx: Tx, principal: Principal): Promise<Pri
 		insert into principals (id, actions)
 		values (${principal.id}, ${tx.sql.json([...DEFAULT_ACTIONS])})
 		on conflict (id) do nothing`;
+	await tx.sql`insert into principal_index (owner) values (${principal.id}) on conflict do nothing`;
 	const rows = await tx.sql<PrincipalRow[]>`
 		select id, actions from principals where id = ${principal.id}`;
 	const row = rows[0];

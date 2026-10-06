@@ -49,6 +49,7 @@ Migrations in `migrations/` run at start, under an advisory lock so replicas do 
 One image, one role per deployment, chosen by `HARNESS_ROLE`:
 
 - `api` serves the HTTP API behind APISIX.
+- `worker` runs the daily curation: for every owner, under their own principal, it merges duplicate memory entries and turns a request made the same way in three conversations or more into a skill proposal for that owner. It serves its health check and nothing else.
 - `matrix` is the Matrix application service: it receives what Synapse pushes, answers as the creator user and the assistants, and calls Synapse through the `matrix` route of APISIX. `npm run matrix:registration` prints the registration file Synapse loads, given `MATRIX_APPSERVICE_URL`, the APISIX route Synapse pushes to.
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
@@ -56,6 +57,10 @@ The Matrix tests start a real Synapse in a container, so Docker is needed to run
 ### Skills
 
 Skills follow the Agent Skills format: a name, a description and Markdown instructions. Each user has a library, the organization has one, and every skill has exactly one owner. The system prompt lists the skills a user may read, with their descriptions; the model reads one with `scoped_skills_read` when it applies and searches them with `skills_search`. What the assistant learns becomes a proposal through `skills_propose`, invisible to the model until its owner approves it (`POST /v1/skills/proposals/:id/approve`). An administrator, a principal with the `skills.admin` right, writes organization skills (`POST /v1/org/skills`) and promotes a user's proposal into the organization library by copy (`POST /v1/org/skills/promote/:id`), leaving the user's library untouched. Row-level security enforces all of it: a user never sees another user's skill, and the organization's are written by administrators only.
+
+### Session search
+
+The model finds past conversations with `session_search`, by words they contain, among the owner's sessions only; the result gives the session ids and a snippet, and `scoped_sessions_read` opens one.
 
 ### Contracts as tools
 
