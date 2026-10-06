@@ -49,6 +49,7 @@ import {
 	type ToolOutcome,
 	type ToolRegistry,
 	type TurnOrigin,
+	WRITE_OWN_MEMORY,
 	WRITE_OWN_SETTINGS
 } from './tools.js';
 
@@ -60,10 +61,15 @@ export type SessionTarget =
 	| { readonly kind: 'id'; readonly id: string }
 	| { readonly kind: 'room'; readonly roomId: string };
 
-// What a turn an event started may not do, whatever its owner may: act through a contract, or
-// change how the assistant speaks to its owner. The event's own text comes from a third party, so
-// only the owner's yes, in a turn of their own, can make the assistant act.
-const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [ACT_THROUGH_CONTRACTS, WRITE_OWN_SETTINGS];
+// What a turn an event started may not do, whatever its owner may: act through a contract, change
+// how the assistant speaks to its owner, or keep a note that later turns would read as the
+// assistant's own. The event's own text comes from a third party, so only the owner's yes, in a
+// turn of their own, can make the assistant act or remember.
+const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
+	ACT_THROUGH_CONTRACTS,
+	WRITE_OWN_SETTINGS,
+	WRITE_OWN_MEMORY
+];
 
 // What the model of a turn is told, and the harness's own question when a read it made before
 // the model speaks waits for the owner
