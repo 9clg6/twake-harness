@@ -168,6 +168,16 @@ function textOf(event: RoomEvent): string | null {
 		: null;
 }
 
+// What an assistant knows of the encryption of one of its rooms
+type RoomEncryption = 'encrypted' | 'clear' | 'unreadable';
+
+// The Matrix error code of a failed request, which the SDK carries on what it throws
+function errcodeOf(err: unknown): string | null {
+	if (typeof err !== 'object' || err === null) return null;
+	const errcode: unknown = Reflect.get(err, 'errcode');
+	return typeof errcode === 'string' ? errcode : null;
+}
+
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
 	const { config, db, log } = options;
 	const messages = getMessages(config.locale);
@@ -532,13 +542,22 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			: { owner: row.owner, userId: row.user_id, welcome: row.welcome };
 	}
 
-	// Whether a room is encrypted, as its assistant's device knows it: the SDK reads the room's
+	// A room's encryption, as its assistant's device knows it: the SDK reads the room's
 	// m.room.encryption state and keeps it in the assistant's encryption store, since encryption is
-	// never turned off, and encrypts what the assistant says in the room by the same knowledge
-	async function isEncryptedRoom(assistantUserId: string, roomId: string): Promise<boolean> {
+	// never turned off, and encrypts what the assistant says in the room by the same knowledge. The
+	// SDK takes a state it failed to read for none, so a room it does not hold as encrypted is read
+	// again here: only the homeserver's answer that the room has no such state makes it clear.
+	async function roomEncryption(assistantUserId: string, roomId: string): Promise<RoomEncryption> {
 		const intent = appservice.getIntentForUserId(assistantUserId);
 		await ensureEncryption(intent);
-		return intent.underlyingClient.crypto.isRoomEncrypted(roomId);
+		const client = intent.underlyingClient;
+		if (await client.crypto.isRoomEncrypted(roomId)) return 'encrypted';
+		try {
+			await client.getRoomStateEvent(roomId, 'm.room.encryption', '');
+			return 'encrypted';
+		} catch (err: unknown) {
+			return errcodeOf(err) === 'M_NOT_FOUND' ? 'clear' : 'unreadable';
+		}
 	}
 
 	// The owner has joined: their devices are in the room, the greeting can be encrypted for them
@@ -702,13 +721,23 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt
 			// what they write: a message in their name that came in clear was written on the server
-			// side, and starts nothing
-			if (!encrypted && (await isEncryptedRoom(room.userId, roomId))) {
-				log.info(
-					{ roomId, sender, owner, eventId: raw.event_id },
-					'assistant ignored an unencrypted message'
-				);
-				return;
+			// side, and starts nothing. A room whose encryption cannot be read counts as encrypted, so
+			// that a failure of the homeserver lets no such message through.
+			if (!encrypted) {
+				const encryption = await roomEncryption(room.userId, roomId);
+				if (encryption !== 'clear') {
+					log.info(
+						{
+							roomId,
+							sender,
+							owner,
+							eventId: raw.event_id,
+							reason: encryption === 'encrypted' ? 'encrypted room' : 'encryption state unreadable'
+						},
+						'assistant ignored an unencrypted message'
+					);
+					return;
+				}
 			}
 			// The turns of one owner run one after the other, in the order they were sent
 			const queued = await enqueueJob(db, {

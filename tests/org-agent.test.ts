@@ -153,6 +153,7 @@ describe('the organization agent', () => {
 		const plain = await h.synapse.sendText(alice, room, 'what is our usage, asks mallory?');
 		const decision = await h.decisionOn(plain);
 		expect(decision?.['msg']).toBe('assistant ignored an unencrypted message');
+		expect(decision?.['reason']).toBe('encrypted room');
 		expect(decision?.['sender']).toBe(alice.userId);
 		expect(decision?.['owner']).toBe('org');
 		// What her own device encrypts is answered as before
@@ -173,5 +174,22 @@ describe('the organization agent', () => {
 		expect(
 			await h.synapse.waitForMessage(alice, clearRoom, orgId, (t) => t.startsWith('Usage:'))
 		).toBe('Usage: 42 turns');
+	});
+
+	it('takes a room whose encryption cannot be read for an encrypted one', async () => {
+		// The homeserver fails to tell any room's encryption while a member opens a new room with the
+		// agent, which therefore never learns that this one is encrypted
+		h.apisix.matrixFault = (call) =>
+			call.method === 'GET' && call.path.includes('/state/m.room.encryption') ? 502 : null;
+		try {
+			const fresh = await aliceClient.createDirectRoom(orgId);
+			await aliceClient.waitForMessage(fresh, orgId, (t) => t.includes('Twake Space'));
+			const plain = await h.synapse.sendText(alice, fresh, 'what is our usage, asks mallory?');
+			const decision = await h.decisionOn(plain);
+			expect(decision?.['msg']).toBe('assistant ignored an unencrypted message');
+			expect(decision?.['reason']).toBe('encryption state unreadable');
+		} finally {
+			h.apisix.matrixFault = null;
+		}
 	});
 });
