@@ -46,6 +46,8 @@ export interface FakeApisix {
 	};
 	// Where the /matrix route forwards, once a homeserver is up
 	matrixUpstream: string | null;
+	// What went through the /matrix route, for diagnosis
+	readonly matrixCalls: { method: string; path: string; status: number; ms: number }[];
 	close(): Promise<void>;
 }
 
@@ -84,6 +86,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
 	const fake = { matrixUpstream: null as string | null };
+	const matrixCalls: FakeApisix['matrixCalls'] = [];
 	const server: Server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? '/', 'http://fake');
 		const apiKeyHeader = req.headers['apikey'];
@@ -109,10 +112,17 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 					headers[name] = value;
 				}
 			}
+			const startedAt = Date.now();
 			const upstream = await fetch(target, {
 				method: req.method ?? 'GET',
 				headers,
 				...(chunks.length === 0 ? {} : { body: Buffer.concat(chunks) })
+			});
+			matrixCalls.push({
+				method: req.method ?? 'GET',
+				path: url.pathname.slice('/matrix'.length) + url.search,
+				status: upstream.status,
+				ms: Date.now() - startedAt
 			});
 			res.statusCode = upstream.status;
 			res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
@@ -163,6 +173,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		set matrixUpstream(value: string | null) {
 			fake.matrixUpstream = value;
 		},
+		matrixCalls,
 		close: () =>
 			new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())))
 	};

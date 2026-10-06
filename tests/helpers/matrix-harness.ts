@@ -1,3 +1,6 @@
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 
 import { makeAgentService } from '../../src/agent/service.js';
@@ -14,9 +17,11 @@ import { startTestIssuer, type TestIssuer } from './jwks-server.js';
 import { freePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
 
 export interface MatrixTestHarness {
+	// Stops and starts the matrix role again on the same database and encryption stores
+	restartRole(): Promise<void>;
 	readonly synapse: TestSynapse;
 	readonly apisix: FakeApisix;
-	readonly role: MatrixRole;
+	role: MatrixRole;
 	readonly config: Config;
 	readonly db: Db;
 	readonly port: number;
@@ -46,6 +51,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		MATRIX_SERVER_NAME: SYNAPSE_SERVER_NAME,
 		MATRIX_AS_TOKEN: asToken,
 		MATRIX_HS_TOKEN: hsToken,
+		MATRIX_CRYPTO_STORE_PATH: join(await mkdtemp(join(tmpdir(), 'harness-crypto-')), 'crypto'),
 		LOG_LEVEL: 'info'
 	});
 	const synapse = await startTestSynapse({
@@ -61,16 +67,23 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	const app = await buildApp({ config, db, logStream, agent });
 	await app.ready();
 	const worker = startTurnWorker({ db, agent, log: app.log, pollIntervalMs: 100 });
-	const role = await startMatrixRole({
-		config,
-		db,
-		log: app.log,
-		port,
-		bindAddress: '0.0.0.0',
-		pollIntervalMs: 100
-	});
+	const startRole = (): Promise<MatrixRole> =>
+		startMatrixRole({
+			config,
+			db,
+			log: app.log,
+			port,
+			bindAddress: '0.0.0.0',
+			pollIntervalMs: 100
+		});
+	let role = await startRole();
 	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
-	return {
+	const harness: MatrixTestHarness = {
+		restartRole: async () => {
+			await role.stop();
+			role = await startRole();
+			harness.role = role;
+		},
 		synapse,
 		apisix,
 		role,
@@ -96,4 +109,5 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 			await issuer.close();
 		}
 	};
+	return harness;
 }

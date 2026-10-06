@@ -60,10 +60,6 @@ function toView(record: AssistantRecord): AssistantView {
 	};
 }
 
-function deviceIdFor(owner: string): string {
-	return `ASSISTANT_${owner.replace(/[^a-z0-9]/gi, '_').toUpperCase()}`.slice(0, 64);
-}
-
 export function makeAssistantService(deps: AssistantServiceDeps): AssistantService {
 	const { config, db, admin, log } = deps;
 
@@ -79,29 +75,21 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if ((await current(owner)) !== null) return { ok: false, reason: 'exists' };
 			const userId = assistantUserId(config, owner);
 			const localpart = `${config.matrix.assistantPrefix}${owner}`;
-			const deviceId = deviceIdFor(owner);
-			// The account is registered once and kept; a new creation after a deletion logs a new
-			// device in on the same account, since a Matrix identifier is never reused.
+			// The account is registered once and kept, since a Matrix identifier is never reused;
+			// its device belongs to the application service, which creates and keeps it.
 			await admin.registerUser(localpart);
-			const accessToken = await admin.loginDevice(localpart, deviceId);
 			const named = await admin.setDisplayName(userId, name);
 			const roomId = await admin.createDirectRoom(userId, ownerMatrixId(config, owner));
-			await admin.sendText(
-				userId,
-				roomId,
-				`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`
-			);
 			await withPrincipal(db, { id: owner }, (tx) =>
-				saveAssistant(tx, { owner, userId, name, deviceId, accessToken, roomId })
+				saveAssistant(tx, { owner, userId, name, roomId })
 			);
+			// The greeting waits for the owner to join: the matrix role then encrypts it for their devices
+			const welcome = `Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`;
 			await db.sql`
-				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${userId})
-				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
+				insert into assistant_rooms (room_id, owner, user_id, welcome) values (${roomId}, ${owner}, ${userId}, ${welcome})
+				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;
 			log.info({ owner, userId, roomId, named }, 'assistant created');
-			return {
-				ok: true,
-				assistant: toView({ owner, userId, name, deviceId, accessToken, roomId, deletedAt: null })
-			};
+			return { ok: true, assistant: toView({ owner, userId, name, roomId, deletedAt: null }) };
 		},
 		async find(owner) {
 			const record = await current(owner);
@@ -120,13 +108,11 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 		async remove(owner) {
 			const record = await current(owner);
 			if (record === null) return false;
+			// The assistant leaves and goes dormant with its device, which the application service
+			// keeps: a device it no longer drives would fail every later transaction that names it.
 			if (record.roomId !== null) {
-				await admin
-					.sendText(record.userId, record.roomId, 'Goodbye. This assistant is being deleted.')
-					.catch(() => undefined);
 				await admin.leaveRoom(record.userId, record.roomId);
 			}
-			await admin.logoutDevice(record.accessToken);
 			await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
 			await db.sql`delete from assistant_rooms where owner = ${owner}`;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');

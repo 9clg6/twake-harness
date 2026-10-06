@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -17,11 +18,13 @@ interface AssistantView {
 describe('creating an assistant, like a Telegram bot', () => {
 	let h: MatrixTestHarness;
 	let alice: MatrixUser;
+	let aliceClient: E2eeClient;
 	let creatorRoom: string;
 	let replies = 0;
 	beforeAll(async () => {
 		h = await startMatrixHarness();
 		alice = await h.synapse.registerUser('alice');
+		aliceClient = await startE2eeClient(h.synapse.url, alice);
 		creatorRoom = await h.synapse.createDirectRoom(alice, h.role.creatorUserId);
 		await h.synapse.waitForMessage(alice, creatorRoom, h.role.creatorUserId, (t) =>
 			t.includes('/newbot')
@@ -29,6 +32,7 @@ describe('creating an assistant, like a Telegram bot', () => {
 		replies = 1;
 	}, 180_000);
 	afterAll(async () => {
+		if (aliceClient !== undefined) await aliceClient.stop();
 		if (h !== undefined) await h.close();
 	});
 
@@ -62,8 +66,8 @@ describe('creating an assistant, like a Telegram bot', () => {
 		}
 		expect(invites).toHaveLength(1);
 		const room = invites[0]?.roomId ?? '';
-		await h.synapse.joinRoom(alice, room);
-		const welcome = await h.synapse.waitForMessage(alice, room, assistantId, (t) =>
+		await aliceClient.joinRoom(room);
+		const welcome = await aliceClient.waitForMessage(room, assistantId, (t) =>
 			t.includes('Jarvis')
 		);
 		expect(welcome).toContain('assistant');
@@ -103,7 +107,7 @@ describe('creating an assistant, like a Telegram bot', () => {
 		expect((await h.api.get<AssistantView>('alice', '/v1/assistants/me')).body.name).toBe('Vision');
 	});
 
-	it('deletes the assistant, logs its device out, and lets the owner start over', async () => {
+	it('deletes the assistant, which leaves the room, and lets the owner start over', async () => {
 		const before = await h.api.get<AssistantView>('alice', '/v1/assistants/me');
 		const room = before.body.roomId ?? '';
 		expect(await ask('/delete')).toMatch(/deleted/i);
