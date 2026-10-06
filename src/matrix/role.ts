@@ -31,6 +31,7 @@ import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
 import { helpText, runCreatorTurn } from './creator.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
+import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeAppserviceStorage } from './storage.js';
@@ -63,6 +64,9 @@ interface SendJob {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
+	// The owner's message the text answers, for the reactions on it
+	readonly replyTo?: string;
+	readonly outcome?: TurnOutcome;
 }
 
 const RECOVERED_TEXT =
@@ -91,13 +95,21 @@ interface ToDeviceSync {
 }
 
 function isSendJob(value: unknown): value is SendJob {
+	if (typeof value !== 'object' || value === null) return false;
+	const job = value as Record<string, unknown>;
 	return (
-		typeof value === 'object' &&
-		value !== null &&
-		typeof (value as SendJob).asUserId === 'string' &&
-		typeof (value as SendJob).roomId === 'string' &&
-		typeof (value as SendJob).text === 'string'
+		typeof job['asUserId'] === 'string' &&
+		typeof job['roomId'] === 'string' &&
+		typeof job['text'] === 'string' &&
+		(job['replyTo'] === undefined || typeof job['replyTo'] === 'string') &&
+		(job['outcome'] === undefined || job['outcome'] === 'answered' || job['outcome'] === 'failed')
 	);
+}
+
+function turnOf(job: SendJob): TurnRef | null {
+	return job.replyTo === undefined
+		? null
+		: { assistantUserId: job.asUserId, roomId: job.roomId, eventId: job.replyTo };
 }
 
 function textOf(event: RoomEvent): string | null {
@@ -406,6 +418,25 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log.info({ roomId, owner: room.owner }, 'welcome queued');
 	});
 
+	// Eyes and typing while a turn works, a check mark once it answered
+	const feedback = makeChatFeedback({
+		log,
+		setTyping: async (userId, roomId, typing, timeoutMs) => {
+			await appservice
+				.getIntentForUserId(userId)
+				.underlyingClient.setTyping(roomId, typing, timeoutMs);
+		},
+		sendEvent: async (userId, roomId, type, content) => {
+			const intent = appservice.getIntentForUserId(userId);
+			await intent.enableEncryption();
+			await refreshMembersDevices(intent, roomId);
+			return intent.underlyingClient.sendEvent(roomId, type, content);
+		},
+		redactEvent: async (userId, roomId, eventId) => {
+			await appservice.getIntentForUserId(userId).underlyingClient.redactEvent(roomId, eventId);
+		}
+	});
+
 	appservice.on('room.message', onRoomMessage);
 
 	async function onRoomMessage(
@@ -441,13 +472,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			// The turns of one owner run one after the other, in the order they were sent
-			await enqueueJob(db, {
+			const queued = await enqueueJob(db, {
 				kind: 'turn',
 				payload: { owner, roomId, eventId, text: message },
 				dedupKey: `turn:${eventId}`,
 				groupKey: `turn:${owner}`
 			});
 			log.info({ roomId, owner, eventId }, 'turn queued');
+			// A redelivered event makes no second turn, nor a second pair of eyes
+			if (queued && raw.event_id !== undefined) {
+				feedback
+					.turnQueued({ assistantUserId: room.userId, roomId, eventId })
+					.catch((err: unknown) => log.warn({ roomId, eventId, err }, 'turn feedback failed'));
+			}
 			backupInBackground(room.userId, owner);
 			return;
 		}
@@ -513,8 +550,17 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			const room = await assistantRoom(job.payload.roomId);
 			if (room !== null) await escrowOnceReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
+			const turn = turnOf(job.payload);
+			if (turn !== null) await feedback.answerReady(turn);
 			await intent.sendEvent(job.payload.roomId, makeRichText(job.payload.text));
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
+			if (turn !== null) {
+				feedback
+					.answerSent(turn, job.payload.outcome ?? 'answered')
+					.catch((err: unknown) =>
+						log.warn({ roomId: turn.roomId, err }, 'answer feedback failed')
+					);
+			}
 			if (room !== null) backupInBackground(room.userId, room.owner);
 		}
 	});
@@ -547,6 +593,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		assistants,
 		stop: async () => {
 			await sender.stop();
+			feedback.stop();
 			appservice.stop();
 		}
 	};

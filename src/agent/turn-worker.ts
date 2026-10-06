@@ -20,6 +20,9 @@ export interface SendPayload {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
+	// The owner's message the text answers, which the matrix role marks as answered
+	readonly replyTo?: string;
+	readonly outcome?: 'answered' | 'failed';
 }
 
 export interface TurnWorkerOptions {
@@ -68,7 +71,14 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			const answer =
 				result.kind === 'ok' ? result.answer : result.kind === 'busy' ? BUSY_TEXT : FAILURE_TEXT;
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
-			const payload: SendPayload = { asUserId: assistant.userId, roomId, text: answer };
+			// A turn woken by an event posted to the API answers no message of the room
+			const payload: SendPayload = {
+				asUserId: assistant.userId,
+				roomId,
+				text: answer,
+				...(eventId.startsWith('$') ? { replyTo: eventId } : {}),
+				outcome: result.kind === 'ok' ? 'answered' : 'failed'
+			};
 			await enqueueJob(db, {
 				kind: 'send',
 				payload,
