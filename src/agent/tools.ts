@@ -56,7 +56,8 @@ export interface ToolContext {
 	readonly origin?: TurnOrigin;
 	readonly actions: readonly string[];
 	// Actions the principal holds but this turn may not use: a turn an event started may read,
-	// never act, so text written by a third party cannot make the assistant act
+	// never act nor keep anything, so text written by a third party cannot make the assistant act,
+	// now or in a later turn
 	readonly withheldActions?: readonly string[];
 	readonly db: Db;
 	// What links this turn's calls in the audit: the request id, or the Matrix event id
@@ -199,6 +200,10 @@ const memoryArgs = z.object({
 	new_text: z.string().optional()
 });
 
+// The right to keep something for later turns, which read it as the assistant's own notes: a turn
+// an event started never holds it, so that a third party's text cannot steer a later turn
+export const WRITE_OWN_MEMORY: string = 'memory.write_own';
+
 export const memoryTool: Tool = {
 	definition: {
 		type: 'function',
@@ -224,7 +229,7 @@ export const memoryTool: Tool = {
 		}
 	},
 	argumentKeys: ['action', 'target', 'content', 'old_text', 'new_text'],
-	requiredAction: 'memory.write_own',
+	requiredAction: WRITE_OWN_MEMORY,
 	run: async (args, context) => {
 		const parsed = memoryArgs.safeParse(args);
 		if (!parsed.success) return { result: { success: false, error: 'invalid arguments' } };
@@ -397,7 +402,8 @@ export const skillsProposeTool: Tool = {
 		}
 	},
 	argumentKeys: ['name', 'description', 'content'],
-	requiredAction: 'skills.read_own',
+	// A proposal keeps what the assistant learned for later turns, as its memory does
+	requiredAction: WRITE_OWN_MEMORY,
 	run: async (args, context) => {
 		const parsed = skillProposeArgs.safeParse(args);
 		if (!parsed.success) return { result: { error: 'name, description and content are required' } };
