@@ -3,6 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
+	BROKER_CONSENT_URL,
+	brokerRefusal,
 	CALENDAR_CATALOG,
 	INJECTED_NOTE,
 	INJECTED_TITLE,
@@ -21,7 +23,6 @@ function sleep(ms: number): Promise<void> {
 }
 
 const INVITED = 'com.twake.calendar.event.invited.v1';
-const CONSENT_URL = 'https://agent-consent.test.local/consent';
 
 function acceptCall(eventId: string): ToolCall[] {
 	return [
@@ -61,7 +62,9 @@ describe('an event wakes my assistant', () => {
 	let room: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
-		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service' } });
+		h = await startMatrixHarness({
+			env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service', BROKER_CONSENT_URL }
+		});
 		// These tests are about events: Alice already let her assistant read her calendar and write
 		// in it
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
@@ -74,18 +77,7 @@ describe('an event wakes my assistant', () => {
 			}
 			const id = call.path.split('/').at(-1) ?? '';
 			// The broker answers for the contract when the owner gave no consent
-			if (id === 'evt-401') {
-				return {
-					status: 401,
-					body: {
-						type: 'about:blank',
-						title: 'Delegation missing',
-						status: 401,
-						code: 'delegation_missing',
-						consent_url: CONSENT_URL
-					}
-				};
-			}
+			if (id === 'evt-401') return brokerRefusal('delegation_missing');
 			return {
 				status: 200,
 				body: invitationEvent({
@@ -263,9 +255,11 @@ describe('an event wakes my assistant', () => {
 		const slots = h.apisix.contracts.calls.filter((c) => c.path.endsWith('/freebusy')).length;
 		const posted = await h.api.post('dispatcher', '/v1/events', { ...EVENT, event_id: 'evt-401' });
 		expect(posted.status).toBe(202);
-		const request = await client.waitForMessage(room, assistantId, (t) => t.includes(CONSENT_URL));
+		const request = await client.waitForMessage(room, assistantId, (t) =>
+			t.includes(BROKER_CONSENT_URL)
+		);
 		expect(request).toBe(
-			`I need your permission to act on your behalf in your applications, and you have not given it yet. Give it here: ${CONSENT_URL}\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`
+			`I need your permission to act on your behalf in your applications, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`
 		);
 		expect(
 			h.apisix.contracts.calls.filter((c) => c.path === '/contracts/v1/events/evt-401')

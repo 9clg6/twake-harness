@@ -57,6 +57,10 @@ export interface Config {
 	readonly consent: {
 		// How long the owner may answer a request; an answer after that runs nothing
 		readonly requestLifetimeMs: number;
+		// The token broker's consent link, the same for every owner: the only link a request shows
+		// when the broker lacks an owner's permission for their assistant to act for them, or null
+		// when the deployment gives none
+		readonly brokerConsentUrl: string | null;
 	};
 	readonly matrix: {
 		readonly serverName: string;
@@ -135,6 +139,7 @@ const envSchema = z.object({
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
 	CONTRACTS_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30_000),
 	CONSENT_REQUEST_LIFETIME_MS: z.coerce.number().int().min(1000).default(86_400_000),
+	BROKER_CONSENT_URL: z.string().default(''),
 	MATRIX_SERVER_NAME: z.string().default(''),
 	MATRIX_MAIL_DOMAIN: z.string().default(''),
 	MATRIX_APPSERVICE_ID: z.string().min(1).default('twake-harness'),
@@ -171,6 +176,10 @@ const envSchema = z.object({
 
 export type Env = Record<string, string | undefined>;
 
+function isHttpsUrl(value: string): boolean {
+	return URL.canParse(value) && new URL(value).protocol === 'https:';
+}
+
 export function loadConfig(env: Env): Config {
 	const parsed = envSchema.safeParse(env);
 	if (!parsed.success) {
@@ -193,6 +202,12 @@ export function loadConfig(env: Env): Config {
 	) {
 		throw new Error(
 			`invalid configuration: ORG_AGENT_LOCALPART must start with ${values.MATRIX_ASSISTANT_PREFIX}`
+		);
+	}
+	// The link goes to owners in the harness's own words, so a mistake in it stops the start
+	if (values.BROKER_CONSENT_URL !== '' && !isHttpsUrl(values.BROKER_CONSENT_URL)) {
+		throw new Error(
+			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
 	const timeZone = findTimeZone(values.ASSISTANT_TIMEZONE);
@@ -241,7 +256,8 @@ export function loadConfig(env: Env): Config {
 			timeoutMs: values.CONTRACTS_TIMEOUT_MS
 		},
 		consent: {
-			requestLifetimeMs: values.CONSENT_REQUEST_LIFETIME_MS
+			requestLifetimeMs: values.CONSENT_REQUEST_LIFETIME_MS,
+			brokerConsentUrl: values.BROKER_CONSENT_URL === '' ? null : values.BROKER_CONSENT_URL
 		},
 		matrix: {
 			serverName: values.MATRIX_SERVER_NAME,

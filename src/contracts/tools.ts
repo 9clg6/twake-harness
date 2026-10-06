@@ -3,7 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { WaitReason } from '../consents/consent.js';
-import { readDelegationRefusal, type DelegationRefusal } from '../consents/delegation.js';
+import { readDelegationCode, type DelegationCode } from '../consents/delegation.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
 import { withPrincipal } from '../db/client.js';
@@ -202,7 +202,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			if (body !== undefined) headers['content-type'] = 'application/json';
 			let status = 0;
 			let result: unknown;
-			let refusal: DelegationRefusal | null = null;
+			let delegation: DelegationCode | null = null;
 			try {
 				const response = await fetchImpl(url, {
 					method: contract.method.toUpperCase(),
@@ -213,7 +213,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				status = response.status;
 				const answered = parseBody(await response.text());
 				result = { status, body: answered };
-				refusal = readDelegationRefusal(status, answered);
+				delegation = readDelegationCode(status, answered);
 			} catch (err: unknown) {
 				result = {
 					error: `the contract could not be called: ${err instanceof Error ? err.message : String(err)}`
@@ -225,20 +225,21 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					method: contract.method,
 					status,
 					principal: context.principalId,
-					...(refusal === null ? {} : { delegation: refusal.code })
+					...(delegation === null ? {} : { delegation })
 				},
 				'contract called'
 			);
 			// The platform's broker lacks the owner's permission for their assistant to act for them:
 			// the call waits for them, and the turn ends with the harness's own request, which tells
-			// them why and gives them the broker's link, so that no text of the model stands in for
-			// it. The organization agent acts for no user: nobody could give it that permission.
-			if (refusal !== null && owner !== ORGANIZATION_PRINCIPAL) {
+			// them why and gives them the deployment's consent link, never one from the answer, which
+			// a contract could have written. The organization agent acts for no user: nobody could
+			// give it that permission.
+			if (delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				const pendingCallId = await freeze(values, context, ['delegation']);
 				const { consent } = getMessages(await fetchOwnerLocale(context.db, owner, config.locale));
 				return {
-					result: { status: 'awaiting_owner', reason: 'delegation', code: refusal.code },
-					final: consent.delegation(refusal.code, refusal.link),
+					result: { status: 'awaiting_owner', reason: 'delegation', code: delegation },
+					final: consent.delegation(delegation, config.consent.brokerConsentUrl),
 					pendingCallId
 				};
 			}

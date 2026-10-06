@@ -1,7 +1,7 @@
 // What the assistants and the creator say to people: in the language each owner chose, or else
 // the deployment's. The model is told to speak it; these are the fixed texts around it.
 
-import type { DelegationCode } from '../consents/consent.js';
+import type { DelegationCode } from '../consents/delegation.js';
 
 export const LOCALES = ['en', 'fr'] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -62,8 +62,8 @@ export interface Messages {
 		// the application as for reading, and what writing covers there when the catalog says
 		firstWrite(application: string, covers: string | null): string;
 		// The platform's broker lacks the owner's permission for their assistant to act for them:
-		// why, the broker's link to give it when it is one to show, and whether to try again once
-		// it is given
+		// why, and whether to try again; with the deployment's consent link, where to give it first,
+		// and without one, no step the owner could not take
 		delegation(code: DelegationCode, link: string | null): string;
 		// The two buttons under a question: the assistant's own reactions, which a tap repeats
 		readonly buttons: { readonly yes: string; readonly no: string };
@@ -173,12 +173,11 @@ const ENGLISH: Messages = {
 			),
 		delegation: (code, link) => {
 			const expired = code === 'delegation_expired';
-			const why = expired ? 'the one you gave me has expired' : 'you have not given it yet';
-			const where = link === null ? '' : ` Give it ${expired ? 'again ' : ''}here: ${link}`;
-			return [
-				`I need your permission to act on your behalf in your applications, and ${why}.${where}`,
-				'Once that is done, shall I try again? Answer with the buttons below, or reply yes or no.'
-			].join('\n');
+			const why = `I need your permission to act on your behalf in your applications, and ${expired ? 'the one you gave me has expired' : 'you have not given it yet'}.`;
+			const answer = 'Answer with the buttons below, or reply yes or no.';
+			return link === null
+				? `${why}\nShall I try again? ${answer}`
+				: `${why} Give it ${expired ? 'again ' : ''}here: ${link}\nOnce that is done, shall I try again? ${answer}`;
 		},
 		buttons: { yes: '✅ YES', no: '❌ NO' },
 		yes: 'yes',
@@ -279,12 +278,11 @@ const FRENCH: Messages = {
 			),
 		delegation: (code, link) => {
 			const expired = code === 'delegation_expired';
-			const why = expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée";
-			const where = link === null ? '' : ` Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}`;
-			return [
-				`J'ai besoin de ton autorisation d'agir en ton nom dans tes applications, et ${why}.${where}`,
-				"Une fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non."
-			].join('\n');
+			const why = `J'ai besoin de ton autorisation d'agir en ton nom dans tes applications, et ${expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée"}.`;
+			const answer = 'Réponds avec les boutons ci-dessous, ou par oui ou non.';
+			return link === null
+				? `${why}\nJe réessaie ? ${answer}`
+				: `${why} Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;
 		},
 		buttons: { yes: '✅ OUI', no: '❌ NON' },
 		yes: 'oui',

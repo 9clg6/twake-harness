@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { listMemory } from '../src/memory/repository.js';
 import { withPrincipal } from '../src/db/client.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import type { ChatRequest } from './helpers/fake-apisix.js';
+import { brokerRefusal, type ChatRequest } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -196,16 +196,7 @@ describe('the organization agent', () => {
 	it("hands its model the platform broker's refusal as data, since nobody could give that permission for the organization", async () => {
 		const handler = h.apisix.contracts.handler;
 		const script = h.apisix.llm.script;
-		h.apisix.contracts.handler = () => ({
-			status: 401,
-			body: {
-				type: 'urn:twake:problem:delegation_missing',
-				title: 'Delegation missing',
-				status: 401,
-				code: 'delegation_missing',
-				consent_url: 'https://agent-consent.test.local/consent'
-			}
-		});
+		h.apisix.contracts.handler = () => brokerRefusal('delegation_missing');
 		h.apisix.llm.script = (request, index) => {
 			const last = request.messages.at(-1);
 			return last?.role === 'tool'

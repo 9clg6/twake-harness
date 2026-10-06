@@ -6,10 +6,6 @@ export type ConsentLevel = 'read' | 'write';
 // permission for their assistant to act for them, which its broker lacks
 export type WaitReason = 'consent' | 'delegation';
 
-// Why the platform's broker refused to act for an owner: they never gave their assistant that
-// permission, or the one they gave expired
-export type DelegationCode = 'delegation_missing' | 'delegation_expired';
-
 export type ConsentSource = 'chat' | 'api' | 'migration';
 
 // The reactions by which an owner allows, or refuses, a call the harness asked them about

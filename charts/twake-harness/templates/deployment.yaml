@@ -87,6 +87,10 @@ spec:
             - name: ASSISTANT_TIMEZONE
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.brokerConsentUrl }}
+            - name: BROKER_CONSENT_URL
+              value: {{ . | quote }}
+            {{- end }}
             {{- /* Rendered as integers, so 0 counts and a large value from a values file is not 1e+06 */}}
             {{- $admission := dict "ADMISSION_MAX_INFLIGHT" .Values.config.admissionMaxInflight "ADMISSION_USER_QUEUE" .Values.config.admissionUserQueue "ADMISSION_USER_PER_MINUTE" .Values.config.admissionUserPerMinute "ADMISSION_USER_DAILY_TOKENS" .Values.config.admissionUserDailyTokens "ADMISSION_GLOBAL_PER_MINUTE" .Values.config.admissionGlobalPerMinute }}
             {{- range $name, $value := $admission }}

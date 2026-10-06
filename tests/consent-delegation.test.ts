@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { loadConfig } from '../src/config.js';
 import {
 	call,
 	modelUsing,
@@ -9,41 +10,80 @@ import {
 } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
-import type { ContractReply } from './helpers/fake-apisix.js';
+import { BROKER_CONSENT_URL, brokerRefusal, type ContractReply } from './helpers/fake-apisix.js';
 
 const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'photos', 'boards'];
-const CONSENT_URL = 'https://agent-consent.test.local/consent';
+// A link of its own that a contract, or anything else answering a call, could put in a refusal
+const FAKED_LINK = 'https://phish.example/consent';
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// What the gateway relays from the platform's token broker when it holds no permission for the
-// assistant to act for its owner: an RFC 9457 problem whose code says why, and the link where the
-// owner gives that permission
-function brokerRefusal(
-	code: 'delegation_missing' | 'delegation_expired',
-	consentUrl: string = CONSENT_URL
-): ContractReply {
-	return {
-		status: 401,
-		body: {
-			type: `urn:twake:problem:${code}`,
-			title: code === 'delegation_missing' ? 'Delegation missing' : 'Delegation expired',
-			status: 401,
-			detail: 'The user must open the consent link.',
-			code,
-			consent_url: consentUrl
-		}
-	};
+const ANSWER = 'Answer with the buttons below, or reply yes or no.';
+const NEEDED = 'I need your permission to act on your behalf in your applications';
+const MISSING = `${NEEDED}, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
+const EXPIRED = `${NEEDED}, and the one you gave me has expired. Give it again here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
+const MISSING_WITHOUT_LINK = `${NEEDED}, and you have not given it yet.\nShall I try again? ${ANSWER}`;
+const EXPIRED_WITHOUT_LINK = `${NEEDED}, and the one you gave me has expired.\nShall I try again? ${ANSWER}`;
+const FRENCH_MISSING = `J'ai besoin de ton autorisation d'agir en ton nom dans tes applications, et tu ne l'as pas encore donnée. Donne-la ici : ${BROKER_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
+
+// The harness's requests for that permission, as Alice's client received them
+const ENGLISH_REQUEST = 'I need your permission';
+
+function requestsIn(r: ConsentRoom, prefix: string = ENGLISH_REQUEST): DecryptedMessage[] {
+	return r.saying(prefix);
 }
 
-const RETRY =
-	'Once that is done, shall I try again? Answer with the buttons below, or reply yes or no.';
-const MISSING = `I need your permission to act on your behalf in your applications, and you have not given it yet. Give it here: ${CONSENT_URL}\n${RETRY}`;
-const EXPIRED = `I need your permission to act on your behalf in your applications, and the one you gave me has expired. Give it again here: ${CONSENT_URL}\n${RETRY}`;
-const MISSING_WITHOUT_LINK = `I need your permission to act on your behalf in your applications, and you have not given it yet.\n${RETRY}`;
-const FRENCH_MISSING = `J'ai besoin de ton autorisation d'agir en ton nom dans tes applications, et tu ne l'as pas encore donnée. Donne-la ici : ${CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
+async function nextRequestIn(
+	r: ConsentRoom,
+	seen: number,
+	prefix: string = ENGLISH_REQUEST
+): Promise<DecryptedMessage> {
+	for (let i = 0; i < 120; i += 1) {
+		const latest = requestsIn(r, prefix).at(seen);
+		if (latest !== undefined) return latest;
+		await sleep(250);
+	}
+	throw new Error('no new request from the harness');
+}
+
+// Everything Alice's client can show of a message: its text, and its rendering with the links
+function shown(message: DecryptedMessage): string {
+	const formatted = message.content['formatted_body'];
+	return `${message.body}\n${typeof formatted === 'string' ? formatted : ''}`;
+}
+
+describe("the token broker's consent link setting", () => {
+	const base = {
+		HARNESS_ROLE: 'api',
+		DATABASE_URL: 'postgres://x@localhost/x',
+		AUTH_JWKS_URL: 'https://example.test/jwks',
+		AUTH_ISSUER: 'https://example.test/',
+		AUTH_AUDIENCE: 'twake-harness',
+		APISIX_BASE_URL: 'http://apisix.test',
+		APISIX_CONSUMER_KEY: 'k'
+	};
+
+	it('refuses, at startup, a link that is not an https URL', () => {
+		for (const link of [
+			'http://agent-consent.test.local/consent',
+			'agent-consent.test.local/consent',
+			'javascript:alert(1)'
+		]) {
+			expect(() => loadConfig({ ...base, BROKER_CONSENT_URL: link })).toThrow(
+				`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(link)} is not an https URL`
+			);
+		}
+	});
+
+	it('keeps the https link it is given, and none when it is given none', () => {
+		expect(loadConfig({ ...base, BROKER_CONSENT_URL }).consent.brokerConsentUrl).toBe(
+			BROKER_CONSENT_URL
+		);
+		expect(loadConfig(base).consent.brokerConsentUrl).toBeNull();
+	});
+});
 
 describe("my assistant sends me the platform's consent link, and tries again once I gave it", () => {
 	let r: ConsentRoom;
@@ -51,7 +91,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 	// gateway relays its refusal for every contract call until she gives it
 	let broker: ContractReply | null = null;
 	beforeAll(async () => {
-		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100' });
+		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100', BROKER_CONSENT_URL });
 		r.h.apisix.contracts.spec = readCatalog(DOMAINS);
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(DOMAINS.length);
 		// Alice let her assistant read these applications: what is missing here is the platform's
@@ -67,34 +107,16 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		broker = brokerRefusal('delegation_missing');
 	});
 
-	// The harness's requests for that permission, as Alice's client received them
-	const ENGLISH_REQUEST = 'I need your permission';
-	function requests(prefix: string = ENGLISH_REQUEST): DecryptedMessage[] {
-		return r.saying(prefix);
-	}
-
-	async function nextRequest(
-		seen: number,
-		prefix: string = ENGLISH_REQUEST
-	): Promise<DecryptedMessage> {
-		for (let i = 0; i < 120; i += 1) {
-			const latest = requests(prefix).at(seen);
-			if (latest !== undefined) return latest;
-			await sleep(250);
-		}
-		throw new Error('no new request from the harness');
-	}
-
-	it("sends me the broker's link itself, whatever the model would say, and calls nothing more until I answer", async () => {
+	it("sends me the platform's consent link itself, whatever the model would say, and calls nothing more until I answer", async () => {
 		// The model would relay a link of its own, had it read the broker's answer
 		r.h.apisix.llm.script = (request) =>
 			request.messages.at(-1)?.role === 'tool'
-				? { content: 'Open https://phish.example/consent to let me in' }
+				? { content: `Open ${FAKED_LINK} to let me in` }
 				: { toolCalls: call('search_mail', { q: 'quarterly-budget' }) };
-		const seen = requests().length;
+		const seen = requestsIn(r).length;
 		const modelCalls = r.h.apisix.llm.calls.length;
 		await r.client.sendText(r.room, 'Find the budget in my mail');
-		const request = await nextRequest(seen);
+		const request = await nextRequestIn(r, seen);
 		expect(request.body).toBe(MISSING);
 		// The same two buttons as any question of the harness
 		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
@@ -103,7 +125,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		// The call reached the gateway once, and the model was never asked what to make of it
 		expect(r.h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/mail/items']);
 		expect(r.h.apisix.llm.calls).toHaveLength(modelCalls + 1);
-		expect(r.client.messages.some((m) => m.body.includes('phish.example'))).toBe(false);
+		expect(r.client.messages.some((m) => shown(m).includes('phish.example'))).toBe(false);
 		// The wait is logged with why, never with what the call would send
 		const waits = r.h.logLines().filter((l) => l['msg'] === 'contract call waits for its owner');
 		expect(waits.at(-1)).toMatchObject({
@@ -118,9 +140,9 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 
 	it('tries the frozen call again once I say yes, and carries on with what it found', async () => {
 		r.h.apisix.llm.script = modelUsing('search_drive', { q: 'plan' });
-		const seen = requests().length;
+		const seen = requestsIn(r).length;
 		const asked = await r.client.sendText(r.room, 'Find my plan in my drive');
-		await nextRequest(seen);
+		await nextRequestIn(r, seen);
 		// Alice gives the platform her permission, then tells her assistant
 		broker = null;
 		const found = r.saying('Found:').length;
@@ -145,20 +167,20 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 
 	it('asks me again when the platform still refuses after my yes, trying the call once per yes', async () => {
 		r.h.apisix.llm.script = modelUsing('search_tasks', { q: 'today' });
-		let seen = requests().length;
+		let seen = requestsIn(r).length;
 		await r.client.sendText(r.room, 'What are my tasks today?');
-		const first = await nextRequest(seen);
+		const first = await nextRequestIn(r, seen);
 		// Alice says yes before she gave her permission
-		seen = requests().length;
+		seen = requestsIn(r).length;
 		await r.client.react(r.room, first.eventId, '✅');
-		const second = await nextRequest(seen);
+		const second = await nextRequestIn(r, seen);
 		expect(second.body).toBe(MISSING);
 		await sleep(2000);
 		expect(r.h.apisix.contracts.calls.map((c) => c.query)).toEqual([
 			{ q: 'today' },
 			{ q: 'today' }
 		]);
-		expect(requests()).toHaveLength(seen + 1);
+		expect(requestsIn(r)).toHaveLength(seen + 1);
 		// Once she gave it, her yes on the new request runs the call
 		broker = null;
 		const found = r.saying('Found:').length;
@@ -170,9 +192,9 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 	it('tells me when the permission I gave has expired, and drops the call when I say no', async () => {
 		broker = brokerRefusal('delegation_expired');
 		r.h.apisix.llm.script = modelUsing('search_notes', { q: 'minutes' });
-		const seen = requests().length;
+		const seen = requestsIn(r).length;
 		await r.client.sendText(r.room, 'Find the minutes in my notes');
-		expect((await nextRequest(seen)).body).toBe(EXPIRED);
+		expect((await nextRequestIn(r, seen)).body).toBe(EXPIRED);
 		const acknowledged = r.saying('All right').length;
 		const modelCalls = r.h.apisix.llm.calls.length;
 		await r.client.sendText(r.room, 'No');
@@ -181,27 +203,22 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		expect(r.h.apisix.contracts.calls).toHaveLength(1);
 	});
 
-	it('never shows me a link of the broker that is not a plain https address', async () => {
+	it("shows me the platform's own consent link, never the one a refusal carries", async () => {
+		broker = brokerRefusal('delegation_missing', FAKED_LINK);
 		r.h.apisix.llm.script = modelUsing('search_photos', { q: 'party' });
-		for (const link of [
-			'http://agent-consent.test.local/consent',
-			'javascript:alert(1)',
-			'https://agent-consent.test.local@phish.example/consent',
-			'https://agent-consent.test.local/consent\nhttps://phish.example/consent'
-		]) {
-			broker = brokerRefusal('delegation_missing', link);
-			const seen = requests().length;
-			await r.client.sendText(r.room, 'Look for the party in my photos');
-			expect((await nextRequest(seen)).body).toBe(MISSING_WITHOUT_LINK);
-		}
-		expect(r.client.messages.some((m) => m.body.includes('phish.example'))).toBe(false);
+		const seen = requestsIn(r).length;
+		await r.client.sendText(r.room, 'Look for the party in my photos');
+		const request = await nextRequestIn(r, seen);
+		expect(request.body).toBe(MISSING);
+		expect(request.content['formatted_body']).toContain(`href="${BROKER_CONSENT_URL}"`);
+		expect(shown(request)).not.toContain('phish.example');
 	});
 
 	it('asks for my consent again, rather than take my yes for it, when I withdrew it before answering', async () => {
 		r.h.apisix.llm.script = modelUsing('search_boards', { q: 'roadmap' });
-		const seen = requests().length;
+		const seen = requestsIn(r).length;
 		await r.client.sendText(r.room, 'Show me the roadmap board');
-		const request = await nextRequest(seen);
+		const request = await nextRequestIn(r, seen);
 		// Before she answers, Alice takes back her assistant's reading of her boards, then gives the
 		// platform its permission and says yes
 		await withdrawConsent(r.h.db, 'alice@test.local', 'boards', 'read');
@@ -231,9 +248,9 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		let told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'Parle-moi en français');
 		expect(await r.nextSaying('Tool:', told)).toContain('"language":"fr"');
-		const seen = requests("J'ai besoin").length;
+		const seen = requestsIn(r, "J'ai besoin").length;
 		await r.client.sendText(r.room, 'Cherche la facture dans mes mails');
-		const request = await nextRequest(seen, "J'ai besoin");
+		const request = await nextRequestIn(r, seen, "J'ai besoin");
 		expect(request.body).toBe(FRENCH_MISSING);
 		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
 		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
@@ -241,5 +258,45 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'oui');
 		expect(await r.nextSaying('Tool:', told)).toContain('/contracts/v1/mail/items');
+	});
+});
+
+describe('my assistant tells me why it cannot act for me, even when the deployment gives no consent link', () => {
+	let r: ConsentRoom;
+	let broker: ContractReply | null = null;
+	beforeAll(async () => {
+		// No BROKER_CONSENT_URL: the deployment gives no link to show
+		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100' });
+		r.h.apisix.contracts.spec = readCatalog(['mail']);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'read');
+		r.h.apisix.contracts.handler = (c) => broker ?? { status: 200, body: { found: c.path } };
+		r.h.apisix.llm.script = modelUsing('search_mail', { q: 'budget' });
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it('says why, shows no link, promises no step I could not take, and still tries again on my yes', async () => {
+		for (const [code, expected] of [
+			['delegation_missing', MISSING_WITHOUT_LINK],
+			['delegation_expired', EXPIRED_WITHOUT_LINK]
+		] as const) {
+			broker = brokerRefusal(code, FAKED_LINK);
+			const seen = requestsIn(r).length;
+			await r.client.sendText(r.room, 'Find the budget in my mail');
+			const request = await nextRequestIn(r, seen);
+			expect(request.body).toBe(expected);
+			expect(shown(request)).not.toContain('http');
+		}
+		const request = requestsIn(r).at(-1);
+		if (request === undefined) throw new Error('no request');
+		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
+		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
+		// Alice gave her permission another way, and says yes
+		broker = null;
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'yes');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/mail/items');
 	});
 });
