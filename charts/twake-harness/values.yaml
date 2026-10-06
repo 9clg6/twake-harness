@@ -58,6 +58,7 @@ config:
 
 # Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY, and for the
 # matrix role MATRIX_HS_TOKEN (and MATRIX_AS_TOKEN when APISIX does not inject it)
+# and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''

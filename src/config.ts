@@ -74,6 +74,10 @@ export interface Config {
 		// The service clients, by their token subject, allowed to post events for an owner
 		readonly clientIds: readonly string[];
 	};
+	readonly gateway: {
+		// The secret the gateway sets on every request it forwards, when the API is only behind it
+		readonly sharedSecret: string | null;
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -120,6 +124,7 @@ const envSchema = z.object({
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
+	GATEWAY_SHARED_SECRET: z.string().default(''),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -211,6 +216,9 @@ export function loadConfig(env: Env): Config {
 			clientIds: values.EVENTS_CLIENT_IDS.split(',')
 				.map((id) => id.trim())
 				.filter((id) => id.length > 0)
+		},
+		gateway: {
+			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
 		logLevel: values.LOG_LEVEL
 	};

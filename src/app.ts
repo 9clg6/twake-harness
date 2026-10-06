@@ -148,6 +148,19 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		reply.header(REQUEST_ID_HEADER, request.id);
 	});
 
+	// Behind the gateway only: when a shared secret is set, every request of the API carries it,
+	// which the gateway injects and nobody else knows; the health check and the metrics stay open
+	if (config.gateway.sharedSecret !== null) {
+		const secret = config.gateway.sharedSecret;
+		app.addHook('onRequest', async (request, reply) => {
+			if (!request.url.startsWith('/v1/')) return;
+			if (request.headers['x-twake-gateway'] !== secret) {
+				request.log.info({ reason: 'gateway' }, 'request refused');
+				return reply.code(403).send(FORBIDDEN);
+			}
+		});
+	}
+
 	app.get('/health', async () => ({ status: 'ok' }));
 
 	// An event the dispatcher posts for an owner wakes their assistant: the turn runs in the
@@ -446,7 +459,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					target:
 						body.session_id === undefined ? { kind: 'new' } : { kind: 'id', id: body.session_id },
 					message: body.message,
-					log: request.log
+					log: request.log,
+					correlationId: request.id
 				});
 				if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
 				if (result.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
