@@ -12,6 +12,22 @@ import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix
 
 const DOMAINS = ['mail', 'drive', 'calendar', 'tasks', 'notes'];
 
+// A read contract in each application, and a write in the calendar
+const CATALOG = {
+	openapi: '3.0.3',
+	paths: {
+		...(readCatalog(DOMAINS)['paths'] as Record<string, unknown>),
+		'/contracts/v1/calendar/events': {
+			post: {
+				operationId: 'add_calendar_event',
+				summary: "Adds an event to the user's calendar",
+				tags: ['calendar.events.create.v1'],
+				parameters: [{ name: 'title', in: 'query', required: true, schema: { type: 'string' } }]
+			}
+		}
+	}
+};
+
 function call(name: string, args: unknown): ToolCall[] {
 	return [
 		{ id: `call_${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
@@ -40,8 +56,8 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 			ADMISSION_USER_PER_MINUTE: '100',
 			EVENTS_CLIENT_IDS: 'dispatcher'
 		});
-		r.h.apisix.contracts.spec = readCatalog(DOMAINS);
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(DOMAINS.length);
+		r.h.apisix.contracts.spec = CATALOG;
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(DOMAINS.length + 1);
 	}, 240_000);
 	afterAll(async () => {
 		if (r !== undefined) await r.close();
@@ -103,9 +119,13 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
-	it('stops only writing in an application when I tell it to, and keeps reading it', async () => {
+	it('stops only writing in an application when I tell it to: it asks before its next write there, and keeps reading', async () => {
 		r.h.apisix.llm.script = modelFor({
 			'What is in my calendar?': { tool: 'search_calendar', args: { q: 'today' } },
+			'Add the budget review to my calendar': {
+				tool: 'add_calendar_event',
+				args: { title: 'Budget review' }
+			},
 			'Stop writing in my calendar': {
 				tool: 'consents_withdraw',
 				args: { domain: 'calendar', level: 'write' }
@@ -127,6 +147,12 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		});
 		expect(r.questions()).toHaveLength(seen);
 		expect(r.h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/calendar/items']);
+		await r.client.sendText(r.room, 'Add the budget review to my calendar');
+		await r.nextQuestion(seen);
+		expect(r.questions().at(-1)?.body).toBe(
+			'This is the first time I need to change your data in calendar. Do you allow it? Answer with the buttons below, or reply yes or no.'
+		);
+		expect(r.h.apisix.contracts.calls.map((c) => c.method)).toEqual(['GET']);
 	});
 
 	it('never grants itself an access, whatever it tries', async () => {
