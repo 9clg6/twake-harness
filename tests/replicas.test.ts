@@ -17,7 +17,8 @@ const PRINCIPAL_ACTIONS = JSON.stringify([
 	'memory.read_own',
 	'memory.write_own',
 	'skills.read_own',
-	'contracts.call'
+	'contracts.call',
+	'contracts.act'
 ]);
 
 // Settings shared by every replica of this suite

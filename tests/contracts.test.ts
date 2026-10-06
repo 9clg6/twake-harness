@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { runMigrations } from '../src/db/migrate.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import type { ChatRequest, ToolCall } from './helpers/fake-apisix.js';
@@ -266,5 +267,32 @@ describe('contracts as tools', () => {
 				.logLines()
 				.some((line) => line['msg'] === 'contracts not loaded, keeping the previous catalog')
 		).toBe(true);
+	});
+	it('grants the right to act to every principal that could call contracts, and to no other', async () => {
+		// Two principals as they stood before acting had its own right: one that could call
+		// contracts, one whose contract rights were revoked
+		for (const [id, actions] of [
+			['dave', ['chat', 'contracts.call']],
+			['erin', ['chat']]
+		] as const) {
+			await h.db.sql.begin(async (sql) => {
+				await sql`select set_config('app.principal', ${id}, true)`;
+				await sql`insert into principals (id, actions) values (${id}, ${sql.json([...actions])})`;
+			});
+		}
+		await h.db.sql`delete from schema_migrations where name = '0018_contracts_act.sql'`;
+		expect((await runMigrations(h.db)).applied).toEqual(['0018_contracts_act.sql']);
+		const canAct = async (id: string): Promise<boolean | undefined> =>
+			h.db.sql.begin(async (sql) => {
+				await sql`select set_config('app.principal', ${id}, true)`;
+				const rows = await sql<{ can_act: boolean }[]>`
+					select actions ? 'contracts.act' as can_act from principals where id = ${id}`;
+				return rows[0]?.can_act;
+			});
+		expect(await canAct('dave')).toBe(true);
+		expect(await canAct('erin')).toBe(false);
+		// The forced row-level security is back: a transaction naming no principal sees no rights
+		const visible = await h.db.sql<{ n: string }[]>`select count(*) as n from principals`;
+		expect(Number(visible[0]?.n)).toBe(0);
 	});
 });

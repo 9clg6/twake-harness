@@ -19,6 +19,12 @@ import {
 
 export const ACCESS_DENIED = { error: 'access denied' } as const;
 
+// What the model reads when a turn may not act: it relays the proposal and waits for a yes
+export const NEEDS_OWNER_APPROVAL = {
+	error: 'needs_owner_approval',
+	hint: "This action needs the owner's approval. Tell the owner what you would do and ask them; act only after their explicit yes in the room."
+} as const;
+
 export interface ToolOutcome {
 	// What the model reads back
 	readonly result: unknown;
@@ -39,6 +45,9 @@ export function toolCallStatus(outcome: ToolOutcome): ToolCallStatus {
 export interface ToolContext {
 	readonly principalId: string;
 	readonly actions: readonly string[];
+	// Actions the principal holds but this turn may not use: a turn an event started may read,
+	// never act, so text written by a third party cannot make the assistant act
+	readonly withheldActions?: readonly string[];
 	readonly db: Db;
 	// What links this turn's calls in the audit: the request id, or the Matrix event id
 	readonly correlationId?: string;
@@ -90,7 +99,8 @@ export async function runTool(
 ): Promise<ToolOutcome> {
 	if (!hasOnlyKeys(args, tool.argumentKeys)) return { result: ACCESS_DENIED, denied: true };
 	if (tool.requiredAction !== null && !context.actions.includes(tool.requiredAction)) {
-		return { result: ACCESS_DENIED, denied: true };
+		const withheld = context.withheldActions?.includes(tool.requiredAction) === true;
+		return { result: withheld ? NEEDS_OWNER_APPROVAL : ACCESS_DENIED, denied: true };
 	}
 	return tool.run(args, context);
 }

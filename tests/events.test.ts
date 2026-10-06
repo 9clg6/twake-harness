@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import type { ChatRequest, ContractCall } from './helpers/fake-apisix.js';
+import type { ChatRequest, ContractCall, ToolCall } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -9,7 +9,8 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The catalog of the contracts service as the gateway exposes it: read_event under events.read.v1
+// The catalog of the contracts service as the gateway exposes it: read_event under events.read.v1,
+// and accept_invitation, the contract that acts, under calendar.invitation.accept.v1
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
@@ -20,9 +21,27 @@ const CATALOG = {
 				tags: ['events.read.v1'],
 				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
+		},
+		'/v1/calendar/invitations/{event_id}/accept': {
+			post: {
+				operationId: 'accept_invitation',
+				summary: 'Accepts an invitation, once the user has said yes to this very invitation',
+				tags: ['calendar.invitation.accept.v1'],
+				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+			}
 		}
 	}
 };
+
+function acceptCall(eventId: string): ToolCall[] {
+	return [
+		{
+			id: 'call_accept',
+			type: 'function',
+			function: { name: 'accept_invitation', arguments: JSON.stringify({ event_id: eventId }) }
+		}
+	];
+}
 
 const EVENT = { owner: 'alice@test.local', event_id: 'evt-1', type: 'calendar.invitation' };
 
@@ -35,7 +54,7 @@ describe('an event wakes my assistant', () => {
 	beforeAll(async () => {
 		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service' } });
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 		h.apisix.contracts.handler = (call: ContractCall) => ({
 			status: 200,
 			body: {
@@ -148,5 +167,62 @@ describe('an event wakes my assistant', () => {
 		);
 		await sleep(1000);
 		expect(h.apisix.llm.calls.length).toBe(calls);
+	});
+	it('lets an event make its assistant read, never act: acting waits for the owner', async () => {
+		// The invitation's own text told the model to accept at once
+		h.apisix.llm.script = (request: ChatRequest) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool') return { content: 'Shall I accept the invitation evt-act?' };
+			const text = request.messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+			return { toolCalls: acceptCall(/\(id ([^)]+)\)/.exec(text)?.[1] ?? 'unknown') };
+		};
+		const posted = await h.api.post('dispatcher', '/v1/events', {
+			owner: 'alice@test.local',
+			event_id: 'evt-act',
+			type: 'calendar.invitation'
+		});
+		expect(posted.status).toBe(202);
+		await client.waitForMessage(room, assistantId, (t) => t.includes('Shall I accept'));
+		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+		const refusal = h.apisix.llm.calls
+			.flatMap((call) => call.request.messages)
+			.find((m) => m.role === 'tool' && m.name === 'accept_invitation');
+		expect(JSON.parse(refusal?.content ?? '{}')).toMatchObject({ error: 'needs_owner_approval' });
+		expect(
+			h
+				.logLines()
+				.some(
+					(l) =>
+						l['msg'] === 'tool called' &&
+						l['tool'] === 'accept_invitation' &&
+						l['status'] === 'denied'
+				)
+		).toBe(true);
+	});
+
+	it("acts on the owner's yes in the room, through the gateway and in the owner's name", async () => {
+		h.apisix.contracts.handler = (call: ContractCall) =>
+			call.method === 'POST'
+				? { status: 200, body: { event_id: 'evt-act', uid: 'uid-act', partstat: 'ACCEPTED' } }
+				: { status: 200, body: { id: 'evt-act', type: 'calendar.invitation' } };
+		// The room session keeps the context: the model accepts only after its own proposal
+		h.apisix.llm.script = (request: ChatRequest) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool') return { content: 'Accepted: evt-act' };
+			const proposed = request.messages.some(
+				(m) => m.role === 'assistant' && (m.content ?? '').includes('Shall I accept')
+			);
+			const said = request.messages.filter((m) => m.role === 'user').at(-1)?.content ?? '';
+			return proposed && said.trim() === 'oui'
+				? { toolCalls: acceptCall('evt-act') }
+				: { content: 'Nothing to accept' };
+		};
+		const yes = await client.client.sendText(room, 'oui');
+		await client.waitForMessage(room, assistantId, (t) => t.includes('Accepted: evt-act'));
+		const accept = h.apisix.contracts.calls.find((c) => c.method === 'POST');
+		expect(accept?.path).toBe('/v1/calendar/invitations/evt-act/accept');
+		expect(accept?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
+		expect(accept?.headers['x-twake-contract']).toBe('calendar.invitation.accept.v1');
+		expect(accept?.headers['x-correlation-id']).toBe(yes);
 	});
 });

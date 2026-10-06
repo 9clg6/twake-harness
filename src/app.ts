@@ -197,7 +197,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			owner,
 			roomId: assistant.roomId,
 			eventId: `event:${eventId}`,
-			text: eventMessage(type, eventId)
+			text: eventMessage(type, eventId),
+			origin: 'event'
 		};
 		await enqueueJob(db, {
 			kind: 'turn',
