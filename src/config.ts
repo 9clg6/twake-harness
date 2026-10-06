@@ -74,6 +74,18 @@ export interface Config {
 		// The service clients, by their token subject, allowed to post events for an owner
 		readonly clientIds: readonly string[];
 	};
+	readonly escrow: {
+		// The assistants' secrets (cross-signing keys, backup key) escrowed in the platform OpenBao
+		readonly enabled: boolean;
+		// The OpenBao route of APISIX, and the KV mount and path prefix of the escrow
+		readonly path: string;
+		readonly kvMount: string;
+		readonly prefix: string;
+		// Kubernetes authentication: the auth path, the role and where the pod's token is
+		readonly authPath: string;
+		readonly k8sRole: string;
+		readonly k8sTokenPath: string;
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -120,6 +132,16 @@ const envSchema = z.object({
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
+	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
+	OPENBAO_PATH: z.string().min(1).default('openbao'),
+	OPENBAO_KV_MOUNT: z.string().min(1).default('secret'),
+	OPENBAO_ESCROW_PREFIX: z.string().min(1).default('twake-harness/assistants'),
+	OPENBAO_AUTH_PATH: z.string().min(1).default('auth/kubernetes/login'),
+	OPENBAO_K8S_ROLE: z.string().min(1).default('twake-harness'),
+	OPENBAO_K8S_TOKEN_PATH: z
+		.string()
+		.min(1)
+		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -211,6 +233,15 @@ export function loadConfig(env: Env): Config {
 			clientIds: values.EVENTS_CLIENT_IDS.split(',')
 				.map((id) => id.trim())
 				.filter((id) => id.length > 0)
+		},
+		escrow: {
+			enabled: values.ESCROW_ENABLED === 'true',
+			path: values.OPENBAO_PATH,
+			kvMount: values.OPENBAO_KV_MOUNT,
+			prefix: values.OPENBAO_ESCROW_PREFIX,
+			authPath: values.OPENBAO_AUTH_PATH,
+			k8sRole: values.OPENBAO_K8S_ROLE,
+			k8sTokenPath: values.OPENBAO_K8S_TOKEN_PATH
 		},
 		logLevel: values.LOG_LEVEL
 	};

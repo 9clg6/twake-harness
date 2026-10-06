@@ -259,6 +259,21 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				return renamed === null ? reply.code(404).send(RESOURCE_UNAVAILABLE) : renamed;
 			});
 
+			// After a lost encryption store, the owner asks for the assistant's escrowed identity back
+			scope.post('/assistants/me/recover', async (request, reply) => {
+				const principal = principalOf(request);
+				const assistant = await assistants.find(principal.id);
+				if (assistant === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				const queued = await enqueueJob(db, {
+					kind: 'recover',
+					payload: { owner: principal.id },
+					dedupKey: `recover:${principal.id}`,
+					groupKey: `send:${assistant.roomId ?? principal.id}`
+				});
+				request.log.info({ principal: principal.id, queued }, 'recovery requested');
+				return reply.code(202).send({ queued });
+			});
+
 			scope.delete('/assistants/me', async (request, reply) => {
 				const removed = await assistants.remove(principalOf(request).id);
 				return removed ? reply.code(204).send() : reply.code(404).send(RESOURCE_UNAVAILABLE);
