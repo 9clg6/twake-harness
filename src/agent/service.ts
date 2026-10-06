@@ -2,6 +2,12 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
+import {
+	approvePendingCall,
+	grantConsent,
+	markReplayed,
+	type ApprovedCall
+} from '../consents/repository.js';
 import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
@@ -28,6 +34,7 @@ import {
 	makeToolRegistry,
 	memoryTool,
 	runTool,
+	toolCallStatus,
 	sessionSearchTool,
 	sessionsListTool,
 	sessionsReadTool,
@@ -36,17 +43,18 @@ import {
 	skillsReadTool,
 	skillsSearchTool,
 	type ToolContext,
-	type ToolRegistry
+	type ToolOutcome,
+	type ToolRegistry,
+	type TurnOrigin
 } from './tools.js';
+
+export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
 	| { readonly kind: 'id'; readonly id: string }
 	| { readonly kind: 'room'; readonly roomId: string };
-
-// Who started a turn: the owner, by a message or a request, or an event a dispatcher posted
-export type TurnOrigin = 'owner' | 'event';
 
 // What a turn an event started may not do, whatever its owner may: act through a contract. The
 // event's own text comes from a third party, so only the owner's yes, in a turn of their own,
@@ -56,14 +64,28 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [ACT_THROUGH_CONTRACTS];
 // What the model of a turn is told, and the harness's own question when a read it made before
 // the model speaks waits for the owner
 interface Told {
-	readonly message: string;
-	readonly question: string | null;
+	readonly message: string | null;
+	readonly question: { readonly text: string; readonly pendingCallId: string } | null;
+}
+
+// What the model reads when the contract its owner allowed is no longer offered as it was
+const CONTRACT_CHANGED = {
+	error: 'contract_changed',
+	hint: 'The contract the owner allowed is no longer offered as it was, so nothing ran. Tell the owner.'
+} as const;
+
+// The HTTP status a contract answered with, when the result carries one
+function statusOf(result: unknown): number | null {
+	if (typeof result !== 'object' || result === null) return null;
+	const status = (result as Record<string, unknown>)['status'];
+	return typeof status === 'number' ? status : null;
 }
 
 export interface OwnerTurnInput {
 	readonly principal: Principal;
 	readonly target: SessionTarget;
-	readonly message: string;
+	// The owner's message, or null when the turn resumes from a call its owner allowed
+	readonly message: string | null;
 	readonly log: FastifyBaseLogger;
 	// What links the turn's calls in the audit: the request id, or the Matrix event id
 	readonly correlationId?: string;
@@ -73,6 +95,9 @@ export interface OwnerTurnInput {
 	readonly assistantName?: string;
 	// The event a dispatcher posted, for a turn of origin event: its id and CloudEvent type
 	readonly event?: { readonly id: string; readonly type: string };
+	// The call its owner just allowed: the turn runs it as frozen, then goes on from there, with
+	// no new message
+	readonly resume?: { readonly pendingCallId: string };
 }
 
 export type OwnerTurnResult =
@@ -81,6 +106,8 @@ export type OwnerTurnResult =
 			readonly sessionId: string;
 			readonly answer: string;
 			readonly model: string;
+			// The call the harness froze, when the turn ended on its question to the owner
+			readonly pendingCallId?: string;
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -156,12 +183,14 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
 			return { message: input.message, question: null };
 		}
-		let question: string | null = null;
+		let question: Told['question'] = null;
 		const run: ToolRunner = async (name, args) => {
 			const tool = tools.find(name);
 			if (tool === null) return null;
 			const outcome = await runTool(tool, args, context);
-			if (outcome.final !== undefined && question === null) question = outcome.final;
+			if (question === null && outcome.final !== undefined && outcome.pendingCallId !== undefined) {
+				question = { text: outcome.final, pendingCallId: outcome.pendingCallId };
+			}
 			return outcome;
 		};
 		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
@@ -174,6 +203,57 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			'invitation checked'
 		);
 		return { message: messages.events.invitation(event.id, check.data), question };
+	}
+
+	// Runs the call its owner allowed, exactly as it was frozen, and writes it in the session as
+	// the assistant's call followed by its result, for the model to go on from. A tool that no
+	// longer stands for the contract the owner allowed, at the same level, runs nothing.
+	async function replay(
+		approved: ApprovedCall,
+		pendingCallId: string,
+		context: ToolContext,
+		log: FastifyBaseLogger
+	): Promise<LlmMessage[]> {
+		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
+		const tool = tools.find(approved.tool);
+		const unchanged =
+			definition !== undefined &&
+			tool !== null &&
+			definition.id === approved.contract &&
+			definition.level === approved.level;
+		const outcome: ToolOutcome = unchanged
+			? await runTool(tool, approved.arguments, context)
+			: { result: CONTRACT_CHANGED };
+		const httpStatus = statusOf(outcome.result);
+		log.info(
+			{
+				pendingCallId,
+				tool: approved.tool,
+				status: unchanged ? toolCallStatus(outcome) : 'contract_changed',
+				...(httpStatus === null ? {} : { httpStatus })
+			},
+			'pending call replayed'
+		);
+		const callId = `replay_${pendingCallId}`;
+		return [
+			{
+				role: 'assistant',
+				content: null,
+				tool_calls: [
+					{
+						id: callId,
+						type: 'function',
+						function: { name: approved.tool, arguments: JSON.stringify(approved.arguments) }
+					}
+				]
+			},
+			{
+				role: 'tool',
+				tool_call_id: callId,
+				name: approved.tool,
+				content: JSON.stringify(outcome.result)
+			}
+		];
 	}
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
@@ -195,6 +275,14 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const opened = await withPrincipal(db, principal, async (tx) => {
 				const record = await ensurePrincipal(tx, principal);
 				if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
+				// The owner's answer approves the call once, and lets the assistant use that
+				// application at that level from now on
+				let approved: ApprovedCall | null = null;
+				if (input.resume !== undefined) {
+					approved = await approvePendingCall(tx, principal.id, input.resume.pendingCallId);
+					if (approved === null) return { kind: 'missing' as const };
+					await grantConsent(tx, principal.id, approved.domain, approved.level, 'chat');
+				}
 				let session: SessionRecord | null;
 				if (target.kind === 'new') session = await createSession(tx, principal.id);
 				else if (target.kind === 'room')
@@ -202,12 +290,14 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				else session = await findSession(tx, target.id);
 				return session === null
 					? { kind: 'missing' as const }
-					: { kind: 'ok' as const, session, actions: record.actions };
+					: { kind: 'ok' as const, session, actions: record.actions, approved };
 			});
 			if (opened.kind !== 'ok') return opened;
-			const { session } = opened;
+			const { session, approved } = opened;
+			// A resumed turn may do no more than the turn that froze its call
+			const origin = approved?.origin ?? input.origin;
 			const withheld =
-				input.origin === 'event'
+				origin === 'event'
 					? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
 					: [];
 			const actions = opened.actions.filter((action) => !withheld.includes(action));
@@ -218,32 +308,58 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				? await withPrincipal(db, principal, (tx) => listSkills(tx))
 				: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
+			// A resumed turn keeps the correlation id of the turn that froze its call, so that the
+			// gateway's audit links both
+			const correlationId = approved?.correlationId ?? input.correlationId;
 			const context: ToolContext = {
 				principalId: principal.id,
+				...(origin === undefined ? {} : { origin }),
 				actions,
 				withheldActions: withheld,
 				db,
-				...(input.correlationId === undefined ? {} : { correlationId: input.correlationId })
+				...(correlationId === undefined ? {} : { correlationId })
 			};
-			const told = await messageFor(input, context, log);
-			log.info({ messageLength: told.message.length }, 'turn started');
+			// A resumed turn has no new message: it goes on from the call its owner allowed
+			const told: Told =
+				approved === null
+					? await messageFor(input, context, log)
+					: { message: null, question: null };
+			log.info({ messageLength: told.message?.length ?? 0 }, 'turn started');
 			if (told.question !== null) {
 				// The conversation keeps what the model would have been told, for the turn the
 				// owner's answer resumes
 				const asked: LlmMessage[] = [
 					...session.messages,
 					{ role: 'user', content: told.message },
-					{ role: 'assistant', content: told.question }
+					{ role: 'assistant', content: told.question.text }
 				];
 				const saved = await withPrincipal(db, principal, (tx) =>
 					saveSessionMessages(tx, session.id, asked)
 				);
 				if (!saved) return { kind: 'missing' };
-				log.info('turn stopped on a question to the owner');
-				return { kind: 'ok', sessionId: session.id, answer: told.question, model: llm.model };
+				const { pendingCallId } = told.question;
+				log.info({ pendingCallId }, 'turn stopped on a question to the owner');
+				return {
+					kind: 'ok',
+					sessionId: session.id,
+					answer: told.question.text,
+					model: llm.model,
+					pendingCallId
+				};
 			}
 			// Read at the start of every turn, never kept: a session can span days
 			const moment = describeMoment(clock.now(), config.timeZone, config.locale);
+			let history: readonly LlmMessage[] = session.messages;
+			if (approved !== null && input.resume !== undefined) {
+				const { pendingCallId } = input.resume;
+				history = [...history, ...(await replay(approved, pendingCallId, context, log))];
+				// The conversation holds the call at once, whatever happens to the rest of the turn
+				const kept = history;
+				await withPrincipal(db, principal, async (tx) => {
+					await saveSessionMessages(tx, session.id, kept);
+					await markReplayed(tx, pendingCallId);
+				});
+			}
 			try {
 				const turn = await runTurn(
 					{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
@@ -261,10 +377,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
 							memory,
 							skills,
-							history: session.messages,
+							history,
 							nudgeInterval: config.turn.memoryNudgeInterval
 						}),
-						history: session.messages,
+						history,
 						message: told.message,
 						context
 					}
@@ -275,7 +391,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				if (!saved) return { kind: 'missing' };
 				await admission.recordUsage(principal.id, turn.tokens);
 				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
-				return { kind: 'ok', sessionId: session.id, answer: turn.answer, model: llm.model };
+				return {
+					kind: 'ok',
+					sessionId: session.id,
+					answer: turn.answer,
+					model: llm.model,
+					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId })
+				};
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {
 					log.error({ err }, 'turn failed');

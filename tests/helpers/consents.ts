@@ -12,3 +12,18 @@ export async function grantConsent(
 ): Promise<void> {
 	await withPrincipal(db, { id: owner }, (tx) => grant(tx, owner, domain, level, 'api'));
 }
+
+// Takes an application back from an owner's assistant, for a suite that needs a first use again
+export async function withdrawConsent(
+	db: Db,
+	owner: string,
+	domain: string,
+	level: ConsentLevel
+): Promise<void> {
+	await withPrincipal(
+		db,
+		{ id: owner },
+		(tx) =>
+			tx.sql`delete from consents where owner = ${owner} and domain = ${domain} and level = ${level}`
+	);
+}

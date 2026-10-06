@@ -47,6 +47,9 @@ export interface E2eeClient {
 	createDirectRoom(userId: string): Promise<string>;
 	// Resolves to the event id of the message sent
 	sendText(roomId: string, text: string): Promise<string>;
+	// Reacts to an event with a key such as ✅, encrypted like any event of an encrypted room;
+	// resolves to the event id of the reaction
+	react(roomId: string, eventId: string, key: string): Promise<string>;
 	waitForMessage(
 		roomId: string,
 		sender: string,
@@ -159,6 +162,10 @@ export async function startE2eeClient(
 				]
 			}),
 		sendText: (roomId, text) => client.sendText(roomId, text),
+		react: (roomId, eventId, key) =>
+			client.sendEvent(roomId, 'm.reaction', {
+				'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key }
+			}),
 		waitForMessage: async (roomId, sender, predicate, timeoutMs = 30_000) => {
 			for (let i = 0; i < timeoutMs / 250; i += 1) {
 				const found = messages.find(

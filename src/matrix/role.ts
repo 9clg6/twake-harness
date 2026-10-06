@@ -20,6 +20,8 @@ import {
 	listActiveAssistants,
 	saveDialog
 } from '../assistants/repository.js';
+import { ALLOW_REACTION, type PendingQuestion, type ResumeRequest } from '../consents/consent.js';
+import { findOpenRequest, recordRequestEvent } from '../consents/repository.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
@@ -76,6 +78,8 @@ interface SendJob {
 	// The owner's message the text answers, for the reactions on it
 	readonly replyTo?: string;
 	readonly outcome?: TurnOutcome;
+	// The text asks the owner about a frozen call: the event sent is remembered for their answer
+	readonly request?: PendingQuestion;
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
@@ -110,8 +114,30 @@ function isSendJob(value: unknown): value is SendJob {
 		typeof job['roomId'] === 'string' &&
 		typeof job['text'] === 'string' &&
 		(job['replyTo'] === undefined || typeof job['replyTo'] === 'string') &&
-		(job['outcome'] === undefined || job['outcome'] === 'answered' || job['outcome'] === 'failed')
+		(job['outcome'] === undefined ||
+			job['outcome'] === 'answered' ||
+			job['outcome'] === 'failed') &&
+		(job['request'] === undefined || isPendingQuestion(job['request']))
 	);
+}
+
+function isPendingQuestion(value: unknown): value is PendingQuestion {
+	if (typeof value !== 'object' || value === null) return false;
+	const request = value as Record<string, unknown>;
+	return typeof request['pendingCallId'] === 'string' && typeof request['owner'] === 'string';
+}
+
+function annotationOf(event: RoomEvent): { readonly eventId: string; readonly key: string } | null {
+	const relation = event.content?.['m.relates_to'];
+	if (typeof relation !== 'object' || relation === null) return null;
+	const fields = relation as Record<string, unknown>;
+	const eventId = fields['event_id'];
+	const key = fields['key'];
+	return fields['rel_type'] === 'm.annotation' &&
+		typeof eventId === 'string' &&
+		typeof key === 'string'
+		? { eventId, key }
+		: null;
 }
 
 function turnOf(job: SendJob): TurnRef | null {
@@ -387,6 +413,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						roomId
 					);
 					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted);
+					// An answer whose key came late counts like any other
+					if (decrypted.type === 'm.reaction') await onOwnerAnswer(roomId, decrypted.raw);
 				} catch (retryErr: unknown) {
 					log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
 				}
@@ -514,6 +542,49 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await appservice.getIntentForUserId(userId).underlyingClient.redactEvent(roomId, eventId);
 		}
 	});
+
+	// The owner's answer to a question of the harness: a ✅ on it. Only an event that arrived
+	// encrypted, from the owner's own device, counts: nothing written in the owner's name on the
+	// server side, which cannot encrypt for the room, answers for them
+	async function onOwnerAnswer(roomId: string, event: RoomEvent): Promise<void> {
+		if (event.type !== 'm.reaction') return;
+		const sender = event.sender ?? '';
+		// The assistants' own reactions mark the messages they answered
+		if (sender === creator || isAssistantUserId(config, sender)) return;
+		const annotation = annotationOf(event);
+		if (annotation === null || annotation.key !== ALLOW_REACTION) return;
+		const room = await assistantRoom(roomId);
+		if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
+		if (principalOfMatrixUser(config, sender) !== room.owner) {
+			log.info({ roomId, sender, owner: room.owner }, 'answer ignored: not the owner');
+			return;
+		}
+		const owner = room.owner;
+		const pendingCallId = await withPrincipal(db, { id: owner }, (tx) =>
+			findOpenRequest(tx, owner, annotation.eventId)
+		);
+		if (pendingCallId === null) return;
+		const resume: ResumeRequest = { owner, roomId, pendingCallId };
+		const queued = await enqueueJob(db, {
+			kind: 'resume',
+			payload: resume,
+			dedupKey: `resume:${pendingCallId}`,
+			groupKey: `turn:${owner}`
+		});
+		log.info(
+			{ roomId, owner, pendingCallId, answer: 'yes', via: 'reaction', queued },
+			'owner answered'
+		);
+	}
+
+	appservice.on(
+		'room.decrypted_event',
+		guard('owner answer', onOwnerAnswer, (roomId: string, event: RoomEvent) => ({
+			roomId,
+			eventId: event.event_id,
+			sender: event.sender
+		}))
+	);
 
 	appservice.on(
 		'room.message',
@@ -649,8 +720,25 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await refreshMembersDevices(intent, job.payload.roomId);
 			const turn = turnOf(job.payload);
 			if (turn !== null) await feedback.answerReady(turn);
-			await intent.sendEvent(job.payload.roomId, makeRichText(job.payload.text));
+			const sent = await intent.sendEvent(job.payload.roomId, makeRichText(job.payload.text));
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
+			const request = job.payload.request;
+			if (request !== undefined) {
+				const recorded = await withPrincipal(db, { id: request.owner }, (tx) =>
+					recordRequestEvent(tx, request.pendingCallId, sent)
+				);
+				if (recorded) {
+					log.info(
+						{ roomId: job.payload.roomId, pendingCallId: request.pendingCallId },
+						'question sent'
+					);
+				} else {
+					log.warn(
+						{ roomId: job.payload.roomId, pendingCallId: request.pendingCallId },
+						'question sent for a call that is no longer stored'
+					);
+				}
+			}
 			if (turn !== null) {
 				feedback
 					.answerSent(turn, job.payload.outcome ?? 'answered')

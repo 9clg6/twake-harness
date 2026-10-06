@@ -12,7 +12,9 @@ import {
 export interface TurnInput {
 	readonly systemPrompt: string;
 	readonly history: readonly LlmMessage[];
-	readonly message: string;
+	// The owner's new message, or null when the turn goes on from its history, such as after a
+	// call its owner allowed
+	readonly message: string | null;
 	readonly context: ToolContext;
 }
 
@@ -20,6 +22,8 @@ export interface TurnOutput {
 	readonly answer: string;
 	readonly messages: readonly LlmMessage[];
 	readonly tokens: number;
+	// The call the harness froze, when the turn ended on its question to the owner
+	readonly pendingCallId?: string;
 }
 
 export interface TurnDeps {
@@ -42,6 +46,12 @@ function countCharacters(messages: readonly LlmMessage[]): number {
 	}
 	return total;
 }
+
+// What the model reads for a call it made after one that ended the turn
+const NOT_RUN = {
+	error: 'not_run',
+	hint: 'The turn stopped before this call ran. Make it again if it is still needed.'
+} as const;
 
 // The most one model call may spend: a call that ran out is retried once at twice the budget,
 // up to this
@@ -101,7 +111,10 @@ function parseArguments(raw: string): unknown {
 // harness end-to-end encrypted and are decrypted only here, so their text must stay out of the
 // production logs.
 export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOutput> {
-	const messages: LlmMessage[] = [...input.history, { role: 'user', content: input.message }];
+	const messages: LlmMessage[] =
+		input.message === null
+			? [...input.history]
+			: [...input.history, { role: 'user', content: input.message }];
 	const system: LlmMessage = { role: 'system', content: input.systemPrompt };
 	let toolCalls = 0;
 	let tokens = 0;
@@ -142,7 +155,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			content: completion.content,
 			tool_calls: completion.toolCalls
 		});
-		for (const call of completion.toolCalls) {
+		for (const [index, call] of completion.toolCalls.entries()) {
 			toolCalls += 1;
 			if (toolCalls > deps.maxToolCalls) {
 				throw new TurnError(`the model exceeded ${deps.maxToolCalls} tool calls`);
@@ -181,8 +194,23 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				content: JSON.stringify(outcome.result)
 			});
 			if (outcome.final !== undefined) {
+				// The calls the model made after this one never run, yet each gets its answer: strict
+				// model APIs refuse a history with a call left unanswered
+				for (const skipped of completion.toolCalls.slice(index + 1)) {
+					messages.push({
+						role: 'tool',
+						tool_call_id: skipped.id,
+						name: skipped.function.name,
+						content: JSON.stringify(NOT_RUN)
+					});
+				}
 				messages.push({ role: 'assistant', content: outcome.final });
-				return { answer: outcome.final, messages, tokens };
+				return {
+					answer: outcome.final,
+					messages,
+					tokens,
+					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId })
+				};
 			}
 		}
 	}

@@ -87,7 +87,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					hasConsent(tx, owner, contract.domain, contract.level)
 				))
 			) {
-				const pendingCall = await withPrincipal(context.db, { id: owner }, (tx) =>
+				const pendingCallId = await withPrincipal(context.db, { id: owner }, (tx) =>
 					insertPendingCall(tx, {
 						owner,
 						tool: contract.toolName,
@@ -96,12 +96,13 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 						level: contract.level,
 						reasons: ['consent'],
 						arguments: values,
-						correlationId: context.correlationId ?? null
+						correlationId: context.correlationId ?? null,
+						origin: context.origin ?? 'owner'
 					})
 				);
 				log.info(
 					{
-						pendingCall,
+						pendingCallId,
 						contract: contract.id,
 						tool: contract.toolName,
 						domain: contract.domain,
@@ -117,7 +118,8 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 						domain: contract.domain,
 						level: contract.level
 					},
-					final: messages.consent.firstRead(contract.domain, ALLOW_REACTION)
+					final: messages.consent.firstRead(contract.domain, ALLOW_REACTION),
+					pendingCallId
 				};
 			}
 			let path = contract.pathTemplate;
