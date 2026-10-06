@@ -48,6 +48,15 @@ import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeAppserviceStorage } from './storage.js';
 
+// The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
+// however busy the user is. The old intent is never released: its encryption stays subscribed to the
+// events of every room, on the same store as the new one's. Each hour, every assistant and the creator
+// then set their encryption up again, as often as not inside a push, and kept one more encryption
+// machine. An intent lives as long as the role instead: an age no uptime reaches, as the cache takes
+// no infinite one, and room for far more users than a deployment has assistants.
+const INTENT_MAX_AGE_MS = Number.MAX_SAFE_INTEGER;
+const MAX_INTENTS = 10_000;
+
 export interface MatrixRoleOptions {
 	readonly config: Config;
 	readonly db: Db;
@@ -200,7 +209,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// The url only matters to Synapse, which reads it from its own registration file
 		registration: buildRegistration(config, ''),
 		storage,
-		cryptoStorage
+		cryptoStorage,
+		intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
 	});
 	const ensureEncryption = makeEnsureEncryption({
 		log,
