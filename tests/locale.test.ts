@@ -91,6 +91,8 @@ describe('a deployment that speaks French', () => {
 		);
 		expect(told?.content).toContain('read_freebusy');
 		expect(told?.content).toContain('exclude');
+		expect(told?.content).toContain('data.object.uid');
+		expect(told?.content).toContain("« Veux-tu que je l'accepte ? »");
 		expect(told?.content).toContain("arrête-toi là : ne l'accepte pas toi-même");
 	});
 });

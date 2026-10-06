@@ -163,6 +163,8 @@ describe('an event wakes my assistant', () => {
 			.find((m) => m.role === 'user' && (m.content ?? '').includes('(id evt-1)'));
 		expect(told?.content).toContain('read_freebusy');
 		expect(told?.content).toContain('exclude');
+		expect(told?.content).toContain('data.object.uid');
+		expect(told?.content).toContain('"Do you want me to accept it?"');
 		expect(told?.content).toContain('do not accept it yourself');
 		// The event's turn knows the present too, to tell whether the slot is today or later
 		const eventCall = h.apisix.llm.calls.find((c) =>

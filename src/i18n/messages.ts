@@ -108,7 +108,13 @@ const ENGLISH: Messages = {
 		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
 	events: {
 		invitation: (type, eventId) =>
-			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with read_event, then check the slot with read_freebusy, passing the invitation uid (data.object.uid) as exclude. Tell me in a few words, in the language of our conversation, who invites me, to what and when, and whether I am free or what it conflicts with. Then ask me whether to accept it and stop there: do not accept it yourself, I will answer you here.`,
+			[
+				`[event] A new event of type "${type}" has arrived (id ${eventId}). Do this, in this order.`,
+				'1. Read it with read_event.',
+				'2. Check its slot with read_freebusy. start and end are the invitation\'s own start and end, in RFC 3339 with the offset given in the "## Now" block. exclude is the invitation\'s uid, data.object.uid in what read_event returned, so that the invitation does not count against itself. For example: read_freebusy {"start": "<its start>±hh:mm", "end": "<its end>±hh:mm", "exclude": "<data.object.uid>"}.',
+				'3. Tell me in a few words, in the language of our conversation, who invites me, to what and when, and whether I am free once the invitation itself is excluded, or what it conflicts with.',
+				'4. End with this question: "Do you want me to accept it?" Then stop there: do not accept it yourself, I will answer you here.'
+			].join('\n'),
 		other: (type, eventId) =>
 			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`
 	},
@@ -175,7 +181,13 @@ const FRENCH: Messages = {
 		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,
 	events: {
 		invitation: (type, eventId) =>
-			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec read_event, puis vérifie le créneau avec read_freebusy, en passant l'uid de l'invitation (data.object.uid) en exclude. Dis-moi en quelques mots, dans la langue de notre conversation, qui m'invite, à quoi et quand, et si je suis libre ou avec quoi cela entre en conflit. Demande-moi ensuite si je l'accepte, et arrête-toi là : ne l'accepte pas toi-même, je te répondrai ici.`,
+			[
+				`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Procède dans cet ordre.`,
+				'1. Lis-le avec read_event.',
+				'2. Vérifie son créneau avec read_freebusy. start et end sont le début et la fin de l\'invitation, en RFC 3339 avec le décalage donné dans le bloc « ## Maintenant ». exclude est l\'uid de l\'invitation, data.object.uid dans ce que read_event a renvoyé, pour que l\'invitation ne compte pas contre elle-même. Par exemple : read_freebusy {"start": "<son début>±hh:mm", "end": "<sa fin>±hh:mm", "exclude": "<data.object.uid>"}.',
+				"3. Dis-moi en quelques mots, dans la langue de notre conversation, qui m'invite, à quoi et quand, et si je suis libre une fois l'invitation elle-même exclue, ou avec quoi cela entre en conflit.",
+				"4. Termine par cette question : « Veux-tu que je l'accepte ? » Puis arrête-toi là : ne l'accepte pas toi-même, je te répondrai ici."
+			].join('\n'),
 		other: (type, eventId) =>
 			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec les contrats et dis-moi de quoi il s'agit.`
 	},
