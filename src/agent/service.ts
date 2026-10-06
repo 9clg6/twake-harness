@@ -17,12 +17,17 @@ import {
 import { makeTurnGate, type TurnGate } from './gate.js';
 import { DEFAULT_SYSTEM_PROMPT } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
+import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
 	makeToolRegistry,
 	memoryTool,
 	sessionsListTool,
 	sessionsReadTool,
+	skillsListTool,
+	skillsProposeTool,
+	skillsReadTool,
+	skillsSearchTool,
 	type ToolRegistry
 } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
@@ -78,7 +83,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		});
 	const contracts = makeContractCatalog({ config, log: deps.log });
 	const tools = makeToolRegistry(
-		[clarifyTool, memoryTool, sessionsListTool, sessionsReadTool],
+		[
+			clarifyTool,
+			memoryTool,
+			sessionsListTool,
+			sessionsReadTool,
+			skillsListTool,
+			skillsSearchTool,
+			skillsReadTool,
+			skillsProposeTool
+		],
 		() => contracts.tools
 	);
 	const gate = makeTurnGate();
@@ -104,6 +118,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const memory = actions.includes('memory.read_own')
 				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
 				: { memory: [], user: [] };
+			const skills = actions.includes('skills.read_own')
+				? await withPrincipal(db, principal, (tx) => listSkills(tx))
+				: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
 			log.info({ messageLength: message.length }, 'turn started');
 			try {
@@ -113,6 +130,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						systemPrompt: buildSystemPrompt({
 							persona: DEFAULT_SYSTEM_PROMPT,
 							memory,
+							skills,
 							history: session.messages,
 							nudgeInterval: config.turn.memoryNudgeInterval
 						}),

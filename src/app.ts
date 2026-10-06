@@ -16,6 +16,14 @@ import { listMemory } from './memory/repository.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
 import { findSession, listSessionIds } from './sessions/repository.js';
+import {
+	findSkill,
+	insertSkill,
+	isValidSkillId,
+	listSkills,
+	setSkillStatus,
+	toSkillMarkdown
+} from './skills/repository.js';
 
 declare module 'fastify' {
 	interface FastifyRequest {
@@ -51,6 +59,14 @@ const chatBodySchema = z
 
 const toolBodySchema = z
 	.object({ tool: z.string().min(1), arguments: z.unknown().optional() })
+	.strict();
+
+const skillBodySchema = z
+	.object({
+		name: z.string().min(1).max(80),
+		description: z.string().min(1).max(500),
+		content: z.string().min(1).max(20_000)
+	})
 	.strict();
 
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
@@ -187,6 +203,124 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				);
 				if (session === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 				return { messages: session.messages };
+			});
+
+			// Skills: one library per user, one for the organization, proposals approved by their
+			// owner or promoted by an administrator, by copy
+			scope.get('/skills', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('skills.read_own')) return reply.code(403).send(FORBIDDEN);
+				const skills = await withPrincipal(db, principal, (tx) => listSkills(tx));
+				return { skills: skills.map((s) => s.id), details: skills };
+			});
+
+			scope.get('/skills/proposals', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('skills.read_own')) return reply.code(403).send(FORBIDDEN);
+				const admin = record.actions.includes('skills.admin');
+				const proposals = await withPrincipal(db, principal, (tx) => listSkills(tx, 'proposed'), {
+					admin
+				});
+				return { proposals };
+			});
+
+			scope.get<{ Params: { id: string } }>('/skills/:id', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('skills.read_own')) return reply.code(403).send(FORBIDDEN);
+				if (!isValidSkillId(request.params.id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				const skill = await withPrincipal(db, principal, (tx) => findSkill(tx, request.params.id));
+				if (skill === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				return {
+					id: skill.id,
+					scope: skill.scope,
+					status: skill.status,
+					content: toSkillMarkdown(skill)
+				};
+			});
+
+			scope.post('/skills', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('skills.read_own')) return reply.code(403).send(FORBIDDEN);
+				const parsed = skillBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const skill = await withPrincipal(db, principal, (tx) =>
+					insertSkill(tx, { scope: 'user', owner: principal.id, status: 'active', ...parsed.data })
+				);
+				return reply.code(201).send({ id: skill.id, scope: skill.scope, status: skill.status });
+			});
+
+			scope.post<{ Params: { id: string } }>(
+				'/skills/proposals/:id/approve',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('skills.read_own')) return reply.code(403).send(FORBIDDEN);
+					if (!isValidSkillId(request.params.id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					const approved = await withPrincipal(db, principal, async (tx) => {
+						const skill = await findSkill(tx, request.params.id);
+						if (
+							skill === null ||
+							skill.scope !== 'user' ||
+							skill.owner !== principal.id ||
+							skill.status !== 'proposed'
+						) {
+							return false;
+						}
+						return setSkillStatus(tx, skill.id, 'active');
+					});
+					return approved
+						? { id: request.params.id, status: 'active' }
+						: reply.code(404).send(RESOURCE_UNAVAILABLE);
+				}
+			);
+
+			scope.post('/org/skills', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('skills.admin')) return reply.code(403).send(FORBIDDEN);
+				const parsed = skillBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const skill = await withPrincipal(
+					db,
+					principal,
+					(tx) => insertSkill(tx, { scope: 'org', owner: 'org', status: 'active', ...parsed.data }),
+					{ admin: true }
+				);
+				return reply.code(201).send({ id: skill.id, scope: skill.scope, status: skill.status });
+			});
+
+			// Promotion copies a user's proposal into the organization library and leaves it theirs
+			scope.post<{ Params: { id: string } }>('/org/skills/promote/:id', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('skills.admin')) return reply.code(403).send(FORBIDDEN);
+				if (!isValidSkillId(request.params.id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				const promoted = await withPrincipal(
+					db,
+					principal,
+					async (tx) => {
+						const proposal = await findSkill(tx, request.params.id);
+						if (proposal === null || proposal.scope !== 'user') return null;
+						return insertSkill(tx, {
+							scope: 'org',
+							owner: 'org',
+							status: 'active',
+							name: proposal.name,
+							description: proposal.description,
+							content: proposal.content
+						});
+					},
+					{ admin: true }
+				);
+				return promoted === null
+					? reply.code(404).send(RESOURCE_UNAVAILABLE)
+					: reply
+							.code(201)
+							.send({ id: promoted.id, scope: promoted.scope, status: promoted.status });
 			});
 
 			scope.get('/memory', async (request, reply) => {

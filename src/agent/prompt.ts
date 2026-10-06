@@ -1,11 +1,22 @@
 import type { LlmMessage } from '../llm/client.js';
 import { formatMemoryForPrompt, type MemoryView } from '../memory/repository.js';
+import type { SkillSummary } from '../skills/repository.js';
 
 export interface PromptInput {
 	readonly persona: string;
 	readonly memory: MemoryView;
+	readonly skills?: readonly SkillSummary[];
 	readonly history: readonly LlmMessage[];
 	readonly nudgeInterval: number;
+}
+
+// Skills are discovered by their description; the model reads one when it applies
+export function formatSkillsForPrompt(skills: readonly SkillSummary[]): string | null {
+	if (skills.length === 0) return null;
+	const lines = skills.map(
+		(s) => `- ${s.id} (${s.scope === 'org' ? 'organization' : 'yours'}): ${s.description}`
+	);
+	return `## Skills\nRead a skill with scoped_skills_read when its description matches the task, then follow it.\n${lines.join('\n')}`;
 }
 
 // Assistant turns since the model last wrote to its memory, in this session
@@ -29,6 +40,8 @@ export function buildSystemPrompt(input: PromptInput): string {
 	const parts: string[] = [input.persona];
 	const memory = formatMemoryForPrompt(input.memory);
 	if (memory !== null) parts.push(memory);
+	const skills = formatSkillsForPrompt(input.skills ?? []);
+	if (skills !== null) parts.push(skills);
 	if (input.nudgeInterval > 0 && countTurnsSinceMemory(input.history) >= input.nudgeInterval - 1) {
 		parts.push(
 			'You have saved nothing to memory for a while. If this conversation holds something worth remembering about the user or your work, save it with the memory tool now.'
