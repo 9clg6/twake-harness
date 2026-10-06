@@ -54,6 +54,10 @@ One image, one role per deployment, chosen by `HARNESS_ROLE`:
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
 
+### Behind the gateway
+
+The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` set, every request of the API must carry that value in `x-twake-gateway`, which the gateway injects on what it forwards; anything else gets a 403 before any identity work, while the health check and the metrics stay open to the cluster. Every contract call is posted to the audit route as one record in the shape the audit relay takes from the gateway's own logger (agent, user, contract, method, path, status, correlation id), so it lands in the audit topic keyed by the agent.
+
 ### Jobs between roles
 
 The roles hand work to each other through the `jobs` table: a Matrix message becomes a `turn` for the api role, its answer a `send` for the matrix role. Any replica claims any job (`for update skip locked`), so the api role scales horizontally; the chart ships a horizontal autoscaler for it (`autoscaling.enabled`), never below one replica. A job carries a dedup key, so an event Synapse delivers twice makes one turn, and a group key: the turns of one owner and the answers of one room run one at a time, in the order they were queued, whichever replica takes them. A job still running after its lease (fifteen minutes) is handed back to the queue, as its replica is taken for gone.
