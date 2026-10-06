@@ -50,8 +50,30 @@ const operationSchema = z.object({
 
 const documentSchema = z.object({
 	openapi: z.string().optional(),
+	servers: z.array(z.object({ url: z.string() })).optional(),
 	paths: z.record(z.string(), z.record(z.string(), z.unknown()))
 });
+
+// Where the document says its operations live: the path its first server names, which the calls
+// join under the gateway's address, and the origin that server names when it is an absolute URL.
+// Without a server, OpenAPI puts the operations at the root, so the paths are used as written.
+export interface ContractServer {
+	readonly path: string;
+	readonly origin: string | null;
+}
+
+const ABSOLUTE_URL = /^[a-z][a-z0-9+.-]*:\/\//i;
+
+export function readServer(document: unknown): ContractServer {
+	const parsed = documentSchema.safeParse(document);
+	const url = parsed.success ? parsed.data.servers?.[0]?.url : undefined;
+	if (url === undefined || url.length === 0) return { path: '', origin: null };
+	if (ABSOLUTE_URL.test(url)) {
+		const absolute = new URL(url);
+		return { path: absolute.pathname, origin: absolute.origin };
+	}
+	return { path: url.replace(/^\.\//, ''), origin: null };
+}
 
 const METHODS: readonly HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
 

@@ -10,11 +10,21 @@ export interface ContractToolDeps {
 	readonly config: Config;
 	readonly log: FastifyBaseLogger;
 	readonly fetchImpl?: typeof fetch;
+	// The path of the document's server, from readServer: empty when the paths are absolute
+	readonly serverPath?: string;
 }
 
-function joinPath(base: URL, ...segments: string[]): URL {
+// Joins path segments under the gateway's address, keeping the path that address may carry: no
+// segment may climb back to the root, and an empty one adds nothing
+export function joinPath(base: URL, ...segments: string[]): URL {
 	const root = base.href.endsWith('/') ? base.href : `${base.href}/`;
-	return new URL(segments.map((s) => s.replace(/^\/+/, '')).join('/'), root);
+	const kept = segments
+		.map((segment, index) => {
+			const trimmed = segment.replace(/^\/+/, '');
+			return index === segments.length - 1 ? trimmed : trimmed.replace(/\/+$/, '');
+		})
+		.filter((segment) => segment.length > 0);
+	return new URL(kept.join('/'), root);
 }
 
 function parseBody(text: string): unknown {
@@ -70,7 +80,14 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					query.set(parameter.name, String(value));
 				}
 			}
-			const url = joinPath(config.apisix.baseUrl, config.contracts.basePath, path);
+			// The path the document gives, under its server path and the prefix the deployment may
+			// add, always on the gateway: the harness has no other way out
+			const url = joinPath(
+				config.apisix.baseUrl,
+				config.contracts.basePath,
+				deps.serverPath ?? '',
+				path
+			);
 			url.search = query.toString();
 			// The organization agent calls with the harness key alone: it acts for no user
 			const headers: Record<string, string> = {
