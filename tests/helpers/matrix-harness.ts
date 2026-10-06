@@ -73,6 +73,7 @@ export async function startMatrixHarness(
 		file: buildRegistrationFile(config, `http://host.docker.internal:${port}`)
 	});
 	apisix.matrixUpstream = synapse.url;
+	apisix.matrixAsToken = asToken;
 	const db = makeDb(config.databaseUrl);
 	await resetDatabase(db);
 	const logStream = new PassThrough();
