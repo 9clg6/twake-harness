@@ -27,6 +27,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # The Synapse of the platform, and the latest release to see an upgrade coming
+        synapse: ['ghcr.io/element-hq/synapse:v1.160.0', 'ghcr.io/element-hq/synapse:latest']
     services:
       postgres:
         image: postgres:16
@@ -50,10 +55,11 @@ jobs:
       - run: npm run test:ci
         env:
           TEST_ADMIN_DATABASE_URL: postgres://harness:harness@127.0.0.1:5433/harness
+          SYNAPSE_IMAGE: ${{ matrix.synapse }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
+          name: test-results-${{ strategy.job-index }}
           path: test-results/
 
   chart:

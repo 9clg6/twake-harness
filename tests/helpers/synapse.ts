@@ -6,7 +6,8 @@ import { join } from 'node:path';
 import { dump, load } from 'js-yaml';
 import { GenericContainer, Wait, type StartedTestContainer } from 'testcontainers';
 
-const IMAGE = process.env['SYNAPSE_IMAGE'] ?? 'matrixdotorg/synapse:latest';
+// The Synapse of the platform; CI also runs the suites against the latest release
+const IMAGE = process.env['SYNAPSE_IMAGE'] ?? 'ghcr.io/element-hq/synapse:v1.160.0';
 export const SYNAPSE_SERVER_NAME = 'test.local';
 const SHARED_SECRET = 'test-registration-secret';
 
