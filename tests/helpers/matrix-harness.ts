@@ -86,6 +86,12 @@ export async function startMatrixHarness(
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
+	const logLines = (): Record<string, unknown>[] =>
+		chunks
+			.join('')
+			.split('\n')
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
 	// The api role, replicated as in the deployment: each replica has its own turn worker
 	const apps: FastifyInstance[] = [];
 	const workers: JobWorker[] = [];
@@ -142,11 +148,7 @@ export async function startMatrixHarness(
 			'missed key shares fetched',
 			'decryption retry failed'
 		]);
-		const lines = chunks
-			.join('')
-			.split('\n')
-			.filter((line) => line.length > 0)
-			.map((line) => JSON.parse(line) as Record<string, unknown>)
+		const lines = logLines()
 			.filter(
 				(line) =>
 					interesting.has(String(line['msg'])) ||
@@ -182,13 +184,6 @@ export async function startMatrixHarness(
 			`--- synapse appservice log (last ${pushes.length}) ---\n${pushes.join('\n')}\n`
 		);
 	}
-
-	const logLines = (): Record<string, unknown>[] =>
-		chunks
-			.join('')
-			.split('\n')
-			.filter((line) => line.length > 0)
-			.map((line) => JSON.parse(line) as Record<string, unknown>);
 
 	const harness: MatrixTestHarness = {
 		restartRole: async (options = {}) => {
