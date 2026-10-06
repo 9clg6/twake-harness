@@ -55,7 +55,13 @@ async function startReplica(h: TestHarness): Promise<Replica> {
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
 	const app = await buildApp({ config, db, logStream });
 	await app.ready();
-	const worker = startTurnWorker({ db, agent: app.agent, log: app.log, pollIntervalMs: 100 });
+	const worker = startTurnWorker({
+		db,
+		agent: app.agent,
+		log: app.log,
+		pollIntervalMs: 100,
+		concurrency: 2
+	});
 	return {
 		app,
 		client: makeClient({ app, issuer: h.issuer } as Parameters<typeof makeClient>[0]),
@@ -119,7 +125,8 @@ describe('two api replicas on one database', () => {
 			db: h.db,
 			agent: h.app.agent,
 			log: h.app.log,
-			pollIntervalMs: 100
+			pollIntervalMs: 100,
+			concurrency: 2
 		});
 		b = await startReplica(h);
 		h.apisix.llm.script = (request: ChatRequest) => ({
@@ -218,6 +225,8 @@ describe('two api replicas on one database', () => {
 				`echo: ${owner} message 3`
 			]);
 		}
+		// Each replica runs two turns at once and four owners are runnable together, so neither
+		// replica can take every turn on its own
 		const startedOnA = roomTurnsStarted(h.logLines());
 		const startedOnB = roomTurnsStarted(b.logLines());
 		expect(startedOnA + startedOnB).toBe(12);
@@ -245,7 +254,8 @@ describe('two api replicas on one database', () => {
 			db: h.db,
 			agent: h.app.agent,
 			log: h.app.log,
-			pollIntervalMs: 100
+			pollIntervalMs: 100,
+			concurrency: 2
 		});
 		for (let i = 0; i < 100; i += 1) {
 			if ((await sendJobs(h)).some((s) => s.text === 'echo: after restart')) break;
@@ -257,7 +267,8 @@ describe('two api replicas on one database', () => {
 			db: h.db,
 			agent: h.app.agent,
 			log: h.app.log,
-			pollIntervalMs: 100
+			pollIntervalMs: 100,
+			concurrency: 2
 		});
 	});
 });

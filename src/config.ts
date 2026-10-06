@@ -61,6 +61,10 @@ export interface Config {
 		// Where the matrix role keeps the assistants' encryption state, on its volume
 		readonly cryptoStorePath: string;
 	};
+	readonly events: {
+		// The service clients, by their token subject, allowed to post events for an owner
+		readonly clientIds: readonly string[];
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -97,6 +101,7 @@ const envSchema = z.object({
 	MATRIX_AS_TOKEN: z.string().default('injected-by-apisix'),
 	MATRIX_HS_TOKEN: z.string().default(''),
 	MATRIX_CRYPTO_STORE_PATH: z.string().min(1).default('/data/crypto'),
+	EVENTS_CLIENT_IDS: z.string().default(''),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -165,6 +170,11 @@ export function loadConfig(env: Env): Config {
 			asToken: values.MATRIX_AS_TOKEN,
 			hsToken: values.MATRIX_HS_TOKEN,
 			cryptoStorePath: values.MATRIX_CRYPTO_STORE_PATH
+		},
+		events: {
+			clientIds: values.EVENTS_CLIENT_IDS.split(',')
+				.map((id) => id.trim())
+				.filter((id) => id.length > 0)
 		},
 		logLevel: values.LOG_LEVEL
 	};

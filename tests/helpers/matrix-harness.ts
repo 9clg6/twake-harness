@@ -15,7 +15,7 @@ import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from '
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
-import { freePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
+import { reservePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
 
 export interface MatrixTestHarness {
 	// Stops and starts the matrix role again on the same database and encryption stores
@@ -28,16 +28,26 @@ export interface MatrixTestHarness {
 	readonly port: number;
 	readonly hsToken: string;
 	readonly issuer: TestIssuer;
-	// The api role on the same database, driven over HTTP
+	// The api role on the same database, driven over HTTP, and its replicas
 	readonly api: TestClient;
+	readonly apps: readonly FastifyInstance[];
 	logLines(): Record<string, unknown>[];
 	close(): Promise<void>;
 }
 
 // The matrix role, a real Synapse pushing to it and the fake APISIX in between for its calls.
-export async function startMatrixHarness(): Promise<MatrixTestHarness> {
+export interface MatrixStartOptions {
+	// Settings of this harness, over the defaults
+	readonly env?: Record<string, string>;
+}
+
+export async function startMatrixHarness(
+	options: MatrixStartOptions = {}
+): Promise<MatrixTestHarness> {
 	await ensureAppRole(false);
-	const port = await freePort();
+	// Held while Synapse starts, so its mapped port cannot land on the role's
+	const reserved = await reservePort();
+	const port = reserved.port;
 	const asToken = 'as-token-test';
 	const hsToken = 'hs-token-test';
 	const apisix = await startFakeApisix();
@@ -54,7 +64,8 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		MATRIX_AS_TOKEN: asToken,
 		MATRIX_HS_TOKEN: hsToken,
 		MATRIX_CRYPTO_STORE_PATH: join(await mkdtemp(join(tmpdir(), 'harness-crypto-')), 'crypto'),
-		LOG_LEVEL: 'info'
+		LOG_LEVEL: 'info',
+		...(options.env ?? {})
 	});
 	const synapse = await startTestSynapse({
 		file: buildRegistrationFile(config, `http://host.docker.internal:${port}`)
@@ -87,6 +98,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 			bindAddress: '0.0.0.0',
 			pollIntervalMs: 100
 		});
+	await reserved.release();
 	let role = await startRole();
 	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
 	// On a CI runner the only window into a failed Matrix scenario is this summary
@@ -153,6 +165,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		hsToken,
 		issuer,
 		api,
+		apps,
 		logLines: () =>
 			chunks
 				.join('')

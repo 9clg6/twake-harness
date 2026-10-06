@@ -41,6 +41,8 @@ config:
   apisixBaseUrl: ''
   llmModel: qwen3.8
   logLevel: info
+  # The service clients, by token subject, allowed to post events for an owner (comma separated)
+  eventsClientIds: ''
   # The matrix role: the homeserver's name and the application service identity
   matrixServerName: ''
   matrixAppserviceId: twake-harness

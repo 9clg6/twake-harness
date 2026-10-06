@@ -53,7 +53,15 @@ export interface TestSynapse {
 	stop(): Promise<void>;
 }
 
-export async function freePort(): Promise<number> {
+export interface ReservedPort {
+	readonly port: number;
+	// Lets the port go, right before whoever reserved it listens on it
+	release(): Promise<void>;
+}
+
+// A port held until it is needed: Docker maps the containers' ports on the host in the same
+// range, so a port merely found free could be taken while a container starts.
+export async function reservePort(): Promise<ReservedPort> {
 	return new Promise((resolve, reject) => {
 		const server = createServer();
 		server.listen(0, '0.0.0.0', () => {
@@ -62,7 +70,10 @@ export async function freePort(): Promise<number> {
 				reject(new Error('no port'));
 				return;
 			}
-			server.close(() => resolve(address.port));
+			resolve({
+				port: address.port,
+				release: () => new Promise((done) => server.close(() => done()))
+			});
 		});
 	});
 }
