@@ -5,7 +5,7 @@ The Twake Space agent harness: one shared service, written in TypeScript, that g
 - Isolation between users is enforced in code and in the database, not by separate pods.
 - Assistants are created by their owner from Twake Chat, through a creator conversation, with nothing to configure.
 - Each assistant has memory, skills and self-learning, and acts in the applications with its owner's rights, through the platform's API gateway, asking before it acts.
-- The service reaches the outside world only through APISIX, keeps the assistants' encryption secrets in the platform's OpenBao, and logs every action and reasoning step in clear.
+- The service reaches the outside world only through APISIX, keeps the assistants' encryption secrets in the platform's OpenBao, and logs every action with its metadata at `info`, the conversation itself (prompt, answer, reasoning, tool arguments and results) only at `debug`, so the messages it decrypts stay out of production logs.
 
 ## Where things are
 
