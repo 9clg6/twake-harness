@@ -94,6 +94,11 @@ export interface FakeApisix {
 	};
 	// Where the /matrix route forwards, once a homeserver is up
 	matrixUpstream: string | null;
+	// The application service token the /matrix route sets on every request it forwards, as the
+	// real route does with its secret header: whatever token the caller sent, Synapse sees this one
+	matrixAsToken: string | null;
+	// A failure the /matrix route answers instead of forwarding, for the calls it returns a status for
+	matrixFault: ((call: { method: string; path: string }) => number | null) | null;
 	// What went through the /matrix route, for diagnosis
 	readonly matrixCalls: { method: string; path: string; status: number; ms: number }[];
 	close(): Promise<void>;
@@ -258,7 +263,11 @@ export function invitationEvent(fields: InvitationFields): Record<string, unknow
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
-	const fake = { matrixUpstream: null as string | null };
+	const fake = {
+		matrixUpstream: null as string | null,
+		matrixAsToken: null as string | null,
+		matrixFault: null as FakeApisix['matrixFault']
+	};
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
 	// One counter for the model and the contract calls, to tell which came first
 	let seq = 0;
@@ -284,7 +293,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			return;
 		}
 		if (url.pathname.startsWith('/matrix/')) {
-			if (fake.matrixUpstream === null) {
+			if (fake.matrixUpstream === null || fake.matrixAsToken === null) {
 				sendJson(res, 502, { error: 'no matrix upstream' });
 				return;
 			}
@@ -295,13 +304,20 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			for (const [name, value] of Object.entries(req.headers)) {
 				if (
 					typeof value === 'string' &&
-					!['host', 'apikey', 'content-length', 'connection'].includes(name)
+					!['host', 'apikey', 'content-length', 'connection', 'authorization'].includes(name)
 				) {
 					headers[name] = value;
 				}
 			}
+			headers['authorization'] = `Bearer ${fake.matrixAsToken}`;
 			const startedAt = Date.now();
 			const path = url.pathname.slice('/matrix'.length) + url.search;
+			const fault = fake.matrixFault?.({ method: req.method ?? 'GET', path }) ?? null;
+			if (fault !== null) {
+				matrixCalls.push({ method: req.method ?? 'GET', path, status: fault, ms: 0 });
+				sendJson(res, fault, { errcode: 'M_UNKNOWN', error: 'Internal server error' });
+				return;
+			}
 			// Like the real gateway, an upstream that fails or goes away mid-call is answered with a 502
 			try {
 				const upstream = await fetch(target, {
@@ -468,6 +484,18 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		},
 		set matrixUpstream(value: string | null) {
 			fake.matrixUpstream = value;
+		},
+		get matrixAsToken() {
+			return fake.matrixAsToken;
+		},
+		set matrixAsToken(value: string | null) {
+			fake.matrixAsToken = value;
+		},
+		get matrixFault() {
+			return fake.matrixFault;
+		},
+		set matrixFault(value: FakeApisix['matrixFault']) {
+			fake.matrixFault = value;
 		},
 		matrixCalls,
 		close: () =>
