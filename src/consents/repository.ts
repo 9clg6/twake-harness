@@ -52,24 +52,137 @@ export async function insertPendingCall(tx: Tx, input: PendingCallInput): Promis
 	return row.id;
 }
 
-// The Matrix event of the question asked about a call, which its owner's answer points to;
-// false when no such call is stored, so that no answer could ever find it
-export async function recordRequestEvent(tx: Tx, id: string, eventId: string): Promise<boolean> {
-	const result =
-		await tx.sql`update pending_calls set request_event_id = ${eventId} where id = ${id}`;
+// The Matrix event and room of the question asked about a call, which its owner's answer points
+// to; false when no such call is stored, so that no answer could ever find it
+export async function recordRequestEvent(
+	tx: Tx,
+	id: string,
+	eventId: string,
+	roomId: string
+): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set request_event_id = ${eventId}, room_id = ${roomId} where id = ${id}`;
 	return result.count === 1;
 }
 
-// The call still waiting for an answer to the question asked in this event, if any
-export async function findOpenRequest(
+// Marks the open requests of a room older than the one just asked as superseded, erasing what
+// their calls would have sent; resolves to their ids
+export async function supersedeRequests(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	newestId: string
+): Promise<string[]> {
+	const rows = await tx.sql<{ id: string }[]>`
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
+		where owner = ${owner} and room_id = ${roomId} and status = 'open' and id <> ${newestId}
+		returning id`;
+	return rows.map((row) => row.id);
+}
+
+// Closes the owner's requests left unanswered past their lifetime, erasing what their calls would
+// have sent; resolves to their ids
+export async function expireRequests(tx: Tx, owner: string, lifetimeMs: number): Promise<string[]> {
+	const rows = await tx.sql<{ id: string }[]>`
+		update pending_calls set status = 'expired', decided_at = now(), arguments = null
+		where owner = ${owner} and status = 'open'
+			and created_at <= now() - make_interval(secs => ${lifetimeMs / 1000})
+		returning id`;
+	return rows.map((row) => row.id);
+}
+
+// What an answer finds: a request still open, one closed unanswered (its lifetime over, or a
+// newer one asked in its room), or one already decided
+export type RequestState = 'open' | 'expired' | 'superseded' | 'decided';
+
+export interface FoundRequest {
+	readonly pendingCallId: string;
+	readonly state: RequestState;
+}
+
+function foundRequest(row: { id: string; status: string } | undefined): FoundRequest | null {
+	if (row === undefined) return null;
+	const state =
+		row.status === 'open' || row.status === 'expired' || row.status === 'superseded'
+			? row.status
+			: 'decided';
+	return { pendingCallId: row.id, state };
+}
+
+// The request asked in this event, whatever became of it
+export async function findRequest(
 	tx: Tx,
 	owner: string,
 	requestEventId: string
-): Promise<string | null> {
-	const rows = await tx.sql<{ id: string }[]>`
-		select id from pending_calls
-		where owner = ${owner} and request_event_id = ${requestEventId} and status = 'open'`;
-	return rows[0]?.id ?? null;
+): Promise<FoundRequest | null> {
+	const rows = await tx.sql<{ id: string; status: string }[]>`
+		select id, status from pending_calls
+		where owner = ${owner} and request_event_id = ${requestEventId}`;
+	return foundRequest(rows[0]);
+}
+
+// The latest request of a room still open to an answer in words, its owner having written nothing
+// else since it was asked. One that expired is found too, so that its answer gets the notice.
+export async function findRequestOpenToWords(
+	tx: Tx,
+	owner: string,
+	roomId: string
+): Promise<FoundRequest | null> {
+	const rows = await tx.sql<{ id: string; status: string }[]>`
+		select id, status from pending_calls
+		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
+			and words_closed_at is null
+		order by created_at desc
+		limit 1`;
+	return foundRequest(rows[0]);
+}
+
+// The owner wrote in the room: its requests are no longer open to an answer in words
+export async function closeRequestsToWords(tx: Tx, owner: string, roomId: string): Promise<void> {
+	await tx.sql`
+		update pending_calls set words_closed_at = now()
+		where owner = ${owner} and room_id = ${roomId} and words_closed_at is null`;
+}
+
+// Whether this event of the owner already answered one of their requests, as an event delivered
+// again would have
+export async function isAnswerEvent(tx: Tx, owner: string, eventId: string): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from pending_calls where owner = ${owner} and answer_event_id = ${eventId}`;
+	return rows.length > 0;
+}
+
+// The owner's answer to a call still waiting, once: a yes approves it, for its resume job to run,
+// and a no refuses it, erasing what it would have sent. From then on no other answer, nor a newer
+// request, changes it. A yes also lands on a call its resume job approved first, so that the
+// answer is recorded. False when the call was no longer waiting.
+export async function decidePendingCall(
+	tx: Tx,
+	owner: string,
+	id: string,
+	decision: 'approved' | 'refused',
+	answerEventId: string
+): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set status = ${decision}, decided_at = coalesce(decided_at, now()),
+			answer_event_id = ${answerEventId},
+			arguments = case when ${decision} = 'refused' then null else arguments end
+		where id = ${id} and owner = ${owner}
+			and (status = 'open' or (status = ${decision} and answer_event_id is null))`;
+	return result.count === 1;
+}
+
+// The event by which the owner answered a request already closed, kept so that, delivered again,
+// it is not taken for a message
+export async function recordAnswerEvent(
+	tx: Tx,
+	owner: string,
+	id: string,
+	eventId: string
+): Promise<void> {
+	await tx.sql`
+		update pending_calls set answer_event_id = ${eventId}
+		where id = ${id} and owner = ${owner} and answer_event_id is null`;
 }
 
 export interface ApprovedCall {
@@ -92,8 +205,9 @@ interface ApprovedRow {
 	origin: TurnOrigin;
 }
 
-// Approves a call still waiting, once: a second answer, or one to a call already run, finds
-// nothing. A call approved but never run, its answer's job having died, is handed out again.
+// Hands out a call its owner allowed, for its resume job to run it: approved when the answer
+// came, or still waiting if the job came first. A call approved but never run, its job having
+// died, is handed out again; one already run, or decided otherwise, is not.
 export async function approvePendingCall(
 	tx: Tx,
 	owner: string,
@@ -118,7 +232,7 @@ export async function approvePendingCall(
 			};
 }
 
-// The call ran, and the conversation holds it
+// The call ran, and the conversation holds it: what it sent is erased
 export async function markReplayed(tx: Tx, id: string): Promise<void> {
-	await tx.sql`update pending_calls set replayed_at = now() where id = ${id}`;
+	await tx.sql`update pending_calls set replayed_at = now(), arguments = null where id = ${id}`;
 }

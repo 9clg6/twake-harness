@@ -20,8 +20,8 @@ import {
 	listActiveAssistants,
 	saveDialog
 } from '../assistants/repository.js';
-import { ALLOW_REACTION, type PendingQuestion, type ResumeRequest } from '../consents/consent.js';
-import { findOpenRequest, recordRequestEvent } from '../consents/repository.js';
+import { reactionAnswer } from '../consents/answers.js';
+import type { PendingQuestion } from '../consents/consent.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
@@ -44,6 +44,7 @@ import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
+import { makeConsentRequests } from './consent-requests.js';
 import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeAppserviceStorage } from './storage.js';
@@ -425,7 +426,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
 						roomId
 					);
-					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted);
+					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted, true);
 					// An answer whose key came late counts like any other
 					if (decrypted.type === 'm.reaction') await onOwnerAnswer(roomId, decrypted.raw);
 				} catch (retryErr: unknown) {
@@ -556,54 +557,74 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	});
 
-	// The owner's answer to a question of the harness: a ✅ on it. Only an event that arrived
-	// encrypted, from the owner's own device, counts: nothing written in the owner's name on the
-	// server side, which cannot encrypt for the room, answers for them
+	// The harness's requests in the assistants' rooms, and the owners' answers to them
+	const requests = makeConsentRequests({
+		db,
+		log,
+		messages,
+		lifetimeMs: config.consent.requestLifetimeMs,
+		react: async (room, eventId, key) => {
+			await appservice
+				.getIntentForUserId(room.assistantUserId)
+				.underlyingClient.sendEvent(room.roomId, 'm.reaction', {
+					'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key }
+				});
+		}
+	});
+
+	// The owner's answer to a request of the harness: one of its buttons, or a bare ✅ or ❌, on it.
+	// Only an event that arrived encrypted, from the owner's own device, counts.
 	async function onOwnerAnswer(roomId: string, event: RoomEvent): Promise<void> {
 		if (event.type !== 'm.reaction') return;
 		const sender = event.sender ?? '';
-		// The assistants' own reactions mark the messages they answered
+		// The assistants' own reactions are the buttons, and mark the messages they answered
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		const annotation = annotationOf(event);
-		if (annotation === null || annotation.key !== ALLOW_REACTION) return;
+		if (annotation === null) return;
+		const says = reactionAnswer(annotation.key);
+		if (says === null) return;
 		const room = await assistantRoom(roomId);
 		if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
 		if (principalOfMatrixUser(config, sender) !== room.owner) {
 			log.info({ roomId, sender, owner: room.owner }, 'answer ignored: not the owner');
 			return;
 		}
-		const owner = room.owner;
-		const pendingCallId = await withPrincipal(db, { id: owner }, (tx) =>
-			findOpenRequest(tx, owner, annotation.eventId)
-		);
-		if (pendingCallId === null) return;
-		const resume: ResumeRequest = { owner, roomId, pendingCallId };
-		const queued = await enqueueJob(db, {
-			kind: 'resume',
-			payload: resume,
-			dedupKey: `resume:${pendingCallId}`,
-			groupKey: `turn:${owner}`
-		});
-		log.info(
-			{ roomId, owner, pendingCallId, answer: 'yes', via: 'reaction', queued },
-			'owner answered'
+		await requests.reacted(
+			{ roomId, owner: room.owner, assistantUserId: room.userId },
+			annotation.eventId,
+			says,
+			event.event_id ?? `${roomId}:${Date.now()}`
 		);
 	}
 
+	// The messages that reached an assistant encrypted, between the SDK's decrypted event and the
+	// same event handed on as a room message: only those may answer a question
+	const decryptedMessages = new Set<string>();
+
 	appservice.on(
 		'room.decrypted_event',
-		guard('owner answer', onOwnerAnswer, (roomId: string, event: RoomEvent) => ({
-			roomId,
-			eventId: event.event_id,
-			sender: event.sender
-		}))
+		guard(
+			'owner answer',
+			async (roomId: string, event: RoomEvent) => {
+				if (event.type === 'm.room.message' && event.event_id !== undefined) {
+					decryptedMessages.add(event.event_id);
+				}
+				await onOwnerAnswer(roomId, event);
+			},
+			(roomId: string, event: RoomEvent) => ({
+				roomId,
+				eventId: event.event_id,
+				sender: event.sender
+			})
+		)
 	);
 
 	appservice.on(
 		'room.message',
 		guard(
 			'room message',
-			onRoomMessage,
+			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) =>
+				onRoomMessage(roomId, event, decryptedMessages.delete((event as RoomEvent).event_id ?? '')),
 			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) => ({
 				roomId,
 				eventId: (event as RoomEvent).event_id,
@@ -614,7 +635,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	async function onRoomMessage(
 		roomId: string,
-		event: MatrixEvent<unknown> | RoomEvent
+		event: MatrixEvent<unknown> | RoomEvent,
+		encrypted: boolean
 	): Promise<void> {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
@@ -624,6 +646,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (text === null) return;
 		const room = await assistantRoom(roomId);
 		if (room !== null) {
+			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			let owner: string;
 			let message = text;
 			if (room.owner === ORGANIZATION_PRINCIPAL) {
@@ -642,8 +665,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					return;
 				}
 				owner = principal;
+				const requestRoom = { roomId, owner, assistantUserId: room.userId };
+				if (encrypted && (await requests.wrote(requestRoom, eventId, text))) return;
 			}
-			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			// The turns of one owner run one after the other, in the order they were sent
 			const queued = await enqueueJob(db, {
 				kind: 'turn',
@@ -737,20 +761,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			const request = job.payload.request;
 			if (request !== undefined) {
-				const recorded = await withPrincipal(db, { id: request.owner }, (tx) =>
-					recordRequestEvent(tx, request.pendingCallId, sent)
-				);
-				if (recorded) {
-					log.info(
-						{ roomId: job.payload.roomId, pendingCallId: request.pendingCallId },
-						'question sent'
-					);
-				} else {
-					log.warn(
-						{ roomId: job.payload.roomId, pendingCallId: request.pendingCallId },
-						'question sent for a call that is no longer stored'
-					);
-				}
+				const requestRoom = {
+					roomId: job.payload.roomId,
+					owner: request.owner,
+					assistantUserId: job.payload.asUserId
+				};
+				await requests.asked(requestRoom, request.pendingCallId, sent);
 			}
 			if (turn !== null) {
 				feedback

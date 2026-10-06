@@ -95,7 +95,7 @@ describe('my assistant asks before it first uses an application', () => {
 			t.startsWith('This is the first time')
 		);
 		expect(request).toBe(
-			'This is the first time I need to read your data in mail. React with ✅ to this message to allow it.'
+			'This is the first time I need to read your data in mail. Do you allow it? Answer with the buttons below, or reply yes or no.'
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 		// The wait is logged with what it is about, never with what the call would have sent
@@ -158,7 +158,7 @@ describe('my assistant asks before it first uses an application', () => {
 			t.includes('your data in calendar')
 		);
 		expect(request).toBe(
-			'This is the first time I need to read your data in calendar. React with ✅ to this message to allow it.'
+			'This is the first time I need to read your data in calendar. Do you allow it? Answer with the buttons below, or reply yes or no.'
 		);
 		// The harness read the invitation, then stopped at the calendar: no slot read, no model
 		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-inv']);

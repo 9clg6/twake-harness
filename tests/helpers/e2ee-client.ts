@@ -56,7 +56,27 @@ export interface E2eeClient {
 		predicate: (text: string) => boolean,
 		timeoutMs?: number
 	): Promise<string>;
+	// Resolves to the keys of a sender's reactions to an event, the labels Twake Chat shows under
+	// it, once there are `count` of them or the time is up
+	waitForReactions(
+		roomId: string,
+		eventId: string,
+		sender: string,
+		count: number,
+		timeoutMs?: number
+	): Promise<string[]>;
 	stop(): Promise<void>;
+}
+
+// The event a reaction annotates, and its key
+function annotationOf(
+	content: Record<string, unknown>
+): { readonly eventId: string; readonly key: string } | null {
+	const relation: unknown = content['m.relates_to'];
+	if (typeof relation !== 'object' || relation === null) return null;
+	const eventId: unknown = Reflect.get(relation, 'event_id');
+	const key: unknown = Reflect.get(relation, 'key');
+	return typeof eventId === 'string' && typeof key === 'string' ? { eventId, key } : null;
 }
 
 // A user's own Matrix client with end-to-end encryption, as Twake Chat would be, talking to
@@ -191,6 +211,18 @@ export async function startE2eeClient(
 					` (delivered from them: ${delivered || 'nothing'})` +
 					(undecryptable.length > 0 ? ` (undecryptable: ${undecryptable})` : '')
 			);
+		},
+		waitForReactions: async (roomId, eventId, sender, count, timeoutMs = 30_000) => {
+			const keys = (): string[] =>
+				events
+					.filter((e) => e.roomId === roomId && e.type === 'm.reaction' && e.sender === sender)
+					.map((e) => annotationOf(e.content))
+					.filter((annotation) => annotation?.eventId === eventId)
+					.map((annotation) => annotation?.key ?? '');
+			for (let i = 0; i < timeoutMs / 250 && keys().length < count; i += 1) {
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+			return keys();
 		},
 		stop: async () => {
 			client.stop();

@@ -47,7 +47,17 @@ export interface Messages {
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
-		firstRead(domain: string, allow: string): string;
+		firstRead(domain: string): string;
+		// The two buttons under a question: the assistant's own reactions, which a tap repeats
+		readonly buttons: { readonly yes: string; readonly no: string };
+		// The words that answer a question, alone in a message
+		readonly yes: string;
+		readonly no: string;
+		// What the harness says once the owner refused a call
+		readonly refused: string;
+		// Answers to a request no longer open, which run nothing
+		readonly expired: string;
+		readonly superseded: string;
 	};
 	orgGreeting(name: string): string;
 	// What the assistant is told, as its owner's message, when a dispatcher posts an event: the
@@ -115,8 +125,14 @@ const ENGLISH: Messages = {
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.'
 	},
 	consent: {
-		firstRead: (domain, allow) =>
-			`This is the first time I need to read your data in ${domain}. React with ${allow} to this message to allow it.`
+		firstRead: (domain) =>
+			`This is the first time I need to read your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`,
+		buttons: { yes: '✅ YES', no: '❌ NO' },
+		yes: 'yes',
+		no: 'no',
+		refused: 'All right, I will not do it.',
+		expired: 'This request has expired, so I did nothing. Ask me again if you still need it.',
+		superseded: 'A newer request replaced this one, so I did nothing. Answer the latest one.'
 	},
 	orgGreeting: (name) =>
 		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
@@ -193,8 +209,16 @@ const FRENCH: Messages = {
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant."
 	},
 	consent: {
-		firstRead: (domain, allow) =>
-			`C'est la première fois que j'ai besoin de lire tes données dans ${domain}. Réagis ${allow} à ce message pour me l'autoriser.`
+		firstRead: (domain) =>
+			`C'est la première fois que j'ai besoin de lire tes données dans ${domain}. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.`,
+		buttons: { yes: '✅ OUI', no: '❌ NON' },
+		yes: 'oui',
+		no: 'non',
+		refused: "D'accord, je ne le fais pas.",
+		expired:
+			"Cette demande a expiré, je n'ai donc rien fait. Redemande-moi si tu en as encore besoin.",
+		superseded:
+			"Une demande plus récente a remplacé celle-ci, je n'ai donc rien fait. Réponds à la dernière."
 	},
 	orgGreeting: (name) =>
 		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,

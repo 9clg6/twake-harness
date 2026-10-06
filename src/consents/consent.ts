@@ -6,8 +6,9 @@ export type WaitReason = 'consent';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 
-// The reaction by which an owner allows a call the harness asked them about
+// The reactions by which an owner allows, or refuses, a call the harness asked them about
 export const ALLOW_REACTION = '✅';
+export const REFUSE_REACTION = '❌';
 
 // A question the harness sent an owner about a call it froze
 export interface PendingQuestion {

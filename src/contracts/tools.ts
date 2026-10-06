@@ -1,7 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
-import { ALLOW_REACTION } from '../consents/consent.js';
 import { hasConsent, insertPendingCall } from '../consents/repository.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
@@ -118,7 +117,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 						domain: contract.domain,
 						level: contract.level
 					},
-					final: messages.consent.firstRead(contract.domain, ALLOW_REACTION),
+					final: messages.consent.firstRead(contract.domain),
 					pendingCallId
 				};
 			}
