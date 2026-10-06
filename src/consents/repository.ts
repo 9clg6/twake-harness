@@ -1,4 +1,4 @@
-import { readJsonColumn, type Tx } from '../db/client.js';
+import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
 import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
 
@@ -65,12 +65,12 @@ export async function recordRequestEvent(
 	return result.count === 1;
 }
 
-// What a waiting call is about: its application, its level and the reasons it waits for, as the
-// harness stored them. Its metrics count it by these, never by its owner nor what it would send.
+// What a waiting call is about: its application, its level and the reasons it waits for. Its
+// metrics count it by these, never by its owner nor what it would send.
 export interface CallSubject {
 	readonly domain: string;
 	readonly level: ConsentLevel;
-	readonly reasons: readonly string[];
+	readonly reasons: readonly WaitReason[];
 }
 
 interface SubjectRow {
@@ -79,13 +79,21 @@ interface SubjectRow {
 	reasons: unknown;
 }
 
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((item) => typeof item === 'string');
+// Every reason a call may wait for, so that a reason read back is known for one: a reason added
+// to WaitReason and missing here fails the build
+const WAIT_REASONS: Readonly<Record<WaitReason, true>> = { consent: true };
+
+function isWaitReason(value: string): value is WaitReason {
+	return Object.hasOwn(WAIT_REASONS, value);
 }
 
 function subjectOf(row: SubjectRow): CallSubject {
 	const reasons = readJsonColumn(row.reasons);
-	return { domain: row.domain, level: row.level, reasons: isStringArray(reasons) ? reasons : [] };
+	return {
+		domain: row.domain,
+		level: row.level,
+		reasons: isStringArray(reasons) ? reasons.filter(isWaitReason) : []
+	};
 }
 
 // A request closed unanswered, and what its call was about
