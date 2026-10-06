@@ -47,6 +47,17 @@ config:
   assistantLocale: ''
   # The IANA time zone the assistants read the present in, such as Europe/Paris; empty means UTC
   assistantTimezone: ''
+  # Admission limits; each empty value keeps the harness default
+  # Turns in flight on one replica; default 32
+  admissionMaxInflight: ''
+  # Turns a user may wait for on a full replica; default 2, 0 for no queue
+  admissionUserQueue: ''
+  # Turns one user may start per minute; default 10
+  admissionUserPerMinute: ''
+  # Tokens one user may spend per day; default 200000
+  admissionUserDailyTokens: ''
+  # Turns the whole harness may start per minute; default 400
+  admissionGlobalPerMinute: ''
   # The organization agent, a bot of the harness answering the organization's members, named by
   # their Matrix identifiers (comma separated); its localpart lives in the assistants' namespace
   orgAgentEnabled: false
