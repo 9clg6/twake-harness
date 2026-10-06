@@ -12,8 +12,20 @@ import type { MatrixUser } from './synapse.js';
 
 export interface DecryptedMessage {
 	readonly roomId: string;
+	readonly eventId: string;
 	readonly sender: string;
 	readonly body: string;
+	readonly content: Record<string, unknown>;
+}
+
+// Any event of a joined room as the client reads it, decrypted when it could be
+export interface ReadEvent {
+	readonly roomId: string;
+	readonly type: string;
+	readonly sender: string;
+	readonly eventId: string;
+	readonly content: Record<string, unknown>;
+	readonly redacts: string | null;
 }
 
 export interface DecryptionFailure {
@@ -27,12 +39,14 @@ export interface E2eeClient {
 	readonly userId: string;
 	readonly client: MatrixClient;
 	readonly messages: DecryptedMessage[];
+	readonly events: ReadEvent[];
 	// What the client could not read, for diagnosis
 	readonly failures: DecryptionFailure[];
 	joinRoom(roomId: string): Promise<void>;
 	// Opens an encrypted direct message with someone, as Twake Chat does
 	createDirectRoom(userId: string): Promise<string>;
-	sendText(roomId: string, text: string): Promise<void>;
+	// Resolves to the event id of the message sent
+	sendText(roomId: string, text: string): Promise<string>;
 	waitForMessage(
 		roomId: string,
 		sender: string,
@@ -56,17 +70,39 @@ export async function startE2eeClient(
 		new RustSdkCryptoStorageProvider(join(dir, 'crypto'), StoreType.Sqlite)
 	);
 	const messages: DecryptedMessage[] = [];
+	const events: ReadEvent[] = [];
 	const failures: DecryptionFailure[] = [];
 	// Every event the sync brings, encrypted or not, to tell a dropped event from one never delivered
 	const seen: { roomId: string; type: string; sender: string; eventId: string }[] = [];
 	client.on(
 		'room.event',
-		(roomId: string, event: { type?: string; sender?: string; event_id?: string }) => {
+		(
+			roomId: string,
+			event: {
+				type?: string;
+				sender?: string;
+				event_id?: string;
+				content?: Record<string, unknown>;
+				redacts?: string;
+			}
+		) => {
 			seen.push({
 				roomId,
 				type: event.type ?? '',
 				sender: event.sender ?? '',
 				eventId: event.event_id ?? ''
+			});
+			const content = event.content ?? {};
+			// Room versions up to 10 put the redacted event at the top, version 11 in the content
+			const redacts =
+				event.redacts ?? (typeof content['redacts'] === 'string' ? content['redacts'] : null);
+			events.push({
+				roomId,
+				type: event.type ?? '',
+				sender: event.sender ?? '',
+				eventId: event.event_id ?? '',
+				content,
+				redacts
 			});
 		}
 	);
@@ -83,9 +119,19 @@ export async function startE2eeClient(
 	);
 	client.on(
 		'room.message',
-		(roomId: string, event: { sender: string; content: { body?: string } }) => {
-			if (typeof event.content.body === 'string') {
-				messages.push({ roomId, sender: event.sender, body: event.content.body });
+		(
+			roomId: string,
+			event: { sender: string; event_id?: string; content: Record<string, unknown> }
+		) => {
+			const body = event.content['body'];
+			if (typeof body === 'string') {
+				messages.push({
+					roomId,
+					eventId: event.event_id ?? '',
+					sender: event.sender,
+					body,
+					content: event.content
+				});
 			}
 		}
 	);
@@ -94,6 +140,7 @@ export async function startE2eeClient(
 		userId: user.userId,
 		client,
 		messages,
+		events,
 		failures,
 		joinRoom: async (roomId) => {
 			await client.joinRoom(roomId);
@@ -111,9 +158,7 @@ export async function startE2eeClient(
 					}
 				]
 			}),
-		sendText: async (roomId, text) => {
-			await client.sendText(roomId, text);
-		},
+		sendText: (roomId, text) => client.sendText(roomId, text),
 		waitForMessage: async (roomId, sender, predicate, timeoutMs = 30_000) => {
 			for (let i = 0; i < timeoutMs / 250; i += 1) {
 				const found = messages.find(

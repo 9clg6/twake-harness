@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
+import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
@@ -43,6 +43,14 @@ describe('talking to my assistant in Matrix', () => {
 		return client.messages
 			.filter((m) => m.roomId === room && m.sender === assistantId)
 			.map((m) => m.body);
+	}
+
+	function lastAnswer(): DecryptedMessage {
+		const last = client.messages
+			.filter((m) => m.roomId === room && m.sender === assistantId)
+			.at(-1);
+		if (last === undefined) throw new Error('the assistant has not answered yet');
+		return last;
 	}
 
 	async function answersAfter(count: number): Promise<string[]> {
@@ -134,5 +142,113 @@ describe('talking to my assistant in Matrix', () => {
 		await client.sendText(room, 'break');
 		const all = await answersAfter(before);
 		expect(all.at(-1)).toMatch(/try again/i);
+	});
+
+	it('sends its answers as rich text, the markdown kept as the plain body', async () => {
+		const markdown =
+			'Some **bold** words\n\n- one\n- two\n\nUse /rename <name>, see [the docs](https://docs.example.org) or https://example.org';
+		h.apisix.llm.script = () => ({ content: markdown });
+		const before = answers().length;
+		await client.sendText(room, 'format please');
+		await answersAfter(before);
+		const answer = lastAnswer();
+		expect(answer.body).toBe(markdown);
+		expect(answer.content['format']).toBe('org.matrix.custom.html');
+		const html = String(answer.content['formatted_body']);
+		expect(html).toContain('<strong>bold</strong>');
+		expect(html).toMatch(/<ul>\s*<li>one<\/li>\s*<li>two<\/li>\s*<\/ul>/);
+		expect(html).toContain('<a href="https://docs.example.org">the docs</a>');
+		expect(html).toContain('<a href="https://example.org">https://example.org</a>');
+		// A placeholder in angle brackets stays text: it is not taken for a tag and dropped
+		expect(html).toContain('/rename &lt;name&gt;');
+	});
+
+	it('keeps only the HTML a Matrix client may render, whatever the model writes', async () => {
+		h.apisix.llm.script = () => ({
+			content:
+				'Hi <script>alert(1)</script><img src="https://tracker.example/p.png"> <a href="https://ok.example" onclick="steal()">ok</a> <b>kept</b>'
+		});
+		const before = answers().length;
+		await client.sendText(room, 'html please');
+		await answersAfter(before);
+		const html = String(lastAnswer().content['formatted_body']);
+		expect(html).not.toMatch(/<script/i);
+		expect(html).not.toContain('alert(1)');
+		expect(html).not.toMatch(/<img/i);
+		expect(html).not.toContain('tracker.example');
+		expect(html).not.toContain('onclick');
+		expect(html).toContain('<a href="https://ok.example">ok</a>');
+		expect(html).toContain('<b>kept</b>');
+	});
+
+	interface Reaction {
+		readonly eventId: string;
+		readonly key: string;
+	}
+
+	function reactionsOn(eventId: string): Reaction[] {
+		return client.events
+			.filter((e) => e.roomId === room && e.type === 'm.reaction' && e.sender === assistantId)
+			.flatMap((e) => {
+				const relation = e.content['m.relates_to'] as Record<string, unknown> | undefined;
+				return relation?.['rel_type'] === 'm.annotation' && relation['event_id'] === eventId
+					? [{ eventId: e.eventId, key: String(relation['key']) }]
+					: [];
+			});
+	}
+
+	function isRedacted(eventId: string): boolean {
+		return client.events.some(
+			(e) => e.roomId === room && e.type === 'm.room.redaction' && e.redacts === eventId
+		);
+	}
+
+	// Typing notifications are ephemeral: the SDK client drops them, a sync without a token shows
+	// who is typing in the room right now
+	let syncs = 0;
+	async function assistantIsTyping(): Promise<boolean> {
+		// Emptier filters (no state, no account data) make Synapse leave the room out altogether
+		const filter = { room: { rooms: [room], timeline: { limit: 0 } } };
+		const sync = await h.synapse.request(
+			alice,
+			'GET',
+			// Synapse caches a sync answer under its parameters, timeout included; a sync without a
+			// token answers at once whatever the timeout, so a new one per call reads the present state
+			`/_matrix/client/v3/sync?timeout=${(syncs += 1)}&filter=${encodeURIComponent(JSON.stringify(filter))}`
+		);
+		const rooms = (sync.body['rooms'] as { join?: Record<string, unknown> } | undefined)?.join;
+		const joined = rooms?.[room] as { ephemeral?: { events?: unknown[] } } | undefined;
+		return (joined?.ephemeral?.events ?? []).some((event) => {
+			const typing = event as { type?: string; content?: { user_ids?: string[] } };
+			return typing.type === 'm.typing' && (typing.content?.user_ids ?? []).includes(assistantId);
+		});
+	}
+
+	async function eventually<T>(read: () => T | Promise<T>, timeoutMs = 15_000): Promise<T> {
+		for (let i = 0; i < timeoutMs / 200; i += 1) {
+			const value = await read();
+			if (value !== undefined && value !== false) return value;
+			await sleep(200);
+		}
+		return read();
+	}
+
+	it('shows it is working on a message, then marks the message answered', async () => {
+		h.apisix.llm.script = (request: ChatRequest) => ({
+			content: `slow echo: ${request.messages.at(-1)?.content ?? ''}`,
+			delayMs: 3000
+		});
+		const before = answers().length;
+		const asked = await client.sendText(room, 'take your time');
+		const typingWhileWorking = eventually(() => assistantIsTyping(), 10_000);
+		const eyes = await eventually(() => reactionsOn(asked).find((r) => r.key === '👀'));
+		expect(eyes).toBeDefined();
+		expect(await typingWhileWorking).toBe(true);
+		await answersAfter(before);
+		expect(lastAnswer().body).toBe('slow echo: take your time');
+		expect(await eventually(() => eyes !== undefined && isRedacted(eyes.eventId))).toBe(true);
+		const check = await eventually(() => reactionsOn(asked).find((r) => r.key === '✅'));
+		expect(check).toBeDefined();
+		expect(await eventually(async () => !(await assistantIsTyping()), 10_000)).toBe(true);
 	});
 });
