@@ -1,12 +1,11 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { wordAnswer, type Answer, type AnswerKind } from '../consents/answers.js';
-import type { ResumeRequest } from '../consents/consent.js';
+import { lookUpAnswerable, refusalNoticeJob, resumeJob } from '../consents/answering.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import {
 	closeRequestsToWords,
 	decidePendingCall,
-	expireRequests,
 	findRequest,
 	findRequestOpenToWords,
 	isAnswerEvent,
@@ -69,19 +68,8 @@ export interface ConsentRequests {
 export function makeConsentRequests(options: ConsentRequestsOptions): ConsentRequests {
 	const { db, log, fetchMessages, lifetimeMs, metrics } = options;
 
-	// Looks a request up once the owner's requests left unanswered past their lifetime expired, so
-	// that a late answer finds its request expired even between two passes of the worker role
-	async function lookUp<T>(owner: string, find: (tx: Tx) => Promise<T>): Promise<T> {
-		const { expired, found } = await withPrincipal(db, { id: owner }, async (tx) => ({
-			expired: await expireRequests(tx, owner, lifetimeMs),
-			found: await find(tx)
-		}));
-		for (const request of expired) {
-			log.info({ owner, pendingCallId: request.pendingCallId }, 'request expired');
-			metrics.expired(request);
-		}
-		return found;
-	}
+	const lookUp = <T>(owner: string, find: (tx: Tx) => Promise<T>): Promise<T> =>
+		lookUpAnswerable({ db, log, metrics, lifetimeMs }, owner, find);
 
 	// A yes allows the call and a no refuses it. An answer to a request that expired, or that a
 	// newer one superseded, runs nothing, and the owner is told why, once: a second tap on it
@@ -133,13 +121,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		if (answer.says === 'yes') {
 			// Queued first: should the role stop before the approval, the same answer delivered
 			// again finds the call still open, and its job queued once
-			const resume: ResumeRequest = { owner, roomId, pendingCallId, through: 'chat' };
-			await enqueueJob(db, {
-				kind: 'resume',
-				payload: resume,
-				dedupKey: `resume:${pendingCallId}`,
-				groupKey: `turn:${owner}`
-			});
+			await enqueueJob(db, resumeJob({ owner, roomId, pendingCallId, through: 'chat' }));
 		}
 		const decided = await withPrincipal(db, { id: owner }, (tx) =>
 			decidePendingCall(
@@ -157,12 +139,10 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		if (decided) metrics.answered(request, answer.says, answer.kind, 'decided');
 		if (answer.says === 'no' && decided) {
 			const messages = await fetchMessages(owner);
-			await enqueueJob(db, {
-				kind: 'send',
-				payload: { asUserId: room.assistantUserId, roomId, text: messages.consent.refused },
-				dedupKey: `refused:${pendingCallId}`,
-				groupKey: `send:${roomId}`
-			});
+			await enqueueJob(
+				db,
+				refusalNoticeJob(room.assistantUserId, roomId, pendingCallId, messages.consent.refused)
+			);
 		}
 	}
 

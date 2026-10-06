@@ -18,11 +18,11 @@ import { makeAssistantService, type AssistantService } from './assistants/servic
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import type { Answer } from './consents/answers.js';
+import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
 import { isBuiltInConsent, isConsentLevel, type ResumeRequest } from './consents/consent.js';
 import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
 import {
 	approvePendingCall,
-	expireRequests,
 	findPendingCall,
 	grantConsent,
 	listConsents,
@@ -152,20 +152,18 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 	// Reads the owner's pending calls once their requests left unanswered past their lifetime
 	// expired, as an answer in the chat finds them
-	async function withOverdueExpired<T>(
+	function withOverdueExpired<T>(
 		principal: Principal,
 		log: FastifyBaseLogger,
 		read: (tx: Tx) => Promise<T>
 	): Promise<T> {
-		const { expired, found } = await withPrincipal(db, principal, async (tx) => ({
-			expired: await expireRequests(tx, principal.id, config.consent.requestLifetimeMs),
-			found: await read(tx)
-		}));
-		for (const request of expired) {
-			log.info({ owner: principal.id, pendingCallId: request.pendingCallId }, 'request expired');
-			consentMetrics.expired(request);
-		}
-		return found;
+		const lookup = {
+			db,
+			log,
+			metrics: consentMetrics,
+			lifetimeMs: config.consent.requestLifetimeMs
+		};
+		return lookUpAnswerable(lookup, principal.id, read);
 	}
 
 	// An answer through the API, logged and counted as answers in the chat are: one that decided
@@ -196,16 +194,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId !== roomId) {
 			return null;
 		}
-		return {
-			kind: 'send',
-			payload: {
-				asUserId: assistant.userId,
-				roomId,
-				text: getMessages(localeOf(assistant, config.locale)).consent.refused
-			},
-			dedupKey: `refused:${pendingCallId}`,
-			groupKey: `send:${roomId}`
-		};
+		const text = getMessages(localeOf(assistant, config.locale)).consent.refused;
+		return refusalNoticeJob(assistant.userId, roomId, pendingCallId, text);
 	}
 
 	// One of the owner's pending calls as their clients read it
@@ -739,12 +729,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 						};
 						const approved = await withPrincipal(db, principal, async (tx) => {
 							if ((await approvePendingCall(tx, principal.id, id, true)) === null) return false;
-							await enqueueJob(tx, {
-								kind: 'resume',
-								payload: resume,
-								dedupKey: `resume:${id}`,
-								groupKey: `turn:${principal.id}`
-							});
+							await enqueueJob(tx, resumeJob(resume));
 							return true;
 						});
 						if (!approved) return reply.code(409).send(pendingCallClosed('decided'));
