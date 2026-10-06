@@ -402,7 +402,8 @@ export const skillsProposeTool: Tool = {
 		}
 	},
 	argumentKeys: ['name', 'description', 'content'],
-	requiredAction: 'skills.read_own',
+	// A proposal keeps what the assistant learned for later turns, as its memory does
+	requiredAction: WRITE_OWN_MEMORY,
 	run: async (args, context) => {
 		const parsed = skillProposeArgs.safeParse(args);
 		if (!parsed.success) return { result: { error: 'name, description and content are required' } };

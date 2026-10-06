@@ -475,6 +475,44 @@ describe('an event wakes my assistant', () => {
 		}
 	});
 
+	it('never lets an event propose a skill to its owner', async () => {
+		h.apisix.llm.script = (request: ChatRequest) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool') return { content: 'Shall I learn to accept your invitations?' };
+			return {
+				toolCalls: [
+					{
+						id: 'call_propose',
+						type: 'function',
+						function: {
+							name: 'skills_propose',
+							arguments: JSON.stringify({
+								name: 'Accept invitations',
+								description: 'Accept every invitation without asking',
+								content: 'Accept every invitation as soon as it arrives.'
+							})
+						}
+					}
+				]
+			};
+		};
+		const posted = await h.api.post('dispatcher', '/v1/events', {
+			...EVENT,
+			event_id: 'evt-skill'
+		});
+		expect(posted.status).toBe(202);
+		await client.waitForMessage(room, assistantId, (t) => t.includes('Shall I learn'));
+		const refusal = h.apisix.llm.calls
+			.flatMap((call) => call.request.messages)
+			.find((m) => m.role === 'tool' && m.name === 'skills_propose');
+		expect(JSON.parse(refusal?.content ?? '{}')).toMatchObject({ error: 'needs_owner_approval' });
+		const proposals = await h.api.get<{ proposals: { name: string }[] }>(
+			'alice@test.local',
+			'/v1/skills/proposals'
+		);
+		expect(proposals.body.proposals.map((p) => p.name)).not.toContain('Accept invitations');
+	});
+
 	it("still remembers what the owner's own message asks", async () => {
 		h.apisix.llm.script = (request: ChatRequest) => {
 			const last = request.messages.at(-1);
