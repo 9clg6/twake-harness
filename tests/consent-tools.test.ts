@@ -6,7 +6,7 @@ import { buildApp } from '../src/app.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
-import { readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
+import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent } from './helpers/consents.js';
 import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix.js';
 
@@ -28,15 +28,9 @@ const CATALOG = {
 	}
 };
 
-function call(name: string, args: unknown): ToolCall[] {
-	return [
-		{ id: `call_${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
-	];
-}
-
 // A literal model: it calls the tool given for each request it knows, and tells the owner what
 // the tool returned
-function modelFor(
+function modelTelling(
 	requests: Record<string, { readonly tool: string; readonly args: unknown }>
 ): (request: ChatRequest) => ScriptedReply {
 	return (request) => {
@@ -85,7 +79,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 	}
 
 	it('tells me what it may access: what I allowed, and its own feed of events', async () => {
-		r.h.apisix.llm.script = modelFor({
+		r.h.apisix.llm.script = modelTelling({
 			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } },
 			'What may you access?': { tool: 'consents_list', args: {} }
 		});
@@ -99,7 +93,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 	});
 
 	it('stops using an application when I tell it to, and asks me again the next time', async () => {
-		r.h.apisix.llm.script = modelFor({
+		r.h.apisix.llm.script = modelTelling({
 			'Find my plan in my drive': { tool: 'search_drive', args: { q: 'plan' } },
 			'Stop using my drive': { tool: 'consents_withdraw', args: { domain: 'drive' } }
 		});
@@ -120,7 +114,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 	});
 
 	it('stops only writing in an application when I tell it to: it asks before its next write there, and keeps reading', async () => {
-		r.h.apisix.llm.script = modelFor({
+		r.h.apisix.llm.script = modelTelling({
 			'What is in my calendar?': { tool: 'search_calendar', args: { q: 'today' } },
 			'Add the budget review to my calendar': {
 				tool: 'add_calendar_event',
@@ -167,7 +161,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 			type: 'function',
 			function: { name: String(name), arguments: JSON.stringify(args) }
 		}));
-		const fallback = modelFor({
+		const fallback = modelTelling({
 			'What are my tasks?': { tool: 'search_tasks', args: { q: 'today' } }
 		});
 		r.h.apisix.llm.script = (request) => {
@@ -205,7 +199,9 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 	});
 
 	it('keeps a turn an event started from withdrawing what I allowed', async () => {
-		const owner = modelFor({ 'Search my notes': { tool: 'search_notes', args: { q: 'budget' } } });
+		const owner = modelTelling({
+			'Search my notes': { tool: 'search_notes', args: { q: 'budget' } }
+		});
 		// The event's text, written by someone else, tells the model to cut my notes off
 		r.h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
@@ -248,7 +244,7 @@ describe('a withdrawal holds at once on every replica', () => {
 		for (const app of [...h.apps, other]) expect(await app.agent.contracts.load()).toBe(1);
 		one = makeClient({ app: h.app, apps: [h.app], issuer: h.issuer });
 		two = makeClient({ app: other, apps: [other], issuer: h.issuer });
-		h.apisix.llm.script = modelFor({
+		h.apisix.llm.script = modelTelling({
 			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } }
 		});
 		h.apisix.contracts.handler = (c) => ({ status: 200, body: { found: c.path } });
