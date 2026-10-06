@@ -82,6 +82,7 @@ export async function startTestHarness(options: StartOptions = {}): Promise<Test
 		APISIX_BASE_URL: apisix.baseUrl,
 		APISIX_CONSUMER_KEY: apisix.consumerKey,
 		LLM_MODEL: 'qwen3.8',
+		CONTRACTS_REFRESH_MS: '0',
 		LOG_LEVEL: 'info'
 	});
 	const db = makeDb(config.databaseUrl);

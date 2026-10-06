@@ -40,11 +40,18 @@ export interface ToolRegistry {
 	find(name: string): Tool | null;
 }
 
-export function makeToolRegistry(tools: readonly Tool[]): ToolRegistry {
+// Static tools, plus a source of tools that may change over time, such as the contract catalog
+export function makeToolRegistry(
+	tools: readonly Tool[],
+	extra: () => readonly Tool[] = () => []
+): ToolRegistry {
 	const byName = new Map(tools.map((tool) => [tool.definition.function.name, tool]));
 	return {
-		definitions: tools.map((tool) => tool.definition),
-		find: (name) => byName.get(name) ?? null
+		get definitions() {
+			return [...tools, ...extra()].map((tool) => tool.definition);
+		},
+		find: (name) =>
+			byName.get(name) ?? extra().find((tool) => tool.definition.function.name === name) ?? null
 	};
 }
 

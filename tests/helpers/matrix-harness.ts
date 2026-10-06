@@ -1,6 +1,5 @@
 import { PassThrough } from 'node:stream';
 
-import { makeAgentService } from '../../src/agent/service.js';
 import { startTurnWorker } from '../../src/agent/turn-worker.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
@@ -57,9 +56,9 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
-	const agent = makeAgentService({ config, db });
-	const app = await buildApp({ config, db, logStream, agent });
+	const app = await buildApp({ config, db, logStream });
 	await app.ready();
+	const agent = app.agent;
 	const worker = startTurnWorker({ db, agent, log: app.log, pollIntervalMs: 100 });
 	const role = await startMatrixRole({
 		config,

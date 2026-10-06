@@ -21,6 +21,10 @@ declare module 'fastify' {
 	interface FastifyRequest {
 		principal: Principal | null;
 	}
+	interface FastifyInstance {
+		// The agent behind the routes, shared with the turn worker of the same process
+		agent: AgentService;
+	}
 }
 
 export interface AppOptions {
@@ -72,10 +76,6 @@ function principalOf(request: FastifyRequest): Principal {
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	const { config, db } = options;
 	const authenticate = options.authenticator ?? makeJwtAuthenticator(config.auth);
-	const agent =
-		options.agent ??
-		makeAgentService({ config, db, ...(options.llm === undefined ? {} : { llm: options.llm }) });
-	const tools = agent.tools;
 
 	async function loadPrincipal(principal: Principal): Promise<PrincipalRecord> {
 		return withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
@@ -88,6 +88,17 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		genReqId: requestIdOf,
 		requestIdHeader: false
 	});
+
+	const agent =
+		options.agent ??
+		makeAgentService({
+			config,
+			db,
+			log: app.log,
+			...(options.llm === undefined ? {} : { llm: options.llm })
+		});
+	app.decorate('agent', agent);
+	const tools = agent.tools;
 
 	const assistants =
 		options.assistants ??

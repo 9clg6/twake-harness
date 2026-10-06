@@ -52,3 +52,7 @@ One image, one role per deployment, chosen by `HARNESS_ROLE`:
 - `matrix` is the Matrix application service: it receives what Synapse pushes, answers as the creator user and the assistants, and calls Synapse through the `matrix` route of APISIX. `npm run matrix:registration` prints the registration file Synapse loads, given `MATRIX_APPSERVICE_URL`, the APISIX route Synapse pushes to.
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
+
+### Contracts as tools
+
+The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged and posted to the audit route. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.
