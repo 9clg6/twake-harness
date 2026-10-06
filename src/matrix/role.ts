@@ -1,16 +1,23 @@
+import { mkdirSync } from 'node:fs';
 import {
 	Appservice,
 	getRequestFn,
 	LogService,
+	RustSdkAppserviceCryptoStorageProvider,
 	setRequestFn,
 	type MatrixEvent
 } from 'matrix-bot-sdk';
+import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { FastifyBaseLogger } from 'fastify';
 
-import { findDialog, saveDialog } from '../assistants/repository.js';
+import { findDialog, listActiveAssistantUserIds, saveDialog } from '../assistants/repository.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
-import { makeAssistantService, type AssistantService } from '../assistants/service.js';
+import {
+	makeAssistantService,
+	ownerMatrixId,
+	type AssistantService
+} from '../assistants/service.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { makeMatrixAdmin } from './admin.js';
@@ -88,17 +95,32 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	LogService.setLogger({
 		trace: () => undefined,
 		debug: () => undefined,
-		info: (module: string, ...rest: unknown[]) => log.debug({ module, rest }, 'matrix sdk'),
+		info: (module: string, ...rest: unknown[]) =>
+			process.env['HARNESS_SDK_LOGS'] === '1'
+				? log.info({ module, rest }, 'matrix sdk')
+				: log.debug({ module, rest }, 'matrix sdk'),
 		warn: (module: string, ...rest: unknown[]) => log.warn({ module, rest }, 'matrix sdk'),
 		error: (module: string, ...rest: unknown[]) => log.error({ module, rest }, 'matrix sdk')
 	});
 	const homeserverUrl = new URL('matrix', ensureTrailingSlash(config.apisix.baseUrl)).href;
-	// Every call of the SDK goes to APISIX, which admits the harness by its consumer key
+	// Every call of the SDK goes to APISIX, which admits the harness by its consumer key. The SDK
+	// still names the device it acts as with the unstable MSC3202 parameter, which Synapse 1.162
+	// dropped: the stable one goes along, so the assistants keep their devices on either side.
 	const originalRequest = getRequestFn();
-	setRequestFn((params: { headers?: Record<string, string> }, callback: unknown) => {
-		params.headers = { ...(params.headers ?? {}), apikey: config.apisix.consumerKey };
-		return originalRequest(params, callback);
-	});
+	setRequestFn(
+		(
+			params: { headers?: Record<string, string>; qs?: Record<string, string> },
+			callback: unknown
+		) => {
+			params.headers = { ...(params.headers ?? {}), apikey: config.apisix.consumerKey };
+			const unstableDeviceId = params.qs?.['org.matrix.msc3202.device_id'];
+			if (unstableDeviceId !== undefined && params.qs !== undefined) {
+				params.qs['device_id'] = unstableDeviceId;
+			}
+			return originalRequest(params, callback);
+		}
+	);
+	mkdirSync(config.matrix.cryptoStorePath, { recursive: true });
 	const appservice = new Appservice({
 		port: options.port,
 		bindAddress: options.bindAddress ?? '0.0.0.0',
@@ -106,7 +128,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		homeserverUrl,
 		// The url only matters to Synapse, which reads it from its own registration file
 		registration: buildRegistration(config, ''),
-		storage: makeAppserviceStorage(db)
+		storage: makeAppserviceStorage(db),
+		// One encryption store per assistant, on the volume of this role
+		cryptoStorage: new RustSdkAppserviceCryptoStorageProvider(
+			config.matrix.cryptoStorePath,
+			StoreType.Sqlite
+		)
 	});
 	const creator = creatorUserId(config);
 	const admin = makeMatrixAdmin({
@@ -149,12 +176,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 
+	appservice.on('room.failed_decryption', (roomId: string, event: RoomEvent, err: unknown) => {
+		log.error({ roomId, sender: event.sender, eventId: event.event_id, err }, 'decryption failed');
+	});
+
 	appservice.on('room.invite', async (roomId: string, event: RoomEvent) => {
 		const invited = event.state_key ?? '';
 		if (invited !== creator && !isAssistantUserId(config, invited)) return;
 		log.info({ roomId, invited, sender: event.sender }, 'invite accepted');
 		try {
-			await appservice.getIntentForUserId(invited).joinRoom(roomId);
+			const intent = appservice.getIntentForUserId(invited);
+			// Key shares for this room may arrive with the next transaction: be ready to receive them
+			await intent.enableEncryption();
+			await intent.joinRoom(roomId);
 		} catch (err: unknown) {
 			log.warn({ roomId, invited, err }, 'join failed');
 			return;
@@ -165,16 +199,38 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	});
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
-	async function assistantRoom(roomId: string): Promise<{ owner: string; userId: string } | null> {
-		const rows = await db.sql<{ owner: string; user_id: string }[]>`
-			select owner, user_id from assistant_rooms where room_id = ${roomId}`;
+	async function assistantRoom(
+		roomId: string
+	): Promise<{ owner: string; userId: string; welcome: string | null } | null> {
+		const rows = await db.sql<{ owner: string; user_id: string; welcome: string | null }[]>`
+			select owner, user_id, welcome from assistant_rooms where room_id = ${roomId}`;
 		const row = rows[0];
-		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
+		return row === undefined
+			? null
+			: { owner: row.owner, userId: row.user_id, welcome: row.welcome };
 	}
+
+	// The owner has joined: their devices are in the room, the greeting can be encrypted for them
+	appservice.on('room.event', async (roomId: string, event: RoomEvent) => {
+		if (event.type !== 'm.room.member' || event.content?.['membership'] !== 'join') return;
+		const room = await assistantRoom(roomId);
+		if (room === null || room.welcome === null) return;
+		if (event.state_key !== ownerMatrixId(config, room.owner)) return;
+		const claimed = await db.sql`
+			update assistant_rooms set welcome = null where room_id = ${roomId} and welcome is not null`;
+		if (claimed.count !== 1) return;
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: { asUserId: room.userId, roomId, text: room.welcome },
+			dedupKey: `welcome:${roomId}`
+		});
+		log.info({ roomId, owner: room.owner }, 'welcome queued');
+	});
 
 	appservice.on('room.message', async (roomId: string, event: MatrixEvent<unknown> | RoomEvent) => {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
+		log.info({ roomId, sender, eventId: raw.event_id }, 'message received');
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		const text = textOf(raw);
 		if (text === null) return;
@@ -210,7 +266,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		await appservice.botIntent.sendText(roomId, turn.reply);
 	});
 
-	// Answers computed by the api role, sent as the assistant
+	// Answers computed by the api role, sent as the assistant through its intent, which encrypts
+	// them when the room is encrypted
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
@@ -218,12 +275,25 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
-			await admin.sendText(job.payload.asUserId, job.payload.roomId, job.payload.text);
+			const intent = appservice.getIntentForUserId(job.payload.asUserId);
+			await intent.enableEncryption();
+			await intent.sendText(job.payload.roomId, job.payload.text);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 		}
 	});
 
+	// Every assistant holds its encryption state from the start, so the key shares Synapse pushes
+	// while this role was away, or before an assistant speaks, are not lost
+	for (const userId of await listActiveAssistantUserIds(db)) {
+		try {
+			await appservice.getIntentForUserId(userId).enableEncryption();
+		} catch (err: unknown) {
+			log.warn({ userId, err }, 'encryption setup failed at start');
+		}
+	}
 	await appservice.begin();
+	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages encrypted
+	await appservice.botIntent.enableEncryption();
 	log.info({ port: options.port, creator, homeserverUrl }, 'matrix role listening');
 	return {
 		appservice,

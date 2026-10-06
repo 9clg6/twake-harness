@@ -1,3 +1,6 @@
+import { mkdtemp } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 
@@ -8,16 +11,18 @@ import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
-import { resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
+import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
 import { freePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
 
 export interface MatrixTestHarness {
+	// Stops and starts the matrix role again on the same database and encryption stores
+	restartRole(): Promise<void>;
 	readonly synapse: TestSynapse;
 	readonly apisix: FakeApisix;
-	readonly role: MatrixRole;
+	role: MatrixRole;
 	readonly config: Config;
 	readonly db: Db;
 	readonly port: number;
@@ -31,6 +36,7 @@ export interface MatrixTestHarness {
 
 // The matrix role, a real Synapse pushing to it and the fake APISIX in between for its calls.
 export async function startMatrixHarness(): Promise<MatrixTestHarness> {
+	await ensureAppRole(false);
 	const port = await freePort();
 	const asToken = 'as-token-test';
 	const hsToken = 'hs-token-test';
@@ -47,6 +53,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		MATRIX_SERVER_NAME: SYNAPSE_SERVER_NAME,
 		MATRIX_AS_TOKEN: asToken,
 		MATRIX_HS_TOKEN: hsToken,
+		MATRIX_CRYPTO_STORE_PATH: join(await mkdtemp(join(tmpdir(), 'harness-crypto-')), 'crypto'),
 		LOG_LEVEL: 'info'
 	});
 	const synapse = await startTestSynapse({
@@ -71,16 +78,72 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	}
 	const app = apps[0];
 	if (app === undefined) throw new Error('no replica started');
-	const role = await startMatrixRole({
-		config,
-		db,
-		log: app.log,
-		port,
-		bindAddress: '0.0.0.0',
-		pollIntervalMs: 100
-	});
-	const api = makeClient({ app, apps, issuer });
-	return {
+	const startRole = (): Promise<MatrixRole> =>
+		startMatrixRole({
+			config,
+			db,
+			log: app.log,
+			port,
+			bindAddress: '0.0.0.0',
+			pollIntervalMs: 100
+		});
+	let role = await startRole();
+	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
+	// On a CI runner the only window into a failed Matrix scenario is this summary
+	async function printDiagnostics(): Promise<void> {
+		const interesting = new Set([
+			'message received',
+			'turn queued',
+			'turn started',
+			'turn finished',
+			'turn failed',
+			'answer sent',
+			'welcome queued',
+			'invite accepted',
+			'decryption failed',
+			'job failed',
+			'creator command',
+			'assistant ignored a foreign sender',
+			'assistant created'
+		]);
+		const lines = chunks
+			.join('')
+			.split('\n')
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter((line) => interesting.has(String(line['msg'])) || Number(line['level']) >= 40)
+			.map((line) => {
+				const { time, pid, hostname, ...rest } = line;
+				void pid;
+				void hostname;
+				return `${String(time)} ${JSON.stringify(rest).slice(0, 300)}`;
+			});
+		process.stdout.write(
+			`\n--- matrix role diagnostics (${lines.length} lines) ---\n${lines.join('\n')}\n`
+		);
+		const proxy = apisix.matrixCalls
+			.filter((c) => /keys|sendToDevice|send\/m\.room|login|devices/.test(c.path))
+			.map((c) => `${c.method} ${c.path.slice(0, 110)} -> ${c.status} ${c.ms}ms`);
+		process.stdout.write(`--- matrix proxy calls (${proxy.length}) ---\n${proxy.join('\n')}\n`);
+		const synapseLog = await synapse.logs().catch(() => '');
+		const pushes = synapseLog
+			.split('\n')
+			.filter((line) =>
+				/as-sender|as-recoverer|appservice\.scheduler|to_device|msc2409/i.test(line)
+			)
+			.slice(-40)
+			.map((line) => line.slice(0, 220));
+		process.stdout.write(
+			`--- synapse appservice log (last ${pushes.length}) ---\n${pushes.join('\n')}\n`
+		);
+	}
+
+	const harness: MatrixTestHarness = {
+		restartRole: async () => {
+			await role.stop();
+			role = await startRole();
+			harness.role = role;
+		},
 		synapse,
 		apisix,
 		role,
@@ -97,6 +160,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 				.filter((line) => line.length > 0)
 				.map((line) => JSON.parse(line) as Record<string, unknown>),
 		close: async () => {
+			if (process.env['CI'] !== undefined) await printDiagnostics();
 			for (const worker of workers) await worker.stop();
 			await role.stop();
 			for (const replica of apps) await replica.close();
@@ -106,4 +170,5 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 			await issuer.close();
 		}
 	};
+	return harness;
 }

@@ -8,6 +8,11 @@ spec:
   {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- end }}
+  {{- if .Values.persistence.enabled }}
+  # One writer of the volume at a time
+  strategy:
+    type: Recreate
+  {{- end }}
   selector:
     matchLabels:
       {{- include "twake-harness.selectorLabels" . | nindent 6 }}
@@ -26,9 +31,14 @@ spec:
       serviceAccountName: {{ .Release.Name }}
       automountServiceAccountToken: false
       enableServiceLinks: false
-      {{- with .Values.imagePullSecrets }}
+      {{- if or .Values.imagePullSecrets .Values.imagePullSecret.create }}
       imagePullSecrets:
-        {{- toYaml . | nindent 8 }}
+        {{- range .Values.imagePullSecrets }}
+        - name: {{ .name }}
+        {{- end }}
+        {{- if .Values.imagePullSecret.create }}
+        - name: {{ .Release.Name }}-registry
+        {{- end }}
       {{- end }}
       securityContext:
         runAsNonRoot: true
@@ -74,6 +84,8 @@ spec:
               value: {{ .Values.config.matrixSenderLocalpart | quote }}
             - name: MATRIX_ASSISTANT_PREFIX
               value: {{ .Values.config.matrixAssistantPrefix | quote }}
+            - name: MATRIX_CRYPTO_STORE_PATH
+              value: {{ printf "%s/crypto" .Values.persistence.mountPath | quote }}
             {{- end }}
           envFrom:
             - secretRef:
@@ -101,3 +113,14 @@ spec:
           resources:
             {{- toYaml . | nindent 12 }}
           {{- end }}
+          {{- if .Values.persistence.enabled }}
+          volumeMounts:
+            - name: data
+              mountPath: {{ .Values.persistence.mountPath }}
+          {{- end }}
+      {{- if .Values.persistence.enabled }}
+      volumes:
+        - name: data
+          persistentVolumeClaim:
+            claimName: {{ .Release.Name }}-data
+      {{- end }}

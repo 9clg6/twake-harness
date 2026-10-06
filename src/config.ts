@@ -58,6 +58,8 @@ export interface Config {
 		// The token APISIX injects on the matrix route; set it only when the harness sends it itself
 		readonly asToken: string;
 		readonly hsToken: string;
+		// Where the matrix role keeps the assistants' encryption state, on its volume
+		readonly cryptoStorePath: string;
 	};
 	readonly logLevel: LogLevel;
 }
@@ -94,6 +96,7 @@ const envSchema = z.object({
 	MATRIX_ASSISTANT_PREFIX: z.string().min(1).default('twake-space-assistant-'),
 	MATRIX_AS_TOKEN: z.string().default('injected-by-apisix'),
 	MATRIX_HS_TOKEN: z.string().default(''),
+	MATRIX_CRYPTO_STORE_PATH: z.string().min(1).default('/data/crypto'),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -160,7 +163,8 @@ export function loadConfig(env: Env): Config {
 			senderLocalpart: values.MATRIX_SENDER_LOCALPART,
 			assistantPrefix: values.MATRIX_ASSISTANT_PREFIX,
 			asToken: values.MATRIX_AS_TOKEN,
-			hsToken: values.MATRIX_HS_TOKEN
+			hsToken: values.MATRIX_HS_TOKEN,
+			cryptoStorePath: values.MATRIX_CRYPTO_STORE_PATH
 		},
 		logLevel: values.LOG_LEVEL
 	};

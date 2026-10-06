@@ -82,8 +82,6 @@ async function seedAssistantRoom(h: TestHarness, owner: string, roomId: string):
 			owner,
 			userId,
 			name: 'A',
-			deviceId: 'DEVICE',
-			accessToken: 'token',
 			roomId
 		});
 	});

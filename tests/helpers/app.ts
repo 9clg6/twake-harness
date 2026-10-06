@@ -26,7 +26,7 @@ export const TEST_DATABASE_URL: string = appDatabaseUrl(ADMIN_DATABASE_URL);
 
 let appRoleReady = false;
 
-async function ensureAppRole(keepSchema: boolean): Promise<void> {
+export async function ensureAppRole(keepSchema: boolean): Promise<void> {
 	if (appRoleReady || keepSchema) return;
 	const admin = makeDb(ADMIN_DATABASE_URL);
 	try {
@@ -66,7 +66,7 @@ export interface TestHarness {
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
 	await db.sql.unsafe(
-		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily, usage_window, usage_window_global'
+		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily, usage_window, usage_window_global, matrix_user_storage'
 	);
 }
 

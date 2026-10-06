@@ -4,12 +4,10 @@ import { randomUUID } from 'node:crypto';
 // of APISIX: register and log in the assistants, open their rooms, speak for them.
 export interface MatrixAdmin {
 	registerUser(localpart: string): Promise<void>;
-	loginDevice(localpart: string, deviceId: string): Promise<string>;
 	setDisplayName(userId: string, name: string): Promise<boolean>;
 	createDirectRoom(asUserId: string, inviteUserId: string): Promise<string>;
 	sendText(asUserId: string, roomId: string, text: string): Promise<void>;
 	leaveRoom(asUserId: string, roomId: string): Promise<void>;
-	logoutDevice(accessToken: string): Promise<void>;
 }
 
 export interface MatrixAdminOptions {
@@ -97,21 +95,6 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 			if (response.body['errcode'] === 'M_USER_IN_USE') return;
 			fail('register', response);
 		},
-		async loginDevice(localpart, deviceId) {
-			const response = await call(
-				'POST',
-				'/login',
-				{
-					type: 'm.login.application_service',
-					identifier: { type: 'm.id.user', user: localpart },
-					device_id: deviceId
-				},
-				options.asToken
-			);
-			const token = response.body['access_token'];
-			if (response.status !== 200 || typeof token !== 'string') fail('login', response);
-			return token;
-		},
 		async setDisplayName(userId, name) {
 			const response = await call(
 				'PUT',
@@ -124,10 +107,23 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 			return response.status === 200;
 		},
 		async createDirectRoom(asUserId, inviteUserId) {
+			// Encrypted from the first event: the keys of the room are only ever shared with the
+			// owner's devices and the assistant's
 			const response = await call(
 				'POST',
 				'/createRoom',
-				{ is_direct: true, preset: 'trusted_private_chat', invite: [inviteUserId] },
+				{
+					is_direct: true,
+					preset: 'trusted_private_chat',
+					invite: [inviteUserId],
+					initial_state: [
+						{
+							type: 'm.room.encryption',
+							state_key: '',
+							content: { algorithm: 'm.megolm.v1.aes-sha2' }
+						}
+					]
+				},
 				options.asToken,
 				asUserId
 			);
@@ -154,10 +150,6 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 				asUserId
 			);
 			if (response.status !== 200 && response.status !== 403) fail('leave', response);
-		},
-		async logoutDevice(accessToken) {
-			const response = await call('POST', '/logout', {}, accessToken);
-			if (response.status !== 200 && response.status !== 401) fail('logout', response);
 		}
 	};
 }

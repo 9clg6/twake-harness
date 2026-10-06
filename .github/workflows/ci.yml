@@ -30,8 +30,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every suite runs with one api replica and with two sharing the database
+        # Every suite runs with one api replica and with two sharing the database, on the
+        # Synapse of the platform and on the latest release to see an upgrade coming
         replicas: [1, 2]
+        synapse: ['ghcr.io/element-hq/synapse:v1.160.0', 'ghcr.io/element-hq/synapse:latest']
     services:
       postgres:
         image: postgres:16
@@ -55,11 +57,12 @@ jobs:
       - run: npm run test:ci
         env:
           TEST_ADMIN_DATABASE_URL: postgres://harness:harness@127.0.0.1:5433/harness
+          SYNAPSE_IMAGE: ${{ matrix.synapse }}
           TEST_REPLICAS: ${{ matrix.replicas }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results-${{ matrix.replicas }}
+          name: test-results-${{ strategy.job-index }}
           path: test-results/
 
   chart:
@@ -74,7 +77,7 @@ jobs:
       - run: helm lint charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set networkPolicy.databaseCidrs[0]=10.0.0.1/32 | kubeconform -strict -summary -kubernetes-version 1.31.0
       - run: helm template agent-api charts/twake-harness --set autoscaling.enabled=true --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k | kubeconform -strict -summary -kubernetes-version 1.31.0
-      - run: helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h | kubeconform -strict -summary -kubernetes-version 1.31.0
+      - run: helm template agent-matrix charts/twake-harness --set role=matrix --set persistence.enabled=true --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h | kubeconform -strict -summary -kubernetes-version 1.31.0
 
   image:
     needs: [check, test, chart]
