@@ -593,7 +593,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		assistants,
 		stop: async () => {
 			await sender.stop();
-			feedback.stop();
+			await feedback.stop();
 			appservice.stop();
 		}
 	};

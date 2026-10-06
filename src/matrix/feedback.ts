@@ -34,7 +34,8 @@ export interface ChatFeedback {
 	// Right before the answer goes out, so the typing stops as the answer appears
 	answerReady(turn: TurnRef): Promise<void>;
 	answerSent(turn: TurnRef, outcome: TurnOutcome): Promise<void>;
-	stop(): void;
+	// Lets what is already on its way (a check mark, a stopped typing) go out, within a bound
+	stop(): Promise<void>;
 }
 
 const WORKING = '👀';
@@ -45,11 +46,22 @@ const DEFAULT_TYPING_REFRESH_MS = 20_000;
 const DEFAULT_TYPING_MAX_MS = 5 * 60_000;
 // The eyes of a turn that never answered are forgotten after this
 const ACK_TTL_MS = 60 * 60_000;
+const STOP_GRACE_MS = 5_000;
 
 interface Ack {
 	// Resolves to the id of the eyes reaction, or null when it could not be sent
 	readonly reaction: Promise<string | null>;
 	readonly at: number;
+}
+
+function settleWithin(work: readonly Promise<unknown>[], ms: number): Promise<void> {
+	return new Promise((resolve) => {
+		const timer = setTimeout(resolve, ms);
+		void Promise.allSettled(work).then(() => {
+			clearTimeout(timer);
+			resolve();
+		});
+	});
 }
 
 interface TypingSession {
@@ -70,6 +82,12 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 	// The typing calls of a room go out one after the other, so a late "typing" never lands after
 	// the "stopped typing" sent before the answer
 	const typingChains = new Map<string, Promise<void>>();
+	// The calls on their way, which a stop lets finish while the homeserver and the store are up
+	const inflight = new Set<Promise<unknown>>();
+	function track(work: Promise<unknown>): void {
+		inflight.add(work);
+		void work.finally(() => inflight.delete(work)).catch(() => undefined);
+	}
 
 	function keyOf(turn: TurnRef): string {
 		return `${turn.assistantUserId} ${turn.roomId}`;
@@ -83,6 +101,7 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 				log.warn({ roomId: turn.roomId, typing, err }, 'typing notice failed');
 			});
 		typingChains.set(key, next);
+		track(next);
 		return next;
 	}
 
@@ -137,6 +156,7 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			// Both are registered before anything is awaited: a fast answer finds them in place
 			startTyping(turn);
 			const reaction = react(turn, WORKING);
+			track(reaction);
 			acks.set(turn.eventId, { reaction, at: now });
 			await reaction;
 		},
@@ -147,28 +167,33 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			// Another message of the owner may still be in the works: the assistant keeps typing for it
 			if (session.pending.size === 0) await endTyping(turn);
 		},
-		answerSent: async (turn, outcome) => {
-			const ack = acks.get(turn.eventId);
-			acks.delete(turn.eventId);
-			const eyes = ack === undefined ? null : await ack.reaction;
-			if (eyes !== null) {
-				try {
-					await options.redactEvent(turn.assistantUserId, turn.roomId, eyes);
-				} catch (err: unknown) {
-					log.warn(
-						{ roomId: turn.roomId, eventId: turn.eventId, err },
-						'reaction redaction failed'
-					);
+		answerSent: (turn, outcome) => {
+			const work = (async (): Promise<void> => {
+				const ack = acks.get(turn.eventId);
+				acks.delete(turn.eventId);
+				const eyes = ack === undefined ? null : await ack.reaction;
+				if (eyes !== null) {
+					try {
+						await options.redactEvent(turn.assistantUserId, turn.roomId, eyes);
+					} catch (err: unknown) {
+						log.warn(
+							{ roomId: turn.roomId, eventId: turn.eventId, err },
+							'reaction redaction failed'
+						);
+					}
 				}
-			}
-			if (outcome === 'answered') await react(turn, ANSWERED);
+				if (outcome === 'answered') await react(turn, ANSWERED);
+			})();
+			track(work);
+			return work;
 		},
-		stop: () => {
+		stop: async () => {
 			for (const session of sessions.values()) {
 				clearInterval(session.refresh);
 				clearTimeout(session.deadline);
 			}
 			sessions.clear();
+			await settleWithin([...inflight], STOP_GRACE_MS);
 		}
 	};
 }
