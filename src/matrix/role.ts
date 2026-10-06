@@ -287,6 +287,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return JSON.parse(raw ?? '[]') as string[];
 	}
 
+	// Before an assistant encrypts for a room, its crypto looks the members' devices up again: a
+	// device the owner opened since is then given the key, whatever the homeserver pushed about it
+	async function refreshMembersDevices(intent: Intent, roomId: string): Promise<void> {
+		const client = intent.underlyingClient;
+		const members = await client.getJoinedRoomMembers(roomId);
+		await client.crypto.updateSyncData(
+			[],
+			await lastCounts(intent.userId),
+			(await lastFallbacks(intent.userId)) as Parameters<typeof client.crypto.updateSyncData>[2],
+			members,
+			[]
+		);
+	}
+
 	// The SDK applies a transaction's device list changes only to the users it also carried keys
 	// for: every assistant is told here, so an owner's new device gets the next room key
 	appservice.on('device_lists', async (lists: { changed?: string[]; removed?: string[] }) => {
@@ -518,6 +532,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await intent.enableEncryption();
 			const room = await assistantRoom(job.payload.roomId);
 			if (room !== null) await escrowOnceReady(intent, room.owner);
+			await refreshMembersDevices(intent, job.payload.roomId);
 			await intent.sendText(job.payload.roomId, job.payload.text);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (room !== null) backupInBackground(room.userId, room.owner);
