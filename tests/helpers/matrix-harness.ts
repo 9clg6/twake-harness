@@ -78,6 +78,55 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		});
 	let role = await startRole();
 	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
+	// On a CI runner the only window into a failed Matrix scenario is this summary
+	async function printDiagnostics(): Promise<void> {
+		const interesting = new Set([
+			'message received',
+			'turn queued',
+			'turn started',
+			'turn finished',
+			'turn failed',
+			'answer sent',
+			'welcome queued',
+			'invite accepted',
+			'decryption failed',
+			'job failed',
+			'creator command',
+			'assistant ignored a foreign sender',
+			'assistant created'
+		]);
+		const lines = chunks
+			.join('')
+			.split('\n')
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as Record<string, unknown>)
+			.filter((line) => interesting.has(String(line['msg'])) || Number(line['level']) >= 40)
+			.map((line) => {
+				const { time, pid, hostname, ...rest } = line;
+				void pid;
+				void hostname;
+				return `${String(time)} ${JSON.stringify(rest).slice(0, 300)}`;
+			});
+		process.stdout.write(
+			`\n--- matrix role diagnostics (${lines.length} lines) ---\n${lines.join('\n')}\n`
+		);
+		const proxy = apisix.matrixCalls
+			.filter((c) => /keys|sendToDevice|send\/m\.room|login|devices/.test(c.path))
+			.map((c) => `${c.method} ${c.path.slice(0, 110)} -> ${c.status} ${c.ms}ms`);
+		process.stdout.write(`--- matrix proxy calls (${proxy.length}) ---\n${proxy.join('\n')}\n`);
+		const synapseLog = await synapse.logs().catch(() => '');
+		const pushes = synapseLog
+			.split('\n')
+			.filter((line) =>
+				/as-sender|as-recoverer|appservice\.scheduler|to_device|msc2409/i.test(line)
+			)
+			.slice(-40)
+			.map((line) => line.slice(0, 220));
+		process.stdout.write(
+			`--- synapse appservice log (last ${pushes.length}) ---\n${pushes.join('\n')}\n`
+		);
+	}
+
 	const harness: MatrixTestHarness = {
 		restartRole: async () => {
 			await role.stop();
@@ -100,6 +149,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 				.filter((line) => line.length > 0)
 				.map((line) => JSON.parse(line) as Record<string, unknown>),
 		close: async () => {
+			if (process.env['CI'] !== undefined) await printDiagnostics();
 			await worker.stop();
 			await role.stop();
 			await app.close();
