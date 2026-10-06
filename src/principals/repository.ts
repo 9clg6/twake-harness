@@ -8,7 +8,8 @@ export const DEFAULT_ACTIONS: readonly string[] = [
 	'memory.read_own',
 	'memory.write_own',
 	'contracts.call',
-	'contracts.act'
+	'contracts.act',
+	'settings.write_own'
 ];
 
 export interface PrincipalRecord {

@@ -1,4 +1,5 @@
 import type { Db, Tx } from '../db/client.js';
+import { isLocale, type Locale } from '../i18n/messages.js';
 
 export interface AssistantRecord {
 	readonly owner: string;
@@ -6,6 +7,8 @@ export interface AssistantRecord {
 	readonly name: string;
 	readonly roomId: string | null;
 	readonly deletedAt: Date | null;
+	// The language its owner chose, null for the deployment's
+	readonly locale: Locale | null;
 }
 
 interface AssistantRow {
@@ -14,6 +17,7 @@ interface AssistantRow {
 	name: string;
 	room_id: string | null;
 	deleted_at: Date | null;
+	locale: string | null;
 }
 
 function normalize(row: AssistantRow): AssistantRecord {
@@ -22,13 +26,15 @@ function normalize(row: AssistantRow): AssistantRecord {
 		userId: row.user_id,
 		name: row.name,
 		roomId: row.room_id,
-		deletedAt: row.deleted_at
+		deletedAt: row.deleted_at,
+		// A language the harness no longer speaks falls back to the deployment's
+		locale: row.locale !== null && isLocale(row.locale) ? row.locale : null
 	};
 }
 
 export async function findAssistant(tx: Tx, owner: string): Promise<AssistantRecord | null> {
 	const rows = await tx.sql<AssistantRow[]>`
-		select owner, user_id, name, room_id, deleted_at
+		select owner, user_id, name, room_id, deleted_at, locale
 		from assistants where owner = ${owner}`;
 	const row = rows[0];
 	return row === undefined ? null : normalize(row);
@@ -39,7 +45,7 @@ export async function findAssistant(tx: Tx, owner: string): Promise<AssistantRec
 // the reclaim policies allow for that row only, while app.reclaim_user_id names the account.
 export async function saveAssistant(
 	tx: Tx,
-	record: Omit<AssistantRecord, 'deletedAt'>
+	record: Omit<AssistantRecord, 'deletedAt' | 'locale'>
 ): Promise<{ readonly reclaimed: number }> {
 	await tx.sql`select set_config('app.reclaim_user_id', ${record.userId}, true)`;
 	const purged = await tx.sql`
@@ -55,6 +61,13 @@ export async function saveAssistant(
 			room_id = excluded.room_id,
 			deleted_at = null`;
 	return { reclaimed: purged.count };
+}
+
+// The language the owner chose, kept with their assistant even once deleted, so that it holds if
+// they create it again; false when they never had one
+export async function setAssistantLocale(tx: Tx, owner: string, locale: Locale): Promise<boolean> {
+	const result = await tx.sql`update assistants set locale = ${locale} where owner = ${owner}`;
+	return result.count === 1;
 }
 
 export async function setAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {

@@ -19,7 +19,7 @@ export function findTimeZone(zone: string): string | null {
 
 // One instant, as a person in the zone reads it and as a contract expects it
 export interface Moment {
-	// The date and time in words, in the deployment's language: "mardi 6 octobre 2026, 13:26"
+	// The date and time in words, in the owner's language: "mardi 6 octobre 2026, 13:26"
 	readonly words: string;
 	// The same instant in ISO 8601 with the zone's offset at that instant, never Z:
 	// "2026-10-06T13:26:00+02:00"

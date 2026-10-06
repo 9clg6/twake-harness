@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { getMessages } from '../i18n/messages.js';
+import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { assistantUserId } from '../matrix/registration.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
@@ -54,7 +54,7 @@ function matrixLink(userId: string): string {
 	return `https://matrix.to/#/${userId}`;
 }
 
-function toView(record: AssistantRecord): AssistantView {
+function toView(record: Pick<AssistantRecord, 'userId' | 'name' | 'roomId'>): AssistantView {
 	return {
 		userId: record.userId,
 		name: record.name,
@@ -124,7 +124,9 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				roomId = opened;
 				// The greeting waits for the owner to join: the matrix role then encrypts it for their
 				// devices. The room and its index land together or not at all.
-				const welcome = getMessages(config.locale).welcome(name);
+				// A first assistant greets in the deployment's language; one created again, in the
+				// language its owner chose for the one before
+				const welcome = (await fetchOwnerMessages(db, owner, config.locale)).welcome(name);
 				await withPrincipal(db, { id: owner }, async (tx) => {
 					await setAssistantRoomId(tx, owner, opened);
 					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
@@ -132,7 +134,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
 				return {
 					ok: true,
-					assistant: toView({ owner, userId, name, roomId: opened, deletedAt: null })
+					assistant: toView({ userId, name, roomId: opened })
 				};
 			} catch (err: unknown) {
 				log.error({ owner, userId, roomId, err }, 'assistant creation failed');

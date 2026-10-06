@@ -91,6 +91,7 @@ describe('contracts as tools', () => {
 				'read_freebusy',
 				'clarify',
 				'memory',
+				'set_language',
 				'scoped_sessions_list',
 				'scoped_sessions_read',
 				'session_search',

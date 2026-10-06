@@ -8,6 +8,7 @@ import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService } from './agent/service.js';
 import { runTool, toolCallStatus } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
+import { localeOf } from './assistants/locale.js';
 import { findAssistant } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
@@ -202,7 +203,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			eventId: `event:${eventId}`,
 			// Told as it is for most events; an invitation is read and checked by the harness first,
 			// and only its owner's answer, in a turn of their own in the room, can accept it
-			text: getMessages(config.locale).events.other(type, eventId),
+			text: getMessages(localeOf(assistant, config.locale)).events.other(type, eventId),
 			origin: 'event',
 			event: { id: eventId, type }
 		};

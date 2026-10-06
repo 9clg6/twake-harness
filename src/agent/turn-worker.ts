@@ -4,9 +4,10 @@ import { z } from 'zod';
 import { withPrincipal, type Db } from '../db/client.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
+import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
-import type { Messages } from '../i18n/messages.js';
+import type { Locale, Messages } from '../i18n/messages.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
 const turnPayload = z.object({
@@ -60,8 +61,9 @@ export interface TurnWorkerOptions {
 	readonly db: Db;
 	readonly agent: AgentService;
 	readonly log: FastifyBaseLogger;
-	// The fixed texts a failed or refused turn answers with, in the deployment's language
-	readonly messages: Messages;
+	// The language of the fixed texts a failed or refused turn answers with, for owners who chose
+	// none
+	readonly locale: Locale;
 	readonly pollIntervalMs?: number;
 	// How many turns this replica runs at once
 	readonly concurrency?: number;
@@ -69,7 +71,7 @@ export interface TurnWorkerOptions {
 
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
-	const { db, agent, log, messages } = options;
+	const { db, agent, log, locale } = options;
 
 	// The owner's assistant, when this room is still its room
 	async function roomAssistant(owner: string, roomId: string): Promise<AssistantRecord | null> {
@@ -85,7 +87,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	function replyTo(
 		result: OwnerTurnResult,
 		assistant: AssistantRecord,
-		roomId: string
+		roomId: string,
+		notices: Messages['notices']
 	): SendPayload {
 		return {
 			asUserId: assistant.userId,
@@ -94,8 +97,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				result.kind === 'ok'
 					? result.answer
 					: result.kind === 'busy'
-						? messages.notices.busy
-						: messages.notices.turnFailed,
+						? notices.busy
+						: notices.turnFailed,
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
 			...(result.kind === 'ok' && result.pendingCallId !== undefined
 				? { request: { pendingCallId: result.pendingCallId, owner: assistant.owner } }
@@ -126,9 +129,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return;
 		}
 		if (result.kind !== 'ok') turnLog.warn({ result }, 'resumed turn did not succeed');
+		// Read once the turn is over: the owner may have changed their language in it
+		const { notices } = await fetchOwnerMessages(db, owner, locale);
 		await enqueueJob(db, {
 			kind: 'send',
-			payload: replyTo(result, assistant, roomId),
+			payload: replyTo(result, assistant, roomId, notices),
 			dedupKey: `send:resume:${pendingCallId}`,
 			groupKey: `send:${roomId}`
 		});
@@ -171,10 +176,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				...(parsed.data.event === undefined ? {} : { event: parsed.data.event })
 			});
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
+			// Read once the turn is over: the owner may have changed their language in it
+			const { notices } = await fetchOwnerMessages(db, owner, locale);
 			await enqueueJob(db, {
 				kind: 'send',
 				payload: {
-					...replyTo(result, assistant, roomId),
+					...replyTo(result, assistant, roomId, notices),
 					// A turn woken by an event posted to the API answers no message of the room
 					...(eventId.startsWith('$') ? { replyTo: eventId } : {})
 				},

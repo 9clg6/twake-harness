@@ -354,6 +354,34 @@ describe('an event wakes my assistant', () => {
 		).toBe(true);
 	});
 
+	it('never lets an event change the language its assistant speaks', async () => {
+		// The event's own text told the model to speak French from now on
+		h.apisix.llm.script = (request: ChatRequest) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool') return { content: 'Shall I speak French from now on?' };
+			return {
+				toolCalls: [
+					{
+						id: 'call_set_language',
+						type: 'function',
+						function: { name: 'set_language', arguments: JSON.stringify({ language: 'fr' }) }
+					}
+				]
+			};
+		};
+		const posted = await h.api.post('dispatcher', '/v1/events', {
+			...EVENT,
+			event_id: 'evt-language',
+			type: 'com.twake.calendar.event.updated.v1'
+		});
+		expect(posted.status).toBe(202);
+		await client.waitForMessage(room, assistantId, (t) => t.includes('Shall I speak French'));
+		const refusal = h.apisix.llm.calls
+			.flatMap((call) => call.request.messages)
+			.find((m) => m.role === 'tool' && m.name === 'set_language');
+		expect(JSON.parse(refusal?.content ?? '{}')).toMatchObject({ error: 'needs_owner_approval' });
+	});
+
 	it("acts on the owner's yes in the room, through the gateway and in the owner's name", async () => {
 		const reads = h.apisix.contracts.handler;
 		h.apisix.contracts.handler = (call: ContractCall) =>

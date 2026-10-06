@@ -26,7 +26,7 @@ export function readCatalog(domains: readonly string[]): Record<string, unknown>
 	return { openapi: '3.0.3', paths };
 }
 
-function call(name: string, args: unknown): ToolCall[] {
+export function call(name: string, args: unknown): ToolCall[] {
 	return [
 		{ id: `call_${name}`, type: 'function', function: { name, arguments: JSON.stringify(args) } }
 	];

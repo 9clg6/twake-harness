@@ -1,9 +1,9 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import { fetchOwnerMessages } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import { hasConsent, insertPendingCall } from '../consents/repository.js';
 import { withPrincipal } from '../db/client.js';
-import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolOutcome } from '../agent/tools.js';
@@ -53,7 +53,6 @@ const FEED_DOMAIN = 'events';
 export function makeContractTool(contract: ContractDefinition, deps: ContractToolDeps): Tool {
 	const { config, log } = deps;
 	const fetchImpl = deps.fetchImpl ?? fetch;
-	const messages = getMessages(config.locale);
 	const definition: LlmToolDefinition = {
 		type: 'function',
 		function: {
@@ -117,7 +116,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 						domain: contract.domain,
 						level: contract.level
 					},
-					final: messages.consent.firstRead(contract.domain),
+					final: (await fetchOwnerMessages(context.db, owner, config.locale)).consent.firstRead(
+						contract.domain
+					),
 					pendingCallId
 				};
 			}
