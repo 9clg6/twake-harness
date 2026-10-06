@@ -56,7 +56,7 @@ The Matrix tests start a real Synapse in a container, so Docker is needed to run
 
 ### Behind the gateway
 
-The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` set, every request of the API must carry that value in `x-twake-gateway`, which the gateway injects on what it forwards; anything else gets a 403 before any identity work, while the health check and the metrics stay open to the cluster. Every contract call is posted to the audit route as one record in the shape the audit relay takes from the gateway's own logger (agent, user, contract, method, path, status, correlation id), so it lands in the audit topic keyed by the agent.
+The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` set, every request of the API must carry that value in `x-twake-gateway`, which the gateway injects on what it forwards; anything else gets a 403 before any identity work, while the health check and the metrics stay open to the cluster. The gateway writes the audit record of every contract call, one per call (agent, user, contract, method, path, status); the harness forwards the correlation id of the turn in `x-correlation-id`, so the record links back to it, and posts no record of its own.
 
 ### Replaying against dev
 
@@ -100,4 +100,4 @@ The model finds past conversations with `session_search`, by words they contain,
 
 ### Contracts as tools
 
-The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged and posted to the audit route. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.
+The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged; the gateway writes its audit record. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.
