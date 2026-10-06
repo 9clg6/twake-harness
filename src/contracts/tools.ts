@@ -26,6 +26,11 @@ function parseBody(text: string): unknown {
 	}
 }
 
+// Reading a contract and acting through one are separate rights: a turn an event started holds
+// the first and never the second
+export const CALL_CONTRACTS = 'contracts.call';
+export const ACT_THROUGH_CONTRACTS = 'contracts.act';
+
 // A contract becomes a tool that calls it through APISIX, naming the owner so that the gateway
 // attaches the owner's token: the harness never holds one. What comes back is data for the model.
 export function makeContractTool(contract: ContractDefinition, deps: ContractToolDeps): Tool {
@@ -47,7 +52,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	return {
 		definition,
 		argumentKeys,
-		requiredAction: 'contracts.call',
+		requiredAction: contract.method === 'get' ? CALL_CONTRACTS : ACT_THROUGH_CONTRACTS,
 		run: async (args, context): Promise<ToolOutcome> => {
 			const values =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};

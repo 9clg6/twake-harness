@@ -45,7 +45,8 @@ const DEFAULT_ACTIONS = [
 	'skills.read_own',
 	'memory.read_own',
 	'memory.write_own',
-	'contracts.call'
+	'contracts.call',
+	'contracts.act'
 ];
 
 describe.skipIf(!configured)('the harness on dev, as the prototype suites checked it', () => {

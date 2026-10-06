@@ -12,7 +12,9 @@ const turnPayload = z.object({
 	owner: z.string().min(1),
 	roomId: z.string().min(1),
 	eventId: z.string().min(1),
-	text: z.string().min(1)
+	text: z.string().min(1),
+	// Who started the turn: the owner's message, or an event a dispatcher posted
+	origin: z.enum(['owner', 'event']).optional()
 });
 
 export type TurnPayload = z.infer<typeof turnPayload>;
@@ -50,6 +52,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			const parsed = turnPayload.safeParse(job.payload);
 			if (!parsed.success) throw new Error('turn payload is malformed');
 			const { owner, roomId, eventId, text } = parsed.data;
+			// A turn queued before the origin was recorded is an event's when its id says so
+			const origin = parsed.data.origin ?? (eventId.startsWith('event:') ? 'event' : 'owner');
 			const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 			const rooms =
 				assistant === null || assistant.deletedAt !== null
@@ -66,6 +70,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				message: text,
 				log: turnLog,
 				correlationId: eventId,
+				origin,
 				assistantName: assistant.name
 			});
 			const answer =

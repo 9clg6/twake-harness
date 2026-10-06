@@ -12,6 +12,7 @@ import { makeAssistantService, type AssistantService } from './assistants/servic
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import { withPrincipal, type Db } from './db/client.js';
+import { getMessages, type Messages } from './i18n/messages.js';
 import { enqueueJob } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
@@ -83,9 +84,14 @@ const eventSchema = z.object({
 	type: z.string().min(1).max(100)
 });
 
-// What the assistant is told when an event arrives, as a message of its owner in their room
-function eventMessage(type: string, eventId: string): string {
-	return `[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`;
+// What the assistant is told when an event arrives, as a message of its owner in their room, in
+// the deployment's language. The turn may read but never act: an invitation is read, checked
+// against the calendar and proposed, and only the owner's answer, in a turn of their own in the
+// same room, can accept it.
+function eventMessage(messages: Messages, type: string, eventId: string): string {
+	return type.startsWith('calendar.invitation')
+		? messages.events.invitation(type, eventId)
+		: messages.events.other(type, eventId);
 }
 const SESSION_ID = /^[0-9a-f]{32}$/;
 
@@ -197,7 +203,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			owner,
 			roomId: assistant.roomId,
 			eventId: `event:${eventId}`,
-			text: eventMessage(type, eventId)
+			text: eventMessage(getMessages(config.locale), type, eventId),
+			origin: 'event'
 		};
 		await enqueueJob(db, {
 			kind: 'turn',

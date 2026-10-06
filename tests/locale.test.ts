@@ -12,7 +12,9 @@ describe('a deployment that speaks French', () => {
 	let assistantRoom: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
-		h = await startMatrixHarness({ env: { ASSISTANT_LOCALE: 'fr' } });
+		h = await startMatrixHarness({
+			env: { ASSISTANT_LOCALE: 'fr', EVENTS_CLIENT_IDS: 'dispatcher' }
+		});
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		creatorRoom = await h.synapse.createDirectRoom(alice, h.role.creatorUserId);
@@ -71,5 +73,23 @@ describe('a deployment that speaks French', () => {
 		const system = h.apisix.llm.calls.at(-1)?.request.messages[0];
 		expect(system?.role).toBe('system');
 		expect(system?.content).toContain('You are "Lucie", the Twake Space assistant');
+	});
+	it('tells the model of an invitation in French: check the slot, propose, never accept', async () => {
+		const posted = await h.api.post('dispatcher', '/v1/events', {
+			owner: 'alice@test.local',
+			event_id: 'evt-fr',
+			type: 'calendar.invitation'
+		});
+		expect(posted.status).toBe(202);
+		await client.waitForMessage(assistantRoom, assistantId, (t) => t.includes('(id evt-fr)'));
+		const told = h.apisix.llm.calls
+			.flatMap((call) => call.request.messages)
+			.find((m) => m.role === 'user' && (m.content ?? '').includes('(id evt-fr)'));
+		expect(told?.content).toMatch(
+			/^\[événement\] Un nouvel événement de type « calendar\.invitation »/
+		);
+		expect(told?.content).toContain('read_freebusy');
+		expect(told?.content).toContain('exclude');
+		expect(told?.content).toContain("arrête-toi là : ne l'accepte pas toi-même");
 	});
 });

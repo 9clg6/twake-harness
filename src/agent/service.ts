@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
+import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { LlmError, makeLlmClient, type LlmClient } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
@@ -39,6 +40,14 @@ export type SessionTarget =
 	| { readonly kind: 'id'; readonly id: string }
 	| { readonly kind: 'room'; readonly roomId: string };
 
+// Who started a turn: the owner, by a message or a request, or an event a dispatcher posted
+export type TurnOrigin = 'owner' | 'event';
+
+// What a turn an event started may not do, whatever its owner may: act through a contract. The
+// event's own text comes from a third party, so only the owner's yes, in a turn of their own,
+// can make the assistant act.
+const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [ACT_THROUGH_CONTRACTS];
+
 export interface OwnerTurnInput {
 	readonly principal: Principal;
 	readonly target: SessionTarget;
@@ -46,6 +55,8 @@ export interface OwnerTurnInput {
 	readonly log: FastifyBaseLogger;
 	// What links the turn's calls in the audit: the request id, or the Matrix event id
 	readonly correlationId?: string;
+	// The owner unless told otherwise
+	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
 }
@@ -136,7 +147,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					: { kind: 'ok' as const, session, actions: record.actions };
 			});
 			if (opened.kind !== 'ok') return opened;
-			const { session, actions } = opened;
+			const { session } = opened;
+			const withheld =
+				input.origin === 'event'
+					? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
+					: [];
+			const actions = opened.actions.filter((action) => !withheld.includes(action));
 			const memory = actions.includes('memory.read_own')
 				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
 				: { memory: [], user: [] };
@@ -166,6 +182,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						context: {
 							principalId: principal.id,
 							actions,
+							withheldActions: withheld,
 							db,
 							...(input.correlationId === undefined ? {} : { correlationId: input.correlationId })
 						}
