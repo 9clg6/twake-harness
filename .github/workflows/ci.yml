@@ -60,6 +60,9 @@ jobs:
       - run: npm run test:ci
         env:
           TEST_ADMIN_DATABASE_URL: postgres://harness:harness@127.0.0.1:5433/harness
+          # The tests share Synapse's configuration through a folder Docker mounts: on the
+          # organization's runners Docker runs beside the job and sees its work directory only
+          TMPDIR: ${{ runner.temp }}
           SYNAPSE_IMAGE: ${{ matrix.synapse }}
           TEST_REPLICAS: ${{ matrix.replicas }}
       - uses: actions/upload-artifact@v4
