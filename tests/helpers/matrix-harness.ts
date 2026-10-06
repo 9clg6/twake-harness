@@ -41,6 +41,8 @@ export interface MatrixTestHarness {
 export interface MatrixStartOptions {
 	// Settings of this harness, over the defaults
 	readonly env?: Record<string, string>;
+	// How long the role lets the SDK process a push before it gives the push up
+	readonly pushDeadlineMs?: number;
 }
 
 export async function startMatrixHarness(
@@ -105,7 +107,8 @@ export async function startMatrixHarness(
 			log: app.log,
 			port,
 			bindAddress: '0.0.0.0',
-			pollIntervalMs: 100
+			pollIntervalMs: 100,
+			...(options.pushDeadlineMs === undefined ? {} : { pushDeadlineMs: options.pushDeadlineMs })
 		});
 	await reserved.release();
 	let role = await startRole();

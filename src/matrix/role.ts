@@ -3,7 +3,7 @@ import { Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
 	EncryptedRoomEvent,
 	type Intent,
-	Appservice,
+	type Appservice,
 	getRequestFn,
 	LogService,
 	RustSdkAppserviceCryptoStorageProvider,
@@ -47,6 +47,7 @@ import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js'
 import { makeConsentRequests } from './consent-requests.js';
 import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
+import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
 
 // The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
@@ -65,6 +66,8 @@ export interface MatrixRoleOptions {
 	readonly port: number;
 	readonly bindAddress?: string;
 	readonly pollIntervalMs?: number;
+	// How long the SDK may process a push before the role gives it up, PUSH_DEADLINE_MS by default
+	readonly pushDeadlineMs?: number;
 }
 
 export interface MatrixRole {
@@ -202,17 +205,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		config.matrix.cryptoStorePath,
 		StoreType.Sqlite
 	);
-	const appservice = new Appservice({
-		port: options.port,
-		bindAddress: options.bindAddress ?? '0.0.0.0',
-		homeserverName: config.matrix.serverName,
-		homeserverUrl,
-		// The url only matters to Synapse, which reads it from its own registration file
-		registration: buildRegistration(config, ''),
-		storage,
-		cryptoStorage,
-		intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
-	});
 	const ensureEncryption = makeEnsureEncryption({
 		log,
 		storedDeviceId: async (userId) => {
@@ -223,6 +215,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return stored ?? null;
 		}
 	});
+	const appservice = makePushedAppservice(
+		{
+			port: options.port,
+			bindAddress: options.bindAddress ?? '0.0.0.0',
+			homeserverName: config.matrix.serverName,
+			homeserverUrl,
+			// The url only matters to Synapse, which reads it from its own registration file
+			registration: buildRegistration(config, ''),
+			storage,
+			cryptoStorage,
+			intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
+		},
+		{ log, storage, ensureEncryption, deadlineMs: options.pushDeadlineMs ?? PUSH_DEADLINE_MS }
+	);
 	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start
 	const inFlight = makeWorkTracker();
