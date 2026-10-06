@@ -1,4 +1,4 @@
-import type { Db } from '../db/client.js';
+import type { Db, Tx } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
 export type JobKind = 'turn' | 'send' | 'recover' | 'resume';
@@ -26,7 +26,8 @@ interface JobRow {
 	attempts: number;
 }
 
-export async function enqueueJob(db: Db, input: EnqueueInput): Promise<boolean> {
+// Queued in the transaction given, a job goes out with what that transaction writes, or not at all
+export async function enqueueJob(db: Db | Tx, input: EnqueueInput): Promise<boolean> {
 	const payload = JSON.stringify(input.payload);
 	const groupKey = input.groupKey ?? null;
 	const result =

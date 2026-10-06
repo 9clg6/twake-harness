@@ -3,8 +3,9 @@ import { ALLOW_REACTION, REFUSE_REACTION } from './consent.js';
 
 export type Answer = 'yes' | 'no';
 
-// How an owner answered: with a reaction on the request, or in words
-export type AnswerKind = 'reaction' | 'words';
+// How an owner answered: with a reaction on the request or in words, in the chat, or through the
+// API
+export type AnswerKind = 'reaction' | 'words' | 'api';
 
 // An owner may answer in any language the harness speaks, whatever language it asked in
 const CATALOGS = LOCALES.map((locale) => getMessages(locale).consent);

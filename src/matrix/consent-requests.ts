@@ -133,7 +133,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		if (answer.says === 'yes') {
 			// Queued first: should the role stop before the approval, the same answer delivered
 			// again finds the call still open, and its job queued once
-			const resume: ResumeRequest = { owner, roomId, pendingCallId };
+			const resume: ResumeRequest = { owner, roomId, pendingCallId, through: 'chat' };
 			await enqueueJob(db, {
 				kind: 'resume',
 				payload: resume,

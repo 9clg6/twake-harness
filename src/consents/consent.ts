@@ -34,9 +34,11 @@ export interface PendingQuestion {
 	readonly owner: string;
 }
 
-// What resumes a turn once its owner allowed the call it froze
+// What resumes a turn once its owner allowed the call it froze, and where they allowed it: in the
+// chat, or through the API
 export interface ResumeRequest {
 	readonly owner: string;
 	readonly roomId: string;
 	readonly pendingCallId: string;
+	readonly through: 'chat' | 'api';
 }

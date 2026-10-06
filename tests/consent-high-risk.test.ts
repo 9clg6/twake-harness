@@ -542,8 +542,8 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 	it('never runs a high-risk write straight from the API: a direct call or a turn there waits for me too', async () => {
 		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'write');
 		const direct = await r.h.api.tool('alice@test.local', 'send_email', TO_PAUL);
-		expect(direct.status).toBe(200);
-		expect(direct.body).toMatchObject({ status: 'awaiting_owner' });
+		expect(direct.status).toBe(202);
+		expect(direct.body).toMatchObject({ pending_call: { reasons: ['high_risk'] } });
 		const turn = await r.h.api.post<{ answer: string }>('alice@test.local', '/v1/chat', {
 			message: 'Send Paul the Q4 budget'
 		});
