@@ -50,6 +50,7 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `ADMISSION_USER_PER_MINUTE`    | turns one user may start per minute, `10` by default                                                                                                            |
 | `ADMISSION_USER_DAILY_TOKENS`  | tokens one user may spend per day, `200000` by default                                                                                                          |
 | `ADMISSION_GLOBAL_PER_MINUTE`  | turns the whole harness may start per minute, `400` by default                                                                                                  |
+| `TURN_HISTORY_MAX_CHARS`       | characters of past conversation a turn shows the model, `24000` by default: its latest exchanges whole, always the last; the session keeps all                  |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 

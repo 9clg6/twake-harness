@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { LlmClient, LlmCompletion, LlmMessage } from '../llm/client.js';
 import type { OwnerRequest } from '../consents/request.js';
+import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	runTool,
 	toolCallStatus,
@@ -34,6 +35,8 @@ export interface TurnDeps {
 	readonly tools: ToolRegistry;
 	readonly log: FastifyBaseLogger;
 	readonly maxToolCalls: number;
+	// The most characters of the past conversation the model reads; its stored history keeps all
+	readonly historyMaxChars: number;
 }
 
 export class TurnError extends Error {
@@ -43,10 +46,7 @@ export class TurnError extends Error {
 // The size of a prompt, which the info logs report instead of its text
 function countCharacters(messages: readonly LlmMessage[]): number {
 	let total = 0;
-	for (const message of messages) {
-		total += message.content?.length ?? 0;
-		for (const call of message.tool_calls ?? []) total += call.function.arguments.length;
-	}
+	for (const message of messages) total += computeMessageSize(message);
 	return total;
 }
 
@@ -114,15 +114,21 @@ function parseArguments(raw: string): unknown {
 // harness end-to-end encrypted and are decrypted only here, so their text must stay out of the
 // production logs.
 export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOutput> {
+	// What this turn adds to the conversation, which the model always reads whole
 	const messages: LlmMessage[] =
-		input.message === null
-			? [...input.history]
-			: [...input.history, { role: 'user', content: input.message }];
+		input.message === null ? [] : [{ role: 'user', content: input.message }];
+	const past = computeVisibleHistory(input.history, deps.historyMaxChars);
+	if (past.length < input.history.length) {
+		deps.log.info(
+			{ historyMessages: input.history.length, shownMessages: past.length },
+			'history windowed'
+		);
+	}
 	const system: LlmMessage = { role: 'system', content: input.systemPrompt };
 	let toolCalls = 0;
 	let tokens = 0;
 	for (let iteration = 0; iteration <= deps.maxToolCalls; iteration += 1) {
-		const prompt = [system, ...messages];
+		const prompt = [system, ...past, ...messages];
 		deps.log.info(
 			{ iteration, messageCount: prompt.length, characters: countCharacters(prompt) },
 			'model asked'
@@ -151,7 +157,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			const answer = completion.content ?? '';
 			if (answer.length === 0) throw new TurnError('the model answered nothing');
 			messages.push({ role: 'assistant', content: answer });
-			return { answer, messages, tokens };
+			return { answer, messages: [...input.history, ...messages], tokens };
 		}
 		messages.push({
 			role: 'assistant',
@@ -215,7 +221,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				messages.push({ role: 'assistant', content: outcome.final });
 				return {
 					answer: outcome.final,
-					messages,
+					messages: [...input.history, ...messages],
 					tokens,
 					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId }),
 					...(outcome.request === undefined ? {} : { request: outcome.request })

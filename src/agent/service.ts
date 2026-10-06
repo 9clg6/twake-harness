@@ -466,7 +466,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			}
 			try {
 				const turn = await runTurn(
-					{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
+					{
+						llm,
+						tools,
+						log,
+						maxToolCalls: config.turn.maxToolCalls,
+						historyMaxChars: config.turn.historyMaxChars
+					},
 					{
 						systemPrompt: buildSystemPrompt({
 							persona:
