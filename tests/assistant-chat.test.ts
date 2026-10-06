@@ -72,15 +72,11 @@ describe('talking to my assistant in Matrix', () => {
 		expect(all.at(-1)).toBe('echo: hello there');
 		expect(all.join('\n')).not.toContain('thinking');
 		expect(all.join('\n')).not.toContain('private');
+		const logs = h.logLines();
 		expect(
-			h
-				.logLines()
-				.some(
-					(line) =>
-						line['msg'] === 'model answered' &&
-						String(line['reasoning']).includes('thinking about greetings')
-				)
+			logs.some((line) => line['msg'] === 'model answered' && line['hasReasoning'] === true)
 		).toBe(true);
+		expect(JSON.stringify(logs)).not.toContain('thinking about greetings');
 		expect(h.logLines().some((line) => line['msg'] === 'answer sent')).toBe(true);
 	});
 

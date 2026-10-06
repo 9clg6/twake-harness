@@ -118,25 +118,6 @@ describe('contracts as tools', () => {
 		expect(call?.headers['authorization']).toBeUndefined();
 		const toolMessage = h.apisix.llm.calls[1]?.request.messages.find((m) => m.role === 'tool');
 		expect(JSON.parse(toolMessage?.content ?? '{}')).toEqual({ status: 200, body: { busy: [] } });
-		for (let i = 0; i < 20 && h.apisix.audit.length === 0; i += 1) {
-			await new Promise((resolve) => setTimeout(resolve, 100));
-		}
-		expect(h.apisix.audit).toHaveLength(1);
-		// The record the audit relay keys by agent and writes to the topic
-		expect(h.apisix.audit[0]).toMatchObject({
-			agent: 'twake-harness',
-			user: 'alice',
-			contract: 'calendar.freebusy.read.v1',
-			method: 'GET',
-			path: '/calendar/freebusy',
-			status: 200
-		});
-		expect(typeof (h.apisix.audit[0] as { correlation_id?: unknown }).correlation_id).toBe(
-			'string'
-		);
-		expect((h.apisix.audit[0] as { correlation_id: string }).correlation_id.length).toBeGreaterThan(
-			0
-		);
 		expect(
 			h
 				.logLines()
@@ -145,6 +126,57 @@ describe('contracts as tools', () => {
 						line['msg'] === 'contract called' && line['contract'] === 'calendar.freebusy.read.v1'
 				)
 		).toBe(true);
+	});
+
+	// The gateway writes the one audit record of each contract call, from its own logger: the
+	// harness only forwards the correlation id that links the record to the turn
+	async function expectNoAuditPosted(): Promise<void> {
+		await new Promise((resolve) => setTimeout(resolve, 500));
+		expect(h.apisix.audit).toHaveLength(0);
+	}
+
+	async function injectAs(sub: string, requestId: string, url: string, payload: object) {
+		return h.app.inject({
+			method: 'POST',
+			url,
+			headers: {
+				authorization: `Bearer ${await h.issuer.mint({ sub })}`,
+				'x-request-id': requestId
+			},
+			payload
+		});
+	}
+
+	it('forwards the correlation id of a turn to the gateway and posts no audit record itself', async () => {
+		h.apisix.llm.script = (_request: ChatRequest, index: number) =>
+			index === 0
+				? {
+						toolCalls: toolCall('calendar_freebusy_read_v1', {
+							start: '2026-10-06T17:00:00Z',
+							end: '2026-10-06T18:00:00Z'
+						})
+					}
+				: { content: 'you are free' };
+		const res = await injectAs('alice', 'corr-turn-42', '/v1/chat', {
+			message: 'am I free tomorrow at 5?'
+		});
+		expect(res.statusCode).toBe(200);
+		const call = h.apisix.contracts.calls[0];
+		expect(call?.headers['x-correlation-id']).toBe('corr-turn-42');
+		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice');
+		await expectNoAuditPosted();
+	});
+
+	it('forwards the correlation id of a direct tool call to the gateway', async () => {
+		const res = await injectAs('alice', 'corr-tool-7', '/v1/tool', {
+			tool: 'calendar_freebusy_read_v1',
+			arguments: { start: '2026-10-06T17:00:00Z', end: '2026-10-06T18:00:00Z' }
+		});
+		expect(res.statusCode).toBe(200);
+		const call = h.apisix.contracts.calls[0];
+		expect(call?.headers['x-correlation-id']).toBe('corr-tool-7');
+		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice');
+		await expectNoAuditPosted();
 	});
 
 	it('sends a body and a path parameter for an action contract', async () => {

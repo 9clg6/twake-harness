@@ -29,6 +29,11 @@ import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/id
 import { makeMatrixAdmin } from './admin.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
+import {
+	ensureCrossSigning,
+	type CrossSigningDeps,
+	type CrossSigningResult
+} from './cross-signing.js';
 import { helpText, runCreatorTurn } from './creator.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
@@ -177,14 +182,25 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const escrow: EscrowDeps | null = config.escrow.enabled
 		? { db, store: makeOpenBaoEscrow({ config, log }), log }
 		: null;
-	async function escrowOnceReady(intent: Intent, owner: string): Promise<void> {
+	const crossSigning: CrossSigningDeps = { db, log, escrowEnabled: escrow !== null, admin };
+	// Once an assistant can encrypt: its device is signed by its own cross-signing identity, which
+	// Twake Chat requires before it sends the room keys, then that identity is escrowed
+	async function onEncryptionReady(intent: Intent, owner: string): Promise<void> {
 		log.info(
 			{ owner, userId: intent.userId, deviceId: intent.underlyingClient.crypto?.clientDeviceId },
 			'encryption ready'
 		);
-		if (escrow === null) return;
+		let signed: CrossSigningResult;
 		try {
-			await ensureEscrow(escrow, intent, owner);
+			signed = await ensureCrossSigning(crossSigning, intent, owner);
+		} catch (err: unknown) {
+			log.error({ owner, userId: intent.userId, err }, 'cross-signing failed');
+			return;
+		}
+		if (escrow === null || signed.outcome === 'awaiting_recovery') return;
+		if (signed.masterPublicKey === null) return;
+		try {
+			await ensureEscrow(escrow, intent, owner, signed.masterPublicKey);
 		} catch (err: unknown) {
 			log.error({ owner, userId: intent.userId, err }, 'escrow failed');
 		}
@@ -548,7 +564,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			const intent = appservice.getIntentForUserId(job.payload.asUserId);
 			await intent.enableEncryption();
 			const room = await assistantRoom(job.payload.roomId);
-			if (room !== null) await escrowOnceReady(intent, room.owner);
+			if (room !== null) await onEncryptionReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
 			const turn = turnOf(job.payload);
 			if (turn !== null) await feedback.answerReady(turn);
@@ -578,7 +594,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		try {
 			const intent = appservice.getIntentForUserId(userId);
 			await intent.enableEncryption();
-			await escrowOnceReady(intent, owner);
+			await onEncryptionReady(intent, owner);
 		} catch (err: unknown) {
 			log.warn({ userId, err }, 'encryption setup failed at start');
 		}

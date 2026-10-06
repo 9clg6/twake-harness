@@ -28,6 +28,14 @@ export interface ToolOutcome {
 	readonly denied?: boolean;
 }
 
+// How a tool call ended, as the info logs report it: never the arguments or the result
+export type ToolCallStatus = 'ok' | 'final' | 'denied' | 'unknown_tool' | 'invalid_arguments';
+
+export function toolCallStatus(outcome: ToolOutcome): ToolCallStatus {
+	if (outcome.denied === true) return 'denied';
+	return outcome.final === undefined ? 'ok' : 'final';
+}
+
 export interface ToolContext {
 	readonly principalId: string;
 	readonly actions: readonly string[];

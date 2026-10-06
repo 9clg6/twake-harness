@@ -151,6 +151,20 @@ describe("the escrow of an assistant's identity", () => {
 		const before = await keysOf(assistantId);
 		const devicesBefore = Object.keys(before.device_keys?.[assistantId] ?? {});
 		await h.restartRole({ wipeCryptoStore: true });
+		// The new device does not reset the escrowed identity: it waits for the owner's recovery
+		const restarted = await keysOf(assistantId);
+		expect(restarted.master_keys?.[assistantId]?.keys).toEqual(
+			before.master_keys?.[assistantId]?.keys
+		);
+		expect(
+			h
+				.logLines()
+				.some(
+					(l) =>
+						l['msg'] === 'cross-signing identity escrowed, waiting for its recovery' &&
+						l['owner'] === 'alice@test.local'
+				)
+		).toBe(true);
 		const asked = await h.api.post<{ queued: boolean }>(
 			'alice@test.local',
 			'/v1/assistants/me/recover',
