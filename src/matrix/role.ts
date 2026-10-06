@@ -46,7 +46,7 @@ import { buildRegistration, creatorUserId, isAssistantUserId } from './registrat
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
-import { makePushedAppservice } from './pushes.js';
+import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
 
 // The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
@@ -65,6 +65,8 @@ export interface MatrixRoleOptions {
 	readonly port: number;
 	readonly bindAddress?: string;
 	readonly pollIntervalMs?: number;
+	// How long the SDK may process a push before the role gives it up, PUSH_DEADLINE_MS by default
+	readonly pushDeadlineMs?: number;
 }
 
 export interface MatrixRole {
@@ -224,7 +226,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			cryptoStorage,
 			intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
 		},
-		{ log, storage, ensureEncryption }
+		{ log, storage, ensureEncryption, deadlineMs: options.pushDeadlineMs ?? PUSH_DEADLINE_MS }
 	);
 	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start

@@ -99,6 +99,9 @@ export interface FakeApisix {
 	matrixAsToken: string | null;
 	// A failure the /matrix route answers instead of forwarding, for the calls it returns a status for
 	matrixFault: ((call: { method: string; path: string }) => number | null) | null;
+	// A wait before the /matrix route forwards, for the calls it returns one for: a homeserver slow
+	// to answer them
+	matrixHold: ((call: { method: string; path: string }) => Promise<void> | null) | null;
 	// What went through the /matrix route, for diagnosis
 	readonly matrixCalls: { method: string; path: string; status: number; ms: number }[];
 	close(): Promise<void>;
@@ -266,7 +269,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 	const fake = {
 		matrixUpstream: null as string | null,
 		matrixAsToken: null as string | null,
-		matrixFault: null as FakeApisix['matrixFault']
+		matrixFault: null as FakeApisix['matrixFault'],
+		matrixHold: null as FakeApisix['matrixHold']
 	};
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
 	// One counter for the model and the contract calls, to tell which came first
@@ -318,6 +322,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 				sendJson(res, fault, { errcode: 'M_UNKNOWN', error: 'Internal server error' });
 				return;
 			}
+			await fake.matrixHold?.({ method: req.method ?? 'GET', path });
 			// Like the real gateway, an upstream that fails or goes away mid-call is answered with a 502
 			try {
 				const upstream = await fetch(target, {
@@ -496,6 +501,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		},
 		set matrixFault(value: FakeApisix['matrixFault']) {
 			fake.matrixFault = value;
+		},
+		get matrixHold() {
+			return fake.matrixHold;
+		},
+		set matrixHold(value: FakeApisix['matrixHold']) {
+			fake.matrixHold = value;
 		},
 		matrixCalls,
 		close: () =>

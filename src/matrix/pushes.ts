@@ -25,10 +25,15 @@ export interface PushResponse {
 type TransactionHandler = (this: Appservice, req: PushRequest, res: PushResponse) => Promise<void>;
 type AuthCheck = (this: Appservice, req: PushRequest) => boolean;
 
+// How long the SDK may take to process a push before the push is given up: under the minute Synapse
+// waits for an answer, far above the few hundred milliseconds a push takes once its users are set up
+export const PUSH_DEADLINE_MS = 45_000;
+
 export interface PushDeps {
 	readonly log: FastifyBaseLogger;
 	readonly storage: IAppserviceStorageProvider;
 	readonly ensureEncryption: (intent: Intent) => Promise<void>;
+	readonly deadlineMs: number;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -102,6 +107,68 @@ export function withoutKeyUpdatesOf(
 	return kept;
 }
 
+function isPromiseLike(value: unknown): value is PromiseLike<unknown> {
+	return (
+		typeof value === 'object' && value !== null && typeof Reflect.get(value, 'then') === 'function'
+	);
+}
+
+// The SDK keeps the promise of each transaction it processes, and hands it to the retries of that
+// transaction. Each one is given a deadline here: past it, the SDK answers the push with an error and
+// the transaction is forgotten, so that Synapse's retry processes it again. Whatever else throws in
+// the SDK's processing, a request to the homeserver that fails for instance, then holds up the pushes
+// after it for the deadline at most. A turn is queued once per event, so a transaction processed
+// twice answers no message twice.
+function boundTransactions(
+	appservice: Appservice,
+	deadlineMs: number,
+	log: FastifyBaseLogger
+): void {
+	const sdkPending: unknown = Reflect.get(appservice, 'pendingTransactions');
+	if (!isRecord(sdkPending)) {
+		throw new Error('matrix-bot-sdk no longer keeps its transactions as the harness expects');
+	}
+	const pending = new Map<string, Promise<void>>();
+	function bounded(txnId: string, processing: PromiseLike<unknown>): Promise<void> {
+		const settled = new Promise<void>((resolve, reject) => {
+			const forget = (): void => {
+				if (pending.get(txnId) === settled) pending.delete(txnId);
+			};
+			const timer = setTimeout(() => {
+				forget();
+				log.error({ txnId, deadlineMs }, 'push given up');
+				reject(new Error(`transaction ${txnId} not processed within ${deadlineMs} ms`));
+			}, deadlineMs);
+			timer.unref();
+			processing.then(
+				() => {
+					clearTimeout(timer);
+					resolve();
+				},
+				(err: unknown) => {
+					clearTimeout(timer);
+					forget();
+					reject(err);
+				}
+			);
+		});
+		return settled;
+	}
+	Reflect.set(
+		appservice,
+		'pendingTransactions',
+		new Proxy(sdkPending, {
+			get: (target, key) => (typeof key === 'string' ? pending.get(key) : Reflect.get(target, key)),
+			set: (target, key, value: unknown) => {
+				if (typeof key !== 'string' || !isPromiseLike(value))
+					return Reflect.set(target, key, value);
+				pending.set(key, bounded(key, value));
+				return true;
+			}
+		})
+	);
+}
+
 function isTransactionHandler(value: unknown): value is TransactionHandler {
 	return typeof value === 'function';
 }
@@ -118,7 +185,8 @@ function isAuthCheck(value: unknown): value is AuthCheck {
 // encryption of a user the push names, which the SDK runs on the way. Those users are set up here
 // first, and the key updates of one whose setup failed are left out of the push, so that the SDK
 // never sets anyone up itself. Refusing the push instead would save nothing: Synapse pushes a failed
-// transaction again with its room events only.
+// transaction again with its room events only. Anything else that throws there is bounded by the
+// deadline of boundTransactions.
 export function makePushedAppservice(options: IAppserviceOptions, deps: PushDeps): Appservice {
 	const sdkHandler: unknown = Reflect.get(Appservice.prototype, 'onTransaction');
 	const sdkAuthCheck: unknown = Reflect.get(Appservice.prototype, 'isAuthed');
@@ -168,5 +236,7 @@ export function makePushedAppservice(options: IAppserviceOptions, deps: PushDeps
 		writable: true,
 		configurable: true
 	});
-	return new PushedAppservice(options);
+	const appservice = new PushedAppservice(options);
+	boundTransactions(appservice, deps.deadlineMs, deps.log);
+	return appservice;
 }

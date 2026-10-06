@@ -8,6 +8,9 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Short, so that a push held up inside the SDK is given up within the test
+const PUSH_DEADLINE_MS = 3000;
+
 interface Conversation {
 	readonly client: E2eeClient;
 	readonly room: string;
@@ -78,7 +81,7 @@ describe('a push that fails on the encryption of an assistant', () => {
 	}
 
 	beforeAll(async () => {
-		h = await startMatrixHarness();
+		h = await startMatrixHarness({ pushDeadlineMs: PUSH_DEADLINE_MS });
 		h.apisix.llm.script = (request: ChatRequest) => ({
 			content: `echo: ${request.messages.at(-1)?.content ?? ''}`
 		});
@@ -126,5 +129,52 @@ describe('a push that fails on the encryption of an assistant', () => {
 		} finally {
 			h.apisix.matrixFault = null;
 		}
+	});
+
+	it('gives up a push held up inside the SDK past its deadline, and processes it again', async () => {
+		const pia = await meetAssistant('pia', 'Lou');
+		const ravi = await meetAssistant('ravi', 'Max');
+		// The homeserver holds the first request the SDK makes as the creator, inside a push of pia's room:
+		// the look-up of the room's members, to find who can decrypt an event
+		let release: () => void = () => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const membersOfRoom = `/_matrix/client/v3/rooms/${encodeURIComponent(pia.room)}/joined_members`;
+		let held = 0;
+		h.apisix.matrixHold = (call) => {
+			const target = new URL(call.path, 'http://synapse');
+			const asUser = target.searchParams.get('user_id') ?? h.role.creatorUserId;
+			if (held > 0 || target.pathname !== membersOfRoom || asUser !== h.role.creatorUserId) {
+				return null;
+			}
+			held += 1;
+			return released;
+		};
+		try {
+			await pia.client.sendText(pia.room, 'slow one');
+			await ravi.client.sendText(ravi.room, 'meanwhile');
+			expect(
+				await ravi.client.waitForMessage(
+					ravi.room,
+					ravi.assistantId,
+					(t) => t === 'echo: meanwhile',
+					15_000
+				)
+			).toBe('echo: meanwhile');
+			expect(
+				await pia.client.waitForMessage(
+					pia.room,
+					pia.assistantId,
+					(t) => t === 'echo: slow one',
+					15_000
+				)
+			).toBe('echo: slow one');
+		} finally {
+			h.apisix.matrixHold = null;
+			release();
+		}
+		expect(held).toBe(1);
+		expect(linesOf('push given up')).not.toEqual([]);
 	});
 });
