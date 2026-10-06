@@ -27,7 +27,9 @@ import {
 
 export const ACCESS_DENIED = { error: 'access denied' } as const;
 
-// What the model reads when a turn may not act: it relays the proposal and waits for a yes
+// What the model reads when its turn may not use a right its owner holds, such as a turn an event
+// started changing the assistant's language or keeping a note: it relays the proposal and waits
+// for a yes. A write through a contract never reads it: it waits for its owner instead.
 export const NEEDS_OWNER_APPROVAL = {
 	error: 'needs_owner_approval',
 	hint: "This action needs the owner's approval. Tell the owner what you would do and ask them; act only after their explicit yes in the room."
@@ -60,12 +62,13 @@ export type TurnOrigin = 'owner' | 'event';
 
 export interface ToolContext {
 	readonly principalId: string;
-	// Who started the turn, which a call frozen in it keeps for the turn its owner's answer resumes
+	// Who started the turn, which a call frozen in it keeps for the turn its owner's answer resumes:
+	// every write a turn an event started prepares waits for its owner
 	readonly origin?: TurnOrigin;
 	readonly actions: readonly string[];
-	// Actions the principal holds but this turn may not use: a turn an event started may read,
-	// never act nor keep anything, so text written by a third party cannot make the assistant act,
-	// now or in a later turn
+	// Actions the principal holds but this turn may not use: a turn an event started never changes
+	// the owner's settings nor keeps anything, so text written by a third party cannot steer the
+	// assistant, now or in a later turn
 	readonly withheldActions?: readonly string[];
 	readonly db: Db;
 	// What links this turn's calls in the audit: the request id, or the Matrix event id

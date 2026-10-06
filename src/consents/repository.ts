@@ -179,6 +179,7 @@ interface SubjectRow {
 // to WaitReason and missing here fails the build
 const WAIT_REASONS: Readonly<Record<WaitReason, true>> = {
 	consent: true,
+	event_turn: true,
 	high_risk: true,
 	delegation: true
 };

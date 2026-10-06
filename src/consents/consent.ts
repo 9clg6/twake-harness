@@ -2,11 +2,11 @@
 // allows each level of each application on its own
 export type ConsentLevel = 'read' | 'write';
 
-// Why a call waits for its owner: an application they never allowed at that level; a high-risk
-// write, which they confirm call by call whatever they allowed; or the platform's own permission
-// for their assistant to act for them, which its broker lacks. One request asks about every
-// reason that applies.
-export type WaitReason = 'consent' | 'high_risk' | 'delegation';
+// Why a call waits for its owner: an application they never allowed at that level; a write that a
+// turn an event started prepared, or a high-risk write, which they confirm call by call whatever
+// they allowed; or the platform's own permission for their assistant to act for them, which its
+// broker lacks. One request asks about every reason that applies.
+export type WaitReason = 'consent' | 'event_turn' | 'high_risk' | 'delegation';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 

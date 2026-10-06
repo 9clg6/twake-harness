@@ -1,6 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
+import { CALENDAR_CATALOG, invitationEvent } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -75,7 +77,7 @@ describe('a deployment that speaks French', () => {
 		expect(system?.content).toContain('You are "Lucie", the Twake Space assistant');
 		expect(system?.content).toContain("Tutoie la personne qui t'écrit");
 	});
-	it('tells the model of an invitation in French: what the calendar answered, propose, never accept', async () => {
+	it('tells the model of an invitation in French: what the calendar answered, and the acceptance to prepare', async () => {
 		const posted = await h.api.post('dispatcher', '/v1/events', {
 			owner: 'alice@test.local',
 			event_id: 'evt-fr',
@@ -93,8 +95,8 @@ describe('a deployment that speaks French', () => {
 			'read_event: not called, the calendar contract read_event is not available'
 		);
 		expect(told?.content).toContain("N'appelle plus read_event ni read_freebusy");
-		expect(told?.content).toContain("« Veux-tu que je l'accepte ? »");
-		expect(told?.content).toContain("arrête-toi là : ne l'accepte pas toi-même");
+		expect(told?.content).toContain('dans la même réponse, appelle accept_invitation pour elle');
+		expect(told?.content).toContain("rien n'est envoyé avant mon oui");
 	});
 
 	it('asks in French before its first read of an application', async () => {
@@ -268,5 +270,94 @@ describe('a deployment that speaks French', () => {
 		const buttons = await client.waitForReactions(assistantRoom, asked.eventId, assistantId, 2);
 		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		expect(h.apisix.contracts.calls).toHaveLength(1);
+	});
+
+	it('asks in French before accepting an invitation that arrived, quoting the model and showing the call', async () => {
+		// The catalog names the calendar and says what writing there covers
+		h.apisix.contracts.spec = {
+			...CALENDAR_CATALOG,
+			'x-twake-domains': {
+				calendar: {
+					name: { en: 'Twake Calendar', fr: 'Twake Calendar' },
+					write: { fr: 'répondre à tes invitations et modifier tes événements' }
+				}
+			}
+		};
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		// Alice lets her assistant read her calendar, never write there
+		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
+		h.apisix.contracts.calls.length = 0;
+		h.apisix.contracts.handler = (call) => {
+			if (call.path.endsWith('/freebusy')) {
+				return { status: 200, body: { start: '', end: '', free: true, busy: [] } };
+			}
+			const id = call.path.split('/').at(call.method === 'POST' ? -2 : -1) ?? '';
+			return call.method === 'POST'
+				? { status: 200, body: { event_id: id, partstat: 'ACCEPTED' } }
+				: {
+						status: 200,
+						body: invitationEvent({
+							id,
+							uid: `uid-${id}`,
+							title: 'Revue du budget',
+							start: '2026-10-09T09:00:00+02:00',
+							end: '2026-10-09T10:00:00+02:00',
+							timezone: 'Europe/Paris',
+							organizer: 'bob@test.local',
+							invitee: 'alice@test.local'
+						})
+					};
+		};
+		h.apisix.llm.script = (request) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool') return { content: 'Acceptée.' };
+			const id = /\(id ([^)]+)\)/.exec(last?.content ?? '')?.[1] ?? '';
+			return {
+				content: `Bob t'invite à la revue du budget (${id}) vendredi de 9 h à 10 h ; tu es libre.`,
+				toolCalls: [
+					{
+						id: `call_accept_${id}`,
+						type: 'function',
+						function: { name: 'accept_invitation', arguments: JSON.stringify({ event_id: id }) }
+					}
+				]
+			};
+		};
+		const invite = async (id: string): Promise<string> => {
+			const posted = await h.api.post('dispatcher', '/v1/events', {
+				owner: 'alice@test.local',
+				event_id: id,
+				type: 'com.twake.calendar.event.invited.v1'
+			});
+			expect(posted.status).toBe(202);
+			return client.waitForMessage(assistantRoom, assistantId, (t) =>
+				t.includes(`> Bob t'invite à la revue du budget (${id})`)
+			);
+		};
+		// Its first acceptance is also its first write in calendar: one request asks about both
+		const first = await invite('evt-fr-first');
+		expect(first).toBe(
+			[
+				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-first) vendredi de 9 h à 10 h ; tu es libre.",
+				"C'est la première fois que j'ai besoin de modifier tes données dans Twake Calendar, pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord.\nÉcriture : répondre à tes invitations et modifier tes événements\nTu m'autorises, à commencer par cette action, exactement comme ci-dessous ?",
+				JSON.stringify({ event_id: 'evt-fr-first' }, null, 2),
+				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+			].join('\n\n')
+		);
+		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+		await client.sendText(assistantRoom, 'oui');
+		await client.waitForMessage(assistantRoom, assistantId, (t) => t === 'Acceptée.');
+		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
+		// The next invitation's acceptance asks again, for that acceptance alone
+		const next = await invite('evt-fr-next');
+		expect(next).toBe(
+			[
+				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-next) vendredi de 9 h à 10 h ; tu es libre.",
+				"J'ai préparé ceci dans Twake Calendar pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord. Je le fais, exactement comme ci-dessous ?",
+				JSON.stringify({ event_id: 'evt-fr-next' }, null, 2),
+				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+			].join('\n\n')
+		);
+		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
 	});
 });

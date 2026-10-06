@@ -331,7 +331,7 @@ describe('my answer lets my assistant carry on', () => {
 		expect(answers()).toHaveLength(answered + 1);
 	});
 
-	it('keeps a turn an event started from acting, even once I allowed it to read', async () => {
+	it('keeps a turn an event started from acting on its own, even once I allowed it to read: what it prepares then asks me', async () => {
 		// The model reads the event, then the calendar it never read, and once allowed to, it
 		// tries to accept the invitation on its own
 		h.apisix.llm.script = (request) => {
@@ -362,7 +362,11 @@ describe('my answer lets my assistant carry on', () => {
 		const request = await nextRequest(seen);
 		const answered = answers().length;
 		await client.react(room, request, '✅');
-		expect(await nextAnswer(answered)).toContain('needs_owner_approval');
+		// My yes let it read my calendar, nothing more: the acceptance it then prepares waits for
+		// me in turn, and only its reads reached my calendar
+		await nextRequest(seen + 1);
+		expect(requests().at(-1)?.body).toContain('"event_id": "evt-9"');
+		expect(answers()).toHaveLength(answered);
 		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual([
 			'/contracts/v1/events/evt-9',
 			'/contracts/v1/calendar/freebusy'

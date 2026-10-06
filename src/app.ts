@@ -176,8 +176,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	app.get('/health', async () => ({ status: 'ok' }));
 
 	// An event the dispatcher posts for an owner wakes their assistant: the turn runs in the
-	// owner's room, reads the event through the contracts and tells the owner. Only the service
-	// clients named in the settings may post one, never a user.
+	// owner's room, reads the event through the contracts and tells the owner, and whatever it
+	// prepares to write waits for the owner's yes. Only the service clients named in the settings
+	// may post one, never a user.
 	app.post('/v1/events', async (request, reply) => {
 		const auth = await authenticate(request.headers.authorization);
 		if (!auth.ok) {
@@ -208,7 +209,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			roomId: assistant.roomId,
 			eventId: `event:${eventId}`,
 			// Told as it is for most events; an invitation is read and checked by the harness first,
-			// and only its owner's answer, in a turn of their own in the room, can accept it
+			// and only its owner's yes to the harness's own request can accept it
 			text: getMessages(localeOf(assistant, config.locale)).events.other(type, eventId),
 			origin: 'event',
 			event: { id: eventId, type }
