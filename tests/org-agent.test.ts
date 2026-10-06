@@ -142,4 +142,36 @@ describe('the organization agent', () => {
 		// No token carries the organization principal
 		expect((await h.api.get('org', '/v1/me')).status).toBe(401);
 	});
+
+	it('starts no turn from a message sent in clear in the name of a member, in an encrypted room, and logs it', async () => {
+		const said = (): string[] =>
+			aliceClient.messages
+				.filter((m) => m.roomId === room && m.sender === orgId)
+				.map((m) => m.body);
+		const before = said().length;
+		// What a component on the server could write in Alice's name: it cannot encrypt for the room
+		const plain = await h.synapse.sendText(alice, room, 'what is our usage, asks mallory?');
+		const decision = await h.decisionOn(plain);
+		expect(decision?.['msg']).toBe('assistant ignored an unencrypted message');
+		expect(decision?.['sender']).toBe(alice.userId);
+		expect(decision?.['owner']).toBe('org');
+		// What her own device encrypts is answered as before
+		await aliceClient.sendText(room, 'what is our usage today?');
+		for (let i = 0; i < 120 && said().length === before; i += 1) await sleep(250);
+		expect(said().slice(before)).toEqual(['Usage: 42 turns']);
+		const told = h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('mallory'))).toBe(
+			false
+		);
+	});
+
+	it('answers a member in a room opened without encryption, where every message comes in clear', async () => {
+		const clearRoom = await h.synapse.createDirectRoom(alice, orgId);
+		await h.synapse.waitForMessage(alice, clearRoom, orgId, (t) => t.includes('Twake Space'));
+		const sent = await h.synapse.sendText(alice, clearRoom, 'what is our usage?');
+		expect((await h.decisionOn(sent))?.['msg']).toBe('turn queued');
+		expect(
+			await h.synapse.waitForMessage(alice, clearRoom, orgId, (t) => t.startsWith('Usage:'))
+		).toBe('Usage: 42 turns');
+	});
 });

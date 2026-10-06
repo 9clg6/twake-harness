@@ -532,6 +532,15 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			: { owner: row.owner, userId: row.user_id, welcome: row.welcome };
 	}
 
+	// Whether a room is encrypted, as its assistant's device knows it: the SDK reads the room's
+	// m.room.encryption state and keeps it in the assistant's encryption store, since encryption is
+	// never turned off, and encrypts what the assistant says in the room by the same knowledge
+	async function isEncryptedRoom(assistantUserId: string, roomId: string): Promise<boolean> {
+		const intent = appservice.getIntentForUserId(assistantUserId);
+		await ensureEncryption(intent);
+		return intent.underlyingClient.crypto.isRoomEncrypted(roomId);
+	}
+
 	// The owner has joined: their devices are in the room, the greeting can be encrypted for them
 	appservice.on(
 		'room.event',
@@ -620,7 +629,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 
 	// The messages that reached an assistant encrypted, between the SDK's decrypted event and the
-	// same event handed on as a room message: only those may answer a question
+	// same event handed on as a room message: only those may answer a question, or start a turn in
+	// an encrypted room
 	const decryptedMessages = new Set<string>();
 
 	appservice.on(
@@ -689,6 +699,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				owner = principal;
 				const requestRoom = { roomId, owner, assistantUserId: room.userId };
 				if (encrypted && (await requests.wrote(requestRoom, eventId, text))) return;
+			}
+			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt
+			// what they write: a message in their name that came in clear was written on the server
+			// side, and starts nothing
+			if (!encrypted && (await isEncryptedRoom(room.userId, roomId))) {
+				log.info(
+					{ roomId, sender, owner, eventId: raw.event_id },
+					'assistant ignored an unencrypted message'
+				);
+				return;
 			}
 			// The turns of one owner run one after the other, in the order they were sent
 			const queued = await enqueueJob(db, {
