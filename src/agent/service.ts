@@ -4,7 +4,7 @@ import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
-import { makeConsentMetrics, replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
+import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
 import {
 	approvePendingCall,
 	grantConsent,
@@ -131,9 +131,6 @@ export interface AgentService {
 	readonly gate: TurnGate;
 	readonly contracts: ContractCatalog;
 	readonly admission: Admission;
-	// The consent counters its metrics serve: the calls this replica freezes and replays, or, in the
-	// worker role, the requests its hourly pass expires
-	readonly consentMetrics: ConsentMetrics;
 	runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult>;
 }
 
@@ -143,6 +140,8 @@ export interface AgentServiceDeps {
 	readonly log: FastifyBaseLogger;
 	readonly llm?: LlmClient;
 	readonly clock?: Clock;
+	// Where its role counts the calls it freezes and those it replays
+	readonly consentMetrics: ConsentMetrics;
 }
 
 export function makeAgentService(deps: AgentServiceDeps): AgentService {
@@ -169,7 +168,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			maxTokens: config.llm.maxTokens,
 			timeoutMs: config.llm.timeoutMs
 		});
-	const consentMetrics = makeConsentMetrics();
+	const { consentMetrics } = deps;
 	const contracts = makeContractCatalog({ config, log: deps.log, consentMetrics });
 	const tools = makeToolRegistry(
 		[
@@ -438,5 +437,5 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	return { llm, tools, gate, contracts, admission, consentMetrics, runOwnerTurn };
+	return { llm, tools, gate, contracts, admission, runOwnerTurn };
 }

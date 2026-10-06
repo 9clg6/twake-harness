@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { expireOverdueRequests } from '../src/consents/expiry.js';
+import { makeConsentMetrics } from '../src/consents/metrics.js';
 import {
 	modelUsing,
 	readCatalog,
@@ -62,7 +63,7 @@ describe('a question I leave unanswered expires', () => {
 		// The worker role's hourly pass, while I say nothing
 		const app = r.h.apps[0];
 		if (app === undefined) throw new Error('no api role');
-		await expireOverdueRequests(r.h.db, app.log, 1000, app.agent.consentMetrics);
+		await expireOverdueRequests(r.h.db, app.log, 1000, makeConsentMetrics());
 		expect(await r.callsTo('notes')).toEqual([{ status: 'expired', arguments: null }]);
 		// My answer, when it comes, gets the notice
 		const notices = r.saying('This request has expired').length;

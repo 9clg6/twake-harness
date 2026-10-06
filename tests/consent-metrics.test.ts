@@ -1,8 +1,7 @@
 import { Writable } from 'node:stream';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { buildApp } from '../src/app.js';
-import { startExpiryScheduler } from '../src/consents/expiry.js';
+import { startWorkerRole } from '../src/worker/role.js';
 import {
 	modelFor,
 	modelUsing,
@@ -295,21 +294,19 @@ describe('an operator sees requests expire', () => {
 		await r.client.sendText(r.room, 'Find my plan in my drive');
 		await r.nextQuestion(seen);
 		await sleep(1500);
-		// The worker role as it starts: its app serves the metrics, its pass runs at once
-		const worker = await buildApp({
+		// The worker role, started as in production: its pass runs at once
+		const worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker' },
 			db: r.h.db,
 			logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
 		});
-		const expiry = startExpiryScheduler(r.h.db, worker.log, 1000, worker.agent.consentMetrics);
 		try {
 			const scrape = async (): Promise<string[]> => [
-				(await worker.inject({ method: 'GET', url: '/metrics' })).body
+				(await worker.app.inject({ method: 'GET', url: '/metrics' })).body
 			];
 			expect(await scraped(scrape, EXPIRIES, firstRead('drive'), 1)).toBe(1);
 		} finally {
-			expiry.stop();
-			await worker.close();
+			await worker.stop();
 		}
 		expect(total(await matrix(), EXPIRIES, { domain: 'drive' })).toBe(0);
 	});
