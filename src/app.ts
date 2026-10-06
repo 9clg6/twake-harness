@@ -478,7 +478,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					principalId: principal.id,
 					actions: record.actions,
 					db,
-					correlationId: request.id
+					correlationId: request.id,
+					log: request.log
 				});
 				request.log.info(
 					{

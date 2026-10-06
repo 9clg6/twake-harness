@@ -67,6 +67,21 @@ export async function listConsents(tx: Tx, owner: string): Promise<ConsentRecord
 	);
 }
 
+// Takes back what an owner allowed in an application, at the levels given; resolves to the levels
+// the owner had allowed there
+export async function withdrawConsents(
+	tx: Tx,
+	owner: string,
+	domain: string,
+	levels: readonly ConsentLevel[]
+): Promise<ConsentLevel[]> {
+	const rows = await tx.sql<{ level: ConsentLevel }[]>`
+		delete from consents
+		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
+		returning level`;
+	return rows.map((row) => row.level).sort();
+}
+
 // A consent as the model and the owner's clients read it
 export interface ConsentView {
 	readonly domain: string;
