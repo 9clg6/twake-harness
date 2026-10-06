@@ -105,6 +105,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// language, which the model then speaks in
 	const withAddressing = (persona: string): string =>
 		messages.addressing === null ? persona : `${persona} ${messages.addressing}`;
+	// The owner's own assistant may need an invitation the conversation does not hold; the
+	// organization agent has no calendar of its own to search
+	const withLookup = (persona: string): string => `${persona} ${messages.lookup}`;
 	const llm =
 		deps.llm ??
 		makeLlmClient({
@@ -221,9 +224,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							persona: withAddressing(
 								principal.id === ORGANIZATION_PRINCIPAL
 									? organizationPrompt(config.org.name, config.org.persona)
-									: input.assistantName === undefined
-										? DEFAULT_SYSTEM_PROMPT
-										: assistantPrompt(input.assistantName)
+									: withLookup(
+											input.assistantName === undefined
+												? DEFAULT_SYSTEM_PROMPT
+												: assistantPrompt(input.assistantName)
+										)
 							),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
 							memory,
