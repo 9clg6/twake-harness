@@ -1,6 +1,12 @@
 import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
-import { FEED_DOMAIN, type ConsentLevel, type ConsentSource, type WaitReason } from './consent.js';
+import {
+	FEED_DOMAIN,
+	isBuiltInConsent,
+	type ConsentLevel,
+	type ConsentSource,
+	type WaitReason
+} from './consent.js';
 
 export async function hasConsent(
 	tx: Tx,
@@ -55,7 +61,7 @@ export async function listConsents(tx: Tx, owner: string): Promise<ConsentRecord
 	const rows = await tx.sql<ConsentRow[]>`
 		select domain, level, granted_by, granted_at from consents where owner = ${owner}`;
 	const given = rows
-		.filter((row) => row.domain !== FEED_DOMAIN || row.level !== 'read')
+		.filter((row) => !isBuiltInConsent(row.domain, row.level))
 		.map((row): ConsentRecord => ({
 			domain: row.domain,
 			level: row.level,
