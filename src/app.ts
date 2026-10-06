@@ -83,9 +83,21 @@ const eventSchema = z.object({
 	type: z.string().min(1).max(100)
 });
 
-// What the assistant is told when an event arrives, as a message of its owner in their room
+// What the assistant is told when an event arrives, as a message of its owner in their room. The
+// turn may read but never act: an invitation is read, checked against the calendar and proposed,
+// and only the owner's answer, in a turn of their own in the same room, can accept it. English
+// until the assistant's texts follow the deployment's language.
 function eventMessage(type: string, eventId: string): string {
-	return `[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`;
+	const arrived = `[event] A new event of type "${type}" has arrived (id ${eventId}).`;
+	if (type.startsWith('calendar.invitation')) {
+		return [
+			arrived,
+			'Read it with read_event, then check the slot with read_freebusy, passing the invitation uid (data.object.uid) as exclude.',
+			'Tell me in a few words, in the language of our conversation, who invites me, to what and when, and whether I am free or what it conflicts with.',
+			'Then ask me whether to accept it and stop there: do not accept it yourself, I will answer you here.'
+		].join(' ');
+	}
+	return `${arrived} Read it with the contracts and tell me what it is about.`;
 }
 const SESSION_ID = /^[0-9a-f]{32}$/;
 

@@ -118,6 +118,13 @@ describe('an event wakes my assistant', () => {
 		expect(posted.body.queued).toBe(true);
 		const answer = await client.waitForMessage(room, assistantId, (t) => t.includes('Budget'));
 		expect(answer).toBe('You received a calendar.invitation: Budget review moved to Friday');
+		// An invitation asks the model to check the slot and to propose, never to accept by itself
+		const told = h.apisix.llm.calls
+			.flatMap((call) => call.request.messages)
+			.find((m) => m.role === 'user' && (m.content ?? '').includes('(id evt-1)'));
+		expect(told?.content).toContain('read_freebusy');
+		expect(told?.content).toContain('exclude');
+		expect(told?.content).toContain('do not accept it yourself');
 		const call = h.apisix.contracts.calls.find((c) => c.path === '/v1/events/evt-1');
 		expect(call?.method).toBe('GET');
 		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
