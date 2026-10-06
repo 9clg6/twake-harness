@@ -52,3 +52,7 @@ One image, one role per deployment, chosen by `HARNESS_ROLE`:
 - `matrix` is the Matrix application service: it receives what Synapse pushes, answers as the creator user and the assistants, and calls Synapse through the `matrix` route of APISIX. `npm run matrix:registration` prints the registration file Synapse loads, given `MATRIX_APPSERVICE_URL`, the APISIX route Synapse pushes to.
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
+
+### Encryption
+
+The assistants' rooms are created encrypted and every message in them is encrypted end to end. The matrix role holds one encryption store per assistant on its volume, acts as each assistant's device through the application service (device masquerading, MSC3202), and receives the key shares Synapse pushes with the transactions (MSC2409), so no assistant runs a sync loop. Both flags are enabled on the Synapse the harness is registered with. The fallback, had push proved unworkable, would have been one sync loop per assistant; it was not needed. An assistant's encryption state is prepared when the role starts and when it is invited, so a key share that arrives while the role was away is not lost: Synapse redelivers the transaction and the message is answered once the role is back.
