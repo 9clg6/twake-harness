@@ -3,7 +3,7 @@ import { Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
 	EncryptedRoomEvent,
 	type Intent,
-	Appservice,
+	type Appservice,
 	getRequestFn,
 	LogService,
 	RustSdkAppserviceCryptoStorageProvider,
@@ -46,6 +46,7 @@ import { buildRegistration, creatorUserId, isAssistantUserId } from './registrat
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
+import { makePushedAppservice } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
 
 // The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
@@ -201,17 +202,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		config.matrix.cryptoStorePath,
 		StoreType.Sqlite
 	);
-	const appservice = new Appservice({
-		port: options.port,
-		bindAddress: options.bindAddress ?? '0.0.0.0',
-		homeserverName: config.matrix.serverName,
-		homeserverUrl,
-		// The url only matters to Synapse, which reads it from its own registration file
-		registration: buildRegistration(config, ''),
-		storage,
-		cryptoStorage,
-		intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
-	});
 	const ensureEncryption = makeEnsureEncryption({
 		log,
 		storedDeviceId: async (userId) => {
@@ -222,6 +212,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return stored ?? null;
 		}
 	});
+	const appservice = makePushedAppservice(
+		{
+			port: options.port,
+			bindAddress: options.bindAddress ?? '0.0.0.0',
+			homeserverName: config.matrix.serverName,
+			homeserverUrl,
+			// The url only matters to Synapse, which reads it from its own registration file
+			registration: buildRegistration(config, ''),
+			storage,
+			cryptoStorage,
+			intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
+		},
+		{ log, storage, ensureEncryption }
+	);
 	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start
 	const inFlight = makeWorkTracker();
