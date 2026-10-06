@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import type { TransactionSql } from 'postgres';
+
 import { withPrincipal, type Db } from '../src/db/client.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
@@ -68,8 +70,50 @@ async function keptOf(
 	return { arguments: rows[0]?.arguments ?? null, request: rows[0]?.request_text ?? null };
 }
 
+// Holds a lock in a transaction of its own until released, so that two answers meet in the order
+// a race could give them
+async function holdLock(
+	db: Db,
+	owner: string,
+	take: (sql: TransactionSql) => Promise<unknown>
+): Promise<{ release(): Promise<void> }> {
+	let release = (): void => undefined;
+	const released = new Promise<void>((resolve) => {
+		release = resolve;
+	});
+	let held = (): void => undefined;
+	const taken = new Promise<void>((resolve) => {
+		held = resolve;
+	});
+	const done = db.sql.begin(async (sql) => {
+		await sql`select set_config('app.principal', ${owner}, true)`;
+		await take(sql);
+		held();
+		await released;
+	});
+	await taken;
+	return {
+		release: async () => {
+			release();
+			await done;
+		}
+	};
+}
+
+// Waits until this many of the harness's statements that read like the pattern wait for a lock
+async function untilWaiting(db: Db, pattern: string, count: number): Promise<void> {
+	for (let i = 0; i < 120; i += 1) {
+		const rows = await db.sql<{ n: number }[]>`
+			select count(*)::int as n from pg_stat_activity
+			where wait_event_type = 'Lock' and query ilike ${pattern}`;
+		if ((rows[0]?.n ?? 0) >= count) return;
+		await sleep(250);
+	}
+	throw new Error(`no ${count} statements like ${pattern} waiting for a lock`);
+}
+
 // What the api replicas count, as a dashboard sums them
-async function countedLines(h: TestHarness): Promise<string[]> {
+async function countedLines(h: Pick<TestHarness, 'apps'>): Promise<string[]> {
 	const lines: string[] = [];
 	for (const app of h.apps) {
 		lines.push(...(await app.inject({ method: 'GET', url: '/metrics' })).body.split('\n'));
@@ -490,5 +534,71 @@ describe('my answer through the API to a question in my room', () => {
 		expect(closed).toBe(true);
 		expect(r.h.apisix.contracts.calls).toHaveLength(1);
 		expect(r.saying('Told:')).toHaveLength(told + 1);
+	});
+	it('lets my yes through the API win over a ✅ that read the question as open just before', async () => {
+		const { id, questionId } = await askInRoom('Find the budget in my contacts');
+		const told = r.saying('Told:').length;
+		// My ✅ reads the question as open, then waits to queue the turn that would run the call
+		const jobs = await holdLock(
+			r.h.db,
+			'alice@test.local',
+			(sql) => sql`lock table jobs in exclusive mode`
+		);
+		await r.client.react(r.room, questionId, '✅');
+		await untilWaiting(r.h.db, '%insert into jobs%', 1);
+		// Meanwhile my yes through the API decides the call, and waits as well to queue its turn
+		const approving = r.h.api.post('alice@test.local', `/v1/pending-calls/${id}/approve`, {});
+		await untilWaiting(r.h.db, '%insert into jobs%', 2);
+		await jobs.release();
+		expect(await approving).toEqual({ status: 202, body: { id, status: 'approved' } });
+		expect(await r.nextSaying('Told:', told)).toBe(
+			'Told: {"status":200,"body":{"found":"/contracts/v1/contacts/items"}}'
+		);
+		// The ✅ comes second: it decides nothing, and is not counted as the answer
+		let reaction: Record<string, unknown> | undefined;
+		for (let i = 0; i < 120 && reaction === undefined; i += 1) {
+			reaction = r.h
+				.logLines()
+				.find(
+					(l) =>
+						l['msg'] === 'owner answered' && l['pendingCallId'] === id && l['via'] === 'reaction'
+				);
+			if (reaction === undefined) await sleep(250);
+		}
+		expect(reaction?.['decided']).toBe(false);
+		expect(r.h.apisix.contracts.calls).toHaveLength(1);
+		const counted = await countedLines(r.h);
+		expect(counted).toContain(
+			'harness_consent_answers_total{domain="contacts",level="read",reason="consent",answer="yes",via="api",outcome="decided"} 1'
+		);
+		expect(
+			counted.some((l) => l.includes('domain="contacts"') && l.includes('via="reaction"'))
+		).toBe(false);
+	});
+
+	it('lets a ✅ win over my yes through the API that read the call as open just before', async () => {
+		const { id, questionId } = await askInRoom('Find the budget in my forms');
+		const told = r.saying('Told:').length;
+		// Something holds the call, so that both answers wait for it, the ✅ first
+		const row = await holdLock(
+			r.h.db,
+			'alice@test.local',
+			(sql) => sql`select id from pending_calls where id = ${id} for update`
+		);
+		// The ✅'s decision keeps the time of a decision already taken; the API's records the time
+		// it answers, with its answer's id
+		await r.client.react(r.room, questionId, '✅');
+		await untilWaiting(r.h.db, '%coalesce(decided_at, now()),%answer_event_id%', 1);
+		const approving = r.h.api.post('alice@test.local', `/v1/pending-calls/${id}/approve`, {});
+		await untilWaiting(r.h.db, '%decided_at = now(),%answer_event_id%', 1);
+		await row.release();
+		expect(await approving).toEqual({
+			status: 409,
+			body: { error: 'pending call closed', state: 'decided' }
+		});
+		expect(await r.nextSaying('Told:', told)).toBe(
+			'Told: {"status":200,"body":{"found":"/contracts/v1/forms/items"}}'
+		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(1);
 	});
 });

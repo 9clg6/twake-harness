@@ -8,6 +8,7 @@ import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
 import {
 	approvePendingCall,
 	grantConsent,
+	takeAllowedCall,
 	markReplayed,
 	supersedeApprovedCall,
 	type ApprovedCall
@@ -138,13 +139,13 @@ export interface OwnerTurnInput {
 
 // How the owner allowed the call a turn resumes, which the consent it grants records: in the chat,
 // or through the API. An answer in the chat, or through the API to a call asked in the room,
-// approved the call before its job ran; an answer through the API to a call of a turn through the
-// API is taken as the resumed turn starts, only if the call still waits, so that the first answer
-// wins.
+// approved the call before its job ran. A yes through the API to a call of a turn through the API
+// is the answer itself, under its own id: the resumed turn takes the call as it starts, once
+// admitted, so that the first answer wins and a turn refused for now leaves the call waiting.
 export interface ResumeInput {
 	readonly pendingCallId: string;
 	readonly through: 'chat' | 'api';
-	readonly approvesNow?: boolean;
+	readonly answerId?: string;
 }
 
 export type OwnerTurnResult =
@@ -179,6 +180,8 @@ export interface AgentService {
 export interface AllowedCallInput {
 	readonly principal: Principal;
 	readonly pendingCallId: string;
+	// The owner's yes through the API, under its own id, which takes the call
+	readonly answerId: string;
 	readonly log: FastifyBaseLogger;
 }
 
@@ -365,10 +368,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// the API, it runs as it was frozen, under the correlation id of the request that froze it,
 	// only if it still waited
 	async function runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult> {
-		const { principal, pendingCallId, log } = input;
+		const { principal, pendingCallId, answerId, log } = input;
 		const opened = await withPrincipal(db, principal, async (tx) => {
 			const record = await ensurePrincipal(tx, principal);
-			const approved = await approvePendingCall(tx, principal.id, pendingCallId, true);
+			const approved = await takeAllowedCall(tx, principal.id, pendingCallId, answerId);
 			if (approved === null) return null;
 			// As in a turn: a yes to a first use allows the application from now on, a yes to the
 			// broker's request grants nothing
@@ -426,12 +429,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				// the platform has their permission, it allows nothing more.
 				let approved: ApprovedCall | null = null;
 				if (input.resume !== undefined) {
-					const { pendingCallId, through, approvesNow } = input.resume;
-					approved = await approvePendingCall(tx, principal.id, pendingCallId, approvesNow);
+					const { pendingCallId, through, answerId } = input.resume;
+					approved =
+						answerId === undefined
+							? await approvePendingCall(tx, principal.id, pendingCallId)
+							: await takeAllowedCall(tx, principal.id, pendingCallId, answerId);
 					if (approved === null) {
-						return approvesNow === true
-							? { kind: 'decided' as const }
-							: { kind: 'missing' as const };
+						return answerId === undefined
+							? { kind: 'missing' as const }
+							: { kind: 'decided' as const };
 					}
 					if (approved.reasons.includes('consent')) {
 						await grantConsent(tx, principal.id, approved.domain, approved.level, through);

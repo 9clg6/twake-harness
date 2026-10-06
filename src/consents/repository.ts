@@ -337,12 +337,23 @@ export async function decidePendingCall(
 	return result.count === 1;
 }
 
-// The owner's no through the API to a call still waiting: it is dropped, and what it would have
-// sent is erased with the question. False when the call was no longer waiting.
-export async function refusePendingCall(tx: Tx, owner: string, id: string): Promise<boolean> {
+// The owner's answer through the API to a call still waiting, recorded under an id of its own:
+// a yes approves it, for its resume job to run, and a no drops it, erasing what it would have
+// sent and the question. The answer goes in as the room's do, so that an answer read in the room
+// as the call still waited finds it answered and decides nothing. False when the call was no
+// longer waiting.
+export async function answerPendingCall(
+	tx: Tx,
+	owner: string,
+	id: string,
+	decision: 'approved' | 'refused',
+	answerId: string
+): Promise<boolean> {
 	const result = await tx.sql`
-		update pending_calls set status = 'refused', decided_at = now(), arguments = null,
-			request_text = null
+		update pending_calls set status = ${decision}, decided_at = now(),
+			answer_event_id = ${answerId},
+			arguments = case when ${decision} = 'refused' then null else arguments end,
+			request_text = case when ${decision} = 'refused' then null else request_text end
 		where id = ${id} and owner = ${owner} and status = 'open'`;
 	return result.count === 1;
 }
@@ -377,24 +388,7 @@ interface ApprovedRow extends SubjectRow {
 	origin: TurnOrigin;
 }
 
-// Hands out a call its owner allowed, for its resume job to run it: approved when the answer
-// came, or still waiting if the job came first. A call approved but never run, its job having
-// died, is handed out again; one already run, or decided otherwise, is not. An answer through the
-// API that runs the call at once takes it only while it still waits, so that a second answer
-// finds it decided.
-export async function approvePendingCall(
-	tx: Tx,
-	owner: string,
-	id: string,
-	onlyWaiting = false
-): Promise<ApprovedCall | null> {
-	const rows = await tx.sql<ApprovedRow[]>`
-		update pending_calls set status = 'approved', decided_at = coalesce(decided_at, now())
-		where id = ${id} and owner = ${owner}
-			and (status = 'open'
-				or (${!onlyWaiting} and status = 'approved' and replayed_at is null))
-		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
-	const row = rows[0];
+function approvedCall(row: ApprovedRow | undefined): ApprovedCall | null {
 	return row === undefined
 		? null
 		: {
@@ -405,6 +399,38 @@ export async function approvePendingCall(
 				correlationId: row.correlation_id,
 				origin: row.origin
 			};
+}
+
+// Hands out a call its owner allowed, for its resume job to run it: approved when the answer
+// came, or still waiting if the job came first. A call approved but never run, its job having
+// died, is handed out again; one already run, or decided otherwise, is not.
+export async function approvePendingCall(
+	tx: Tx,
+	owner: string,
+	id: string
+): Promise<ApprovedCall | null> {
+	const rows = await tx.sql<ApprovedRow[]>`
+		update pending_calls set status = 'approved', decided_at = coalesce(decided_at, now())
+		where id = ${id} and owner = ${owner}
+			and (status = 'open' or (status = 'approved' and replayed_at is null))
+		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
+	return approvedCall(rows[0]);
+}
+
+// Takes a call for the owner's yes through the API, which runs it at once with no job behind it,
+// while it still waits. The yes is recorded under its own id, so that a second answer, through the
+// API or in the room, finds the call decided.
+export async function takeAllowedCall(
+	tx: Tx,
+	owner: string,
+	id: string,
+	answerId: string
+): Promise<ApprovedCall | null> {
+	const rows = await tx.sql<ApprovedRow[]>`
+		update pending_calls set status = 'approved', decided_at = now(), answer_event_id = ${answerId}
+		where id = ${id} and owner = ${owner} and status = 'open'
+		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
+	return approvedCall(rows[0]);
 }
 
 // The call its owner allowed waits again once replayed, under a newer request that asks about

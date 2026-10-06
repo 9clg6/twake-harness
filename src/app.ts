@@ -22,12 +22,11 @@ import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answer
 import { isBuiltInConsent, isConsentLevel, type ResumeRequest } from './consents/consent.js';
 import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
 import {
-	approvePendingCall,
+	answerPendingCall,
 	findPendingCall,
 	grantConsent,
 	listConsents,
 	listPendingCalls,
-	refusePendingCall,
 	toConsentView,
 	toPendingCallView,
 	withdrawConsents,
@@ -683,8 +682,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 						call.channel.kind === 'room'
 							? await refusalNotice(principal, call.channel.roomId, id)
 							: null;
+					const answerId = `api:${request.id}`;
 					const refused = await withPrincipal(db, principal, async (tx) => {
-						if (!(await refusePendingCall(tx, principal.id, id))) return false;
+						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
 						if (notice !== null) await enqueueJob(tx, notice);
 						return true;
 					});
@@ -714,10 +714,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 						}
 						return reply.code(409).send(pendingCallClosed(call.state));
 					}
+					const { channel } = call;
+					// The yes goes in under an id of its own, so that the first answer wins, in the room
+					// or through the API
+					const answerId = `api:${request.id}`;
 					const answered = (): void => {
 						answeredThroughApi(request.log, principal.id, call, 'yes', 'decided');
 					};
-					const { channel } = call;
 					if (channel.kind === 'room') {
 						// A call asked in the owner's room resumes there, with their turns, as after their
 						// ✅: its job goes out with the approval, or not at all
@@ -728,7 +731,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							through: 'api'
 						};
 						const approved = await withPrincipal(db, principal, async (tx) => {
-							if ((await approvePendingCall(tx, principal.id, id, true)) === null) return false;
+							if (!(await answerPendingCall(tx, principal.id, id, 'approved', answerId))) {
+								return false;
+							}
 							await enqueueJob(tx, resumeJob(resume));
 							return true;
 						});
@@ -744,7 +749,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							target: { kind: 'id', id: channel.sessionId },
 							message: null,
 							log: request.log,
-							resume: { pendingCallId: id, through: 'api', approvesNow: true }
+							resume: { pendingCallId: id, through: 'api', answerId }
 						});
 						if (result.kind === 'decided') {
 							return reply.code(409).send(pendingCallClosed('decided'));
@@ -774,6 +779,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					const ran = await agent.runAllowedCall({
 						principal,
 						pendingCallId: id,
+						answerId,
 						log: request.log
 					});
 					if (ran.kind === 'decided') return reply.code(409).send(pendingCallClosed('decided'));
