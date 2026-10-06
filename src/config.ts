@@ -54,6 +54,10 @@ export interface Config {
 		readonly refreshMs: number;
 		readonly timeoutMs: number;
 	};
+	readonly consent: {
+		// How long the owner may answer a request; an answer after that runs nothing
+		readonly requestLifetimeMs: number;
+	};
 	readonly matrix: {
 		readonly serverName: string;
 		// The mail domain of the homeserver's users: a user @alice:<server> is the principal
@@ -130,6 +134,7 @@ const envSchema = z.object({
 	CONTRACTS_BASE_PATH: z.string().default(''),
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
 	CONTRACTS_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30_000),
+	CONSENT_REQUEST_LIFETIME_MS: z.coerce.number().int().min(1000).default(86_400_000),
 	MATRIX_SERVER_NAME: z.string().default(''),
 	MATRIX_MAIL_DOMAIN: z.string().default(''),
 	MATRIX_APPSERVICE_ID: z.string().min(1).default('twake-harness'),
@@ -234,6 +239,9 @@ export function loadConfig(env: Env): Config {
 			basePath: values.CONTRACTS_BASE_PATH,
 			refreshMs: values.CONTRACTS_REFRESH_MS,
 			timeoutMs: values.CONTRACTS_TIMEOUT_MS
+		},
+		consent: {
+			requestLifetimeMs: values.CONSENT_REQUEST_LIFETIME_MS
 		},
 		matrix: {
 			serverName: values.MATRIX_SERVER_NAME,

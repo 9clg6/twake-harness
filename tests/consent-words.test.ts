@@ -9,7 +9,7 @@ import {
 } from './helpers/consent-room.js';
 import { startE2eeClient } from './helpers/e2ee-client.js';
 
-const DOMAINS = ['mail', 'drive', 'tasks', 'notes', 'photos', 'boards'];
+const DOMAINS = ['mail', 'drive', 'tasks', 'notes', 'photos', 'wiki', 'contacts', 'boards'];
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -108,6 +108,31 @@ describe('I answer the question in words', () => {
 		const found = r.saying('Found:').length;
 		await r.client.react(r.room, question, '✅ OUI');
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/photos/items');
+	});
+
+	it('lets a newer question replace the open one, and tells me when I answer the old one', async () => {
+		r.h.apisix.llm.script = modelFor({
+			'Find the minutes in my wiki': { tool: 'search_wiki', args: { q: 'minutes' } },
+			'Look in my contacts instead': { tool: 'search_contacts', args: { q: 'minutes' } }
+		});
+		let seen = r.questions().length;
+		await r.client.sendText(r.room, 'Find the minutes in my wiki');
+		const older = await r.nextQuestion(seen);
+		seen = r.questions().length;
+		await r.client.sendText(r.room, 'Look in my contacts instead');
+		await r.nextQuestion(seen);
+		const notices = r.saying('A newer request').length;
+		await r.client.react(r.room, older, '✅ YES');
+		expect(await r.nextSaying('A newer request', notices)).toBe(
+			'A newer request replaced this one, so I did nothing. Answer the latest one.'
+		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+		// My yes, in any language the harness speaks, answers the newer one
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'Oui');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/contacts/items');
+		expect(r.h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/contacts/items']);
+		expect(await r.callsTo('wiki')).toEqual([{ status: 'superseded', arguments: null }]);
 	});
 
 	it('ignores a yes from someone else, or sent unencrypted from my account', async () => {

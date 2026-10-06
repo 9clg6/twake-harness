@@ -5,13 +5,16 @@ import type { ResumeRequest } from '../consents/consent.js';
 import {
 	closeRequestsToWords,
 	decidePendingCall,
+	expireRequests,
 	findRequest,
 	findRequestOpenToWords,
 	isAnswerEvent,
+	recordAnswerEvent,
 	recordRequestEvent,
+	supersedeRequests,
 	type FoundRequest
 } from '../consents/repository.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import type { Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
 
@@ -33,6 +36,8 @@ export interface ConsentRequestsOptions {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
 	readonly messages: Messages;
+	// How long the owner may answer a request
+	readonly lifetimeMs: number;
 	// Reacts to an event of the room as its assistant, encrypted when the room is
 	react(room: RequestRoom, eventId: string, key: string): Promise<void>;
 }
@@ -41,8 +46,8 @@ export interface ConsentRequestsOptions {
 // hands over only what it read encrypted from the owner's own device: nothing written in the
 // owner's name on the server side, which cannot encrypt for the room, answers for them.
 export interface ConsentRequests {
-	// A request went out: the assistant puts its two buttons under it, as reactions that the
-	// owner's tap repeats
+	// A request went out: it supersedes the one still open in the room, and the assistant puts its
+	// two buttons under it, as reactions that the owner's tap repeats
 	asked(room: RequestRoom, pendingCallId: string, eventId: string): Promise<void>;
 	// The owner put one of the buttons, or a bare ✅ or ❌, on an event of the room
 	reacted(
@@ -58,10 +63,22 @@ export interface ConsentRequests {
 }
 
 export function makeConsentRequests(options: ConsentRequestsOptions): ConsentRequests {
-	const { db, log, messages } = options;
+	const { db, log, messages, lifetimeMs } = options;
 
-	// A yes allows the call and a no refuses it; an answer to a request already decided, a second
-	// tap for instance, changes nothing
+	// Looks a request up once the owner's requests left unanswered past their lifetime expired, so
+	// that a late answer finds its request expired even between two passes of the worker role
+	async function lookUp<T>(owner: string, find: (tx: Tx) => Promise<T>): Promise<T> {
+		const { expired, found } = await withPrincipal(db, { id: owner }, async (tx) => ({
+			expired: await expireRequests(tx, owner, lifetimeMs),
+			found: await find(tx)
+		}));
+		for (const id of expired) log.info({ owner, pendingCallId: id }, 'request expired');
+		return found;
+	}
+
+	// A yes allows the call and a no refuses it. An answer to a request that expired, or that a
+	// newer one superseded, runs nothing, and the owner is told why; one to a request already
+	// decided, a second tap for instance, changes nothing.
 	async function settle(
 		room: RequestRoom,
 		request: FoundRequest,
@@ -77,11 +94,25 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			{ roomId, owner, pendingCallId, answer: answer.says, via: answer.kind, state },
 			'answer to a closed request'
 		);
+		if (state === 'decided') return;
+		await withPrincipal(db, { id: owner }, (tx) =>
+			recordAnswerEvent(tx, owner, pendingCallId, answer.eventId)
+		);
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: room.assistantUserId,
+				roomId,
+				text: state === 'expired' ? messages.consent.expired : messages.consent.superseded
+			},
+			dedupKey: `closed:${answer.eventId}`,
+			groupKey: `send:${roomId}`
+		});
 	}
 
-	// A yes approves the call at once, so that no later answer undoes it, and queues the turn that
-	// runs it with the owner's turns. A no refuses it, and the harness says so itself, without the
-	// model.
+	// A yes approves the call at once, so that no later answer nor newer request undoes it, and
+	// queues the turn that runs it with the owner's turns. A no refuses it, and the harness says so
+	// itself, without the model.
 	async function decide(
 		room: RequestRoom,
 		pendingCallId: string,
@@ -125,9 +156,16 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	return {
 		asked: async (room, pendingCallId, eventId) => {
 			const { roomId, owner } = room;
-			const recorded = await withPrincipal(db, { id: owner }, (tx) =>
-				recordRequestEvent(tx, pendingCallId, eventId, roomId)
-			);
+			const { recorded, superseded } = await withPrincipal(db, { id: owner }, async (tx) => {
+				const stored = await recordRequestEvent(tx, pendingCallId, eventId, roomId);
+				return {
+					recorded: stored,
+					superseded: stored ? await supersedeRequests(tx, owner, roomId, pendingCallId) : []
+				};
+			});
+			for (const id of superseded) {
+				log.info({ roomId, owner, pendingCallId: id }, 'request superseded');
+			}
 			if (!recorded) {
 				log.warn({ roomId, pendingCallId }, 'question sent for a call that is no longer stored');
 				return;
@@ -144,16 +182,14 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		},
 		reacted: async (room, requestEventId, says, reactionEventId) => {
 			const { owner } = room;
-			const request = await withPrincipal(db, { id: owner }, (tx) =>
-				findRequest(tx, owner, requestEventId)
-			);
+			const request = await lookUp(owner, (tx) => findRequest(tx, owner, requestEventId));
 			if (request === null) return;
 			await settle(room, request, { says, kind: 'reaction', eventId: reactionEventId });
 		},
 		wrote: async (room, eventId, text) => {
 			const { roomId, owner } = room;
 			const says = wordAnswer(text);
-			const { answered, request } = await withPrincipal(db, { id: owner }, async (tx) => {
+			const { answered, request } = await lookUp(owner, async (tx) => {
 				// Delivered again, the message that answered is still that answer
 				const again = says !== null && (await isAnswerEvent(tx, owner, eventId));
 				const found =

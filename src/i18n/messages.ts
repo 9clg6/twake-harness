@@ -55,6 +55,9 @@ export interface Messages {
 		readonly no: string;
 		// What the harness says once the owner refused a call
 		readonly refused: string;
+		// Answers to a request no longer open, which run nothing
+		readonly expired: string;
+		readonly superseded: string;
 	};
 	orgGreeting(name: string): string;
 	// What the assistant is told, as its owner's message, when a dispatcher posts an event: the
@@ -127,7 +130,9 @@ const ENGLISH: Messages = {
 		buttons: { yes: '✅ YES', no: '❌ NO' },
 		yes: 'yes',
 		no: 'no',
-		refused: 'All right, I will not do it.'
+		refused: 'All right, I will not do it.',
+		expired: 'This request has expired, so I did nothing. Ask me again if you still need it.',
+		superseded: 'A newer request replaced this one, so I did nothing. Answer the latest one.'
 	},
 	orgGreeting: (name) =>
 		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
@@ -209,7 +214,11 @@ const FRENCH: Messages = {
 		buttons: { yes: '✅ OUI', no: '❌ NON' },
 		yes: 'oui',
 		no: 'non',
-		refused: "D'accord, je ne le fais pas."
+		refused: "D'accord, je ne le fais pas.",
+		expired:
+			"Cette demande a expiré, je n'ai donc rien fait. Redemande-moi si tu en as encore besoin.",
+		superseded:
+			"Une demande plus récente a remplacé celle-ci, je n'ai donc rien fait. Réponds à la dernière."
 	},
 	orgGreeting: (name) =>
 		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,

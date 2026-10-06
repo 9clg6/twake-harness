@@ -65,8 +65,35 @@ export async function recordRequestEvent(
 	return result.count === 1;
 }
 
-// What an answer finds: a request still open, or one already decided
-export type RequestState = 'open' | 'decided';
+// Marks the open requests of a room older than the one just asked as superseded, erasing what
+// their calls would have sent; resolves to their ids
+export async function supersedeRequests(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	newestId: string
+): Promise<string[]> {
+	const rows = await tx.sql<{ id: string }[]>`
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
+		where owner = ${owner} and room_id = ${roomId} and status = 'open' and id <> ${newestId}
+		returning id`;
+	return rows.map((row) => row.id);
+}
+
+// Closes the owner's requests left unanswered past their lifetime, erasing what their calls would
+// have sent; resolves to their ids
+export async function expireRequests(tx: Tx, owner: string, lifetimeMs: number): Promise<string[]> {
+	const rows = await tx.sql<{ id: string }[]>`
+		update pending_calls set status = 'expired', decided_at = now(), arguments = null
+		where owner = ${owner} and status = 'open'
+			and created_at <= now() - make_interval(secs => ${lifetimeMs / 1000})
+		returning id`;
+	return rows.map((row) => row.id);
+}
+
+// What an answer finds: a request still open, one closed unanswered (its lifetime over, or a
+// newer one asked in its room), or one already decided
+export type RequestState = 'open' | 'expired' | 'superseded' | 'decided';
 
 export interface FoundRequest {
 	readonly pendingCallId: string;
@@ -75,7 +102,11 @@ export interface FoundRequest {
 
 function foundRequest(row: { id: string; status: string } | undefined): FoundRequest | null {
 	if (row === undefined) return null;
-	return { pendingCallId: row.id, state: row.status === 'open' ? 'open' : 'decided' };
+	const state =
+		row.status === 'open' || row.status === 'expired' || row.status === 'superseded'
+			? row.status
+			: 'decided';
+	return { pendingCallId: row.id, state };
 }
 
 // The request asked in this event, whatever became of it
@@ -91,7 +122,7 @@ export async function findRequest(
 }
 
 // The latest request of a room still open to an answer in words, its owner having written nothing
-// else since it was asked
+// else since it was asked. One that expired is found too, so that its answer gets the notice.
 export async function findRequestOpenToWords(
 	tx: Tx,
 	owner: string,
@@ -99,7 +130,7 @@ export async function findRequestOpenToWords(
 ): Promise<FoundRequest | null> {
 	const rows = await tx.sql<{ id: string; status: string }[]>`
 		select id, status from pending_calls
-		where owner = ${owner} and room_id = ${roomId} and status = 'open'
+		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
 			and words_closed_at is null
 		order by created_at desc
 		limit 1`;
@@ -139,6 +170,19 @@ export async function decidePendingCall(
 		where id = ${id} and owner = ${owner}
 			and (status = 'open' or (status = ${decision} and answer_event_id is null))`;
 	return result.count === 1;
+}
+
+// The event by which the owner answered a request already closed, kept so that, delivered again,
+// it is not taken for a message
+export async function recordAnswerEvent(
+	tx: Tx,
+	owner: string,
+	id: string,
+	eventId: string
+): Promise<void> {
+	await tx.sql`
+		update pending_calls set answer_event_id = ${eventId}
+		where id = ${id} and owner = ${owner} and answer_event_id is null`;
 }
 
 export interface ApprovedCall {

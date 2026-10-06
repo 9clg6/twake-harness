@@ -1,6 +1,7 @@
 import { startTurnWorker } from './agent/turn-worker.js';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
+import { startExpiryScheduler } from './consents/expiry.js';
 import { startCurationScheduler } from './curation/curation.js';
 import { makeDb } from './db/client.js';
 import { getMessages } from './i18n/messages.js';
@@ -16,9 +17,11 @@ if (config.role === 'worker') {
 	const app = await buildApp({ config, db });
 	app.log.info({ role: config.role, applied: report.applied }, 'harness starting');
 	const scheduler = startCurationScheduler(db, app.log, config.curation.intervalMs);
+	const expiry = startExpiryScheduler(db, app.log, config.consent.requestLifetimeMs);
 	const stop = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
 		scheduler.stop();
+		expiry.stop();
 		await app.close();
 		await db.close();
 		process.exit(0);

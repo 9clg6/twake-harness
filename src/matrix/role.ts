@@ -562,6 +562,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		db,
 		log,
 		messages,
+		lifetimeMs: config.consent.requestLifetimeMs,
 		react: async (room, eventId, key) => {
 			await appservice
 				.getIntentForUserId(room.assistantUserId)
