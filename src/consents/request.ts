@@ -52,16 +52,20 @@ function linesOf(text: string): string[] {
 }
 
 // The harness's question for the reasons a call waits for: a first use asks about the
-// application, a high-risk write about that very call, and the first high-risk write about both
+// application; a high-risk write, or a write that a turn an event started prepared, about that
+// very call; and the first of either in its application about both
 function questionFor(call: RequestedCall, consent: Messages['consent']): string {
 	const { name, covers } = call.application;
 	const firstUse = call.reasons.includes('consent');
-	if (!call.reasons.includes('high_risk')) {
-		return call.level === 'read'
-			? consent.firstRead(name, covers)
-			: consent.firstWrite(name, covers);
+	// A high-risk write asks every time, whoever started the turn: its question also holds for one
+	// that a turn an event started prepared
+	if (call.reasons.includes('high_risk')) {
+		return firstUse ? consent.firstHighRisk(name, covers) : consent.highRisk(name);
 	}
-	return firstUse ? consent.firstHighRisk(name, covers) : consent.highRisk(name);
+	if (call.reasons.includes('event_turn')) {
+		return firstUse ? consent.firstEventWrite(name, covers) : consent.eventWrite(name);
+	}
+	return call.level === 'read' ? consent.firstRead(name, covers) : consent.firstWrite(name, covers);
 }
 
 // The request about a frozen call, or null when the call is too large to show whole in one

@@ -49,8 +49,8 @@ function parseBody(text: string): unknown {
 	}
 }
 
-// Reading a contract and acting through one are separate rights: a turn an event started holds
-// the first and never the second
+// Reading a contract and acting through one are separate rights, which stay a switch above what
+// an owner allows: a principal without the second never writes, whoever asks
 export const CALL_CONTRACTS = 'contracts.call';
 export const ACT_THROUGH_CONTRACTS = 'contracts.act';
 
@@ -119,8 +119,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	}
 
 	// Why a call waits for its owner, every reason that applies: the first read of an application,
-	// or the first write there even once it may read; and a high-risk write, each time, whatever its
-	// owner allowed. The organization agent acts for no user: none of its calls waits for anyone.
+	// or the first write there even once it may read; a write that a turn an event started
+	// prepared, each time, since what arrived was written by someone else; and a high-risk write,
+	// each time, whatever its owner allowed. The organization agent acts for no user: none of its
+	// calls waits for anyone.
 	async function reasonsToWait(context: ToolContext): Promise<WaitReason[]> {
 		const owner = context.principalId;
 		if (owner === ORGANIZATION_PRINCIPAL) return [];
@@ -133,6 +135,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		) {
 			reasons.push('consent');
 		}
+		if (contract.level === 'write' && context.origin === 'event') reasons.push('event_turn');
 		if (contract.risk === 'high') reasons.push('high_risk');
 		return reasons;
 	}

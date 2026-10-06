@@ -13,7 +13,6 @@ import {
 	type ApprovedCall
 } from '../consents/repository.js';
 import type { OwnerRequest } from '../consents/request.js';
-import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
@@ -67,13 +66,13 @@ export type SessionTarget =
 	| { readonly kind: 'id'; readonly id: string }
 	| { readonly kind: 'room'; readonly roomId: string };
 
-// What a turn an event started may not do, whatever its owner may: act through a contract, change
-// how the assistant speaks to its owner, keep a note or a skill proposal that later turns would
-// read as the assistant's own, or withdraw a consent. The event's own text comes from a third
-// party, so only the owner's yes, in a turn of their own, can make the assistant act, remember or
-// change what the owner decided.
+// What a turn an event started may not do, whatever its owner may: change how the assistant speaks
+// to its owner, keep a note or a skill proposal that later turns would read as the assistant's own,
+// or withdraw a consent. The event's own text comes from a third party, so only the owner, in a
+// turn of their own, can make the assistant remember or change what they decided. Such a turn may
+// prepare a write through a contract, which then waits for its owner's yes to the harness's own
+// request, whatever they allowed.
 const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
-	ACT_THROUGH_CONTRACTS,
 	WRITE_OWN_SETTINGS,
 	WRITE_OWN_MEMORY,
 	WITHDRAW_OWN_CONSENTS
@@ -367,7 +366,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			if (opened.kind !== 'ok') return opened;
 			const { session, approved, locale } = opened;
 			const messages = getMessages(locale);
-			// A resumed turn may do no more than the turn that froze its call
+			// A resumed turn may do no more than the turn that froze its call. Resumed from a call that
+			// a turn an event started prepared, it is still that event's: the owner's yes runs that
+			// call alone, and any other write it prepares waits for them again.
 			const origin = approved?.origin ?? input.origin;
 			const withheld =
 				origin === 'event'
