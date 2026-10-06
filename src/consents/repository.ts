@@ -73,19 +73,36 @@ export async function listConsents(tx: Tx, owner: string): Promise<ConsentRecord
 	);
 }
 
-// Takes back what an owner allowed in an application, at the levels given; resolves to the levels
-// the owner had allowed there
+// What a withdrawal took back: the levels the owner had allowed in the application, and the calls
+// there it closed
+export interface Withdrawal {
+	readonly levels: readonly ConsentLevel[];
+	readonly superseded: readonly ClosedRequest[];
+}
+
+// Takes back what an owner allowed in an application, at the levels given. The calls there that
+// still wait for the owner's answer, or that the owner allowed and that have not run yet, close
+// with it, as an older question closes when a newer one is asked, and what they would have sent is
+// erased: nothing runs there after the withdrawal unless the owner allows it again.
 export async function withdrawConsents(
 	tx: Tx,
 	owner: string,
 	domain: string,
 	levels: readonly ConsentLevel[]
-): Promise<ConsentLevel[]> {
-	const rows = await tx.sql<{ level: ConsentLevel }[]>`
+): Promise<Withdrawal> {
+	const withdrawn = await tx.sql<{ level: ConsentLevel }[]>`
 		delete from consents
 		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
 		returning level`;
-	return rows.map((row) => row.level).sort();
+	const superseded = await tx.sql<ClosedRow[]>`
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
+		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
+			and (status = 'open' or (status = 'approved' and replayed_at is null))
+		returning id, domain, level, reasons`;
+	return {
+		levels: withdrawn.map((row) => row.level).sort(),
+		superseded: closedRequests(superseded)
+	};
 }
 
 // A consent as the model and the owner's clients read it

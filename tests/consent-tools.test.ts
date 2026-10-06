@@ -10,7 +10,7 @@ import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers
 import { grantConsent } from './helpers/consents.js';
 import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix.js';
 
-const DOMAINS = ['mail', 'drive', 'calendar', 'tasks', 'notes'];
+const DOMAINS = ['mail', 'drive', 'calendar', 'tasks', 'notes', 'wiki', 'boards'];
 
 // A read contract in each application, and a write in the calendar
 const CATALOG = {
@@ -27,6 +27,19 @@ const CATALOG = {
 		}
 	}
 };
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+// What the api replicas count, as a dashboard sums them
+async function countedLines(apps: readonly FastifyInstance[]): Promise<string[]> {
+	const lines: string[] = [];
+	for (const app of apps) {
+		lines.push(...(await app.inject({ method: 'GET', url: '/metrics' })).body.split('\n'));
+	}
+	return lines;
+}
 
 // A literal model: it calls the tool given for each request it knows, and tells the owner what
 // the tool returned
@@ -227,6 +240,86 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 			body: { found: '/contracts/v1/notes/items' }
 		});
 		expect(r.questions()).toHaveLength(questions);
+	});
+	it('drops the question still open in an application I withdraw, and tells me so when I answer it', async () => {
+		r.h.apisix.llm.script = modelTelling({
+			'Find the minutes in my wiki': { tool: 'search_wiki', args: { q: 'minutes' } },
+			'Stop using my wiki': { tool: 'consents_withdraw', args: { domain: 'wiki' } }
+		});
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'Find the minutes in my wiki');
+		const question = await r.nextQuestion(seen);
+		expect(await told('Stop using my wiki')).toEqual({
+			domain: 'wiki',
+			withdrawn: [],
+			still_allowed: []
+		});
+		const notices = r.saying('A newer request').length;
+		await r.client.react(r.room, question, '✅');
+		expect(await r.nextSaying('A newer request', notices)).toBe(
+			'A newer request replaced this one, so I did nothing. Answer the latest one.'
+		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+		// An operator counts it with the other questions closed unanswered by something newer
+		expect(await countedLines(r.h.apps)).toContain(
+			'harness_consent_supersessions_total{domain="wiki",level="read",reason="consent"} 1'
+		);
+	});
+
+	it('runs nothing I allowed in an application I withdraw before the call ran', async () => {
+		let withdrawing = false;
+		const owner = modelTelling({
+			'Find the plan in my boards': { tool: 'search_boards', args: { q: 'plan' } }
+		});
+		r.h.apisix.llm.script = (request) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'user' && last.content === 'Stop using my boards') {
+				// The model takes its time over my withdrawal, while my ✅ to the question comes in
+				withdrawing = true;
+				return { toolCalls: call('consents_withdraw', { domain: 'boards' }), delayMs: 8000 };
+			}
+			return owner(request);
+		};
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'Find the plan in my boards');
+		const question = await r.nextQuestion(seen);
+		const answers = r.saying('Told:').length;
+		await r.client.sendText(r.room, 'Stop using my boards');
+		for (let i = 0; i < 120 && !withdrawing; i += 1) await sleep(250);
+		await r.client.react(r.room, question, '✅');
+		// My ✅ allows the call before the withdrawal ends, and its turn waits behind the withdrawal
+		const pendingCallId = r.h
+			.logLines()
+			.find((l) => l['msg'] === 'contract call waits for its owner' && l['domain'] === 'boards')?.[
+			'pendingCallId'
+		];
+		const lineOf = (msg: string): number =>
+			r.h
+				.logLines()
+				.findIndex(
+					(l) =>
+						l['msg'] === msg &&
+						l['pendingCallId'] === pendingCallId &&
+						(msg !== 'owner answered' || l['decided'] === true)
+				);
+		for (let i = 0; i < 120 && lineOf('owner answered') < 0; i += 1) await sleep(250);
+		expect(await r.nextSaying('Told:', answers)).toBe(
+			'Told: {"domain":"boards","withdrawn":[],"still_allowed":[]}'
+		);
+		expect(lineOf('owner answered')).toBeGreaterThanOrEqual(0);
+		expect(lineOf('request superseded')).toBeGreaterThan(lineOf('owner answered'));
+		// The turn my ✅ queued finds the call closed, and runs nothing
+		for (
+			let i = 0;
+			i < 120 && lineOf('resume dropped: the call is no longer waiting') < 0;
+			i += 1
+		) {
+			await sleep(250);
+		}
+		expect(lineOf('resume dropped: the call is no longer waiting')).toBeGreaterThan(
+			lineOf('request superseded')
+		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 });
 

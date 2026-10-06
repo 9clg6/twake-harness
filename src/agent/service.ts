@@ -203,7 +203,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			consentsListTool,
 			makeConsentsWithdrawTool({
 				// Each application once, as consents_list names it
-				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort()
+				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort(),
+				consentMetrics
 			})
 		],
 		() => contracts.tools

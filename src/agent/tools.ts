@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import { setAssistantLocale } from '../assistants/repository.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
 import { listConsents, toConsentView, withdrawConsents } from '../consents/repository.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
@@ -460,6 +461,8 @@ const consentsWithdrawArgs = z.object({
 export interface ConsentsWithdrawDeps {
 	// The applications the catalog offers now, as consents_list names them
 	readonly applications: () => readonly string[];
+	// Where the api role counts the questions a withdrawal closes
+	readonly consentMetrics: ConsentMetrics;
 }
 
 // The owner tells their assistant to stop using an application, or only to stop writing there:
@@ -509,23 +512,30 @@ export function makeConsentsWithdrawTool(deps: ConsentsWithdrawDeps): Tool {
 				if (!applications.includes(domain) && !allowed.some((c) => c.domain === domain)) {
 					return null;
 				}
-				const withdrawn = await withdrawConsents(
+				const withdrawal = await withdrawConsents(
 					tx,
 					owner,
 					domain,
 					level === undefined ? ['read', 'write'] : [level]
 				);
-				return { withdrawn, kept: await listConsents(tx, owner) };
+				return { withdrawal, kept: await listConsents(tx, owner) };
 			});
 			if (done === null) return { result: { error: 'unknown application', applications } };
-			const { withdrawn, kept } = done;
-			if (withdrawn.length > 0) {
-				context.log.info({ principal: owner, domain, levels: withdrawn }, 'consent withdrawn');
+			const { withdrawal, kept } = done;
+			if (withdrawal.levels.length > 0) {
+				context.log.info(
+					{ principal: owner, domain, levels: withdrawal.levels },
+					'consent withdrawn'
+				);
+			}
+			for (const request of withdrawal.superseded) {
+				context.log.info({ owner, pendingCallId: request.pendingCallId }, 'request superseded');
+				deps.consentMetrics.superseded(request);
 			}
 			return {
 				result: {
 					domain,
-					withdrawn,
+					withdrawn: withdrawal.levels,
 					still_allowed: kept.filter((c) => c.domain === domain).map((c) => c.level)
 				}
 			};
