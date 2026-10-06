@@ -1,22 +1,42 @@
 import { randomUUID } from 'node:crypto';
 import type { Writable } from 'node:stream';
-import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
+import Fastify, {
+	type FastifyBaseLogger,
+	type FastifyInstance,
+	type FastifyRequest
+} from 'fastify';
 
 import { z } from 'zod';
 
 import type { Clock } from './agent/clock.js';
-import { makeAgentService, type AgentService } from './agent/service.js';
-import { runTool, toolCallStatus } from './agent/tools.js';
+import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
+import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
 import { localeOf } from './assistants/locale.js';
 import { findAssistant } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
-import { makeConsentMetrics, type ConsentMetrics } from './consents/metrics.js';
-import { withPrincipal, type Db } from './db/client.js';
+import type { Answer } from './consents/answers.js';
+import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
+import { isBuiltInConsent, isConsentLevel, type ResumeRequest } from './consents/consent.js';
+import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
+import {
+	answerPendingCall,
+	findPendingCall,
+	grantConsent,
+	listConsents,
+	listPendingCalls,
+	toConsentView,
+	toPendingCallView,
+	withdrawConsents,
+	type PendingCallRecord,
+	type PendingCallView,
+	type RequestState
+} from './consents/repository.js';
+import { withPrincipal, type Db, type Tx } from './db/client.js';
 import { getMessages } from './i18n/messages.js';
-import { enqueueJob } from './jobs/queue.js';
+import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
@@ -86,6 +106,16 @@ const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
+// The harness builds the consent in: no owner withdraws it
+const CONSENT_BUILT_IN = { error: 'consent built in' } as const;
+
+// An answer to a call no longer waiting: answered already, expired, or replaced by a newer
+// question in its room
+function pendingCallClosed(state: RequestState): { error: string; state: RequestState } {
+	return { error: 'pending call closed', state };
+}
+
+const PENDING_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
 
 const eventSchema = z.object({
 	owner: z.string().min(1).max(128),
@@ -117,6 +147,77 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 	async function loadPrincipal(principal: Principal): Promise<PrincipalRecord> {
 		return withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
+	}
+
+	// Reads the owner's pending calls once their requests left unanswered past their lifetime
+	// expired, as an answer in the chat finds them
+	function withOverdueExpired<T>(
+		principal: Principal,
+		log: FastifyBaseLogger,
+		read: (tx: Tx) => Promise<T>
+	): Promise<T> {
+		const lookup = {
+			db,
+			log,
+			metrics: consentMetrics,
+			lifetimeMs: config.consent.requestLifetimeMs
+		};
+		return lookUpAnswerable(lookup, principal.id, read);
+	}
+
+	// An answer through the API, logged and counted as answers in the chat are: one that decided
+	// the call, or one that came once its request had expired or been replaced and ran nothing. A
+	// second answer to a call already decided is neither.
+	function answeredThroughApi(
+		log: FastifyBaseLogger,
+		owner: string,
+		call: PendingCallRecord,
+		says: Answer,
+		outcome: AnswerOutcome
+	): void {
+		log.info(
+			{ owner, pendingCallId: call.id, answer: says, via: 'api', outcome },
+			'owner answered'
+		);
+		consentMetrics.answered(call, says, 'api', outcome);
+	}
+
+	// What the owner's assistant says in their room, in their language, once they refused a call
+	// asked there; nothing when the room is no longer the assistant's
+	async function refusalNotice(
+		principal: Principal,
+		roomId: string,
+		pendingCallId: string
+	): Promise<EnqueueInput | null> {
+		const assistant = await withPrincipal(db, principal, (tx) => findAssistant(tx, principal.id));
+		if (assistant === null || assistant.deletedAt !== null || assistant.roomId !== roomId) {
+			return null;
+		}
+		const text = getMessages(localeOf(assistant, config.locale)).consent.refused;
+		return refusalNoticeJob(assistant.userId, roomId, pendingCallId, text);
+	}
+
+	// One of the owner's pending calls as their clients read it
+	async function pendingCallView(
+		principal: Principal,
+		id: string
+	): Promise<PendingCallView | null> {
+		const call = await withPrincipal(db, principal, (tx) => findPendingCall(tx, principal.id, id));
+		return call === null ? null : toPendingCallView(call, config.consent.requestLifetimeMs);
+	}
+
+	// What a turn through the API answers; a turn that stopped on the harness's question returns
+	// the call it froze, which waits for the owner's answer
+	async function turnAnswer(
+		principal: Principal,
+		result: Extract<OwnerTurnResult, { kind: 'ok' }>
+	): Promise<Record<string, unknown>> {
+		const answer = { session_id: result.sessionId, answer: result.answer, model: result.model };
+		const pending =
+			result.pendingCallId === undefined
+				? null
+				: await pendingCallView(principal, result.pendingCallId);
+		return pending === null ? answer : { ...answer, pending_call: pending };
 	}
 	const app = Fastify({
 		logger: {
@@ -462,6 +563,250 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				return withPrincipal(db, principal, (tx) => listMemory(tx, principal.id));
 			});
 
+			// The owner's consents, which a settings page lists, grants and withdraws with the owner's
+			// own token. The reading of the assistant's own feed of events is built in: it is listed,
+			// never granted nor withdrawn.
+			scope.get('/consents', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+				const consents = await withPrincipal(db, principal, (tx) => listConsents(tx, principal.id));
+				return { consents: consents.map(toConsentView) };
+			});
+
+			// Grants a level of an application the catalog offers, ahead of its first use
+			scope.put<{ Params: { domain: string; level: string } }>(
+				'/consents/:domain/:level',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					// Granting is the owner's own yes, given ahead of the question: it takes the same
+					// right as answering one
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+					const { domain, level } = request.params;
+					const offered =
+						isConsentLevel(level) &&
+						(isBuiltInConsent(domain, level) ||
+							agent.contracts.contracts.some((c) => c.domain === domain && c.level === level));
+					if (!offered) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					const { created, consent } = await withPrincipal(db, principal, async (tx) => {
+						const created =
+							!isBuiltInConsent(domain, level) &&
+							(await grantConsent(tx, principal.id, domain, level, 'api'));
+						const consents = await listConsents(tx, principal.id);
+						return {
+							created,
+							consent: consents.find((c) => c.domain === domain && c.level === level)
+						};
+					});
+					if (consent === undefined) throw new Error('a granted consent is not listed');
+					if (created) {
+						request.log.info({ principal: principal.id, domain, level }, 'consent granted');
+					}
+					return reply.code(created ? 201 : 200).send(toConsentView(consent));
+				}
+			);
+
+			scope.delete<{ Params: { domain: string; level: string } }>(
+				'/consents/:domain/:level',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes(WITHDRAW_OWN_CONSENTS)) {
+						return reply.code(403).send(FORBIDDEN);
+					}
+					const { domain, level } = request.params;
+					if (!isConsentLevel(level)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					if (isBuiltInConsent(domain, level)) return reply.code(409).send(CONSENT_BUILT_IN);
+					// A level the owner never allowed is no consent to withdraw, and changes nothing
+					const withdrawal = await withPrincipal(db, principal, async (tx) => {
+						const allowed = await listConsents(tx, principal.id);
+						return allowed.some((c) => c.domain === domain && c.level === level)
+							? withdrawConsents(tx, principal.id, domain, [level])
+							: null;
+					});
+					if (withdrawal === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					request.log.info(
+						{ principal: principal.id, domain, levels: withdrawal.levels },
+						'consent withdrawn'
+					);
+					for (const closed of withdrawal.superseded) {
+						request.log.info(
+							{ owner: principal.id, pendingCallId: closed.pendingCallId },
+							'request superseded'
+						);
+						consentMetrics.superseded(closed);
+					}
+					return reply.code(204).send();
+				}
+			);
+
+			// What waits for the owner's answer, asked in their room or through the API, which they
+			// answer here as they would in the chat
+			scope.get('/pending-calls', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+				const calls = await withOverdueExpired(principal, request.log, (tx) =>
+					listPendingCalls(tx, principal.id)
+				);
+				return {
+					pending_calls: calls.map((call) =>
+						toPendingCallView(call, config.consent.requestLifetimeMs)
+					)
+				};
+			});
+
+			// The owner's no through the API drops the call, as their no in the chat does
+			scope.post<{ Params: { id: string } }>(
+				'/pending-calls/:id/refuse',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+					const { id } = request.params;
+					if (!PENDING_CALL_ID.test(id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					const call = await withOverdueExpired(principal, request.log, (tx) =>
+						findPendingCall(tx, principal.id, id)
+					);
+					if (call === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					if (call.state !== 'open') {
+						if (call.state !== 'decided') {
+							answeredThroughApi(request.log, principal.id, call, 'no', call.state);
+						}
+						return reply.code(409).send(pendingCallClosed(call.state));
+					}
+					// The harness says so in the owner's room when the call was asked there, as after their
+					// ❌: the notice goes out with the refusal, or not at all
+					const notice =
+						call.channel.kind === 'room'
+							? await refusalNotice(principal, call.channel.roomId, id)
+							: null;
+					const answerId = `api:${request.id}`;
+					const refused = await withPrincipal(db, principal, async (tx) => {
+						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
+						if (notice !== null) await enqueueJob(tx, notice);
+						return true;
+					});
+					if (!refused) return reply.code(409).send(pendingCallClosed('decided'));
+					answeredThroughApi(request.log, principal.id, call, 'no', 'decided');
+					return { id, status: 'refused' };
+				}
+			);
+
+			// The owner's yes through the API resumes the call where it was frozen, as their yes in the
+			// chat does; the first answer wins, and a later one gets a conflict
+			scope.post<{ Params: { id: string } }>(
+				'/pending-calls/:id/approve',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+					const { id } = request.params;
+					if (!PENDING_CALL_ID.test(id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					const call = await withOverdueExpired(principal, request.log, (tx) =>
+						findPendingCall(tx, principal.id, id)
+					);
+					if (call === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					if (call.state === 'expired' || call.state === 'superseded') {
+						answeredThroughApi(request.log, principal.id, call, 'yes', call.state);
+						return reply.code(409).send(pendingCallClosed(call.state));
+					}
+					const { channel } = call;
+					// A call asked in the room runs through the job its first answer queued: a later yes
+					// changes nothing
+					if (call.state === 'decided' && channel.kind === 'room') {
+						return reply.code(409).send(pendingCallClosed('decided'));
+					}
+					// The yes goes in under an id of its own, so that the first answer wins, in the room
+					// or through the API
+					const answerId = `api:${request.id}`;
+					const answered = (): void => {
+						// A yes that takes back a call a lost replica left unrun was counted when it first came
+						if (call.state === 'open') {
+							answeredThroughApi(request.log, principal.id, call, 'yes', 'decided');
+						} else {
+							request.log.info(
+								{ owner: principal.id, pendingCallId: id, answer: 'yes', via: 'api' },
+								'owner answered again'
+							);
+						}
+					};
+					if (channel.kind === 'room') {
+						// A call asked in the owner's room resumes there, with their turns, as after their
+						// ✅: its job goes out with the approval, or not at all
+						const resume: ResumeRequest = {
+							owner: principal.id,
+							roomId: channel.roomId,
+							pendingCallId: id,
+							through: 'api'
+						};
+						const approved = await withPrincipal(db, principal, async (tx) => {
+							if (!(await answerPendingCall(tx, principal.id, id, 'approved', answerId))) {
+								return false;
+							}
+							await enqueueJob(tx, resumeJob(resume));
+							return true;
+						});
+						if (!approved) return reply.code(409).send(pendingCallClosed('decided'));
+						answered();
+						return reply.code(202).send({ id, status: 'approved' });
+					}
+					if (channel.kind === 'api_chat') {
+						// A turn through the API goes on in its session, admitted like any turn: a turn
+						// refused for now leaves the call waiting
+						const result = await agent.runOwnerTurn({
+							principal,
+							target: { kind: 'id', id: channel.sessionId },
+							message: null,
+							log: request.log,
+							resume: { pendingCallId: id, through: 'api', answerId }
+						});
+						if (result.kind === 'decided') {
+							return reply.code(409).send(pendingCallClosed('decided'));
+						}
+						if (result.kind === 'busy') {
+							return reply.code(429).send({ error: 'busy', reason: result.reason });
+						}
+						if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
+						if (result.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
+						answered();
+						if (result.kind === 'failed') {
+							return reply.code(502).send({ error: 'execution failed' });
+						}
+						return turnAnswer(principal, result);
+					}
+					// A direct tool call runs once allowed, under the same rules as when it was made, and
+					// answers as it would have: the rights to call and act through contracts stay a
+					// switch above the owner's consents
+					const tool = tools.find(call.tool);
+					if (
+						tool !== null &&
+						tool.requiredAction !== null &&
+						!record.actions.includes(tool.requiredAction)
+					) {
+						return reply.code(403).send(FORBIDDEN);
+					}
+					const ran = await agent.runAllowedCall({
+						principal,
+						pendingCallId: id,
+						answerId,
+						log: request.log
+					});
+					if (ran.kind === 'decided') return reply.code(409).send(pendingCallClosed('decided'));
+					answered();
+					if (ran.outcome.denied === true) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					// A call that waits for its owner again answers as the tool route does: with its new
+					// pending call
+					const waiting =
+						ran.outcome.pendingCallId === undefined
+							? null
+							: await pendingCallView(principal, ran.outcome.pendingCallId);
+					if (waiting !== null) return reply.code(202).send({ pending_call: waiting });
+					return ran.outcome.result;
+				}
+			);
+
 			// Direct tool calls, under the same rules as the model's: identity from the token only,
 			// unknown tools and unknown arguments refused, ownership enforced by the database.
 			scope.post('/tool', async (request, reply) => {
@@ -495,6 +840,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					'tool called'
 				);
 				if (outcome.denied === true) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				// A call that waits for the owner's answer did not run: the client gets the pending call
+				const pending =
+					outcome.pendingCallId === undefined
+						? null
+						: await pendingCallView(principal, outcome.pendingCallId);
+				if (pending !== null) return reply.code(202).send({ pending_call: pending });
 				return outcome.result;
 			});
 
@@ -514,11 +865,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					correlationId: request.id
 				});
 				if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
-				if (result.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				// A turn of a new message resumes no call, so none was decided before it
+				if (result.kind === 'missing' || result.kind === 'decided') {
+					return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				}
 				if (result.kind === 'busy')
 					return reply.code(429).send({ error: 'busy', reason: result.reason });
 				if (result.kind === 'failed') return reply.code(502).send({ error: 'execution failed' });
-				return { session_id: result.sessionId, answer: result.answer, model: result.model };
+				return turnAnswer(principal, result);
 			});
 		},
 		{ prefix: '/v1' }

@@ -79,12 +79,14 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		...(contract.bodySchema === null ? [] : ['body'])
 	];
 
-	// Freezes the call as the model wrote it until its owner answers, counts it, and logs why it
-	// waits, never what it would send; resolves to the frozen call's id
+	// Freezes the call as the model wrote it until its owner answers, with the turn's session and
+	// the harness's question as its owner reads it, counts it, and logs why it waits, never what
+	// it would send; resolves to the frozen call's id
 	async function freeze(
 		values: Record<string, unknown>,
 		context: ToolContext,
-		reasons: readonly WaitReason[]
+		reasons: readonly WaitReason[],
+		request: string
 	): Promise<string> {
 		const owner = context.principalId;
 		const call: PendingCallInput = {
@@ -96,7 +98,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			reasons,
 			arguments: values,
 			correlationId: context.correlationId ?? null,
-			origin: context.origin ?? 'owner'
+			origin: context.origin ?? 'owner',
+			sessionId: context.sessionId ?? null,
+			request
 		};
 		const pendingCallId = await withPrincipal(context.db, { id: owner }, (tx) =>
 			insertPendingCall(tx, call)
@@ -184,7 +188,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					);
 					return { result: TOO_LARGE_TO_CONFIRM };
 				}
-				const pendingCallId = await freeze(values, context, reasons);
+				// The call keeps the harness's question alone, never the call nor the model's words: it
+				// is what the API shows of the request
+				const pendingCallId = await freeze(values, context, reasons, request.question);
 				return {
 					result: {
 						status: 'awaiting_owner',
@@ -274,7 +280,6 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// consent link, never one from the answer, which a contract could have written. The
 			// organization agent acts for no user: nobody could give it that permission.
 			if (delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
-				const pendingCallId = await freeze(values, context, ['delegation']);
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				const application = labelOf(
 					deps.domains,
@@ -283,14 +288,16 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					locale,
 					config.locale
 				);
+				const request = getMessages(locale).consent.delegation(
+					application.name,
+					contract.level,
+					delegation,
+					config.consent.brokerConsentUrl
+				);
+				const pendingCallId = await freeze(values, context, ['delegation'], request);
 				return {
 					result: { status: 'awaiting_owner', reason: 'delegation', code: delegation },
-					final: getMessages(locale).consent.delegation(
-						application.name,
-						contract.level,
-						delegation,
-						config.consent.brokerConsentUrl
-					),
+					final: request,
 					pendingCallId
 				};
 			}

@@ -73,6 +73,9 @@ export interface ToolContext {
 	readonly db: Db;
 	// What links this turn's calls in the audit: the request id, or the Matrix event id
 	readonly correlationId?: string;
+	// The turn's session, which a call frozen in it keeps for its owner's answer; none for a direct
+	// tool call through the API
+	readonly sessionId?: string;
 	// The turn's or the request's logger, for what a tool changes on its owner's behalf
 	readonly log: FastifyBaseLogger;
 	// What the model wrote alongside this call, in the same answer: a call that waits for its

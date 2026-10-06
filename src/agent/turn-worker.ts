@@ -43,7 +43,9 @@ function correlationIdOf(payload: TurnPayload, origin: TurnOrigin): string {
 const resumePayload = z.object({
 	owner: z.string().min(1),
 	roomId: z.string().min(1),
-	pendingCallId: z.string().min(1)
+	pendingCallId: z.string().min(1),
+	// A job queued before answers came through the API was answered in the chat
+	through: z.enum(['chat', 'api']).default('chat')
 }) satisfies z.ZodType<ResumeRequest>;
 
 export interface SendPayload {
@@ -115,7 +117,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 
 	// Runs the call its owner allowed, then the rest of the turn, and sends the answer
 	async function resume(request: ResumeRequest): Promise<void> {
-		const { owner, roomId, pendingCallId } = request;
+		const { owner, roomId, pendingCallId, through } = request;
 		const assistant = await roomAssistant(owner, roomId);
 		if (assistant === null) {
 			log.info({ owner, roomId }, 'resume dropped: no assistant for this room');
@@ -128,10 +130,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			message: null,
 			log: turnLog,
 			assistantName: assistant.name,
-			resume: { pendingCallId }
+			resume: { pendingCallId, through }
 		});
 		// A call already decided, by an answer delivered twice for instance, runs nothing more
-		if (result.kind === 'missing') {
+		if (result.kind === 'missing' || result.kind === 'decided') {
 			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
 			return;
 		}

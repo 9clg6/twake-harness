@@ -8,6 +8,7 @@ import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
 import {
 	approvePendingCall,
 	grantConsent,
+	takeAllowedCall,
 	markReplayed,
 	supersedeApprovedCall,
 	type ApprovedCall
@@ -15,6 +16,7 @@ import {
 import type { OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
+import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
@@ -133,7 +135,18 @@ export interface OwnerTurnInput {
 	readonly event?: { readonly id: string; readonly type: string };
 	// The call its owner just allowed: the turn runs it as frozen, then goes on from there, with
 	// no new message
-	readonly resume?: { readonly pendingCallId: string };
+	readonly resume?: ResumeInput;
+}
+
+// How the owner allowed the call a turn resumes, which the consent it grants records: in the chat,
+// or through the API. An answer in the chat, or through the API to a call asked in the room,
+// approved the call before its job ran. A yes through the API to a call of a turn through the API
+// is the answer itself, under its own id: the resumed turn takes the call as it starts, once
+// admitted, so that the first answer wins and a turn refused for now leaves the call waiting.
+export interface ResumeInput {
+	readonly pendingCallId: string;
+	readonly through: 'chat' | 'api';
+	readonly answerId?: string;
 }
 
 export type OwnerTurnResult =
@@ -149,6 +162,8 @@ export type OwnerTurnResult =
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
+	// The call to resume no longer waited: another answer came first
+	| { readonly kind: 'decided' }
 	| { readonly kind: 'busy'; readonly reason: RefusalReason }
 	| { readonly kind: 'failed'; readonly error: string };
 
@@ -159,7 +174,22 @@ export interface AgentService {
 	readonly contracts: ContractCatalog;
 	readonly admission: Admission;
 	runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult>;
+	runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult>;
 }
+
+// A call a direct tool call through the API froze, which its owner allows through the API
+export interface AllowedCallInput {
+	readonly principal: Principal;
+	readonly pendingCallId: string;
+	// The owner's yes through the API, under its own id, which takes the call
+	readonly answerId: string;
+	readonly log: FastifyBaseLogger;
+}
+
+export type AllowedCallResult =
+	| { readonly kind: 'ok'; readonly outcome: ToolOutcome }
+	// The call no longer waited: another answer came first
+	| { readonly kind: 'decided' };
 
 export interface AgentServiceDeps {
 	readonly config: Config;
@@ -256,18 +286,17 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		return { message: messages.events.invitation(event.id, check.data), question };
 	}
 
-	// Runs the call its owner allowed, exactly as it was frozen, and writes it in the session as
-	// the assistant's call followed by its result, for the model to go on from. A tool that no
-	// longer stands for the contract the owner allowed, at the same level, runs nothing. The call
-	// waits for nothing the owner's yes answered; one that waits for its owner again, such as one
-	// the platform's broker still refuses or one in an application whose writing they took back
-	// since, comes back with the harness's new question.
-	async function replay(
+	// Runs the call its owner allowed, exactly as it was frozen. A tool that no longer stands for
+	// the contract the owner allowed, at the same level, runs nothing. The call waits for nothing the
+	// owner's yes answered; one that waits for its owner again, such as one the platform's broker
+	// still refuses or one in an application whose writing they took back since, comes back with
+	// the harness's new question.
+	async function runFrozenCall(
 		approved: ApprovedCall,
 		pendingCallId: string,
 		context: ToolContext,
 		log: FastifyBaseLogger
-	): Promise<{ readonly messages: LlmMessage[]; readonly question: Question | null }> {
+	): Promise<ToolOutcome> {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
 		const tool = tools.find(approved.tool);
 		const unchanged =
@@ -298,6 +327,19 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				'pending call waits again'
 			);
 		}
+		return outcome;
+	}
+
+	// Runs the call its owner allowed, and writes it in the session as the assistant's call followed
+	// by its result, for the model to go on from, with the harness's new question when it waits
+	// again
+	async function replay(
+		approved: ApprovedCall,
+		pendingCallId: string,
+		context: ToolContext,
+		log: FastifyBaseLogger
+	): Promise<{ readonly messages: LlmMessage[]; readonly question: Question | null }> {
+		const outcome = await runFrozenCall(approved, pendingCallId, context, log);
 		const callId = `replay_${pendingCallId}`;
 		return {
 			messages: [
@@ -319,8 +361,55 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					content: JSON.stringify(outcome.result)
 				}
 			],
-			question
+			question: questionOf(outcome)
 		};
+	}
+
+	// A call a direct tool call froze has no turn to go on with: once its owner allowed it through
+	// the API, it runs as it was frozen, under the correlation id of the request that froze it, if
+	// it still waited, or if an earlier yes left it unrun past the lease
+	async function runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult> {
+		const { principal, pendingCallId, answerId, log } = input;
+		const opened = await withPrincipal(db, principal, async (tx) => {
+			const record = await ensurePrincipal(tx, principal);
+			const approved = await takeAllowedCall(
+				tx,
+				principal.id,
+				pendingCallId,
+				answerId,
+				DEFAULT_LEASE_MS
+			);
+			if (approved === null) return null;
+			// As in a turn: a yes to a first use allows the application from now on, a yes to the
+			// broker's request grants nothing
+			if (approved.reasons.includes('consent')) {
+				await grantConsent(tx, principal.id, approved.domain, approved.level, 'api');
+			}
+			return { actions: record.actions, approved };
+		});
+		if (opened === null) return { kind: 'decided' };
+		const { actions, approved } = opened;
+		const outcome = await runFrozenCall(
+			approved,
+			pendingCallId,
+			{
+				principalId: principal.id,
+				origin: approved.origin,
+				actions,
+				db,
+				...(approved.correlationId === null ? {} : { correlationId: approved.correlationId }),
+				log
+			},
+			log
+		);
+		// A call that waits for its owner again is not stamped as run: its newer request supersedes
+		// the one answered
+		await withPrincipal(db, principal, (tx) =>
+			questionOf(outcome) === null
+				? markReplayed(tx, pendingCallId)
+				: supersedeApprovedCall(tx, principal.id, pendingCallId)
+		);
+		return { kind: 'ok', outcome };
 	}
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
@@ -347,10 +436,18 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				// the platform has their permission, it allows nothing more.
 				let approved: ApprovedCall | null = null;
 				if (input.resume !== undefined) {
-					approved = await approvePendingCall(tx, principal.id, input.resume.pendingCallId);
-					if (approved === null) return { kind: 'missing' as const };
+					const { pendingCallId, through, answerId } = input.resume;
+					approved =
+						answerId === undefined
+							? await approvePendingCall(tx, principal.id, pendingCallId)
+							: await takeAllowedCall(tx, principal.id, pendingCallId, answerId, DEFAULT_LEASE_MS);
+					if (approved === null) {
+						return answerId === undefined
+							? { kind: 'missing' as const }
+							: { kind: 'decided' as const };
+					}
 					if (approved.reasons.includes('consent')) {
-						await grantConsent(tx, principal.id, approved.domain, approved.level, 'chat');
+						await grantConsent(tx, principal.id, approved.domain, approved.level, through);
 					}
 				}
 				const locale = localeOf(await findAssistant(tx, principal.id), config.locale);
@@ -392,6 +489,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				withheldActions: withheld,
 				db,
 				...(correlationId === undefined ? {} : { correlationId }),
+				sessionId: session.id,
 				log
 			};
 			// A resumed turn has no new message: it goes on from the call its owner allowed
@@ -519,5 +617,5 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	return { llm, tools, gate, contracts, admission, runOwnerTurn };
+	return { llm, tools, gate, contracts, admission, runOwnerTurn, runAllowedCall };
 }

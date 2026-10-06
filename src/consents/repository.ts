@@ -19,17 +19,20 @@ export async function hasConsent(
 	return rows.length > 0;
 }
 
+// Resolves to whether the owner had not allowed it yet: a consent already given keeps when and how
+// it was given
 export async function grantConsent(
 	tx: Tx,
 	owner: string,
 	domain: string,
 	level: ConsentLevel,
 	source: ConsentSource
-): Promise<void> {
-	await tx.sql`
+): Promise<boolean> {
+	const result = await tx.sql`
 		insert into consents (owner, domain, level, granted_by)
 		values (${owner}, ${domain}, ${level}, ${source})
 		on conflict do nothing`;
+	return result.count === 1;
 }
 
 // What an owner's assistant may use: what the owner allowed, or the reading of its own feed of
@@ -132,16 +135,20 @@ export interface PendingCallInput {
 	readonly arguments: unknown;
 	readonly correlationId: string | null;
 	readonly origin: TurnOrigin;
+	// The session of the turn that froze the call; none for a direct tool call through the API
+	readonly sessionId: string | null;
+	// The harness's question, as its owner reads it
+	readonly request: string;
 }
 
 // Freezes a call until its owner answers; resolves to its id
 export async function insertPendingCall(tx: Tx, input: PendingCallInput): Promise<string> {
 	const rows = await tx.sql<{ id: string }[]>`
 		insert into pending_calls (owner, tool, contract, domain, level, reasons, arguments,
-			correlation_id, origin)
+			correlation_id, origin, session_id, request_text)
 		values (${input.owner}, ${input.tool}, ${input.contract}, ${input.domain}, ${input.level},
 			${JSON.stringify(input.reasons)}::jsonb, ${JSON.stringify(input.arguments)}::jsonb,
-			${input.correlationId}, ${input.origin})
+			${input.correlationId}, ${input.origin}, ${input.sessionId}, ${input.request})
 		returning id`;
 	const row = rows[0];
 	if (row === undefined) throw new Error('the pending call was not stored');
@@ -211,7 +218,7 @@ function closedRequests(rows: readonly ClosedRow[]): ClosedRequest[] {
 }
 
 // Marks the open requests of a room older than the one just asked as superseded, erasing what
-// their calls would have sent
+// their calls would have sent, and the question with it
 export async function supersedeRequests(
 	tx: Tx,
 	owner: string,
@@ -219,21 +226,23 @@ export async function supersedeRequests(
 	newestId: string
 ): Promise<ClosedRequest[]> {
 	const rows = await tx.sql<ClosedRow[]>`
-		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null,
+			request_text = null
 		where owner = ${owner} and room_id = ${roomId} and status = 'open' and id <> ${newestId}
 		returning id, domain, level, reasons`;
 	return closedRequests(rows);
 }
 
 // Closes the owner's requests left unanswered past their lifetime, erasing what their calls would
-// have sent
+// have sent, and the question with it
 export async function expireRequests(
 	tx: Tx,
 	owner: string,
 	lifetimeMs: number
 ): Promise<ClosedRequest[]> {
 	const rows = await tx.sql<ClosedRow[]>`
-		update pending_calls set status = 'expired', decided_at = now(), arguments = null
+		update pending_calls set status = 'expired', decided_at = now(), arguments = null,
+			request_text = null
 		where owner = ${owner} and status = 'open'
 			and created_at <= now() - make_interval(secs => ${lifetimeMs / 1000})
 		returning id, domain, level, reasons`;
@@ -243,6 +252,10 @@ export async function expireRequests(
 // What an answer finds: a request still open, one closed unanswered (its lifetime over, or a
 // newer one asked in its room), or one already decided
 export type RequestState = 'open' | 'expired' | 'superseded' | 'decided';
+
+function stateOf(status: string): RequestState {
+	return status === 'open' || status === 'expired' || status === 'superseded' ? status : 'decided';
+}
 
 export interface FoundRequest extends CallSubject {
 	readonly pendingCallId: string;
@@ -255,12 +268,9 @@ interface RequestRow extends SubjectRow {
 }
 
 function foundRequest(row: RequestRow | undefined): FoundRequest | null {
-	if (row === undefined) return null;
-	const state =
-		row.status === 'open' || row.status === 'expired' || row.status === 'superseded'
-			? row.status
-			: 'decided';
-	return { pendingCallId: row.id, state, ...subjectOf(row) };
+	return row === undefined
+		? null
+		: { pendingCallId: row.id, state: stateOf(row.status), ...subjectOf(row) };
 }
 
 // The request asked in this event, whatever became of it
@@ -320,9 +330,31 @@ export async function decidePendingCall(
 	const result = await tx.sql`
 		update pending_calls set status = ${decision}, decided_at = coalesce(decided_at, now()),
 			answer_event_id = ${answerEventId},
-			arguments = case when ${decision} = 'refused' then null else arguments end
+			arguments = case when ${decision} = 'refused' then null else arguments end,
+			request_text = case when ${decision} = 'refused' then null else request_text end
 		where id = ${id} and owner = ${owner}
 			and (status = 'open' or (status = ${decision} and answer_event_id is null))`;
+	return result.count === 1;
+}
+
+// The owner's answer through the API to a call still waiting, recorded under an id of its own:
+// a yes approves it, for its resume job to run, and a no drops it, erasing what it would have
+// sent and the question. The answer goes in as the room's do, so that an answer read in the room
+// as the call still waited finds it answered and decides nothing. False when the call was no
+// longer waiting.
+export async function answerPendingCall(
+	tx: Tx,
+	owner: string,
+	id: string,
+	decision: 'approved' | 'refused',
+	answerId: string
+): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set status = ${decision}, decided_at = now(),
+			answer_event_id = ${answerId},
+			arguments = case when ${decision} = 'refused' then null else arguments end,
+			request_text = case when ${decision} = 'refused' then null else request_text end
+		where id = ${id} and owner = ${owner} and status = 'open'`;
 	return result.count === 1;
 }
 
@@ -356,6 +388,19 @@ interface ApprovedRow extends SubjectRow {
 	origin: TurnOrigin;
 }
 
+function approvedCall(row: ApprovedRow | undefined): ApprovedCall | null {
+	return row === undefined
+		? null
+		: {
+				...subjectOf(row),
+				tool: row.tool,
+				contract: row.contract,
+				arguments: readJsonColumn(row.arguments),
+				correlationId: row.correlation_id,
+				origin: row.origin
+			};
+}
+
 // Hands out a call its owner allowed, for its resume job to run it: approved when the answer
 // came, or still waiting if the job came first. A call approved but never run, its job having
 // died, is handed out again; one already run, or decided otherwise, is not.
@@ -369,29 +414,152 @@ export async function approvePendingCall(
 		where id = ${id} and owner = ${owner}
 			and (status = 'open' or (status = 'approved' and replayed_at is null))
 		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
-	const row = rows[0];
-	return row === undefined
-		? null
-		: {
-				...subjectOf(row),
-				tool: row.tool,
-				contract: row.contract,
-				arguments: readJsonColumn(row.arguments),
-				correlationId: row.correlation_id,
-				origin: row.origin
-			};
+	return approvedCall(rows[0]);
+}
+
+// Takes a call for the owner's yes through the API, which runs it at once with no job behind it:
+// a call still waiting, or one an earlier yes through the API took and left unrun past the lease
+// a replica holds a job for, its replica taken for gone. The yes is recorded under its own id,
+// so that a second answer, through the API or in the room, finds the call decided.
+export async function takeAllowedCall(
+	tx: Tx,
+	owner: string,
+	id: string,
+	answerId: string,
+	leaseMs: number
+): Promise<ApprovedCall | null> {
+	const rows = await tx.sql<ApprovedRow[]>`
+		update pending_calls set status = 'approved', decided_at = now(), answer_event_id = ${answerId}
+		where id = ${id} and owner = ${owner}
+			and (status = 'open'
+				or (status = 'approved' and replayed_at is null and answer_event_id like 'api:%'
+					and decided_at <= now() - make_interval(secs => ${leaseMs / 1000})))
+		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
+	return approvedCall(rows[0]);
 }
 
 // The call its owner allowed waits again once replayed, under a newer request that asks about
 // everything that applies by then, such as writing they took back since: this one is closed as
-// superseded by that request, and what it would have sent is erased, the newer one holding it
+// superseded by that request, and what it would have sent is erased with its question, the newer
+// one holding both
 export async function supersedeApprovedCall(tx: Tx, owner: string, id: string): Promise<void> {
 	await tx.sql`
-		update pending_calls set status = 'superseded', arguments = null
+		update pending_calls set status = 'superseded', arguments = null, request_text = null
 		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
 }
 
-// The call ran, and the conversation holds it: what it sent is erased
+// The call ran, and the conversation holds it: what it sent is erased, and the question with it
 export async function markReplayed(tx: Tx, id: string): Promise<void> {
-	await tx.sql`update pending_calls set replayed_at = now(), arguments = null where id = ${id}`;
+	await tx.sql`
+		update pending_calls set replayed_at = now(), arguments = null, request_text = null
+		where id = ${id}`;
+}
+
+// Where a call was frozen, which is where its owner's answer resumes it: the owner's room, a turn
+// through the API's chat in its session, or a direct call through the API's tool route. The API's
+// channels say so in their names, apart from the chat in the room that consents record.
+export type PendingCallChannel =
+	| { readonly kind: 'room'; readonly roomId: string }
+	| { readonly kind: 'api_chat'; readonly sessionId: string }
+	| { readonly kind: 'api_tool' };
+
+// A call the harness froze, as its owner's clients see it: never what it would send
+export interface PendingCallRecord extends CallSubject {
+	readonly id: string;
+	readonly channel: PendingCallChannel;
+	readonly sessionId: string | null;
+	readonly tool: string;
+	readonly contract: string;
+	// The harness's question as its owner read it, erased once the call is decided
+	readonly request: string | null;
+	readonly state: RequestState;
+	readonly createdAt: Date;
+}
+
+interface PendingCallRow extends SubjectRow {
+	id: string;
+	session_id: string | null;
+	room_id: string | null;
+	tool: string;
+	contract: string;
+	request_text: string | null;
+	status: string;
+	created_at: Date;
+}
+
+function toPendingCallRecord(row: PendingCallRow): PendingCallRecord {
+	return {
+		...subjectOf(row),
+		id: row.id,
+		channel:
+			row.room_id !== null
+				? { kind: 'room', roomId: row.room_id }
+				: row.session_id !== null
+					? { kind: 'api_chat', sessionId: row.session_id }
+					: { kind: 'api_tool' },
+		sessionId: row.session_id,
+		tool: row.tool,
+		contract: row.contract,
+		request: row.request_text,
+		state: stateOf(row.status),
+		createdAt: row.created_at
+	};
+}
+
+// One of the owner's calls, whatever became of it. A call asked in a room belongs to that room
+// even before its question went out, through the session of the turn that froze it.
+export async function findPendingCall(
+	tx: Tx,
+	owner: string,
+	id: string
+): Promise<PendingCallRecord | null> {
+	const rows = await tx.sql<PendingCallRow[]>`
+		select p.id, p.session_id, coalesce(p.room_id, s.room_id) as room_id, p.tool, p.contract,
+			p.domain, p.level, p.reasons, p.request_text, p.status, p.created_at
+		from pending_calls p left join sessions s on s.id = p.session_id
+		where p.owner = ${owner} and p.id = ${id}`;
+	const row = rows[0];
+	return row === undefined ? null : toPendingCallRecord(row);
+}
+
+// The owner's calls that wait for their answer, the oldest first
+export async function listPendingCalls(tx: Tx, owner: string): Promise<PendingCallRecord[]> {
+	const rows = await tx.sql<PendingCallRow[]>`
+		select p.id, p.session_id, coalesce(p.room_id, s.room_id) as room_id, p.tool, p.contract,
+			p.domain, p.level, p.reasons, p.request_text, p.status, p.created_at
+		from pending_calls p left join sessions s on s.id = p.session_id
+		where p.owner = ${owner} and p.status = 'open'
+		order by p.created_at`;
+	return rows.map(toPendingCallRecord);
+}
+
+// A pending call as the owner's clients read it
+export interface PendingCallView {
+	readonly id: string;
+	readonly channel: PendingCallChannel['kind'];
+	readonly session_id: string | null;
+	readonly tool: string;
+	readonly contract: string;
+	readonly domain: string;
+	readonly level: ConsentLevel;
+	readonly reasons: readonly string[];
+	readonly request: string | null;
+	readonly created_at: string;
+	readonly expires_at: string;
+}
+
+export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number): PendingCallView {
+	return {
+		id: record.id,
+		channel: record.channel.kind,
+		session_id: record.sessionId,
+		tool: record.tool,
+		contract: record.contract,
+		domain: record.domain,
+		level: record.level,
+		reasons: record.reasons,
+		request: record.request,
+		created_at: record.createdAt.toISOString(),
+		expires_at: new Date(record.createdAt.getTime() + lifetimeMs).toISOString()
+	};
 }
