@@ -37,6 +37,7 @@ import {
 	type CrossSigningResult
 } from './cross-signing.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
+import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
@@ -230,6 +231,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	});
 	appservice.expressAppInstance.get('/health', (_req, res) => {
 		res.status(200).json({ status: 'ok', role: 'matrix' });
+	});
+
+	// A push the SDK fails on no longer ends the role: see installRejectionGuard
+	const rejections = installRejectionGuard(log);
+	appservice.expressAppInstance.get('/metrics', (_req, res) => {
+		res
+			.type('text/plain; version=0.0.4')
+			.send(
+				[
+					'# TYPE harness_unhandled_rejections_total counter',
+					`harness_unhandled_rejections_total ${rejections.count}`,
+					''
+				].join('\n')
+			);
 	});
 
 	const guard = makeListenerGuard(log, inFlight);
@@ -730,6 +745,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				await feedback.stop();
 				appservice.stop();
 				appServer?.closeAllConnections();
+				rejections.uninstall();
 			})();
 			return stopping;
 		}
