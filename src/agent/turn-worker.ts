@@ -6,7 +6,7 @@ import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { findAssistant } from '../assistants/repository.js';
 import type { Messages } from '../i18n/messages.js';
-import type { AgentService } from './service.js';
+import type { AgentService, TurnOrigin } from './service.js';
 
 const turnPayload = z.object({
 	owner: z.string().min(1),
@@ -21,6 +21,21 @@ const turnPayload = z.object({
 });
 
 export type TurnPayload = z.infer<typeof turnPayload>;
+
+// The prefix that keys a turn an event woke, in its payload and its jobs' dedup keys
+const EVENT_KEY_PREFIX = 'event:';
+
+// What links a turn's contract calls and log lines to their cause: the Matrix id of the owner's
+// message, or, for a turn an event woke, the bare id the dispatcher posted, which is also the
+// event's row id and the dispatcher's own request and correlation ids, so that the gateway's
+// audit records match it exactly. The prefixed form stays the turn's internal key.
+function correlationIdOf(payload: TurnPayload, origin: TurnOrigin): string {
+	if (origin !== 'event') return payload.eventId;
+	if (payload.event !== undefined) return payload.event.id;
+	return payload.eventId.startsWith(EVENT_KEY_PREFIX)
+		? payload.eventId.slice(EVENT_KEY_PREFIX.length)
+		: payload.eventId;
+}
 
 export interface SendPayload {
 	readonly asUserId: string;
@@ -56,7 +71,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			if (!parsed.success) throw new Error('turn payload is malformed');
 			const { owner, roomId, eventId, text } = parsed.data;
 			// A turn queued before the origin was recorded is an event's when its id says so
-			const origin = parsed.data.origin ?? (eventId.startsWith('event:') ? 'event' : 'owner');
+			const origin =
+				parsed.data.origin ?? (eventId.startsWith(EVENT_KEY_PREFIX) ? 'event' : 'owner');
 			const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 			const rooms =
 				assistant === null || assistant.deletedAt !== null
@@ -66,13 +82,14 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				log.info({ owner, roomId }, 'turn dropped: no assistant for this room');
 				return;
 			}
-			const turnLog = log.child({ reqId: eventId, roomId });
+			const correlationId = correlationIdOf(parsed.data, origin);
+			const turnLog = log.child({ reqId: correlationId, roomId });
 			const result = await agent.runOwnerTurn({
 				principal: { id: owner },
 				target: { kind: 'room', roomId },
 				message: text,
 				log: turnLog,
-				correlationId: eventId,
+				correlationId,
 				origin,
 				assistantName: assistant.name,
 				...(parsed.data.event === undefined ? {} : { event: parsed.data.event })
