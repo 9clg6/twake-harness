@@ -73,6 +73,7 @@ describe('a deployment that speaks French', () => {
 		const system = h.apisix.llm.calls.at(-1)?.request.messages[0];
 		expect(system?.role).toBe('system');
 		expect(system?.content).toContain('You are "Lucie", the Twake Space assistant');
+		expect(system?.content).toContain("Tutoie la personne qui t'écrit");
 	});
 	it('tells the model of an invitation in French: check the slot, propose, never accept', async () => {
 		const posted = await h.api.post('dispatcher', '/v1/events', {
