@@ -6,7 +6,14 @@ import { withPrincipal, type Db } from '../src/db/client.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import { readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix.js';
+import { grantConsent } from './helpers/consents.js';
+import {
+	BROKER_CONSENT_URL,
+	brokerRefusal,
+	type ChatRequest,
+	type ScriptedReply,
+	type ToolCall
+} from './helpers/fake-apisix.js';
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -490,6 +497,54 @@ describe('my answer through the API to a call left unanswered too long', () => {
 		expect(await countedLines(h)).toContain(
 			'harness_consent_answers_total{domain="mail",level="read",reason="consent",answer="yes",via="api",outcome="expired"} 1'
 		);
+	});
+});
+
+describe("my answer through the API to the broker's request", () => {
+	let h: TestHarness;
+	let c: TestClient;
+	beforeAll(async () => {
+		h = await startTestHarness({ env: { BROKER_CONSENT_URL } });
+		c = makeClient(h);
+		h.apisix.contracts.spec = readCatalog(['mail']);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		h.apisix.llm.script = searchingModel;
+		// Alice let her assistant read her mail; the platform's broker lacks her delegation
+		await grantConsent(h.db, 'alice', 'mail', 'read');
+	});
+	afterAll(async () => {
+		if (h !== undefined) await h.close();
+	});
+
+	it('shows me the call the broker refused, with its consent link, and runs it again on my yes', async () => {
+		let refusals = 1;
+		h.apisix.contracts.handler = (c) =>
+			refusals-- > 0
+				? brokerRefusal('delegation_missing')
+				: { status: 200, body: { found: c.path } };
+		const turn = await c.post<{ answer: string; pending_call: { id: string } }>(
+			'alice',
+			'/v1/chat',
+			{
+				message: 'Find the budget in my mail'
+			}
+		);
+		const request = `To read your data in mail, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`;
+		expect(turn.body.answer).toBe(request);
+		expect(turn.body.pending_call).toMatchObject({
+			channel: 'api_chat',
+			domain: 'mail',
+			level: 'read',
+			reasons: ['delegation'],
+			request
+		});
+		expect(
+			await c.post('alice', `/v1/pending-calls/${turn.body.pending_call.id}/approve`, {})
+		).toMatchObject({
+			status: 200,
+			body: { answer: 'Told: {"status":200,"body":{"found":"/contracts/v1/mail/items"}}' }
+		});
+		expect(h.apisix.contracts.calls).toHaveLength(2);
 	});
 });
 
