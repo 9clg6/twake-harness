@@ -48,6 +48,21 @@ async function nextRequestIn(
 	throw new Error('no new request from the harness');
 }
 
+// The calls that waited for that permission in an application, summed over the api replicas'
+// metrics as an operator's dashboard reads them
+async function delegationRequests(r: ConsentRoom, domain: string): Promise<number> {
+	const sample = new RegExp(
+		`^harness_consent_requests_total\\{domain="${domain}",level="read",reason="delegation"\\} (\\d+)$`,
+		'm'
+	);
+	let sum = 0;
+	for (const app of r.h.apps) {
+		const text = (await app.inject({ method: 'GET', url: '/metrics' })).body;
+		sum += Number(sample.exec(text)?.[1] ?? 0);
+	}
+	return sum;
+}
+
 // Everything Alice's client can show of a message: its text, and its rendering with the links
 function shown(message: DecryptedMessage): string {
 	const formatted = message.content['formatted_body'];
@@ -136,6 +151,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 			principal: 'alice@test.local'
 		});
 		expect(r.h.logLines().some((l) => JSON.stringify(l).includes('quarterly-budget'))).toBe(false);
+		expect(await delegationRequests(r, 'mail')).toBe(1);
 	});
 
 	it('tries the frozen call again once I say yes, and carries on with what it found', async () => {
@@ -181,6 +197,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 			{ q: 'today' }
 		]);
 		expect(requestsIn(r)).toHaveLength(seen + 1);
+		expect(await delegationRequests(r, 'tasks')).toBe(2);
 		// Once she gave it, her yes on the new request runs the call
 		broker = null;
 		const found = r.saying('Found:').length;
