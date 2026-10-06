@@ -10,7 +10,7 @@ import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
-import { resetDatabase, TEST_DATABASE_URL } from './app.js';
+import { ensureAppRole, resetDatabase, TEST_DATABASE_URL } from './app.js';
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
@@ -35,6 +35,7 @@ export interface MatrixTestHarness {
 
 // The matrix role, a real Synapse pushing to it and the fake APISIX in between for its calls.
 export async function startMatrixHarness(): Promise<MatrixTestHarness> {
+	await ensureAppRole(false);
 	const port = await freePort();
 	const asToken = 'as-token-test';
 	const hsToken = 'hs-token-test';

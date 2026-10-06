@@ -26,7 +26,7 @@ export const TEST_DATABASE_URL: string = appDatabaseUrl(ADMIN_DATABASE_URL);
 
 let appRoleReady = false;
 
-async function ensureAppRole(keepSchema: boolean): Promise<void> {
+export async function ensureAppRole(keepSchema: boolean): Promise<void> {
 	if (appRoleReady || keepSchema) return;
 	const admin = makeDb(ADMIN_DATABASE_URL);
 	try {
