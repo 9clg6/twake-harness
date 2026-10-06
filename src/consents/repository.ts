@@ -425,11 +425,12 @@ export async function markReplayed(tx: Tx, id: string): Promise<void> {
 }
 
 // Where a call was frozen, which is where its owner's answer resumes it: the owner's room, a turn
-// through the API in its session, or a direct tool call through the API
+// through the API's chat in its session, or a direct call through the API's tool route. The API's
+// channels say so in their names, apart from the chat in the room that consents record.
 export type PendingCallChannel =
 	| { readonly kind: 'room'; readonly roomId: string }
-	| { readonly kind: 'chat'; readonly sessionId: string }
-	| { readonly kind: 'tool' };
+	| { readonly kind: 'api_chat'; readonly sessionId: string }
+	| { readonly kind: 'api_tool' };
 
 // A call the harness froze, as its owner's clients see it: never what it would send
 export interface PendingCallRecord extends CallSubject {
@@ -463,8 +464,8 @@ function toPendingCallRecord(row: PendingCallRow): PendingCallRecord {
 			row.room_id !== null
 				? { kind: 'room', roomId: row.room_id }
 				: row.session_id !== null
-					? { kind: 'chat', sessionId: row.session_id }
-					: { kind: 'tool' },
+					? { kind: 'api_chat', sessionId: row.session_id }
+					: { kind: 'api_tool' },
 		sessionId: row.session_id,
 		tool: row.tool,
 		contract: row.contract,

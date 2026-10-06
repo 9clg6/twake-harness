@@ -735,7 +735,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 						answered();
 						return reply.code(202).send({ id, status: 'approved' });
 					}
-					if (channel.kind === 'chat') {
+					if (channel.kind === 'api_chat') {
 						// A turn through the API goes on in its session, admitted like any turn: a turn
 						// refused for now leaves the call waiting
 						const result = await agent.runOwnerTurn({

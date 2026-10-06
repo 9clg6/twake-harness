@@ -35,10 +35,10 @@ function searchingModel(request: ChatRequest): ScriptedReply {
 }
 
 // A pending call as the API shows it, frozen in a turn through the API in a session
-function pendingInChat(domain: string, sessionId: string): Record<string, unknown> {
+function pendingInTurn(domain: string, sessionId: string): Record<string, unknown> {
 	return {
 		id: expect.stringMatching(/^[0-9a-f-]{36}$/),
-		channel: 'chat',
+		channel: 'api_chat',
 		session_id: sessionId,
 		tool: `search_${domain}`,
 		contract: `${domain}.items.read.v1`,
@@ -189,7 +189,7 @@ describe('my consents through the API', () => {
 			session_id: expect.any(String),
 			answer: question('tasks'),
 			model: 'qwen3.8',
-			pending_call: pendingInChat('tasks', body.session_id)
+			pending_call: pendingInTurn('tasks', body.session_id)
 		});
 		// It waits for a day, as a question in the room does
 		expect(
@@ -205,7 +205,7 @@ describe('my consents through the API', () => {
 		);
 		const waiting = await c.get<{ pending_calls: { id: string }[] }>('alice', '/v1/pending-calls');
 		expect(waiting.status).toBe(200);
-		expect(waiting.body.pending_calls).toContainEqual(pendingInChat('wiki', turn.body.session_id));
+		expect(waiting.body.pending_calls).toContainEqual(pendingInTurn('wiki', turn.body.session_id));
 		expect(await c.get('bob', '/v1/pending-calls')).toEqual({
 			status: 200,
 			body: { pending_calls: [] }
@@ -269,8 +269,8 @@ describe('my consents through the API', () => {
 		expect(frozen.statusCode).toBe(202);
 		const { pending_call: pending } = frozen.json<{ pending_call: { id: string } }>();
 		expect(pending).toEqual({
-			...pendingInChat('contacts', ''),
-			channel: 'tool',
+			...pendingInTurn('contacts', ''),
+			channel: 'api_tool',
 			session_id: null
 		});
 		expect(h.apisix.contracts.calls).toHaveLength(0);
