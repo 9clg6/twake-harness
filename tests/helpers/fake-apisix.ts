@@ -152,20 +152,34 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 				}
 			}
 			const startedAt = Date.now();
-			const upstream = await fetch(target, {
-				method: req.method ?? 'GET',
-				headers,
-				...(chunks.length === 0 ? {} : { body: Buffer.concat(chunks) })
-			});
-			matrixCalls.push({
-				method: req.method ?? 'GET',
-				path: url.pathname.slice('/matrix'.length) + url.search,
-				status: upstream.status,
-				ms: Date.now() - startedAt
-			});
-			res.statusCode = upstream.status;
-			res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
-			res.end(Buffer.from(await upstream.arrayBuffer()));
+			const path = url.pathname.slice('/matrix'.length) + url.search;
+			// Like the real gateway, an upstream that fails or goes away mid-call is answered with a 502
+			try {
+				const upstream = await fetch(target, {
+					method: req.method ?? 'GET',
+					headers,
+					...(chunks.length === 0 ? {} : { body: Buffer.concat(chunks) })
+				});
+				const body = Buffer.from(await upstream.arrayBuffer());
+				matrixCalls.push({
+					method: req.method ?? 'GET',
+					path,
+					status: upstream.status,
+					ms: Date.now() - startedAt
+				});
+				res.statusCode = upstream.status;
+				res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
+				res.end(body);
+			} catch {
+				matrixCalls.push({
+					method: req.method ?? 'GET',
+					path,
+					status: 502,
+					ms: Date.now() - startedAt
+				});
+				if (!res.headersSent) sendJson(res, 502, { error: 'matrix upstream failed' });
+				else res.destroy();
+			}
 			return;
 		}
 		if (url.pathname.startsWith('/openbao/')) {
