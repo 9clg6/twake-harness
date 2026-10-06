@@ -25,25 +25,19 @@ interface Waiter {
 	resolve(): void;
 }
 
-function pruneWindow(times: number[], now: number): number[] {
-	const cutoff = now - 60_000;
-	return times.filter((t) => t > cutoff);
-}
-
 function today(): string {
 	return new Date().toISOString().slice(0, 10);
 }
 
 // Admission runs before any model call. Limits are per user, so one user cannot saturate the
 // replica for the others, and the queue of a full replica is served one user at a time rather
-// than first come first served.
+// than first come first served. The turns per minute and the daily tokens are counted in the
+// database, so they hold across replicas; the turns in flight and the queue are this replica's.
 export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): Admission {
 	const limits = config.admission;
 	let inflight = 0;
 	const running = new Map<string, number>();
 	const waiting = new Map<string, number>();
-	const userTimes = new Map<string, number[]>();
-	let globalTimes: number[] = [];
 	const queue: Waiter[] = [];
 	const refused: Record<RefusalReason, number> = {
 		user_queue_full: 0,
@@ -60,6 +54,35 @@ export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): A
 				select tokens from usage_daily where owner = ${principalId} and day = ${today()}`
 		);
 		return Number(rows[0]?.tokens ?? 0);
+	}
+
+	async function userTurnsLastMinute(principalId: string): Promise<number> {
+		return withPrincipal(db, { id: principalId }, async (tx) => {
+			await tx.sql`delete from usage_window where owner = ${principalId} and at < now() - interval '60 seconds'`;
+			const rows = await tx.sql<{ n: string }[]>`
+				select coalesce(sum(turns), 0) as n from usage_window where owner = ${principalId}`;
+			return Number(rows[0]?.n ?? 0);
+		});
+	}
+
+	async function globalTurnsLastMinute(): Promise<number> {
+		await db.sql`delete from usage_window_global where at < now() - interval '60 seconds'`;
+		const rows = await db.sql<{ n: string }[]>`
+			select coalesce(sum(turns), 0) as n from usage_window_global`;
+		return Number(rows[0]?.n ?? 0);
+	}
+
+	async function recordStart(principalId: string): Promise<void> {
+		await withPrincipal(
+			db,
+			{ id: principalId },
+			(tx) => tx.sql`
+				insert into usage_window (owner, at, turns) values (${principalId}, date_trunc('second', now()), 1)
+				on conflict (owner, at) do update set turns = usage_window.turns + 1`
+		);
+		await db.sql`
+			insert into usage_window_global (at, turns) values (date_trunc('second', now()), 1)
+			on conflict (at) do update set turns = usage_window_global.turns + 1`;
 	}
 
 	function refuse(principalId: string, reason: RefusalReason): AdmissionDecision {
@@ -82,9 +105,6 @@ export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): A
 	function start(principalId: string): void {
 		inflight += 1;
 		running.set(principalId, (running.get(principalId) ?? 0) + 1);
-		const now = Date.now();
-		userTimes.set(principalId, [...pruneWindow(userTimes.get(principalId) ?? [], now), now]);
-		globalTimes = [...pruneWindow(globalTimes, now), now];
 	}
 
 	function release(principalId: string): void {
@@ -98,12 +118,12 @@ export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): A
 
 	return {
 		async admit(principalId) {
-			const now = Date.now();
-			const perUser = pruneWindow(userTimes.get(principalId) ?? [], now);
-			userTimes.set(principalId, perUser);
-			if (perUser.length >= limits.userPerMinute) return refuse(principalId, 'user_rate');
-			globalTimes = pruneWindow(globalTimes, now);
-			if (globalTimes.length >= limits.globalPerMinute) return refuse(principalId, 'global_rate');
+			if ((await userTurnsLastMinute(principalId)) >= limits.userPerMinute) {
+				return refuse(principalId, 'user_rate');
+			}
+			if ((await globalTurnsLastMinute()) >= limits.globalPerMinute) {
+				return refuse(principalId, 'global_rate');
+			}
 			if ((await tokensToday(principalId)) >= limits.userDailyTokens) {
 				return refuse(principalId, 'user_budget');
 			}
@@ -119,6 +139,7 @@ export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): A
 				waiting.set(principalId, (waiting.get(principalId) ?? 1) - 1);
 			}
 			start(principalId);
+			await recordStart(principalId);
 			log.info({ principal: principalId, inflight, queued: queue.length }, 'admission granted');
 			let released = false;
 			return {
