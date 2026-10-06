@@ -72,11 +72,24 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WRITE_OWN_MEMORY
 ];
 
+// The harness's own question to an owner about a call it froze, on which the turn ends
+interface Question {
+	readonly text: string;
+	readonly pendingCallId: string;
+}
+
+// The question a tool's outcome ends the turn on, when its call waits for its owner
+function questionOf(outcome: ToolOutcome): Question | null {
+	return outcome.final !== undefined && outcome.pendingCallId !== undefined
+		? { text: outcome.final, pendingCallId: outcome.pendingCallId }
+		: null;
+}
+
 // What the model of a turn is told, and the harness's own question when a read it made before
 // the model speaks waits for the owner
 interface Told {
 	readonly message: string | null;
-	readonly question: { readonly text: string; readonly pendingCallId: string } | null;
+	readonly question: Question | null;
 }
 
 // What the model reads when the contract its owner allowed is no longer offered as it was
@@ -203,14 +216,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
 			return { message: input.message, question: null };
 		}
-		let question: Told['question'] = null;
+		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
 			const tool = tools.find(name);
 			if (tool === null) return null;
 			const outcome = await runTool(tool, args, context);
-			if (question === null && outcome.final !== undefined && outcome.pendingCallId !== undefined) {
-				question = { text: outcome.final, pendingCallId: outcome.pendingCallId };
-			}
+			question ??= questionOf(outcome);
 			return outcome;
 		};
 		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
@@ -235,7 +246,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		pendingCallId: string,
 		context: ToolContext,
 		log: FastifyBaseLogger
-	): Promise<{ readonly messages: LlmMessage[]; readonly question: Told['question'] }> {
+	): Promise<{ readonly messages: LlmMessage[]; readonly question: Question | null }> {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
 		const tool = tools.find(approved.tool);
 		const unchanged =
@@ -278,10 +289,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					content: JSON.stringify(outcome.result)
 				}
 			],
-			question:
-				outcome.final !== undefined && outcome.pendingCallId !== undefined
-					? { text: outcome.final, pendingCallId: outcome.pendingCallId }
-					: null
+			question: questionOf(outcome)
 		};
 	}
 
@@ -390,11 +398,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				// A call that waits for its owner again ends the turn on the harness's new question,
 				// which the conversation keeps as the assistant's answer: the owner's next yes tries it
 				// once more, never the model
-				const asked = replayed.question;
+				const newQuestion = replayed.question;
 				history = [
 					...history,
 					...replayed.messages,
-					...(asked === null ? [] : [{ role: 'assistant' as const, content: asked.text }])
+					...(newQuestion === null
+						? []
+						: [{ role: 'assistant' as const, content: newQuestion.text }])
 				];
 				// The conversation holds the call at once, whatever happens to the rest of the turn
 				const kept = history;
@@ -402,17 +412,17 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					await saveSessionMessages(tx, session.id, kept);
 					await markReplayed(tx, pendingCallId);
 				});
-				if (asked !== null) {
+				if (newQuestion !== null) {
 					log.info(
-						{ pendingCallId: asked.pendingCallId },
+						{ pendingCallId: newQuestion.pendingCallId },
 						'turn stopped on a question to the owner'
 					);
 					return {
 						kind: 'ok',
 						sessionId: session.id,
-						answer: asked.text,
+						answer: newQuestion.text,
 						model: llm.model,
-						pendingCallId: asked.pendingCallId
+						pendingCallId: newQuestion.pendingCallId
 					};
 				}
 			}
