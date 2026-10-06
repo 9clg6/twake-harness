@@ -34,6 +34,7 @@ import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
+	consentsListTool,
 	languageTool,
 	makeToolRegistry,
 	memoryTool,
@@ -194,7 +195,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			skillsListTool,
 			skillsSearchTool,
 			skillsReadTool,
-			skillsProposeTool
+			skillsProposeTool,
+			consentsListTool
 		],
 		() => contracts.tools
 	);

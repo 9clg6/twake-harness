@@ -8,6 +8,11 @@ export type WaitReason = 'consent' | 'delegation';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 
+// The assistant's own feed of workplace events, read without asking: it is how events reach the
+// owner in the first place. It is built into the harness, never a consent an owner gives or
+// withdraws.
+export const FEED_DOMAIN = 'events';
+
 // The reactions by which an owner allows, or refuses, a call the harness asked them about
 export const ALLOW_REACTION = '✅';
 export const REFUSE_REACTION = '❌';

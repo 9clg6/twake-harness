@@ -1,6 +1,7 @@
 import { z } from 'zod';
 
 import { setAssistantLocale } from '../assistants/repository.js';
+import { listConsents, toConsentView } from '../consents/repository.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
 import type { LlmToolDefinition } from '../llm/client.js';
@@ -416,6 +417,28 @@ export const skillsProposeTool: Tool = {
 			})
 		);
 		return { result: { proposed: skill.id, status: 'proposed' } };
+	}
+};
+
+// What the owner allowed their assistant to use in their applications, which the model reads to
+// answer them; only the owner's own answer to the harness's question ever grants an access
+export const consentsListTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'consents_list',
+			description:
+				"List what the user allowed you to use in their applications: each application for reading or for writing, and how it was allowed. For anything else, the harness asks the user the first time you need it; only the user's answer grants an access, never you.",
+			parameters: { type: 'object', properties: {}, additionalProperties: false }
+		}
+	},
+	argumentKeys: [],
+	requiredAction: null,
+	run: async (_args, context) => {
+		const consents = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			listConsents(tx, context.principalId)
+		);
+		return { result: { consents: consents.map(toConsentView) } };
 	}
 };
 

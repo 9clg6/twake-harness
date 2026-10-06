@@ -1,6 +1,6 @@
 import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
-import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
+import { FEED_DOMAIN, type ConsentLevel, type ConsentSource, type WaitReason } from './consent.js';
 
 export async function hasConsent(
 	tx: Tx,
@@ -24,6 +24,64 @@ export async function grantConsent(
 		insert into consents (owner, domain, level, granted_by)
 		values (${owner}, ${domain}, ${level}, ${source})
 		on conflict do nothing`;
+}
+
+// What an owner's assistant may use: what the owner allowed, or the reading of its own feed of
+// events, built into the harness, which no owner gives
+export interface ConsentRecord {
+	readonly domain: string;
+	readonly level: ConsentLevel;
+	readonly grantedBy: ConsentSource | 'built_in';
+	// When the owner allowed it; null for the one built in
+	readonly grantedAt: Date | null;
+}
+
+const BUILT_IN_FEED: ConsentRecord = {
+	domain: FEED_DOMAIN,
+	level: 'read',
+	grantedBy: 'built_in',
+	grantedAt: null
+};
+
+interface ConsentRow {
+	domain: string;
+	level: ConsentLevel;
+	granted_by: ConsentSource;
+	granted_at: Date;
+}
+
+// Everything an owner's assistant may use, application by application, reading before writing
+export async function listConsents(tx: Tx, owner: string): Promise<ConsentRecord[]> {
+	const rows = await tx.sql<ConsentRow[]>`
+		select domain, level, granted_by, granted_at from consents where owner = ${owner}`;
+	const given = rows
+		.filter((row) => row.domain !== FEED_DOMAIN || row.level !== 'read')
+		.map((row): ConsentRecord => ({
+			domain: row.domain,
+			level: row.level,
+			grantedBy: row.granted_by,
+			grantedAt: row.granted_at
+		}));
+	return [...given, BUILT_IN_FEED].sort(
+		(a, b) => a.domain.localeCompare(b.domain, 'en') || a.level.localeCompare(b.level, 'en')
+	);
+}
+
+// A consent as the model and the owner's clients read it
+export interface ConsentView {
+	readonly domain: string;
+	readonly level: ConsentLevel;
+	readonly granted_by: ConsentSource | 'built_in';
+	readonly granted_at: string | null;
+}
+
+export function toConsentView(record: ConsentRecord): ConsentView {
+	return {
+		domain: record.domain,
+		level: record.level,
+		granted_by: record.grantedBy,
+		granted_at: record.grantedAt?.toISOString() ?? null
+	};
 }
 
 export interface PendingCallInput {

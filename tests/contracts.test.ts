@@ -92,6 +92,7 @@ describe('contracts as tools', () => {
 				'accept_event',
 				'read_freebusy',
 				'clarify',
+				'consents_list',
 				'memory',
 				'set_language',
 				'scoped_sessions_list',
