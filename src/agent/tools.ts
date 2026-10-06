@@ -8,7 +8,14 @@ import {
 	replaceMemoryEntry,
 	toMemoryTarget
 } from '../memory/repository.js';
-import { findSession, listSessionIds } from '../sessions/repository.js';
+import { findSession, listSessionIds, searchSessions } from '../sessions/repository.js';
+import {
+	findSkill,
+	insertSkill,
+	listSkills,
+	searchSkills,
+	toSkillMarkdown
+} from '../skills/repository.js';
 
 export const ACCESS_DENIED = { error: 'access denied' } as const;
 
@@ -40,11 +47,18 @@ export interface ToolRegistry {
 	find(name: string): Tool | null;
 }
 
-export function makeToolRegistry(tools: readonly Tool[]): ToolRegistry {
+// Static tools, plus a source of tools that may change over time, such as the contract catalog
+export function makeToolRegistry(
+	tools: readonly Tool[],
+	extra: () => readonly Tool[] = () => []
+): ToolRegistry {
 	const byName = new Map(tools.map((tool) => [tool.definition.function.name, tool]));
 	return {
-		definitions: tools.map((tool) => tool.definition),
-		find: (name) => byName.get(name) ?? null
+		get definitions() {
+			return [...tools, ...extra()].map((tool) => tool.definition);
+		},
+		find: (name) =>
+			byName.get(name) ?? extra().find((tool) => tool.definition.function.name === name) ?? null
 	};
 }
 
@@ -195,5 +209,155 @@ export const sessionsReadTool: Tool = {
 		return session === null
 			? { result: ACCESS_DENIED, denied: true }
 			: { result: { messages: session.messages } };
+	}
+};
+
+export const skillsListTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'scoped_skills_list',
+			description: 'List the skills available to you: your own and those of the organization.',
+			parameters: { type: 'object', properties: {}, additionalProperties: false }
+		}
+	},
+	argumentKeys: [],
+	requiredAction: 'skills.read_own',
+	run: async (_args, context) => ({
+		result: {
+			skills: await withPrincipal(context.db, { id: context.principalId }, (tx) => listSkills(tx))
+		}
+	})
+};
+
+const skillSearchArgs = z.object({ query: z.string().min(1).max(200) });
+
+export const skillsSearchTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'skills_search',
+			description:
+				"Find skills by words of their name or description, among yours and the organization's.",
+			parameters: {
+				type: 'object',
+				properties: { query: { type: 'string' } },
+				required: ['query'],
+				additionalProperties: false
+			}
+		}
+	},
+	argumentKeys: ['query'],
+	requiredAction: 'skills.read_own',
+	run: async (args, context) => {
+		const parsed = skillSearchArgs.safeParse(args);
+		if (!parsed.success) return { result: { error: 'query is required' } };
+		return {
+			result: {
+				skills: await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+					searchSkills(tx, parsed.data.query)
+				)
+			}
+		};
+	}
+};
+
+const skillReadArgs = z.object({ skill_id: z.string().min(1) });
+
+export const skillsReadTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'scoped_skills_read',
+			description: 'Read a skill by its id and follow its instructions for the task at hand.',
+			parameters: {
+				type: 'object',
+				properties: { skill_id: { type: 'string' } },
+				required: ['skill_id'],
+				additionalProperties: false
+			}
+		}
+	},
+	argumentKeys: ['skill_id'],
+	requiredAction: 'skills.read_own',
+	run: async (args, context) => {
+		const parsed = skillReadArgs.safeParse(args);
+		if (!parsed.success) return { result: ACCESS_DENIED, denied: true };
+		const skill = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			findSkill(tx, parsed.data.skill_id)
+		);
+		if (skill === null || skill.status !== 'active') return { result: ACCESS_DENIED, denied: true };
+		return { result: { id: skill.id, content: toSkillMarkdown(skill) } };
+	}
+};
+
+const skillProposeArgs = z.object({
+	name: z.string().min(1).max(80),
+	description: z.string().min(1).max(500),
+	content: z.string().min(1).max(20_000)
+});
+
+// What the assistant learns becomes a proposal its owner approves before it is ever used
+export const skillsProposeTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'skills_propose',
+			description:
+				'Propose a new skill from what you learned: a reusable way of doing something for this user. It waits for the user to approve it.',
+			parameters: {
+				type: 'object',
+				properties: {
+					name: { type: 'string' },
+					description: { type: 'string', description: 'When to use it, in one sentence' },
+					content: { type: 'string', description: 'The instructions, in Markdown' }
+				},
+				required: ['name', 'description', 'content'],
+				additionalProperties: false
+			}
+		}
+	},
+	argumentKeys: ['name', 'description', 'content'],
+	requiredAction: 'skills.read_own',
+	run: async (args, context) => {
+		const parsed = skillProposeArgs.safeParse(args);
+		if (!parsed.success) return { result: { error: 'name, description and content are required' } };
+		const skill = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			insertSkill(tx, {
+				scope: 'user',
+				owner: context.principalId,
+				status: 'proposed',
+				...parsed.data
+			})
+		);
+		return { result: { proposed: skill.id, status: 'proposed' } };
+	}
+};
+
+const sessionSearchArgs = z.object({ query: z.string().min(1).max(200) });
+
+export const sessionSearchTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'session_search',
+			description: 'Find your past conversations with this user by words they contain.',
+			parameters: {
+				type: 'object',
+				properties: { query: { type: 'string' } },
+				required: ['query'],
+				additionalProperties: false
+			}
+		}
+	},
+	argumentKeys: ['query'],
+	requiredAction: 'sessions.read_own',
+	run: async (args, context) => {
+		const parsed = sessionSearchArgs.safeParse(args);
+		if (!parsed.success) return { result: { error: 'query is required' } };
+		const matches = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			searchSessions(tx, parsed.data.query)
+		);
+		return { result: { sessions: matches.map((m) => ({ session_id: m.id, snippet: m.snippet })) } };
 	}
 };

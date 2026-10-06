@@ -16,6 +16,23 @@ imagePullSecret:
 role: api
 replicaCount: 1
 
+# The api role scales horizontally on the turns in progress; the other roles stay at one
+# replica. The harness exposes harness_turns_inflight on /metrics, which a metrics adapter
+# (prometheus-adapter, for instance) must serve as a pods metric for this to apply. Without
+# one, replace the metric with a cpu resource target.
+autoscaling:
+  enabled: false
+  minReplicas: 1
+  maxReplicas: 5
+  metrics:
+    - type: Pods
+      pods:
+        metric:
+          name: harness_turns_inflight
+        target:
+          type: AverageValue
+          averageValue: '4'
+
 config:
   authJwksUrl: ''
   authIssuer: ''

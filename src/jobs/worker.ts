@@ -2,7 +2,14 @@ import { randomUUID } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Db } from '../db/client.js';
-import { claimJob, completeJob, failJob, type Job, type JobKind } from './queue.js';
+import {
+	claimJob,
+	completeJob,
+	failJob,
+	requeueStaleJobs,
+	type Job,
+	type JobKind
+} from './queue.js';
 
 export interface JobWorkerOptions {
 	readonly db: Db;
@@ -11,7 +18,12 @@ export interface JobWorkerOptions {
 	readonly log: FastifyBaseLogger;
 	readonly pollIntervalMs?: number;
 	readonly concurrency?: number;
+	// How long a claimed job may run before another replica assumes its holder is gone
+	readonly leaseMs?: number;
 }
+
+// Longer than any turn: the model timeout times the tool calls a turn may make
+export const DEFAULT_LEASE_MS = 15 * 60 * 1000;
 
 export interface JobWorker {
 	stop(): Promise<void>;
@@ -22,6 +34,7 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 	const workerId = randomUUID();
 	const interval = options.pollIntervalMs ?? 500;
 	const concurrency = options.concurrency ?? 4;
+	const leaseMs = options.leaseMs ?? DEFAULT_LEASE_MS;
 	let running = 0;
 	let stopped = false;
 	let timer: NodeJS.Timeout | null = null;
@@ -41,6 +54,8 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 	async function tick(): Promise<void> {
 		if (stopped) return;
 		try {
+			const requeued = await requeueStaleJobs(options.db, leaseMs);
+			if (requeued > 0) options.log.warn({ requeued }, 'jobs requeued after their lease');
 			while (running < concurrency) {
 				const job = await claimJob(options.db, options.kinds, workerId);
 				if (job === null) break;

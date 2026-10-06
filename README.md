@@ -49,10 +49,31 @@ Migrations in `migrations/` run at start, under an advisory lock so replicas do 
 One image, one role per deployment, chosen by `HARNESS_ROLE`:
 
 - `api` serves the HTTP API behind APISIX.
+- `worker` runs the daily curation: for every owner, under their own principal, it merges duplicate memory entries and turns a request made the same way in three conversations or more into a skill proposal for that owner. It serves its health check and nothing else.
 - `matrix` is the Matrix application service: it receives what Synapse pushes, answers as the creator user and the assistants, and calls Synapse through the `matrix` route of APISIX. `npm run matrix:registration` prints the registration file Synapse loads, given `MATRIX_APPSERVICE_URL`, the APISIX route Synapse pushes to.
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
 
+### Jobs between roles
+
+The roles hand work to each other through the `jobs` table: a Matrix message becomes a `turn` for the api role, its answer a `send` for the matrix role. Any replica claims any job (`for update skip locked`), so the api role scales horizontally; the chart ships a horizontal autoscaler for it (`autoscaling.enabled`), never below one replica. A job carries a dedup key, so an event Synapse delivers twice makes one turn, and a group key: the turns of one owner and the answers of one room run one at a time, in the order they were queued, whichever replica takes them. A job still running after its lease (fifteen minutes) is handed back to the queue, as its replica is taken for gone.
+
+### Admission
+
+A turn is admitted before any model call. The turns per minute of a user, those of the whole harness and the daily tokens of a user are counted in the database, so the limits hold whatever the number of replicas; the turns in flight, the queue of a full replica and the slots a user holds in it are each replica's own, as are the counters of `/metrics`. A refused turn gets a 429 with its reason.
+
 ### Encryption
 
 The assistants' rooms are created encrypted and every message in them is encrypted end to end. The matrix role holds one encryption store per assistant on its volume, acts as each assistant's device through the application service (device masquerading, MSC3202), and receives the key shares Synapse pushes with the transactions (MSC2409), so no assistant runs a sync loop. Both flags are enabled on the Synapse the harness is registered with. The fallback, had push proved unworkable, would have been one sync loop per assistant; it was not needed. An assistant's encryption state is prepared when the role starts and when it is invited, so a key share that arrives while the role was away is not lost: Synapse redelivers the transaction and the message is answered once the role is back.
+
+### Skills
+
+Skills follow the Agent Skills format: a name, a description and Markdown instructions. Each user has a library, the organization has one, and every skill has exactly one owner. The system prompt lists the skills a user may read, with their descriptions; the model reads one with `scoped_skills_read` when it applies and searches them with `skills_search`. What the assistant learns becomes a proposal through `skills_propose`, invisible to the model until its owner approves it (`POST /v1/skills/proposals/:id/approve`). An administrator, a principal with the `skills.admin` right, writes organization skills (`POST /v1/org/skills`) and promotes a user's proposal into the organization library by copy (`POST /v1/org/skills/promote/:id`), leaving the user's library untouched. Row-level security enforces all of it: a user never sees another user's skill, and the organization's are written by administrators only.
+
+### Session search
+
+The model finds past conversations with `session_search`, by words they contain, among the owner's sessions only; the result gives the session ids and a snippet, and `scoped_sessions_read` opens one.
+
+### Contracts as tools
+
+The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged and posted to the audit route. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.

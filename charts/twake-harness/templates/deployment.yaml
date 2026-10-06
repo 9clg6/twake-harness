@@ -5,6 +5,7 @@ metadata:
   labels:
     {{- include "twake-harness.labels" . | nindent 4 }}
 spec:
+  {{- if not .Values.autoscaling.enabled }}
   replicas: {{ .Values.replicaCount }}
   {{- if .Values.persistence.enabled }}
   # One writer of the volume at a time

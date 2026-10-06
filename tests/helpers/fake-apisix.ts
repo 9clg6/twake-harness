@@ -37,6 +37,19 @@ export interface RecordedCall {
 	readonly request: ChatRequest;
 }
 
+export interface ContractCall {
+	readonly method: string;
+	readonly path: string;
+	readonly query: Record<string, string>;
+	readonly headers: Record<string, string>;
+	readonly body: unknown;
+}
+
+export interface ContractReply {
+	readonly status: number;
+	readonly body: unknown;
+}
+
 export interface FakeApisix {
 	readonly baseUrl: string;
 	readonly consumerKey: string;
@@ -44,6 +57,13 @@ export interface FakeApisix {
 		calls: RecordedCall[];
 		script: LlmScript;
 	};
+	// The contract catalog APISIX serves, the contracts' behaviour, and the audit route
+	readonly contracts: {
+		spec: unknown;
+		calls: ContractCall[];
+		handler: (call: ContractCall) => ContractReply;
+	};
+	readonly audit: unknown[];
 	// Where the /matrix route forwards, once a homeserver is up
 	matrixUpstream: string | null;
 	// What went through the /matrix route, for diagnosis
@@ -87,6 +107,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
 	const fake = { matrixUpstream: null as string | null };
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
+	const contracts: FakeApisix['contracts'] = {
+		spec: null,
+		calls: [],
+		handler: () => ({ status: 200, body: { ok: true } })
+	};
+	const audit: unknown[] = [];
 	const server: Server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? '/', 'http://fake');
 		const apiKeyHeader = req.headers['apikey'];
@@ -129,6 +155,39 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			res.end(Buffer.from(await upstream.arrayBuffer()));
 			return;
 		}
+		if (req.method === 'GET' && url.pathname === '/contracts/openapi.json') {
+			if (contracts.spec === null) {
+				sendJson(res, 404, { error: 'no catalog' });
+				return;
+			}
+			sendJson(res, 200, contracts.spec);
+			return;
+		}
+		if (url.pathname.startsWith('/contracts/')) {
+			const chunks: Buffer[] = [];
+			for await (const chunk of req) chunks.push(chunk as Buffer);
+			const text = Buffer.concat(chunks).toString('utf8');
+			const headers: Record<string, string> = {};
+			for (const [name, value] of Object.entries(req.headers)) {
+				if (typeof value === 'string') headers[name] = value;
+			}
+			const call: ContractCall = {
+				method: req.method ?? 'GET',
+				path: url.pathname.slice('/contracts'.length),
+				query: Object.fromEntries(url.searchParams.entries()),
+				headers,
+				body: text.length === 0 ? null : (JSON.parse(text) as unknown)
+			};
+			contracts.calls.push(call);
+			const reply = contracts.handler(call);
+			sendJson(res, reply.status, reply.body);
+			return;
+		}
+		if (req.method === 'POST' && url.pathname === '/audit') {
+			audit.push(await readJson(req));
+			sendJson(res, 200, {});
+			return;
+		}
 		if (req.method === 'POST' && url.pathname === '/llm/v1/chat/completions') {
 			const startedAt = Date.now();
 			const request = (await readJson(req)) as ChatRequest;
@@ -167,6 +226,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		baseUrl: `http://127.0.0.1:${address.port}`,
 		consumerKey,
 		llm,
+		contracts,
+		audit,
 		get matrixUpstream() {
 			return fake.matrixUpstream;
 		},
