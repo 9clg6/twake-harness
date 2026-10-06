@@ -1,8 +1,12 @@
-// What the assistants and the creator say to people, in the language of the deployment. The model
-// answers in the language of the user; these are the fixed texts around it.
+// What the assistants and the creator say to people: in the language each owner chose, or else
+// the deployment's. The model is told to speak it; these are the fixed texts around it.
 
 export const LOCALES = ['en', 'fr'] as const;
 export type Locale = (typeof LOCALES)[number];
+
+export function isLocale(value: string): value is Locale {
+	return (LOCALES as readonly string[]).includes(value);
+}
 
 export interface CreatorCommand {
 	readonly command: string;
@@ -10,6 +14,8 @@ export interface CreatorCommand {
 }
 
 export interface Messages {
+	// The language itself: its own name, and how the model is told to speak it
+	readonly language: { readonly name: string; readonly speak: string };
 	// The assistant's first message in its room with the owner
 	welcome(name: string): string;
 	readonly creator: {
@@ -81,6 +87,7 @@ export interface Messages {
 }
 
 const ENGLISH: Messages = {
+	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
 	welcome: (name) =>
 		`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`,
 	creator: {
@@ -162,6 +169,7 @@ const ENGLISH: Messages = {
 // Tutoiement, as Hermes spoke. The name is chosen by the user, so no word around it agrees in
 // gender with it: "{name} est", never "ton assistant(e) {name}".
 const FRENCH: Messages = {
+	language: { name: 'Français', speak: "Parle français avec la personne qui t'écrit." },
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
 	creator: {

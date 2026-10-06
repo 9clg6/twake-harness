@@ -35,7 +35,8 @@ interface GivenAnswer {
 export interface ConsentRequestsOptions {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
-	readonly messages: Messages;
+	// The fixed texts an owner reads, in their language as it is now
+	fetchMessages(owner: string): Promise<Messages>;
 	// How long the owner may answer a request
 	readonly lifetimeMs: number;
 	// Reacts to an event of the room as its assistant, encrypted when the room is
@@ -63,7 +64,7 @@ export interface ConsentRequests {
 }
 
 export function makeConsentRequests(options: ConsentRequestsOptions): ConsentRequests {
-	const { db, log, messages, lifetimeMs } = options;
+	const { db, log, fetchMessages, lifetimeMs } = options;
 
 	// Looks a request up once the owner's requests left unanswered past their lifetime expired, so
 	// that a late answer finds its request expired even between two passes of the worker role
@@ -98,6 +99,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		await withPrincipal(db, { id: owner }, (tx) =>
 			recordAnswerEvent(tx, owner, pendingCallId, answer.eventId)
 		);
+		const messages = await fetchMessages(owner);
 		await enqueueJob(db, {
 			kind: 'send',
 			payload: {
@@ -144,6 +146,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			'owner answered'
 		);
 		if (answer.says === 'no' && decided) {
+			const messages = await fetchMessages(owner);
 			await enqueueJob(db, {
 				kind: 'send',
 				payload: { asUserId: room.assistantUserId, roomId, text: messages.consent.refused },
@@ -174,8 +177,9 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			// Best effort: should a button fail, the question is not asked again, and a bare ✅ or ❌,
 			// or a word, still answers it
 			try {
-				await options.react(room, eventId, messages.consent.buttons.yes);
-				await options.react(room, eventId, messages.consent.buttons.no);
+				const { buttons } = (await fetchMessages(owner)).consent;
+				await options.react(room, eventId, buttons.yes);
+				await options.react(room, eventId, buttons.no);
 			} catch (err: unknown) {
 				log.warn({ roomId, pendingCallId, err }, 'question buttons failed');
 			}

@@ -1,6 +1,8 @@
 import { z } from 'zod';
 
+import { setAssistantLocale } from '../assistants/repository.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import {
 	addMemoryEntry,
@@ -8,6 +10,7 @@ import {
 	replaceMemoryEntry,
 	toMemoryTarget
 } from '../memory/repository.js';
+import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { findSession, listSessionIds, searchSessions } from '../sessions/repository.js';
 import {
 	findSkill,
@@ -136,6 +139,55 @@ export const clarifyTool: Tool = {
 		const parsed = clarifyArgs.safeParse(args);
 		if (!parsed.success) return { result: { error: 'question is required' } };
 		return { result: { asked: true }, final: parsed.data.question };
+	}
+};
+
+// The right to change one's own settings, such as the language: a turn an event started never
+// holds it, so that a third party's text cannot change how the assistant speaks to its owner
+export const WRITE_OWN_SETTINGS: string = 'settings.write_own';
+
+// The languages the harness speaks, each by its own name
+const LANGUAGES = Object.fromEntries(
+	LOCALES.map((locale) => [locale, getMessages(locale).language.name])
+) as Readonly<Record<Locale, string>>;
+
+const languageArgs = z.object({ language: z.string() });
+
+// The owner asks their assistant to speak another language: from the next turn on, the assistant
+// speaks it with them, and so do the harness's own sentences
+export const languageTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'set_language',
+			description: `Change the language you speak with the person writing to you, when they ask for it; the harness's own messages follow. Supported: ${LOCALES.map((locale) => `${locale} (${LANGUAGES[locale]})`).join(', ')}.`,
+			parameters: {
+				type: 'object',
+				properties: {
+					language: { type: 'string', description: 'The language code, such as en or fr' }
+				},
+				required: ['language'],
+				additionalProperties: false
+			}
+		}
+	},
+	argumentKeys: ['language'],
+	requiredAction: WRITE_OWN_SETTINGS,
+	run: async (args, context) => {
+		const parsed = languageArgs.safeParse(args);
+		const language = parsed.success ? parsed.data.language.trim().toLowerCase() : '';
+		if (!isLocale(language)) {
+			return { result: { success: false, error: 'unsupported language', supported: LANGUAGES } };
+		}
+		// The organization agent speaks the deployment's language with every member
+		if (context.principalId === ORGANIZATION_PRINCIPAL)
+			return { result: ACCESS_DENIED, denied: true };
+		const saved = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			setAssistantLocale(tx, context.principalId, language)
+		);
+		return {
+			result: saved ? { success: true, language } : { success: false, error: 'no assistant' }
+		};
 	}
 };
 

@@ -14,6 +14,7 @@ import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
+import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import {
 	findAssistant,
 	findDialog,
@@ -27,7 +28,7 @@ import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { getMessages } from '../i18n/messages.js';
+import { getMessages, type Messages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
@@ -158,6 +159,8 @@ function textOf(event: RoomEvent): string | null {
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
 	const { config, db, log } = options;
 	const messages = getMessages(config.locale);
+	const fetchMessages = (owner: string): Promise<Messages> =>
+		fetchOwnerMessages(db, owner, config.locale);
 	LogService.setLogger({
 		trace: () => undefined,
 		debug: () => undefined,
@@ -487,8 +490,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				}
 				// Synapse delivers nothing sent before the join, so the creator opens the conversation
 				// itself rather than let a first message go unanswered.
-				if (invited === creator)
-					await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(messages)));
+				if (invited === creator) {
+					const owner = principalOfMatrixUser(config, event.sender ?? '');
+					const toOwner = owner === null ? messages : await fetchMessages(owner);
+					await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(toOwner)));
+				}
 			},
 			(roomId: string, event: RoomEvent) => ({
 				roomId,
@@ -561,7 +567,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const requests = makeConsentRequests({
 		db,
 		log,
-		messages,
+		fetchMessages,
 		lifetimeMs: config.consent.requestLifetimeMs,
 		react: async (room, eventId, key) => {
 			await appservice
@@ -692,14 +698,15 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
+		const toOwner = await fetchMessages(owner);
 		let turn: CreatorTurn;
 		try {
-			turn = await runCreatorTurn({ owner, text, state }, assistants, messages);
+			turn = await runCreatorTurn({ owner, text, state }, assistants, toOwner);
 		} catch (err: unknown) {
 			// The owner is told, and the dialog starts over: one left waiting for a name would take
 			// their next message for one
 			log.error({ roomId, sender, owner, err }, 'creator turn failed');
-			turn = { command: 'failed', nextState: null, reply: messages.creator.requestFailed };
+			turn = { command: 'failed', nextState: null, reply: toOwner.creator.requestFailed };
 		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
@@ -725,12 +732,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const result = await recoverFromEscrow(escrow, intent, owner);
 		log.info({ owner, userId: assistant.userId, result }, 'recovery done');
 		if (assistant.roomId === null) return;
+		const { notices } = getMessages(localeOf(assistant, config.locale));
 		await enqueueJob(db, {
 			kind: 'send',
 			payload: {
 				asUserId: assistant.userId,
 				roomId: assistant.roomId,
-				text: result === 'recovered' ? messages.notices.recovered : messages.notices.noEscrow
+				text: result === 'recovered' ? notices.recovered : notices.noEscrow
 			},
 			dedupKey: `recover-notice:${owner}:${Date.now()}`,
 			groupKey: `send:${assistant.roomId}`

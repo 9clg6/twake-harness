@@ -1,5 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import { localeOf } from '../assistants/locale.js';
+import { findAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
 import {
@@ -10,7 +12,7 @@ import {
 } from '../consents/repository.js';
 import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { getMessages } from '../i18n/messages.js';
+import { getMessages, type Messages } from '../i18n/messages.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
@@ -31,6 +33,7 @@ import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
+	languageTool,
 	makeToolRegistry,
 	memoryTool,
 	runTool,
@@ -45,7 +48,8 @@ import {
 	type ToolContext,
 	type ToolOutcome,
 	type ToolRegistry,
-	type TurnOrigin
+	type TurnOrigin,
+	WRITE_OWN_SETTINGS
 } from './tools.js';
 
 export type { TurnOrigin } from './tools.js';
@@ -56,10 +60,10 @@ export type SessionTarget =
 	| { readonly kind: 'id'; readonly id: string }
 	| { readonly kind: 'room'; readonly roomId: string };
 
-// What a turn an event started may not do, whatever its owner may: act through a contract. The
-// event's own text comes from a third party, so only the owner's yes, in a turn of their own,
-// can make the assistant act.
-const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [ACT_THROUGH_CONTRACTS];
+// What a turn an event started may not do, whatever its owner may: act through a contract, or
+// change how the assistant speaks to its owner. The event's own text comes from a third party, so
+// only the owner's yes, in a turn of their own, can make the assistant act.
+const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [ACT_THROUGH_CONTRACTS, WRITE_OWN_SETTINGS];
 
 // What the model of a turn is told, and the harness's own question when a read it made before
 // the model speaks waits for the owner
@@ -134,14 +138,18 @@ export interface AgentServiceDeps {
 export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const { config, db } = deps;
 	const clock = deps.clock ?? SYSTEM_CLOCK;
-	const messages = getMessages(config.locale);
-	// The persona's rules are in English; how to address people is told in the deployment's
-	// language, which the model then speaks in
-	const withAddressing = (persona: string): string =>
+	// The persona's rules are in English; how to address people is told in the language the model
+	// speaks, when that language marks it
+	const withAddressing = (persona: string, messages: Messages): string =>
 		messages.addressing === null ? persona : `${persona} ${messages.addressing}`;
+	// An owner's assistant is told, in its owner's language, to speak it; the organization agent
+	// answers each member in their own language, as it always did
+	const withLanguage = (persona: string, messages: Messages): string =>
+		withAddressing(`${persona} ${messages.language.speak}`, messages);
 	// The owner's own assistant may need an invitation the conversation does not hold; the
 	// organization agent has no calendar of its own to search
-	const withLookup = (persona: string): string => `${persona} ${messages.lookup}`;
+	const withLookup = (persona: string, messages: Messages): string =>
+		`${persona} ${messages.lookup}`;
 	const llm =
 		deps.llm ??
 		makeLlmClient({
@@ -156,6 +164,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		[
 			clarifyTool,
 			memoryTool,
+			languageTool,
 			sessionsListTool,
 			sessionsReadTool,
 			sessionSearchTool,
@@ -177,7 +186,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
-		log: FastifyBaseLogger
+		log: FastifyBaseLogger,
+		messages: Messages
 	): Promise<Told> {
 		const event = input.event;
 		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
@@ -283,6 +293,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					if (approved === null) return { kind: 'missing' as const };
 					await grantConsent(tx, principal.id, approved.domain, approved.level, 'chat');
 				}
+				const locale = localeOf(await findAssistant(tx, principal.id), config.locale);
 				let session: SessionRecord | null;
 				if (target.kind === 'new') session = await createSession(tx, principal.id);
 				else if (target.kind === 'room')
@@ -290,10 +301,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				else session = await findSession(tx, target.id);
 				return session === null
 					? { kind: 'missing' as const }
-					: { kind: 'ok' as const, session, actions: record.actions, approved };
+					: { kind: 'ok' as const, session, actions: record.actions, approved, locale };
 			});
 			if (opened.kind !== 'ok') return opened;
-			const { session, approved } = opened;
+			const { session, approved, locale } = opened;
+			const messages = getMessages(locale);
 			// A resumed turn may do no more than the turn that froze its call
 			const origin = approved?.origin ?? input.origin;
 			const withheld =
@@ -322,7 +334,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// A resumed turn has no new message: it goes on from the call its owner allowed
 			const told: Told =
 				approved === null
-					? await messageFor(input, context, log)
+					? await messageFor(input, context, log, messages)
 					: { message: null, question: null };
 			log.info({ messageLength: told.message?.length ?? 0 }, 'turn started');
 			if (told.question !== null) {
@@ -348,7 +360,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				};
 			}
 			// Read at the start of every turn, never kept: a session can span days
-			const moment = describeMoment(clock.now(), config.timeZone, config.locale);
+			const moment = describeMoment(clock.now(), config.timeZone, locale);
 			let history: readonly LlmMessage[] = session.messages;
 			if (approved !== null && input.resume !== undefined) {
 				const { pendingCallId } = input.resume;
@@ -365,15 +377,21 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
 					{
 						systemPrompt: buildSystemPrompt({
-							persona: withAddressing(
+							persona:
 								principal.id === ORGANIZATION_PRINCIPAL
-									? organizationPrompt(config.org.name, config.org.persona)
-									: withLookup(
-											input.assistantName === undefined
-												? DEFAULT_SYSTEM_PROMPT
-												: assistantPrompt(input.assistantName)
+									? withAddressing(
+											organizationPrompt(config.org.name, config.org.persona),
+											messages
 										)
-							),
+									: withLanguage(
+											withLookup(
+												input.assistantName === undefined
+													? DEFAULT_SYSTEM_PROMPT
+													: assistantPrompt(input.assistantName),
+												messages
+											),
+											messages
+										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
 							memory,
 							skills,
