@@ -32,6 +32,8 @@ export interface ToolOutcome {
 	readonly final?: string;
 	// Set when the caller tried to reach something that is not theirs
 	readonly denied?: boolean;
+	// The call the harness froze until its owner answers, when the turn ends on its question
+	readonly pendingCallId?: string;
 }
 
 // How a tool call ended, as the info logs report it: never the arguments or the result
@@ -42,8 +44,13 @@ export function toolCallStatus(outcome: ToolOutcome): ToolCallStatus {
 	return outcome.final === undefined ? 'ok' : 'final';
 }
 
+// Who started a turn: the owner, by a message or a request, or an event a dispatcher posted
+export type TurnOrigin = 'owner' | 'event';
+
 export interface ToolContext {
 	readonly principalId: string;
+	// Who started the turn, which a call frozen in it keeps for the turn its owner's answer resumes
+	readonly origin?: TurnOrigin;
 	readonly actions: readonly string[];
 	// Actions the principal holds but this turn may not use: a turn an event started may read,
 	// never act, so text written by a third party cannot make the assistant act

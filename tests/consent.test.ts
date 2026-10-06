@@ -110,7 +110,7 @@ describe('my assistant asks before it first uses an application', () => {
 			level: 'read',
 			principal: 'alice@test.local'
 		});
-		expect(typeof waits[0]?.['pendingCall']).toBe('string');
+		expect(typeof waits[0]?.['pendingCallId']).toBe('string');
 		expect(h.logLines().some((line) => JSON.stringify(line).includes('paul@test.local'))).toBe(
 			false
 		);
