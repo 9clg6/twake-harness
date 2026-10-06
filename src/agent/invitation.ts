@@ -1,4 +1,7 @@
+import { randomBytes } from 'node:crypto';
+
 import { findTimeZone, formatOffset, offsetMinutesAt } from './clock.js';
+import type { ToolOutcome } from './tools.js';
 
 // The CloudEvent type of an invitation, as the calendar producer names it and the dispatcher
 // posts it: the events whose slot the harness checks before the model speaks
@@ -116,4 +119,144 @@ export function invitationSlot(times: InvitationTimes, defaultZone: string): Inv
 		return { ok: false, reason: `${NOT_CHECKED}the invitation lasts over 31 days` };
 	}
 	return { ok: true, start: start.time, end: end.time };
+}
+
+// Runs a tool of the turn by its name, through the same path as the model's own calls and with
+// the same context, or tells that the catalog has no such tool
+export type ToolRunner = (
+	name: string,
+	args: Readonly<Record<string, unknown>>
+) => Promise<ToolOutcome | null>;
+
+export interface InvitationCheck {
+	// What the calendar answered, fenced as data, for the message the model reads
+	readonly data: string;
+	// For the logs, never the content: how each read ended, and why the slot went unchecked
+	readonly eventStatus: number | null;
+	readonly freeBusyStatus: number | null;
+	readonly reason: string | null;
+}
+
+export interface InvitationCheckOptions {
+	// The deployment's zone, for an all-day event
+	readonly timeZone: string;
+	// The random part of the fence, so that the data cannot close the block it sits in; set by
+	// tests only
+	readonly nonce?: string;
+}
+
+const READ_EVENT = 'read_event';
+const READ_FREEBUSY = 'read_freebusy';
+
+function statusOf(outcome: ToolOutcome): number | null {
+	const result = outcome.result;
+	if (typeof result !== 'object' || result === null || !('status' in result)) return null;
+	return typeof result.status === 'number' ? result.status : null;
+}
+
+function isSuccess(status: number | null): status is number {
+	return status !== null && status >= 200 && status < 300;
+}
+
+function field(value: unknown, key: string): unknown {
+	return typeof value === 'object' && value !== null && key in value
+		? (value as Record<string, unknown>)[key]
+		: undefined;
+}
+
+// One read, as the model will see it: the call and what came back, on one line of JSON, so that
+// nothing a third party wrote can start a line of its own
+function described(
+	name: string,
+	args: Readonly<Record<string, unknown>>,
+	outcome: ToolOutcome
+): string {
+	return `${name} ${JSON.stringify(args)} -> ${JSON.stringify(outcome.result)}`;
+}
+
+// Before the model speaks about an invitation, the harness reads it and checks its slot itself,
+// through the same contracts and in the same context as the model would: whether the owner is
+// free is the heart of the proposal, so it does not depend on the model choosing to call a tool.
+// What came back is handed to the model as data: an error, such as the broker's
+// delegation_missing with its consent_url, too, for the model to relay.
+export async function checkInvitation(
+	run: ToolRunner,
+	eventId: string,
+	options: InvitationCheckOptions
+): Promise<InvitationCheck> {
+	const nonce = options.nonce ?? randomBytes(6).toString('hex');
+	const lines: string[] = [];
+	// A read that throws becomes data too: the turn goes on and the model says it could not check
+	const call = async (
+		name: string,
+		args: Readonly<Record<string, unknown>>
+	): Promise<ToolOutcome | null> => {
+		try {
+			return await run(name, args);
+		} catch (err: unknown) {
+			return {
+				result: { error: `the call failed: ${err instanceof Error ? err.message : String(err)}` }
+			};
+		}
+	};
+	const finish = (
+		eventStatus: number | null,
+		freeBusyStatus: number | null,
+		reason: string | null
+	): InvitationCheck => ({
+		data: [`<<<calendar-data ${nonce}`, ...lines, `calendar-data ${nonce}>>>`].join('\n'),
+		eventStatus,
+		freeBusyStatus,
+		reason
+	});
+
+	const eventArgs = { event_id: eventId };
+	const event = await call(READ_EVENT, eventArgs);
+	if (event === null) {
+		const reason = 'the calendar contract read_event is not available';
+		lines.push(`read_event: not called, ${reason}`, 'read_freebusy: not called');
+		return finish(null, null, reason);
+	}
+	lines.push(described(READ_EVENT, eventArgs, event));
+	const eventStatus = statusOf(event);
+	if (!isSuccess(eventStatus)) {
+		const reason = 'the invitation could not be read';
+		lines.push(`read_freebusy: not called, ${reason}`);
+		return finish(eventStatus, null, reason);
+	}
+
+	const object = field(field(field(event.result, 'body'), 'data'), 'object');
+	const uid = field(object, 'uid');
+	if (typeof uid !== 'string' || uid.length === 0) {
+		const reason = 'availability not checked: the invitation has no uid';
+		lines.push(`read_freebusy: not called, ${reason}`);
+		return finish(eventStatus, null, reason);
+	}
+	const slot = invitationSlot(
+		{
+			start: field(object, 'start'),
+			end: field(object, 'end'),
+			timezone: field(object, 'timezone')
+		},
+		options.timeZone
+	);
+	if (!slot.ok) {
+		lines.push(`read_freebusy: not called, ${slot.reason}`);
+		return finish(eventStatus, null, slot.reason);
+	}
+	// The invitation is already in the owner's calendar: left out, it does not count against itself
+	const freeBusyArgs = { start: slot.start, end: slot.end, exclude: [uid] };
+	const freeBusy = await call(READ_FREEBUSY, freeBusyArgs);
+	if (freeBusy === null) {
+		const reason = 'availability not checked: the calendar contract read_freebusy is not available';
+		lines.push(`read_freebusy: not called, ${reason}`);
+		return finish(eventStatus, null, reason);
+	}
+	lines.push(described(READ_FREEBUSY, freeBusyArgs, freeBusy));
+	const freeBusyStatus = statusOf(freeBusy);
+	return finish(
+		eventStatus,
+		freeBusyStatus,
+		isSuccess(freeBusyStatus) ? null : 'availability not checked: the free/busy read failed'
+	);
 }

@@ -170,6 +170,45 @@ function contractRoutes(spec: unknown, mount: string): ContractRoute[] {
 	return routes;
 }
 
+export interface InvitationFields {
+	readonly id: string;
+	readonly uid: string;
+	readonly title: string;
+	// As the calendar producer writes DTSTART and DTEND: RFC 3339 with offset or Z, a date for an
+	// all-day event, a wall time when the zone is unknown to its image, null for no DTEND
+	readonly start: string | null;
+	readonly end: string | null;
+	readonly timezone: string | null;
+	readonly organizer: string;
+	readonly invitee: string;
+}
+
+// read_event's answer for an invitation, in the shape of the contracts service: a CloudEvent
+// stored for the users it concerns, the calendar event in data.object
+export function invitationEvent(fields: InvitationFields): Record<string, unknown> {
+	return {
+		id: fields.id,
+		type: 'com.twake.calendar.event.invited.v1',
+		time: '2026-10-06T12:58:58Z',
+		org: 'test.local',
+		actor: fields.organizer,
+		targets: [fields.invitee],
+		subject: fields.title,
+		data: {
+			object: {
+				uid: fields.uid,
+				id: `/calendars/organizer/${fields.uid}.ics`,
+				title: fields.title,
+				start: fields.start,
+				end: fields.end,
+				timezone: fields.timezone
+			},
+			actor: { native_id: fields.organizer },
+			targets: [{ native_id: fields.invitee }]
+		}
+	};
+}
+
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
