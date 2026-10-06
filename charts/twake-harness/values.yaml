@@ -61,6 +61,9 @@ config:
   admissionUserDailyTokens: ''
   # Turns the whole harness may start per minute; default 400
   admissionGlobalPerMinute: ''
+  # The most characters of past conversation a turn shows the model, its most recent exchanges
+  # whole; the session keeps every message. Empty means the harness default, 24000
+  turnHistoryMaxChars: ''
   # The organization agent, a bot of the harness answering the organization's members, named by
   # their Matrix identifiers (comma separated); its localpart lives in the assistants' namespace
   orgAgentEnabled: false
