@@ -269,6 +269,32 @@ export function invitationEvent(fields: InvitationFields): Record<string, unknow
 	};
 }
 
+// The token broker's consent link, the same for every user
+export const BROKER_CONSENT_URL = 'https://agent-consent.test.local/consent';
+
+// What the gateway relays from the token broker when it holds no permission for the assistant to
+// act for its owner, or that permission expired: an RFC 9457 problem whose code says why, with a
+// consent link that anyone answering the call, a contract included, could have written
+export function brokerRefusal(
+	code: 'delegation_missing' | 'delegation_expired',
+	consentUrl: string = BROKER_CONSENT_URL
+): ContractReply {
+	const expired = code === 'delegation_expired';
+	return {
+		status: 401,
+		body: {
+			type: `urn:twake:problem:${code}`,
+			title: expired ? 'Delegation expired' : 'Delegation missing',
+			status: 401,
+			detail: expired
+				? "The user's consent to their agent has expired: they must open the consent link again."
+				: 'The user has not let their agent act for them yet: they must open the consent link.',
+			code,
+			consent_url: consentUrl
+		}
+	};
+}
+
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { listMemory } from '../src/memory/repository.js';
 import { withPrincipal } from '../src/db/client.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import type { ChatRequest } from './helpers/fake-apisix.js';
+import { brokerRefusal, type ChatRequest } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -190,6 +190,32 @@ describe('the organization agent', () => {
 			expect(decision?.['reason']).toBe('encryption state unreadable');
 		} finally {
 			h.apisix.matrixFault = null;
+		}
+	});
+
+	it("hands its model the platform broker's refusal as data, since nobody could give that permission for the organization", async () => {
+		const handler = h.apisix.contracts.handler;
+		const script = h.apisix.llm.script;
+		h.apisix.contracts.handler = () => brokerRefusal('delegation_missing');
+		h.apisix.llm.script = (request, index) => {
+			const last = request.messages.at(-1);
+			return last?.role === 'tool'
+				? { content: `Refused: ${last.content ?? ''}` }
+				: script(request, index);
+		};
+		try {
+			await aliceClient.sendText(room, 'what is our usage today?');
+			const answer = await aliceClient.waitForMessage(room, orgId, (t) => t.startsWith('Refused:'));
+			expect(JSON.parse(answer.slice('Refused: '.length))).toMatchObject({
+				status: 401,
+				body: { code: 'delegation_missing' }
+			});
+			expect(h.logLines().some((l) => l['msg'] === 'contract call waits for its owner')).toBe(
+				false
+			);
+		} finally {
+			h.apisix.contracts.handler = handler;
+			h.apisix.llm.script = script;
 		}
 	});
 });

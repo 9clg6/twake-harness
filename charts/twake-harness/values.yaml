@@ -47,6 +47,9 @@ config:
   assistantLocale: ''
   # The IANA time zone the assistants read the present in, such as Europe/Paris; empty means UTC
   assistantTimezone: ''
+  # The token broker's consent link, the same for every user, which an assistant shows when the
+  # broker lacks its owner's permission to act for them; an https URL, empty for none
+  brokerConsentUrl: ''
   # Admission limits; each empty value keeps the harness default
   # Turns in flight on one replica; default 32
   admissionMaxInflight: ''

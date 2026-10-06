@@ -2,13 +2,15 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
+import type { WaitReason } from '../consents/consent.js';
+import { readDelegationCode, type DelegationCode } from '../consents/delegation.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
-import type { Tool, ToolOutcome } from '../agent/tools.js';
+import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
 import { labelOf, type DomainDescriptions } from './domains.js';
 import { toolParametersOf, type ContractDefinition } from './openapi.js';
 
@@ -73,6 +75,44 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		...(contract.bodySchema === null ? [] : ['body'])
 	];
 
+	// Freezes the call as the model wrote it until its owner answers, counts it, and logs why it
+	// waits, never what it would send; resolves to the frozen call's id
+	async function freeze(
+		values: Record<string, unknown>,
+		context: ToolContext,
+		reasons: readonly WaitReason[]
+	): Promise<string> {
+		const owner = context.principalId;
+		const call: PendingCallInput = {
+			owner,
+			tool: contract.toolName,
+			contract: contract.id,
+			domain: contract.domain,
+			level: contract.level,
+			reasons,
+			arguments: values,
+			correlationId: context.correlationId ?? null,
+			origin: context.origin ?? 'owner'
+		};
+		const pendingCallId = await withPrincipal(context.db, { id: owner }, (tx) =>
+			insertPendingCall(tx, call)
+		);
+		deps.consentMetrics.requested(call);
+		log.info(
+			{
+				pendingCallId,
+				reasons,
+				contract: contract.id,
+				tool: contract.toolName,
+				domain: contract.domain,
+				level: contract.level,
+				principal: owner
+			},
+			'contract call waits for its owner'
+		);
+		return pendingCallId;
+	}
+
 	return {
 		definition,
 		argumentKeys,
@@ -92,32 +132,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					hasConsent(tx, owner, contract.domain, contract.level)
 				))
 			) {
-				const call: PendingCallInput = {
-					owner,
-					tool: contract.toolName,
-					contract: contract.id,
-					domain: contract.domain,
-					level: contract.level,
-					reasons: ['consent'],
-					arguments: values,
-					correlationId: context.correlationId ?? null,
-					origin: context.origin ?? 'owner'
-				};
-				const pendingCallId = await withPrincipal(context.db, { id: owner }, (tx) =>
-					insertPendingCall(tx, call)
-				);
-				deps.consentMetrics.requested(call);
-				log.info(
-					{
-						pendingCallId,
-						contract: contract.id,
-						tool: contract.toolName,
-						domain: contract.domain,
-						level: contract.level,
-						principal: owner
-					},
-					'contract call waits for its owner'
-				);
+				const pendingCallId = await freeze(values, context, ['consent']);
 				// The question names the application as the catalog does in its owner's language,
 				// and says what the level covers there
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
@@ -187,6 +202,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			if (body !== undefined) headers['content-type'] = 'application/json';
 			let status = 0;
 			let result: unknown;
+			let delegation: DelegationCode | null = null;
 			try {
 				const response = await fetchImpl(url, {
 					method: contract.method.toUpperCase(),
@@ -195,16 +211,50 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					signal: AbortSignal.timeout(config.contracts.timeoutMs)
 				});
 				status = response.status;
-				result = { status, body: parseBody(await response.text()) };
+				const answered = parseBody(await response.text());
+				result = { status, body: answered };
+				delegation = readDelegationCode(status, answered);
 			} catch (err: unknown) {
 				result = {
 					error: `the contract could not be called: ${err instanceof Error ? err.message : String(err)}`
 				};
 			}
 			log.info(
-				{ contract: contract.id, method: contract.method, status, principal: context.principalId },
+				{
+					contract: contract.id,
+					method: contract.method,
+					status,
+					principal: context.principalId,
+					...(delegation === null ? {} : { delegation })
+				},
 				'contract called'
 			);
+			// The platform's broker lacks the owner's permission for their assistant to act for them:
+			// the call waits for them, and the turn ends with the harness's own request, which names
+			// the application as a first use does, tells them why and gives them the deployment's
+			// consent link, never one from the answer, which a contract could have written. The
+			// organization agent acts for no user: nobody could give it that permission.
+			if (delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
+				const pendingCallId = await freeze(values, context, ['delegation']);
+				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
+				const application = labelOf(
+					deps.domains,
+					contract.domain,
+					contract.level,
+					locale,
+					config.locale
+				);
+				return {
+					result: { status: 'awaiting_owner', reason: 'delegation', code: delegation },
+					final: getMessages(locale).consent.delegation(
+						application.name,
+						contract.level,
+						delegation,
+						config.consent.brokerConsentUrl
+					),
+					pendingCallId
+				};
+			}
 			return { result };
 		}
 	};

@@ -72,11 +72,24 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WRITE_OWN_MEMORY
 ];
 
+// The harness's own question to an owner about a call it froze, on which the turn ends
+interface Question {
+	readonly text: string;
+	readonly pendingCallId: string;
+}
+
+// The question a tool's outcome ends the turn on, when its call waits for its owner
+function questionOf(outcome: ToolOutcome): Question | null {
+	return outcome.final !== undefined && outcome.pendingCallId !== undefined
+		? { text: outcome.final, pendingCallId: outcome.pendingCallId }
+		: null;
+}
+
 // What the model of a turn is told, and the harness's own question when a read it made before
 // the model speaks waits for the owner
 interface Told {
 	readonly message: string | null;
-	readonly question: { readonly text: string; readonly pendingCallId: string } | null;
+	readonly question: Question | null;
 }
 
 // What the model reads when the contract its owner allowed is no longer offered as it was
@@ -203,14 +216,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
 			return { message: input.message, question: null };
 		}
-		let question: Told['question'] = null;
+		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
 			const tool = tools.find(name);
 			if (tool === null) return null;
 			const outcome = await runTool(tool, args, context);
-			if (question === null && outcome.final !== undefined && outcome.pendingCallId !== undefined) {
-				question = { text: outcome.final, pendingCallId: outcome.pendingCallId };
-			}
+			question ??= questionOf(outcome);
 			return outcome;
 		};
 		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
@@ -227,13 +238,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	// Runs the call its owner allowed, exactly as it was frozen, and writes it in the session as
 	// the assistant's call followed by its result, for the model to go on from. A tool that no
-	// longer stands for the contract the owner allowed, at the same level, runs nothing.
+	// longer stands for the contract the owner allowed, at the same level, runs nothing. A call
+	// that waits for its owner again, such as one the platform's broker still refuses, comes back
+	// with the harness's new question.
 	async function replay(
 		approved: ApprovedCall,
 		pendingCallId: string,
 		context: ToolContext,
 		log: FastifyBaseLogger
-	): Promise<LlmMessage[]> {
+	): Promise<{ readonly messages: LlmMessage[]; readonly question: Question | null }> {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
 		const tool = tools.find(approved.tool);
 		const unchanged =
@@ -256,25 +269,28 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			'pending call replayed'
 		);
 		const callId = `replay_${pendingCallId}`;
-		return [
-			{
-				role: 'assistant',
-				content: null,
-				tool_calls: [
-					{
-						id: callId,
-						type: 'function',
-						function: { name: approved.tool, arguments: JSON.stringify(approved.arguments) }
-					}
-				]
-			},
-			{
-				role: 'tool',
-				tool_call_id: callId,
-				name: approved.tool,
-				content: JSON.stringify(outcome.result)
-			}
-		];
+		return {
+			messages: [
+				{
+					role: 'assistant',
+					content: null,
+					tool_calls: [
+						{
+							id: callId,
+							type: 'function',
+							function: { name: approved.tool, arguments: JSON.stringify(approved.arguments) }
+						}
+					]
+				},
+				{
+					role: 'tool',
+					tool_call_id: callId,
+					name: approved.tool,
+					content: JSON.stringify(outcome.result)
+				}
+			],
+			question: questionOf(outcome)
+		};
 	}
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
@@ -296,13 +312,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const opened = await withPrincipal(db, principal, async (tx) => {
 				const record = await ensurePrincipal(tx, principal);
 				if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
-				// The owner's answer approves the call once, and lets the assistant use that
-				// application at that level from now on
+				// The owner's answer approves the call once. Asked about a first use, it also lets the
+				// assistant use that application at that level from now on; asked to try again once
+				// the platform has their permission, it allows nothing more.
 				let approved: ApprovedCall | null = null;
 				if (input.resume !== undefined) {
 					approved = await approvePendingCall(tx, principal.id, input.resume.pendingCallId);
 					if (approved === null) return { kind: 'missing' as const };
-					await grantConsent(tx, principal.id, approved.domain, approved.level, 'chat');
+					if (approved.reasons.includes('consent')) {
+						await grantConsent(tx, principal.id, approved.domain, approved.level, 'chat');
+					}
 				}
 				const locale = localeOf(await findAssistant(tx, principal.id), config.locale);
 				let session: SessionRecord | null;
@@ -375,13 +394,37 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			let history: readonly LlmMessage[] = session.messages;
 			if (approved !== null && input.resume !== undefined) {
 				const { pendingCallId } = input.resume;
-				history = [...history, ...(await replay(approved, pendingCallId, context, log))];
+				const replayed = await replay(approved, pendingCallId, context, log);
+				// A call that waits for its owner again ends the turn on the harness's new question,
+				// which the conversation keeps as the assistant's answer: the owner's next yes tries it
+				// once more, never the model
+				const newQuestion = replayed.question;
+				history = [
+					...history,
+					...replayed.messages,
+					...(newQuestion === null
+						? []
+						: [{ role: 'assistant' as const, content: newQuestion.text }])
+				];
 				// The conversation holds the call at once, whatever happens to the rest of the turn
 				const kept = history;
 				await withPrincipal(db, principal, async (tx) => {
 					await saveSessionMessages(tx, session.id, kept);
 					await markReplayed(tx, pendingCallId);
 				});
+				if (newQuestion !== null) {
+					log.info(
+						{ pendingCallId: newQuestion.pendingCallId },
+						'turn stopped on a question to the owner'
+					);
+					return {
+						kind: 'ok',
+						sessionId: session.id,
+						answer: newQuestion.text,
+						model: llm.model,
+						pendingCallId: newQuestion.pendingCallId
+					};
+				}
 			}
 			try {
 				const turn = await runTurn(
