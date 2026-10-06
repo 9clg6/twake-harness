@@ -33,16 +33,17 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 
 ## Configuration
 
-| Variable                       | Meaning                                                         |
-| ------------------------------ | --------------------------------------------------------------- |
-| `HARNESS_ROLE`                 | `api`, `matrix` or `worker`                                     |
-| `HOST`, `PORT`                 | listening address, `0.0.0.0:8080` by default                    |
-| `DATABASE_URL`                 | PostgreSQL connection string of a plain role, never a superuser |
-| `AUTH_JWKS_URL`                | JWKS of the OIDC provider the access tokens come from           |
-| `AUTH_ISSUER`, `AUTH_AUDIENCE` | expected `iss` and `aud` of the access tokens                   |
-| `LOG_LEVEL`                    | pino level, `info` by default                                   |
-| `ASSISTANT_LOCALE`             | language of the assistants' and creator's texts, `en` or `fr`   |
-| `ASSISTANT_TIMEZONE`           | IANA zone of the present each turn states, `UTC` by default     |
+| Variable                       | Meaning                                                                                                                                                         |
+| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HARNESS_ROLE`                 | `api`, `matrix` or `worker`                                                                                                                                     |
+| `HOST`, `PORT`                 | listening address, `0.0.0.0:8080` by default                                                                                                                    |
+| `DATABASE_URL`                 | PostgreSQL connection string of a plain role, never a superuser                                                                                                 |
+| `AUTH_JWKS_URL`                | JWKS of the OIDC provider the access tokens come from                                                                                                           |
+| `AUTH_ISSUER`, `AUTH_AUDIENCE` | expected `iss` and `aud` of the access tokens                                                                                                                   |
+| `LOG_LEVEL`                    | pino level, `info` by default                                                                                                                                   |
+| `ASSISTANT_LOCALE`             | language of the assistants' and creator's texts, `en` or `fr`                                                                                                   |
+| `ASSISTANT_TIMEZONE`           | IANA zone of the present each turn states, `UTC` by default                                                                                                     |
+| `LLM_MAX_TOKENS`               | token budget of one model call, `8192` by default; a call that ran out while thinking, with nothing written, is retried once at twice the budget, at most 32768 |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 
