@@ -455,7 +455,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
 						roomId
 					);
-					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted, true);
+					// The raw event, as a push hands it: the SDK's wrapper keeps its id under another name,
+					// and the message would lose it, with the dedup of its turn and its reactions
+					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted.raw, true);
 					// An answer whose key came late counts like any other
 					if (decrypted.type === 'm.reaction') await onOwnerAnswer(roomId, decrypted.raw);
 				} catch (retryErr: unknown) {
