@@ -5,7 +5,7 @@ The Twake Space agent harness: one shared service, written in TypeScript, that g
 - Isolation between users is enforced in code and in the database, not by separate pods.
 - Assistants are created by their owner from Twake Chat, through a creator conversation, with nothing to configure.
 - Each assistant has memory, skills and self-learning, and acts in the applications with its owner's rights, through the platform's API gateway, asking before it acts.
-- The service reaches the outside world only through APISIX, keeps the assistants' encryption secrets in the platform's OpenBao, and logs every action and reasoning step in clear.
+- The service reaches the outside world only through APISIX, keeps the assistants' encryption secrets in the platform's OpenBao, and logs every action with its metadata at `info`, the conversation itself (prompt, answer, reasoning, tool arguments and results) only at `debug`, so the messages it decrypts stay out of production logs.
 
 ## Where things are
 
@@ -57,7 +57,11 @@ The Matrix tests start a real Synapse in a container, so Docker is needed to run
 
 ### Behind the gateway
 
-The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` set, every request of the API must carry that value in `x-twake-gateway`, which the gateway injects on what it forwards; anything else gets a 403 before any identity work, while the health check and the metrics stay open to the cluster. Every contract call is posted to the audit route as one record in the shape the audit relay takes from the gateway's own logger (agent, user, contract, method, path, status, correlation id), so it lands in the audit topic keyed by the agent.
+The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` set, every request of the API must carry that value in `x-twake-gateway`, which the gateway injects on what it forwards; anything else gets a 403 before any identity work, while the health check and the metrics stay open to the cluster. The gateway writes the audit record of every contract call, one per call (agent, user, contract, method, path, status); the harness forwards the correlation id of the turn in `x-correlation-id`, so the record links back to it, and posts no record of its own.
+
+### Replaying against dev
+
+`npm run test:dev` replays the prototype's black-box checks (identity, default rights, memory and session isolation, identity override, two users at once) against a deployed harness through its gateway, with no database or container: set `HARNESS_BASE_URL` to the api route (for instance `https://apisix.dev.twake.lin-saas.com/agents`) and `HARNESS_TOKEN_A` and `HARNESS_TOKEN_B` to the access tokens of two users carrying the `twake-harness` audience. The results land in `dev-results/vitest.json`, to keep with the pilot. Without those variables the suite is skipped.
 
 ### Jobs between roles
 
@@ -70,6 +74,8 @@ A turn is admitted before any model call. The turns per minute of a user, those 
 ### Encryption
 
 The assistants' rooms are created encrypted and every message in them is encrypted end to end. The matrix role holds one encryption store per assistant on its volume, acts as each assistant's device through the application service (device masquerading, MSC3202), and receives the key shares Synapse pushes with the transactions (MSC2409), so no assistant runs a sync loop. Both flags are enabled on the Synapse the harness is registered with. The fallback, had push proved unworkable, would have been one sync loop per assistant; it was not needed. An assistant's encryption state is prepared when the role starts and when it is invited, so a key share that arrives while the role was away is not lost: Synapse redelivers the transaction and the message is answered once the role is back.
+
+Every assistant device is signed by the assistant's own cross-signing identity, which the harness holds whether the escrow is on or not: Twake Chat sends the room keys only to the devices that the owner of a cross-signing identity signed, so an unsigned device never reads its owner's messages. The identity is created when the assistant first speaks. An identity on the assistant's Matrix user that the harness does not hold, such as one another application left there, is replaced, and so is the harness's own when its store is lost and no escrow keeps it. The cross-signing keys go up as the application service, which Synapse lets replace an identity without interactive authentication; the device's own token could not. The database keeps the master public key the harness holds, to tell its identity from any other.
 
 ### Identity
 
@@ -85,7 +91,7 @@ The dispatcher wakes an assistant by posting an event to `POST /v1/events` with 
 
 ### Key escrow
 
-With `ESCROW_ENABLED`, the matrix role escrows each assistant's identity in the platform OpenBao, through the `openbao` route of APISIX and the Kubernetes auth method (`OPENBAO_K8S_ROLE`, the pod's projected token with the audience the chart sets): once an assistant's encryption is ready, its cross-signing keys are uploaded to the homeserver, a key backup is opened there, and the secret storage key, the three cross-signing secrets, the backup key and its version go to `<mount>/data/<prefix>/<owner>`. The database keeps the path, the master public key and the backup version only; every read and write of the escrow is logged with the principal. Room keys are backed up as they come and go. After a lost store, `POST /v1/assistants/me/recover` (the owner's token) puts the new device back on the escrowed identity, which the owner's clients already trust, and the backup goes on; the room keys of the lost device stay in the server backup, unreadable until the crypto bindings can import them. At rest, the store on the volume is protected by the volume's own encryption (an encrypted storage class).
+With `ESCROW_ENABLED`, the matrix role escrows each assistant's identity in the platform OpenBao, through the `openbao` route of APISIX and the Kubernetes auth method (`OPENBAO_K8S_ROLE`, the pod's projected token with the audience the chart sets): once an assistant's device is signed by its identity (see Encryption), a key backup is opened on the homeserver, and the secret storage key, the three cross-signing secrets, the backup key and its version go to `<mount>/data/<prefix>/<owner>`. The escrow only stores the keys: the identity itself is the harness's either way, and an identity replaced since is escrowed again. The database keeps the path, the master public key and the backup version only; every read and write of the escrow is logged with the principal. Room keys are backed up as they come and go. After a lost store, the escrowed identity on the homeserver is not replaced: the new device waits, and `POST /v1/assistants/me/recover` (the owner's token) puts it back on the escrowed identity, which the owner's clients already trust, and the backup goes on; the room keys of the lost device stay in the server backup, unreadable until the crypto bindings can import them. At rest, the store on the volume is protected by the volume's own encryption (an encrypted storage class).
 
 ### Skills
 
@@ -97,4 +103,4 @@ The model finds past conversations with `session_search`, by words they contain,
 
 ### Contracts as tools
 
-The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged and posted to the audit route. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.
+The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged; the gateway writes its audit record. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.

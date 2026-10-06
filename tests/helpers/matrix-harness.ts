@@ -127,6 +127,8 @@ export async function startMatrixHarness(
 			'assistant created',
 			'to-device received',
 			'encryption ready',
+			'cross-signing identity reset',
+			'assistant device cross-signed',
 			'missed key shares fetched',
 			'decryption retry failed'
 		]);

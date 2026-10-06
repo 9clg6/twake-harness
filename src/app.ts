@@ -5,7 +5,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 import { z } from 'zod';
 
 import { makeAgentService, type AgentService } from './agent/service.js';
-import { runTool } from './agent/tools.js';
+import { runTool, toolCallStatus } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
 import { findAssistant } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
@@ -456,12 +456,22 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				if (tool.requiredAction !== null && !record.actions.includes(tool.requiredAction)) {
 					return reply.code(403).send(FORBIDDEN);
 				}
+				const started = performance.now();
 				const outcome = await runTool(tool, parsed.data.arguments ?? {}, {
 					principalId: principal.id,
 					actions: record.actions,
-					db
+					db,
+					correlationId: request.id
 				});
 				request.log.info(
+					{
+						tool: parsed.data.tool,
+						status: toolCallStatus(outcome),
+						durationMs: Math.round(performance.now() - started)
+					},
+					'tool called'
+				);
+				request.log.debug(
 					{ tool: parsed.data.tool, arguments: parsed.data.arguments, result: outcome.result },
 					'tool called'
 				);

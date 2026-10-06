@@ -48,7 +48,6 @@ export interface Config {
 		// Paths under the APISIX address: the curated OpenAPI, the contracts, the audit route
 		readonly openapiPath: string;
 		readonly basePath: string;
-		readonly auditPath: string;
 		readonly refreshMs: number;
 		readonly timeoutMs: number;
 	};
@@ -123,7 +122,6 @@ const envSchema = z.object({
 	ADMISSION_GLOBAL_PER_MINUTE: z.coerce.number().int().min(1).default(400),
 	CONTRACTS_OPENAPI_PATH: z.string().min(1).default('contracts/openapi.json'),
 	CONTRACTS_BASE_PATH: z.string().min(1).default('contracts'),
-	AUDIT_PATH: z.string().min(1).default('audit'),
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
 	CONTRACTS_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30_000),
 	MATRIX_SERVER_NAME: z.string().default(''),
@@ -221,7 +219,6 @@ export function loadConfig(env: Env): Config {
 		contracts: {
 			openapiPath: values.CONTRACTS_OPENAPI_PATH,
 			basePath: values.CONTRACTS_BASE_PATH,
-			auditPath: values.AUDIT_PATH,
 			refreshMs: values.CONTRACTS_REFRESH_MS,
 			timeoutMs: values.CONTRACTS_TIMEOUT_MS
 		},
