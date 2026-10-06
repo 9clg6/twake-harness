@@ -1,6 +1,13 @@
 import type { AssistantService } from '../assistants/service.js';
 import type { DialogState } from '../assistants/repository.js';
 
+// What the creator answers when an assistant cannot be created
+const CREATE_REFUSALS = {
+	invalid_name: 'That name is not usable: one line, 64 characters at most. Which name?',
+	exists: 'You already have an assistant. Send /mybot to see it.',
+	not_on_homeserver: 'Your account is not on this homeserver, so I cannot open a room with you.'
+} as const;
+
 export const CREATOR_COMMANDS: readonly { readonly command: string; readonly help: string }[] = [
 	{ command: '/newbot', help: 'create your assistant' },
 	{ command: '/mybot', help: 'show your assistant' },
@@ -45,10 +52,7 @@ export async function runCreatorTurn(
 			return {
 				command: 'name',
 				nextState: created.reason === 'invalid_name' ? 'awaiting_name' : null,
-				reply:
-					created.reason === 'invalid_name'
-						? 'That name is not usable: one line, 64 characters at most. Which name?'
-						: 'You already have an assistant. Send /mybot to see it.'
+				reply: CREATE_REFUSALS[created.reason]
 			};
 		}
 		return {

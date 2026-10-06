@@ -52,6 +52,9 @@ export interface Config {
 	};
 	readonly matrix: {
 		readonly serverName: string;
+		// The mail domain of the homeserver's users: a user @alice:<server> is the principal
+		// alice@<mail domain>, the subject of her platform token
+		readonly mailDomain: string;
 		readonly appserviceId: string;
 		readonly senderLocalpart: string;
 		readonly assistantPrefix: string;
@@ -120,6 +123,7 @@ const envSchema = z.object({
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
 	CONTRACTS_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30_000),
 	MATRIX_SERVER_NAME: z.string().default(''),
+	MATRIX_MAIL_DOMAIN: z.string().default(''),
 	MATRIX_APPSERVICE_ID: z.string().min(1).default('twake-harness'),
 	MATRIX_SENDER_LOCALPART: z.string().min(1).default('twake-space-assistant'),
 	MATRIX_ASSISTANT_PREFIX: z.string().min(1).default('twake-space-assistant-'),
@@ -218,6 +222,8 @@ export function loadConfig(env: Env): Config {
 		},
 		matrix: {
 			serverName: values.MATRIX_SERVER_NAME,
+			mailDomain:
+				values.MATRIX_MAIL_DOMAIN === '' ? values.MATRIX_SERVER_NAME : values.MATRIX_MAIL_DOMAIN,
 			appserviceId: values.MATRIX_APPSERVICE_ID,
 			senderLocalpart: values.MATRIX_SENDER_LOCALPART,
 			assistantPrefix: values.MATRIX_ASSISTANT_PREFIX,

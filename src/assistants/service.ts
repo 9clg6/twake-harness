@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { assistantUserId } from '../matrix/registration.js';
+import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import {
 	findAssistant,
 	markAssistantDeleted,
@@ -21,7 +22,7 @@ export interface AssistantView {
 
 export type CreateResult =
 	| { readonly ok: true; readonly assistant: AssistantView }
-	| { readonly ok: false; readonly reason: 'exists' | 'invalid_name' };
+	| { readonly ok: false; readonly reason: 'exists' | 'invalid_name' | 'not_on_homeserver' };
 
 export interface AssistantService {
 	create(owner: string, name: string): Promise<CreateResult>;
@@ -41,10 +42,6 @@ const NAME = /^[^\p{C}]{1,64}$/u;
 
 export function isValidAssistantName(name: string): boolean {
 	return NAME.test(name.trim()) && name.trim().length > 0;
-}
-
-export function ownerMatrixId(config: Config, owner: string): string {
-	return `@${owner}:${config.matrix.serverName}`;
 }
 
 function matrixLink(userId: string): string {
@@ -73,13 +70,19 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			const name = rawName.trim();
 			if (!isValidAssistantName(name)) return { ok: false, reason: 'invalid_name' };
 			if ((await current(owner)) !== null) return { ok: false, reason: 'exists' };
-			const userId = assistantUserId(config, owner);
-			const localpart = `${config.matrix.assistantPrefix}${owner}`;
+			// The owner needs an account on our homeserver, where the assistant opens the room
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
+			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
+			const userId = assistantUserId(config, ownerLocalpart);
+			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
 			// The account is registered once and kept, since a Matrix identifier is never reused;
 			// its device belongs to the application service, which creates and keeps it.
 			await admin.registerUser(localpart);
 			const named = await admin.setDisplayName(userId, name);
-			const roomId = await admin.createDirectRoom(userId, ownerMatrixId(config, owner));
+			const roomId = await admin.createDirectRoom(
+				userId,
+				`@${ownerLocalpart}:${config.matrix.serverName}`
+			);
 			await withPrincipal(db, { id: owner }, (tx) =>
 				saveAssistant(tx, { owner, userId, name, roomId })
 			);

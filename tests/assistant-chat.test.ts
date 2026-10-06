@@ -21,7 +21,7 @@ describe('talking to my assistant in Matrix', () => {
 		alice = await h.synapse.registerUser('alice');
 		bob = await h.synapse.registerUser('bob');
 		client = await startE2eeClient(h.synapse.url, alice);
-		const created = await h.api.post<{ roomId: string }>('alice', '/v1/assistants', {
+		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
 			name: 'Jarvis'
 		});
 		expect(created.status).toBe(201);
@@ -89,7 +89,7 @@ describe('talking to my assistant in Matrix', () => {
 		await client.sendText(room, 'what was it?');
 		const all = await answersAfter(before);
 		expect(all.at(-1)).toBe(marker);
-		const sessions = await h.api.get<{ sessions: string[] }>('alice', '/v1/sessions');
+		const sessions = await h.api.get<{ sessions: string[] }>('alice@test.local', '/v1/sessions');
 		expect(sessions.body.sessions).toHaveLength(1);
 	});
 

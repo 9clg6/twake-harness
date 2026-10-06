@@ -20,9 +20,10 @@ describe('creating an assistant, like a Telegram bot', () => {
 	let alice: MatrixUser;
 	let aliceClient: E2eeClient;
 	let creatorRoom: string;
+	let room = '';
 	let replies = 0;
 	beforeAll(async () => {
-		h = await startMatrixHarness();
+		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher' } });
 		alice = await h.synapse.registerUser('alice');
 		aliceClient = await startE2eeClient(h.synapse.url, alice);
 		creatorRoom = await h.synapse.createDirectRoom(alice, h.role.creatorUserId);
@@ -65,7 +66,7 @@ describe('creating an assistant, like a Telegram bot', () => {
 			);
 		}
 		expect(invites).toHaveLength(1);
-		const room = invites[0]?.roomId ?? '';
+		room = invites[0]?.roomId ?? '';
 		await aliceClient.joinRoom(room);
 		const welcome = await aliceClient.waitForMessage(room, assistantId, (t) =>
 			t.includes('Jarvis')
@@ -88,30 +89,71 @@ describe('creating an assistant, like a Telegram bot', () => {
 	});
 
 	it('exposes the same operations through the API, each owner seeing only their own', async () => {
-		const mine = await h.api.get<AssistantView>('alice', '/v1/assistants/me');
+		const mine = await h.api.get<AssistantView>('alice@test.local', '/v1/assistants/me');
 		expect(mine.status).toBe(200);
 		expect(mine.body.name).toBe('Vision');
-		expect((await h.api.get('bob', '/v1/assistants/me')).status).toBe(404);
-		const created = await h.api.post<AssistantView>('bob', '/v1/assistants', { name: 'Friday' });
+		expect((await h.api.get('bob@test.local', '/v1/assistants/me')).status).toBe(404);
+		const created = await h.api.post<AssistantView>('bob@test.local', '/v1/assistants', {
+			name: 'Friday'
+		});
 		expect(created.status).toBe(201);
 		expect(created.body.userId).toBe('@twake-space-assistant-bob:test.local');
-		expect((await h.api.post('bob', '/v1/assistants', { name: 'Again' })).status).toBe(409);
-		expect((await h.api.post('bob', '/v1/assistants', { name: 'x', owner: 'alice' })).status).toBe(
-			400
+		expect((await h.api.post('bob@test.local', '/v1/assistants', { name: 'Again' })).status).toBe(
+			409
 		);
-		const renamed = await h.api.put<AssistantView>('bob', '/v1/assistants/me', {
+		expect(
+			(await h.api.post('bob@test.local', '/v1/assistants', { name: 'x', owner: 'alice' })).status
+		).toBe(400);
+		const renamed = await h.api.put<AssistantView>('bob@test.local', '/v1/assistants/me', {
 			name: 'Saturday'
 		});
 		expect(renamed.status).toBe(200);
 		expect(renamed.body.name).toBe('Saturday');
-		expect((await h.api.get<AssistantView>('alice', '/v1/assistants/me')).body.name).toBe('Vision');
+		expect(
+			(await h.api.get<AssistantView>('alice@test.local', '/v1/assistants/me')).body.name
+		).toBe('Vision');
+	});
+
+	it('is one person for Matrix and for the API: the email is the principal', async () => {
+		// The subject of the token is the owner's email; a bare localpart is somebody else
+		expect((await h.api.get('alice', '/v1/assistants/me')).status).toBe(404);
+		// A person of another mail domain has no account on the homeserver to open a room with
+		const elsewhere = await h.api.post('dave@elsewhere.example', '/v1/assistants', {
+			name: 'Nope'
+		});
+		expect(elsewhere.status).toBe(422);
+		expect(elsewhere.body).toEqual({ error: 'owner not on the homeserver' });
+	});
+
+	it('wakes the assistant created from Matrix when the dispatcher posts an event for the email', async () => {
+		const posted = await h.api.post<{ queued: boolean }>('dispatcher', '/v1/events', {
+			owner: 'alice@test.local',
+			event_id: 'evt-matrix-1',
+			type: 'calendar.invitation'
+		});
+		expect(posted.status).toBe(202);
+		expect(posted.body.queued).toBe(true);
+		const told = await aliceClient.waitForMessage(
+			room,
+			assistantId,
+			(t) => t.includes('evt-matrix-1'),
+			60_000
+		);
+		expect(told).toContain('calendar.invitation');
+		// The localpart alone names nobody's assistant
+		const nobody = await h.api.post('dispatcher', '/v1/events', {
+			owner: 'alice',
+			event_id: 'evt-matrix-2',
+			type: 'calendar.invitation'
+		});
+		expect(nobody.status).toBe(404);
 	});
 
 	it('deletes the assistant, which leaves the room, and lets the owner start over', async () => {
-		const before = await h.api.get<AssistantView>('alice', '/v1/assistants/me');
+		const before = await h.api.get<AssistantView>('alice@test.local', '/v1/assistants/me');
 		const room = before.body.roomId ?? '';
 		expect(await ask('/delete')).toMatch(/deleted/i);
-		expect((await h.api.get('alice', '/v1/assistants/me')).status).toBe(404);
+		expect((await h.api.get('alice@test.local', '/v1/assistants/me')).status).toBe(404);
 		expect(await ask('/mybot')).toContain('/newbot');
 		for (let i = 0; i < 40; i += 1) {
 			const members = await h.synapse.joinedMembers(alice, room);
@@ -119,13 +161,17 @@ describe('creating an assistant, like a Telegram bot', () => {
 			await sleep(250);
 		}
 		expect(await h.synapse.joinedMembers(alice, room)).not.toContain(assistantId);
-		const again = await h.api.post<AssistantView>('alice', '/v1/assistants', { name: 'Jarvis II' });
+		const again = await h.api.post<AssistantView>('alice@test.local', '/v1/assistants', {
+			name: 'Jarvis II'
+		});
 		expect(again.status).toBe(201);
 		expect(again.body.userId).toBe(assistantId);
 	});
 
 	it('does not let another user manage my assistant', async () => {
-		expect((await h.api.delete('carol', '/v1/assistants/me')).status).toBe(404);
-		expect((await h.api.get<AssistantView>('alice', '/v1/assistants/me')).status).toBe(200);
+		expect((await h.api.delete('carol@test.local', '/v1/assistants/me')).status).toBe(404);
+		expect((await h.api.get<AssistantView>('alice@test.local', '/v1/assistants/me')).status).toBe(
+			200
+		);
 	});
 });
