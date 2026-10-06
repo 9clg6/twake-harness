@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { withPrincipal } from '../src/db/client.js';
 import { runMigrations } from '../src/db/migrate.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import type { ToolCall } from './helpers/fake-apisix.js';
+import { invitationEvent, type ToolCall } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -32,7 +32,8 @@ const CATALOG = {
 				tags: ['calendar.freebusy.read.v1'],
 				parameters: [
 					{ name: 'start', in: 'query', required: true, schema: { type: 'string' } },
-					{ name: 'end', in: 'query', required: true, schema: { type: 'string' } }
+					{ name: 'end', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'exclude', in: 'query', required: false, schema: { type: 'string' } }
 				]
 			}
 		},
@@ -60,7 +61,7 @@ describe('my assistant asks before it first uses an application', () => {
 	let room: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
-		h = await startMatrixHarness();
+		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher' } });
 		h.apisix.contracts.spec = CATALOG;
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		alice = await h.synapse.registerUser('alice');
@@ -127,6 +128,41 @@ describe('my assistant asks before it first uses an application', () => {
 		await client.sendText(room, 'What is event evt-7 about?');
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Quarterly figures'));
 		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-7']);
+	});
+
+	it("asks before the harness checks an invitation's slot in a calendar it never read", async () => {
+		h.apisix.contracts.handler = (c) =>
+			c.path.startsWith('/contracts/v1/events/')
+				? {
+						status: 200,
+						body: invitationEvent({
+							id: 'evt-inv',
+							uid: 'uid-evt-inv',
+							title: 'Budget review',
+							start: '2026-10-09T09:00:00+02:00',
+							end: '2026-10-09T10:00:00+02:00',
+							timezone: 'Europe/Paris',
+							organizer: 'bob@test.local',
+							invitee: 'alice@test.local'
+						})
+					}
+				: { status: 200, body: { free: true, busy: [] } };
+		const modelCalls = h.apisix.llm.calls.length;
+		const posted = await h.api.post('dispatcher', '/v1/events', {
+			owner: 'alice@test.local',
+			event_id: 'evt-inv',
+			type: 'com.twake.calendar.event.invited.v1'
+		});
+		expect(posted.status).toBe(202);
+		const request = await client.waitForMessage(room, assistantId, (t) =>
+			t.includes('your data in calendar')
+		);
+		expect(request).toBe(
+			'This is the first time I need to read your data in calendar. React with ✅ to this message to allow it.'
+		);
+		// The harness read the invitation, then stopped at the calendar: no slot read, no model
+		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-inv']);
+		expect(h.apisix.llm.calls).toHaveLength(modelCalls);
 	});
 
 	it("lets the pilot's assistants read Calendar without asking, as they did before consents", async () => {

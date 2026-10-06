@@ -5,7 +5,7 @@ import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.
 import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
-import { LlmError, makeLlmClient, type LlmClient } from '../llm/client.js';
+import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
@@ -52,6 +52,13 @@ export type TurnOrigin = 'owner' | 'event';
 // event's own text comes from a third party, so only the owner's yes, in a turn of their own,
 // can make the assistant act.
 const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [ACT_THROUGH_CONTRACTS];
+
+// What the model of a turn is told, and the harness's own question when a read it made before
+// the model speaks waits for the owner
+interface Told {
+	readonly message: string;
+	readonly question: string | null;
+}
 
 export interface OwnerTurnInput {
 	readonly principal: Principal;
@@ -137,19 +144,25 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	// What the model is told. An invitation an event brings is read and its slot checked by the
 	// harness before the model speaks, through the same tools and context as the model's calls,
-	// and handed to it as data; any other message is told as it is.
+	// and handed to it as data; any other message is told as it is. A read of that check that
+	// waits for its owner, such as the first read of their calendar, ends the turn on the
+	// harness's question.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
 		log: FastifyBaseLogger
-	): Promise<string> {
+	): Promise<Told> {
 		const event = input.event;
 		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
-			return input.message;
+			return { message: input.message, question: null };
 		}
+		let question: string | null = null;
 		const run: ToolRunner = async (name, args) => {
 			const tool = tools.find(name);
-			return tool === null ? null : runTool(tool, args, context);
+			if (tool === null) return null;
+			const outcome = await runTool(tool, args, context);
+			if (outcome.final !== undefined && question === null) question = outcome.final;
+			return outcome;
 		};
 		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
 		log.info(
@@ -160,7 +173,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			},
 			'invitation checked'
 		);
-		return messages.events.invitation(event.id, check.data);
+		return { message: messages.events.invitation(event.id, check.data), question };
 	}
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
@@ -213,7 +226,22 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				...(input.correlationId === undefined ? {} : { correlationId: input.correlationId })
 			};
 			const told = await messageFor(input, context, log);
-			log.info({ messageLength: told.length }, 'turn started');
+			log.info({ messageLength: told.message.length }, 'turn started');
+			if (told.question !== null) {
+				// The conversation keeps what the model would have been told, for the turn the
+				// owner's answer resumes
+				const asked: LlmMessage[] = [
+					...session.messages,
+					{ role: 'user', content: told.message },
+					{ role: 'assistant', content: told.question }
+				];
+				const saved = await withPrincipal(db, principal, (tx) =>
+					saveSessionMessages(tx, session.id, asked)
+				);
+				if (!saved) return { kind: 'missing' };
+				log.info('turn stopped on a question to the owner');
+				return { kind: 'ok', sessionId: session.id, answer: told.question, model: llm.model };
+			}
 			// Read at the start of every turn, never kept: a session can span days
 			const moment = describeMoment(clock.now(), config.timeZone, config.locale);
 			try {
@@ -237,7 +265,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							nudgeInterval: config.turn.memoryNudgeInterval
 						}),
 						history: session.messages,
-						message: told,
+						message: told.message,
 						context
 					}
 				);
