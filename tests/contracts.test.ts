@@ -64,7 +64,9 @@ describe('contracts as tools', () => {
 		h = await startTestHarness();
 		c = makeClient(h);
 		// These tests are about calling contracts: Alice already let her assistant read her calendar
+		// and write in it
 		await grantConsent(h.db, 'alice', 'calendar', 'read');
+		await grantConsent(h.db, 'alice', 'calendar', 'write');
 		h.apisix.contracts.spec = CATALOG;
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 	});
