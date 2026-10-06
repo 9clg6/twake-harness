@@ -18,16 +18,16 @@ export function computeVisibleHistory(
 	let used = 0;
 	let start = history.length;
 	// The size of the exchange being read backwards, until the user message that begins it
-	let exchange = 0;
+	let exchangeSize = 0;
 	for (let i = history.length - 1; i >= 0; i -= 1) {
 		const message = history[i];
 		if (message === undefined) break;
-		exchange += computeMessageSize(message);
+		exchangeSize += computeMessageSize(message);
 		if (message.role !== 'user' && i > 0) continue;
 		// The last exchange stays whatever its size: without it the model would answer out of context
-		if (start < history.length && used + exchange > maxChars) break;
-		used += exchange;
-		exchange = 0;
+		if (start < history.length && used + exchangeSize > maxChars) break;
+		used += exchangeSize;
+		exchangeSize = 0;
 		start = i;
 	}
 	return history.slice(start);
