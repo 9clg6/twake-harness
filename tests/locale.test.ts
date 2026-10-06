@@ -130,8 +130,14 @@ describe('a deployment that speaks French', () => {
 			t.startsWith("C'est la première fois")
 		);
 		expect(request).toBe(
-			"C'est la première fois que j'ai besoin de lire tes données dans mail. Réagis ✅ à ce message pour me l'autoriser."
+			"C'est la première fois que j'ai besoin de lire tes données dans mail. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
 		);
+		const asked = client.messages.find(
+			(m) => m.roomId === assistantRoom && m.sender === assistantId && m.body === request
+		);
+		if (asked === undefined) throw new Error('no question');
+		const buttons = await client.waitForReactions(assistantRoom, asked.eventId, assistantId, 2);
+		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 });
