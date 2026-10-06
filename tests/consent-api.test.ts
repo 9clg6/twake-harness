@@ -408,6 +408,22 @@ describe('my consents through the API', () => {
 			'harness_consent_answers_total{domain="notes",level="read",reason="consent",answer="no",via="api",outcome="decided"} 1'
 		);
 	});
+	it('answers a conflict to my yes on a call a withdrawal closed', async () => {
+		const turn = await c.post<WaitingTurn>('alice', '/v1/chat', {
+			message: 'Find the budget in my wiki'
+		});
+		const { id } = turn.body.pending_call;
+		// I tell my assistant to stop using my wiki, which closes what waited there
+		expect((await c.tool('alice', 'consents_withdraw', { domain: 'wiki' })).status).toBe(200);
+		for (const answer of ['approve', 'refuse']) {
+			expect(await c.post('alice', `/v1/pending-calls/${id}/${answer}`, {})).toEqual({
+				status: 409,
+				body: { error: 'pending call closed', state: 'superseded' }
+			});
+		}
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
+
 	it('runs a call a lost replica left approved, once I approve it again past its lease', async () => {
 		const turn = await c.post<WaitingTurn>('alice', '/v1/chat', {
 			message: 'Find the budget in my mail'
@@ -437,6 +453,43 @@ describe('my consents through the API', () => {
 			body: { error: 'pending call closed', state: 'decided' }
 		});
 		expect(h.apisix.contracts.calls).toHaveLength(1);
+	});
+});
+
+describe('my answer through the API to a call left unanswered too long', () => {
+	let h: TestHarness;
+	let c: TestClient;
+	beforeAll(async () => {
+		// A request's lifetime is a second here, and a day by default
+		h = await startTestHarness({ env: { CONSENT_REQUEST_LIFETIME_MS: '1000' } });
+		c = makeClient(h);
+		h.apisix.contracts.spec = readCatalog(['mail']);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		h.apisix.llm.script = searchingModel;
+	});
+	afterAll(async () => {
+		if (h !== undefined) await h.close();
+	});
+
+	it('answers a conflict to my yes on a call that expired, and runs nothing', async () => {
+		const turn = await c.post<WaitingTurn>('alice', '/v1/chat', {
+			message: 'Find the budget in my mail'
+		});
+		const { id } = turn.body.pending_call;
+		await sleep(1500);
+		expect(await c.post('alice', `/v1/pending-calls/${id}/approve`, {})).toEqual({
+			status: 409,
+			body: { error: 'pending call closed', state: 'expired' }
+		});
+		expect(await c.get('alice', '/v1/pending-calls')).toEqual({
+			status: 200,
+			body: { pending_calls: [] }
+		});
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+		// An operator sees an answer that came too late
+		expect(await countedLines(h)).toContain(
+			'harness_consent_answers_total{domain="mail",level="read",reason="consent",answer="yes",via="api",outcome="expired"} 1'
+		);
 	});
 });
 
