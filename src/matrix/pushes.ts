@@ -2,9 +2,10 @@ import type { FastifyBaseLogger } from 'fastify';
 import {
 	Appservice,
 	type IAppserviceOptions,
-	type IAppserviceStorageProvider,
-	type Intent
+	type IAppserviceStorageProvider
 } from 'matrix-bot-sdk';
+
+import type { EnsureEncryption } from './encryption.js';
 
 // The fields of a pushed transaction the SDK sets the encryption of their users up for (MSC2409
 // for the to-device and ephemeral events, MSC3202 for the key counts), under the names it reads
@@ -15,11 +16,11 @@ const ONE_TIME_KEYS_BEFORE_SYNAPSE_1_73 = 'org.matrix.msc3202.device_one_time_ke
 const FALLBACK_KEYS = 'org.matrix.msc3202.device_unused_fallback_key_types';
 
 // What the SDK's handler of a push reads and writes, as express hands them to it
-export interface PushRequest {
+interface PushRequest {
 	body?: unknown;
 	readonly params?: Readonly<Record<string, string | undefined>>;
 }
-export interface PushResponse {
+interface PushResponse {
 	status(code: number): { json(body: unknown): unknown };
 }
 type TransactionHandler = (this: Appservice, req: PushRequest, res: PushResponse) => Promise<void>;
@@ -32,7 +33,7 @@ export const PUSH_DEADLINE_MS = 45_000;
 export interface PushDeps {
 	readonly log: FastifyBaseLogger;
 	readonly storage: IAppserviceStorageProvider;
-	readonly ensureEncryption: (intent: Intent) => Promise<void>;
+	readonly ensureEncryption: EnsureEncryption;
 	readonly deadlineMs: number;
 }
 
@@ -61,7 +62,7 @@ function oneTimeKeysOf(body: Record<string, unknown>): unknown {
 // The users whose encryption the SDK sets up while it processes a push, as it picks them: those its
 // to-device events, and its encrypted ephemeral ones, are for, and those it reports the one-time and
 // fallback keys of
-export function usersSetUpBy(body: Record<string, unknown>): string[] {
+function usersSetUpBy(body: Record<string, unknown>): string[] {
 	const users = new Set<string>();
 	for (const event of eventsOf(body[TO_DEVICE])) {
 		const userId = recipientOf(event);
@@ -79,7 +80,7 @@ export function usersSetUpBy(body: Record<string, unknown>): string[] {
 
 // The push without what the SDK would hand to the encryption of these users. Their to-device events
 // stay in their devices' inboxes, which an assistant reads again when a message fails to decrypt.
-export function withoutKeyUpdatesOf(
+function withoutKeyUpdatesOf(
 	body: Record<string, unknown>,
 	userIds: ReadonlySet<string>
 ): Record<string, unknown> {
