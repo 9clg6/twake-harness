@@ -1,5 +1,8 @@
+import { createServer } from 'node:http';
+import { doHttpRequest, LogService } from 'matrix-bot-sdk';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { step } from '../src/matrix/crypto-requests.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 
 describe('structured logs', () => {
@@ -128,5 +131,160 @@ describe('conversation content at the debug level', () => {
 	it('still keeps it out of every line at info and above', () => {
 		const text = textOf(h.logLines().filter((line) => Number(line['level']) >= 30));
 		for (const marker of MARKERS) expect(text).not.toContain(marker);
+	});
+});
+
+// The matrix role sends its consumer key with every request of the SDK, and the SDK its access
+// token: neither may reach a log line, whatever shape the failure of such a request takes.
+const CONSUMER_KEY = 'fake-consumer-key-0d4f';
+const ACCESS_TOKEN = 'fake-access-token-8b2e';
+
+interface Upstream {
+	readonly url: string;
+	close(): Promise<void>;
+}
+
+// An upstream answering every request the same way: a gateway whose upstream is down, or Synapse
+// refusing the request
+async function startUpstream(status: number, type: string, body: string): Promise<Upstream> {
+	const server = createServer((_req, res) => {
+		res.writeHead(status, { 'content-type': type });
+		res.end(body);
+	});
+	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+	const address = server.address();
+	if (address === null || typeof address === 'string') {
+		throw new Error('the upstream did not bind to a TCP port');
+	}
+	return {
+		url: `http://127.0.0.1:${address.port}`,
+		close: () =>
+			new Promise<void>((resolve) => {
+				// The SDK keeps its connections alive
+				server.closeAllConnections();
+				server.close(() => resolve());
+			})
+	};
+}
+
+// A request of the matrix role through the SDK, with the headers the role and the SDK send
+function sdkRequest(upstream: Upstream): Promise<unknown> {
+	return doHttpRequest(upstream.url, 'GET', '/_matrix/client/v3/account/whoami', null, null, {
+		apikey: CONSUMER_KEY,
+		Authorization: `Bearer ${ACCESS_TOKEN}`
+	});
+}
+
+// What a failed request rejects with: the SDK's rejection, or an error raised over it
+async function rejectionOf(request: () => Promise<unknown>): Promise<unknown> {
+	try {
+		await request();
+	} catch (rejection: unknown) {
+		return rejection;
+	}
+	throw new Error('the request was expected to fail');
+}
+
+describe('failed requests in the logs', () => {
+	let h: TestHarness;
+	let gateway: Upstream;
+	let synapse: Upstream;
+	beforeAll(async () => {
+		// The SDK reports the failures on the console by itself
+		LogService.muteModule('MatrixHttpClient');
+		h = await startTestHarness();
+		gateway = await startUpstream(502, 'text/html', '<html><body>502 Bad Gateway</body></html>');
+		synapse = await startUpstream(
+			403,
+			'application/json',
+			JSON.stringify({ errcode: 'M_FORBIDDEN', error: 'Not allowed' })
+		);
+	});
+	afterAll(async () => {
+		await gateway.close();
+		await synapse.close();
+		await h.close();
+	});
+
+	function lineOf(msg: string): Record<string, unknown> {
+		const line = h.logLines().find((candidate) => candidate['msg'] === msg);
+		if (line === undefined) throw new Error(`no log line "${msg}"`);
+		return line;
+	}
+
+	function expectNoSecretIn(line: Record<string, unknown>): void {
+		const text = JSON.stringify(line);
+		expect(text).not.toContain(CONSUMER_KEY);
+		expect(text).not.toContain(ACCESS_TOKEN);
+	}
+
+	it('logs the status of a request the gateway failed, never its headers', async () => {
+		h.app.log.error({ err: await rejectionOf(() => sdkRequest(gateway)) }, 'gateway failure');
+		const line = lineOf('gateway failure');
+		expect(line['err']).toEqual({
+			type: 'IncomingMessage',
+			statusCode: 502,
+			statusMessage: 'Bad Gateway'
+		});
+		expectNoSecretIn(line);
+	});
+
+	it('logs an error carrying such a response with its status, not the response', async () => {
+		const err = Object.assign(new Error('whoami failed'), {
+			response: await rejectionOf(() => sdkRequest(gateway))
+		});
+		h.app.log.warn({ err }, 'wrapped failure');
+		const line = lineOf('wrapped failure');
+		expect(line['err']).toMatchObject({ type: 'Error', message: 'whoami failed', statusCode: 502 });
+		expect(line['err']).not.toHaveProperty('response');
+		expectNoSecretIn(line);
+	});
+
+	it('keeps the reports of the SDK readable, without the headers of what failed', async () => {
+		h.app.log.error(
+			{
+				module: 'Appservice',
+				rest: [
+					'(REQ-1)',
+					await rejectionOf(() => sdkRequest(gateway)),
+					{ errcode: 'M_UNKNOWN', error: 'Unknown error' }
+				]
+			},
+			'matrix sdk'
+		);
+		const line = lineOf('matrix sdk');
+		expect(line['rest']).toEqual([
+			'(REQ-1)',
+			{ type: 'IncomingMessage', statusCode: 502, statusMessage: 'Bad Gateway' },
+			{ errcode: 'M_UNKNOWN', error: 'Unknown error' }
+		]);
+		expectNoSecretIn(line);
+	});
+
+	it('names the status of a failed request an error was raised over, not its headers', async () => {
+		const err = await rejectionOf(() => step('signing keys upload', () => sdkRequest(gateway)));
+		h.app.log.error({ err }, 'crypto step failure');
+		const line = lineOf('crypto step failure');
+		expect(line['err']).toMatchObject({
+			type: 'Error',
+			cause: { type: 'IncomingMessage', statusCode: 502, statusMessage: 'Bad Gateway' }
+		});
+		expectNoSecretIn(line);
+	});
+
+	it('keeps what the homeserver answered when it refused a request', async () => {
+		h.app.log.warn(
+			{ err: await rejectionOf(() => sdkRequest(synapse)) },
+			'request refused by synapse'
+		);
+		const line = lineOf('request refused by synapse');
+		expect(line['err']).toMatchObject({
+			type: 'MatrixError',
+			message: 'M_FORBIDDEN: Not allowed',
+			statusCode: 403,
+			errcode: 'M_FORBIDDEN',
+			error: 'Not allowed'
+		});
+		expectNoSecretIn(line);
 	});
 });
