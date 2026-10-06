@@ -80,7 +80,11 @@ describe('I answer the question in words', () => {
 		await r.client.sendText(r.room, 'Search my notes for the budget');
 		const question = await r.nextQuestion(seen);
 		expect(r.questions().at(-1)?.body).toBe(
-			'This is the first time I need to read your data in notes. Do you allow it? Answer with the buttons below, or reply yes or no.'
+			[
+				'This is the first time I need to read your data in notes. Do you allow it? I would start with this:',
+				JSON.stringify({ q: 'budget' }, null, 2),
+				'Answer with the buttons below, or reply yes or no.'
+			].join('\n\n')
 		);
 		// The assistant's own reactions on its question are the buttons Twake Chat shows
 		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);

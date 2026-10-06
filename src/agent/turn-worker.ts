@@ -7,6 +7,7 @@ import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
+import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
@@ -55,6 +56,8 @@ export interface SendPayload {
 	// The text asks the owner about a frozen call: the matrix role remembers the event it sent,
 	// which the owner's answer points to
 	readonly request?: PendingQuestion;
+	// The text as HTML, when the harness laid it out itself rather than the model writing Markdown
+	readonly html?: string;
 }
 
 export interface TurnWorkerOptions {
@@ -102,6 +105,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
 			...(result.kind === 'ok' && result.pendingCallId !== undefined
 				? { request: { pendingCallId: result.pendingCallId, owner: assistant.owner } }
+				: {}),
+			// The harness's own request, laid out by the harness as HTML too
+			...(result.kind === 'ok' && result.request !== undefined
+				? { html: requestHtml(result.request) }
 				: {})
 		};
 	}

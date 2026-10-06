@@ -33,6 +33,9 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 	const warnedOrigins = new Set<string>();
 	// The descriptions of applications left out for their shape, warned about once each
 	const warnedDescriptions = new Set<string>();
+	// The writes whose risk the document gave a value the harness does not know, warned about once
+	// each
+	const warnedRisks = new Set<string>();
 
 	async function load(): Promise<number> {
 		const base = config.apisix.baseUrl.href.endsWith('/')
@@ -46,7 +49,7 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 			});
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			const document: unknown = await response.json();
-			const parsed = parseContracts(document);
+			const { contracts: parsed, unknownRisks } = parseContracts(document);
 			const server = readServer(document);
 			// A server on another host does not take the calls there: only its path is kept
 			if (
@@ -68,6 +71,14 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 				if (warnedDescriptions.has(key)) continue;
 				warnedDescriptions.add(key);
 				log.warn({ domain, problem }, 'domain description ignored, named by its id');
+			}
+			// A write whose risk is neither low nor high is confirmed call by call, as a high one is:
+			// the mistake costs its owners a question, and its operator learns of it
+			for (const { contract, declared } of unknownRisks) {
+				const key = `${contract}\n${JSON.stringify(declared)}`;
+				if (warnedRisks.has(key)) continue;
+				warnedRisks.add(key);
+				log.warn({ contract, declared }, 'contract risk unknown, treated as high');
 			}
 			contracts = parsed;
 			tools = parsed.map((contract) =>

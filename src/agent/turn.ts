@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { LlmClient, LlmCompletion, LlmMessage } from '../llm/client.js';
+import type { OwnerRequest } from '../consents/request.js';
 import {
 	runTool,
 	toolCallStatus,
@@ -24,6 +25,8 @@ export interface TurnOutput {
 	readonly tokens: number;
 	// The call the harness froze, when the turn ended on its question to the owner
 	readonly pendingCallId?: string;
+	// That question in its parts, when the harness laid it out as a request about the call
+	readonly request?: OwnerRequest;
 }
 
 export interface TurnDeps {
@@ -155,6 +158,11 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			content: completion.content,
 			tool_calls: completion.toolCalls
 		});
+		// What the model wrote alongside its calls goes with each of them: a call that waits for its
+		// owner shows it as the assistant's words
+		const said = completion.content ?? '';
+		const context: ToolContext =
+			said.trim().length === 0 ? input.context : { ...input.context, accompanyingText: said };
 		for (const [index, call] of completion.toolCalls.entries()) {
 			toolCalls += 1;
 			if (toolCalls > deps.maxToolCalls) {
@@ -168,7 +176,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					? { result: { error: `unknown tool ${call.function.name}` } }
 					: args === null
 						? { result: { error: 'arguments are not valid JSON' } }
-						: await runTool(tool, args, input.context);
+						: await runTool(tool, args, context);
 			const status: ToolCallStatus =
 				tool === null
 					? 'unknown_tool'
@@ -209,7 +217,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					answer: outcome.final,
 					messages,
 					tokens,
-					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId })
+					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId }),
+					...(outcome.request === undefined ? {} : { request: outcome.request })
 				};
 			}
 		}

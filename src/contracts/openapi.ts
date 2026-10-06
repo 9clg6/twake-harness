@@ -4,6 +4,11 @@ import type { ConsentLevel } from '../consents/consent.js';
 
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 
+// What a write risks: a low one runs once its owner allowed writing in its application; a high
+// one, which sends words to other people in the owner's name, shares or publishes, deletes for
+// good or trains what other users share, runs only once its owner confirmed that very call
+export type WriteRisk = 'low' | 'high';
+
 export interface ContractParameter {
 	readonly name: string;
 	readonly location: 'path' | 'query';
@@ -20,6 +25,9 @@ export interface ContractDefinition {
 	// what its owner allows the assistant to use, together with the level
 	readonly domain: string;
 	readonly level: ConsentLevel;
+	// For a write, what x-twake-risk declares: high unless the document says low, so that a write
+	// declared wrongly, or not at all, is confirmed call by call. A read carries no risk.
+	readonly risk: WriteRisk | null;
 	// What the model calls: the operationId, a verb such as read_freebusy, in the alphabet a model
 	// tool name allows
 	readonly toolName: string;
@@ -43,6 +51,8 @@ const operationSchema = z.object({
 	tags: z.array(z.string()).optional(),
 	summary: z.string().optional(),
 	description: z.string().optional(),
+	// Read whatever it holds: a value of another shape makes the write high, never drops it
+	'x-twake-risk': z.unknown().optional(),
 	parameters: z.array(parameterSchema).optional(),
 	requestBody: z
 		.object({
@@ -87,15 +97,28 @@ export function toToolName(operationId: string): string {
 	return operationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 }
 
+// A write whose x-twake-risk is neither low nor high: it is high all the same, and the operator
+// who curates the catalog is told what it declared
+export interface UnknownRisk {
+	readonly contract: string;
+	readonly declared: unknown;
+}
+
+export interface ParsedContracts {
+	readonly contracts: ContractDefinition[];
+	readonly unknownRisks: readonly UnknownRisk[];
+}
+
 // Reads the curated OpenAPI APISIX serves and keeps one contract per operation that has an id.
 // Operations without an id, and header or cookie parameters, are left out on purpose: a
 // contract is called by its name and nothing travels in headers but what APISIX adds. The
 // contracts service names each operation with a verb (operationId) and the versioned contract it
 // belongs to with its first tag; the model sees the verb, everything else names the contract.
-export function parseContracts(document: unknown): ContractDefinition[] {
+export function parseContracts(document: unknown): ParsedContracts {
 	const parsed = documentSchema.safeParse(document);
 	if (!parsed.success) throw new Error('the OpenAPI document has an unexpected shape');
 	const contracts: ContractDefinition[] = [];
+	const unknownRisks: UnknownRisk[] = [];
 	for (const [pathTemplate, item] of Object.entries(parsed.data.paths)) {
 		for (const method of METHODS) {
 			const raw = item[method];
@@ -114,11 +137,22 @@ export function parseContracts(document: unknown): ContractDefinition[] {
 			const body = operation.data.requestBody?.content['application/json']?.schema ?? null;
 			const contractName = operation.data.tags?.find((tag) => tag.length > 0);
 			const id = contractName ?? operation.data.operationId;
+			// A GET reads; every other method writes
+			const level = method === 'get' ? 'read' : 'write';
+			const declared = operation.data['x-twake-risk'];
+			if (
+				level === 'write' &&
+				declared !== undefined &&
+				declared !== 'low' &&
+				declared !== 'high'
+			) {
+				unknownRisks.push({ contract: id, declared });
+			}
 			contracts.push({
 				id,
 				domain: id.split('.')[0] ?? id,
-				// A GET reads; every other method writes
-				level: method === 'get' ? 'read' : 'write',
+				level,
+				risk: level === 'read' ? null : declared === 'low' ? 'low' : 'high',
 				toolName: toToolName(operation.data.operationId),
 				method,
 				pathTemplate,
@@ -129,7 +163,7 @@ export function parseContracts(document: unknown): ContractDefinition[] {
 			});
 		}
 	}
-	return contracts;
+	return { contracts, unknownRisks };
 }
 
 // The JSON schema the model sees: one property per path or query parameter, plus `body`

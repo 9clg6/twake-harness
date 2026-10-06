@@ -36,6 +36,7 @@ const CATALOG = {
 			post: {
 				operationId: 'accept_event',
 				tags: ['calendar.event.accept.v1'],
+				'x-twake-risk': 'low',
 				description: 'Accepts an invitation on behalf of the user',
 				parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
 				requestBody: {

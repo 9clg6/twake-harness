@@ -4,6 +4,8 @@ import { z } from 'zod';
 import { setAssistantLocale } from '../assistants/repository.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { listConsents, toConsentView, withdrawConsents } from '../consents/repository.js';
+import type { WaitReason } from '../consents/consent.js';
+import type { OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
 import type { LlmToolDefinition } from '../llm/client.js';
@@ -40,6 +42,9 @@ export interface ToolOutcome {
 	readonly denied?: boolean;
 	// The call the harness froze until its owner answers, when the turn ends on its question
 	readonly pendingCallId?: string;
+	// That question in its parts, when the harness laid it out as a request about the call:
+	// `final` is its plain text
+	readonly request?: OwnerRequest;
 }
 
 // How a tool call ended, as the info logs report it: never the arguments or the result
@@ -67,6 +72,12 @@ export interface ToolContext {
 	readonly correlationId?: string;
 	// The turn's or the request's logger, for what a tool changes on its owner's behalf
 	readonly log: FastifyBaseLogger;
+	// What the model wrote alongside this call, in the same answer: a call that waits for its
+	// owner shows it to them as the assistant's own words
+	readonly accompanyingText?: string;
+	// For the call its owner allowed, run again as it was frozen: the reasons their yes answered,
+	// which it no longer waits for
+	readonly answeredReasons?: readonly WaitReason[];
 }
 
 export interface Tool {

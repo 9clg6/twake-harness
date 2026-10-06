@@ -6,6 +6,7 @@ import { isBuiltInConsent, type WaitReason } from '../consents/consent.js';
 import { readDelegationCode, type DelegationCode } from '../consents/delegation.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
+import { makeOwnerRequest, requestText } from '../consents/request.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
@@ -52,6 +53,13 @@ function parseBody(text: string): unknown {
 // the first and never the second
 export const CALL_CONTRACTS = 'contracts.call';
 export const ACT_THROUGH_CONTRACTS = 'contracts.act';
+
+// What the model reads when a call that would wait for its owner is too large to show them whole:
+// nothing waits, and it may make the call smaller
+const TOO_LARGE_TO_CONFIRM = {
+	error: 'too_large_to_confirm',
+	hint: 'The owner must see a call whole before it runs, and this one is too large to show in one message. Nothing was done. Make the call smaller, for instance with a shorter text, then make it again.'
+} as const;
 
 // A contract becomes a tool that calls it through APISIX, naming the owner so that the gateway
 // attaches the owner's token: the harness never holds one. What comes back is data for the model.
@@ -102,11 +110,31 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				tool: contract.toolName,
 				domain: contract.domain,
 				level: contract.level,
+				...(contract.risk === null ? {} : { risk: contract.risk }),
 				principal: owner
 			},
 			'contract call waits for its owner'
 		);
 		return pendingCallId;
+	}
+
+	// Why a call waits for its owner, every reason that applies: the first read of an application,
+	// or the first write there even once it may read; and a high-risk write, each time, whatever its
+	// owner allowed. The organization agent acts for no user: none of its calls waits for anyone.
+	async function reasonsToWait(context: ToolContext): Promise<WaitReason[]> {
+		const owner = context.principalId;
+		if (owner === ORGANIZATION_PRINCIPAL) return [];
+		const reasons: WaitReason[] = [];
+		if (
+			!isBuiltInConsent(contract.domain, contract.level) &&
+			!(await withPrincipal(context.db, { id: owner }, (tx) =>
+				hasConsent(tx, owner, contract.domain, contract.level)
+			))
+		) {
+			reasons.push('consent');
+		}
+		if (contract.risk === 'high') reasons.push('high_risk');
+		return reasons;
 	}
 
 	return {
@@ -116,23 +144,17 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		run: async (args, context): Promise<ToolOutcome> => {
 			const values =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
-			// The first read of an application waits for its owner, and so does the first write there,
-			// even once it may read: the call is frozen as the model wrote it, and the turn ends with
-			// the harness's own question. The organization agent acts for no user, so nobody's
-			// consent applies to it.
+			// A call that waits is frozen as the model wrote it, and the turn ends with the harness's
+			// own request. The call its owner allowed runs as it was frozen, unless something their
+			// yes did not answer applies now, such as writing they took back since: it then waits
+			// again, and the request asks about everything that applies.
 			const owner = context.principalId;
-			if (
-				!isBuiltInConsent(contract.domain, contract.level) &&
-				owner !== ORGANIZATION_PRINCIPAL &&
-				!(await withPrincipal(context.db, { id: owner }, (tx) =>
-					hasConsent(tx, owner, contract.domain, contract.level)
-				))
-			) {
-				const pendingCallId = await freeze(values, context, ['consent']);
+			const reasons = await reasonsToWait(context);
+			const answeredReasons = context.answeredReasons ?? [];
+			if (reasons.some((reason) => !answeredReasons.includes(reason))) {
 				// The question names the application as the catalog does in its owner's language,
 				// and says what the level covers there
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
-				const { consent } = getMessages(locale);
 				const application = labelOf(
 					deps.domains,
 					contract.domain,
@@ -140,18 +162,36 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					locale,
 					config.locale
 				);
+				const request = makeOwnerRequest(
+					{
+						application,
+						level: contract.level,
+						reasons,
+						arguments: values,
+						said: context.accompanyingText ?? null
+					},
+					getMessages(locale)
+				);
+				// A call its owner could not see whole is never asked about: nothing waits, and the
+				// model may make it smaller
+				if (request === null) {
+					log.info(
+						{ reasons, contract: contract.id, tool: contract.toolName, principal: owner },
+						'contract call too large to ask about'
+					);
+					return { result: TOO_LARGE_TO_CONFIRM };
+				}
+				const pendingCallId = await freeze(values, context, reasons);
 				return {
 					result: {
 						status: 'awaiting_owner',
-						reason: 'consent',
+						reasons,
 						domain: contract.domain,
 						level: contract.level
 					},
-					final:
-						contract.level === 'read'
-							? consent.firstRead(application.name, application.covers)
-							: consent.firstWrite(application.name, application.covers),
-					pendingCallId
+					final: requestText(request),
+					pendingCallId,
+					request
 				};
 			}
 			let path = contract.pathTemplate;
