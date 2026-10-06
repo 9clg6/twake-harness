@@ -218,16 +218,17 @@ export async function decidePendingCall(
 }
 
 // The event by which the owner answered a request already closed, kept so that, delivered again,
-// it is not taken for a message
+// it is not taken for a message. Only the first answer is kept: false for any later one.
 export async function recordAnswerEvent(
 	tx: Tx,
 	owner: string,
 	id: string,
 	eventId: string
-): Promise<void> {
-	await tx.sql`
+): Promise<boolean> {
+	const result = await tx.sql`
 		update pending_calls set answer_event_id = ${eventId}
 		where id = ${id} and owner = ${owner} and answer_event_id is null`;
+	return result.count === 1;
 }
 
 export interface ApprovedCall extends CallSubject {
