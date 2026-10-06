@@ -426,6 +426,34 @@ describe('my consents through the API', () => {
 			'harness_consent_answers_total{domain="notes",level="read",reason="consent",answer="no",via="api",outcome="decided"} 1'
 		);
 	});
+	it('shows through the API the question alone, never the call nor what the model wrote with it', async () => {
+		const script = h.apisix.llm.script;
+		// The model writes a few words with the call, and the call holds what I keep to myself
+		h.apisix.llm.script = (request, index) =>
+			request.messages.at(-1)?.content === 'Search my notes for the reorganisation'
+				? {
+						content: 'Searching your notes for the Q3 reorganisation memo',
+						toolCalls: call('search_notes', { q: 'Q3 reorganisation memo' })
+					}
+				: script(request, index);
+		try {
+			const turn = await c.post<{ answer: string; pending_call: unknown }>('alice', '/v1/chat', {
+				message: 'Search my notes for the reorganisation'
+			});
+			// I read the whole request, as my room would show it
+			expect(turn.body.answer).toContain('"q": "Q3 reorganisation memo"');
+			expect(turn.body.answer).toContain('Searching your notes for the Q3 reorganisation memo');
+			// What waits for my answer shows the question alone
+			const waiting = await c.get('alice', '/v1/pending-calls');
+			for (const shown of [JSON.stringify(turn.body.pending_call), JSON.stringify(waiting.body)]) {
+				expect(shown).toContain(question('notes'));
+				expect(shown).not.toContain('Q3 reorganisation');
+			}
+		} finally {
+			h.apisix.llm.script = script;
+		}
+	});
+
 	it('answers a conflict to my yes on a call a withdrawal closed', async () => {
 		const turn = await c.post<WaitingTurn>('alice', '/v1/chat', {
 			message: 'Find the budget in my wiki'
