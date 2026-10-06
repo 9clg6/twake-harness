@@ -281,9 +281,22 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		displayName,
 		whoami,
 		logs: async () => {
+			// The log stream follows the container and never ends: read what is there, then let go
 			const stream = await container.logs();
 			const chunks: string[] = [];
-			for await (const chunk of stream) chunks.push(String(chunk));
+			await new Promise<void>((resolve) => {
+				const done = (): void => {
+					clearTimeout(timer);
+					stream.destroy();
+					resolve();
+				};
+				const timer = setTimeout(done, 1500);
+				stream.on('data', (chunk: Buffer | string) => {
+					chunks.push(String(chunk));
+				});
+				stream.on('end', done);
+				stream.on('error', done);
+			});
 			return chunks.join('');
 		},
 		stop: async () => {
