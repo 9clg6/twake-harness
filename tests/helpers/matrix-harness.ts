@@ -1,12 +1,14 @@
 import { PassThrough } from 'node:stream';
+import type { FastifyInstance } from 'fastify';
 
 import { startTurnWorker } from '../../src/agent/turn-worker.js';
+import type { JobWorker } from '../../src/jobs/worker.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
-import { resetDatabase, TEST_DATABASE_URL } from './app.js';
+import { resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
@@ -56,10 +58,19 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
-	const app = await buildApp({ config, db, logStream });
-	await app.ready();
-	const agent = app.agent;
-	const worker = startTurnWorker({ db, agent, log: app.log, pollIntervalMs: 100 });
+	// The api role, replicated as in the deployment: each replica has its own turn worker
+	const apps: FastifyInstance[] = [];
+	const workers: JobWorker[] = [];
+	for (let i = 0; i < TEST_REPLICAS; i += 1) {
+		const replica = await buildApp({ config, db, logStream });
+		await replica.ready();
+		apps.push(replica);
+		workers.push(
+			startTurnWorker({ db, agent: replica.agent, log: replica.log, pollIntervalMs: 100 })
+		);
+	}
+	const app = apps[0];
+	if (app === undefined) throw new Error('no replica started');
 	const role = await startMatrixRole({
 		config,
 		db,
@@ -68,7 +79,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		bindAddress: '0.0.0.0',
 		pollIntervalMs: 100
 	});
-	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
+	const api = makeClient({ app, apps, issuer });
 	return {
 		synapse,
 		apisix,
@@ -86,9 +97,9 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 				.filter((line) => line.length > 0)
 				.map((line) => JSON.parse(line) as Record<string, unknown>),
 		close: async () => {
-			await worker.stop();
+			for (const worker of workers) await worker.stop();
 			await role.stop();
-			await app.close();
+			for (const replica of apps) await replica.close();
 			await db.close();
 			await synapse.stop();
 			await apisix.close();

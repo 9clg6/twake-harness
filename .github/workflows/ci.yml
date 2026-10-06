@@ -27,6 +27,11 @@ jobs:
 
   test:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        # Every suite runs with one api replica and with two sharing the database
+        replicas: [1, 2]
     services:
       postgres:
         image: postgres:16
@@ -50,10 +55,11 @@ jobs:
       - run: npm run test:ci
         env:
           TEST_ADMIN_DATABASE_URL: postgres://harness:harness@127.0.0.1:5433/harness
+          TEST_REPLICAS: ${{ matrix.replicas }}
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: test-results
+          name: test-results-${{ matrix.replicas }}
           path: test-results/
 
   chart:
@@ -67,6 +73,7 @@ jobs:
           sudo mv kubeconform /usr/local/bin/
       - run: helm lint charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set networkPolicy.databaseCidrs[0]=10.0.0.1/32 | kubeconform -strict -summary -kubernetes-version 1.31.0
+      - run: helm template agent-api charts/twake-harness --set autoscaling.enabled=true --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k | kubeconform -strict -summary -kubernetes-version 1.31.0
       - run: helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h | kubeconform -strict -summary -kubernetes-version 1.31.0
 
   image:
