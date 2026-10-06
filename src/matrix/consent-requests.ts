@@ -84,8 +84,8 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	}
 
 	// A yes allows the call and a no refuses it. An answer to a request that expired, or that a
-	// newer one superseded, runs nothing, and the owner is told why; one to a request already
-	// decided, a second tap for instance, changes nothing.
+	// newer one superseded, runs nothing, and the owner is told why, once: a second tap on it
+	// changes nothing, as does one on a request already decided.
 	async function settle(
 		room: RequestRoom,
 		request: FoundRequest,
@@ -102,11 +102,12 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			'answer to a closed request'
 		);
 		if (state === 'decided') return;
-		await withPrincipal(db, { id: owner }, (tx) =>
+		const first = await withPrincipal(db, { id: owner }, (tx) =>
 			recordAnswerEvent(tx, owner, pendingCallId, answer.eventId)
 		);
+		if (!first) return;
 		const messages = await fetchMessages(owner);
-		const told = await enqueueJob(db, {
+		await enqueueJob(db, {
 			kind: 'send',
 			payload: {
 				asUserId: room.assistantUserId,
@@ -116,7 +117,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			dedupKey: `closed:${answer.eventId}`,
 			groupKey: `send:${roomId}`
 		});
-		if (told) metrics.answered(request, answer.says, answer.kind, state);
+		metrics.answered(request, answer.says, answer.kind, state);
 	}
 
 	// A yes approves the call at once, so that no later answer nor newer request undoes it, and

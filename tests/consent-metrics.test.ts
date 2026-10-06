@@ -1,8 +1,7 @@
 import { Writable } from 'node:stream';
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { buildApp } from '../src/app.js';
-import { startExpiryScheduler } from '../src/consents/expiry.js';
+import { startWorkerRole } from '../src/worker/role.js';
 import {
 	modelFor,
 	modelUsing,
@@ -240,8 +239,8 @@ describe('an operator sees requests expire', () => {
 	beforeAll(async () => {
 		// A request's lifetime is a second here, and a day by default
 		r = await startConsentRoom({ CONSENT_REQUEST_LIFETIME_MS: '1000' });
-		r.h.apisix.contracts.spec = readCatalog(['mail', 'drive']);
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
+		r.h.apisix.contracts.spec = readCatalog(['mail', 'drive', 'notes']);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		r.h.apisix.contracts.handler = (c) => ({ status: 200, body: { found: c.path } });
 	}, 240_000);
 	afterAll(async () => {
@@ -264,27 +263,50 @@ describe('an operator sees requests expire', () => {
 		expect(total(await api(), REPLAYS, {})).toBe(0);
 	});
 
+	it('counts my late answer once per request, and tells me once, however many times I tap', async () => {
+		r.h.apisix.llm.script = modelUsing('search_notes', { q: 'minutes' });
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'Search my notes for the minutes');
+		const question = await r.nextQuestion(seen);
+		await sleep(1500);
+		const notices = r.saying('This request has expired').length;
+		const read = (): number =>
+			r.h.logLines().filter((line) => line['msg'] === 'answer to a closed request').length;
+		const answers = read();
+		await r.client.react(r.room, question, '✅ YES');
+		await r.nextSaying('This request has expired', notices);
+		await r.client.react(r.room, question, '❌ NO');
+		// The matrix role read my second tap...
+		for (let i = 0; i < 120 && read() < answers + 2; i += 1) await sleep(250);
+		expect(read()).toBe(answers + 2);
+		// ...and whatever it says of it comes before its answer to my next message
+		r.h.apisix.llm.script = () => ({ content: 'Noted.' });
+		const noted = r.saying('Noted.').length;
+		await r.client.sendText(r.room, 'Never mind');
+		await r.nextSaying('Noted.', noted);
+		expect(total(await matrix(), ANSWERS, { ...firstRead('notes'), outcome: 'expired' })).toBe(1);
+		expect(r.saying('This request has expired')).toHaveLength(notices + 1);
+	});
+
 	it('counts on the worker role the requests its hourly pass expires', async () => {
 		r.h.apisix.llm.script = modelUsing('search_drive', { q: 'plan' });
 		const seen = r.questions().length;
 		await r.client.sendText(r.room, 'Find my plan in my drive');
 		await r.nextQuestion(seen);
 		await sleep(1500);
-		// The worker role as it starts: its app serves the metrics, its pass runs at once
-		const worker = await buildApp({
+		// The worker role, started as in production: its pass runs at once
+		const worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker' },
 			db: r.h.db,
 			logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
 		});
-		const expiry = startExpiryScheduler(r.h.db, worker.log, 1000, worker.agent.consentMetrics);
 		try {
 			const scrape = async (): Promise<string[]> => [
-				(await worker.inject({ method: 'GET', url: '/metrics' })).body
+				(await worker.app.inject({ method: 'GET', url: '/metrics' })).body
 			];
 			expect(await scraped(scrape, EXPIRIES, firstRead('drive'), 1)).toBe(1);
 		} finally {
-			expiry.stop();
-			await worker.close();
+			await worker.stop();
 		}
 		expect(total(await matrix(), EXPIRIES, { domain: 'drive' })).toBe(0);
 	});

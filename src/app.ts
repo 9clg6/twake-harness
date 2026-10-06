@@ -13,6 +13,7 @@ import { findAssistant } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
+import { makeConsentMetrics, type ConsentMetrics } from './consents/metrics.js';
 import { withPrincipal, type Db } from './db/client.js';
 import { getMessages } from './i18n/messages.js';
 import { enqueueJob } from './jobs/queue.js';
@@ -52,6 +53,9 @@ export interface AppOptions {
 	readonly agent?: AgentService;
 	// The present as the agent reads it; the system clock unless a test sets its own
 	readonly clock?: Clock;
+	// The consent counters its metrics serve, which the role brings when it counts some of its
+	// own, such as the worker role's expiries; new ones otherwise
+	readonly consentMetrics?: ConsentMetrics;
 }
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
@@ -124,12 +128,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		requestIdHeader: false
 	});
 
+	const consentMetrics = options.consentMetrics ?? makeConsentMetrics();
 	const agent =
 		options.agent ??
 		makeAgentService({
 			config,
 			db,
 			log: app.log,
+			consentMetrics,
 			...(options.llm === undefined ? {} : { llm: options.llm }),
 			...(options.clock === undefined ? {} : { clock: options.clock })
 		});
@@ -234,7 +240,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			),
 			'# TYPE harness_assistants_held gauge',
 			`harness_assistants_held ${assistants[0]?.n ?? 0}`,
-			...agent.consentMetrics.exposition()
+			...consentMetrics.exposition()
 		];
 		return reply.type('text/plain; version=0.0.4').send(`${lines.join('\n')}\n`);
 	});

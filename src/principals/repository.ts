@@ -1,4 +1,4 @@
-import { readJsonColumn, type Tx } from '../db/client.js';
+import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { Principal } from './principal.js';
 
 export const DEFAULT_ACTIONS: readonly string[] = [
@@ -20,10 +20,6 @@ export interface PrincipalRecord {
 interface PrincipalRow {
 	id: string;
 	actions: unknown;
-}
-
-function isStringArray(value: unknown): value is string[] {
-	return Array.isArray(value) && value.every((item) => typeof item === 'string');
 }
 
 function normalizePrincipalRow(row: PrincipalRow): PrincipalRecord {

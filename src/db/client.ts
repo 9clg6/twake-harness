@@ -45,3 +45,8 @@ export function readJsonColumn(value: unknown): unknown {
 		return value;
 	}
 }
+
+// A json column read back that holds a list of strings, such as a principal's rights
+export function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}

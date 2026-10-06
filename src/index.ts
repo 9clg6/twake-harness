@@ -1,33 +1,22 @@
 import { startTurnWorker } from './agent/turn-worker.js';
 import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
-import { startExpiryScheduler } from './consents/expiry.js';
-import { startCurationScheduler } from './curation/curation.js';
 import { makeDb } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
 import { startMatrixRole } from './matrix/role.js';
+import { startWorkerRole } from './worker/role.js';
 
 const config = loadConfig(process.env);
 const db = makeDb(config.databaseUrl);
 const report = await runMigrations(db);
 
 if (config.role === 'worker') {
-	// Serves its health check; the API routes stay behind APISIX, which never routes here
-	const app = await buildApp({ config, db });
+	const worker = await startWorkerRole({ config, db });
+	const { app } = worker;
 	app.log.info({ role: config.role, applied: report.applied }, 'harness starting');
-	const scheduler = startCurationScheduler(db, app.log, config.curation.intervalMs);
-	// Its expiries are counted on the metrics its app serves
-	const expiry = startExpiryScheduler(
-		db,
-		app.log,
-		config.consent.requestLifetimeMs,
-		app.agent.consentMetrics
-	);
 	const stop = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
-		scheduler.stop();
-		expiry.stop();
-		await app.close();
+		await worker.stop();
 		await db.close();
 		process.exit(0);
 	};
