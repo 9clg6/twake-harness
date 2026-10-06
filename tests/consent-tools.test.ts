@@ -285,6 +285,19 @@ describe('a withdrawal holds at once on every replica', () => {
 		});
 	});
 
+	it('refuses to withdraw an application the catalog does not offer, naming those it does', async () => {
+		expect(await one.tool('alice', 'consents_withdraw', { domain: 'email' })).toEqual({
+			status: 200,
+			body: { error: 'unknown application', applications: ['mail'] }
+		});
+		// What I allowed in an application the catalog no longer offers is still mine to withdraw
+		await grantConsent(h.db, 'alice', 'photos', 'read');
+		expect(await one.tool('alice', 'consents_withdraw', { domain: 'photos' })).toEqual({
+			status: 200,
+			body: { domain: 'photos', withdrawn: ['read'], still_allowed: [] }
+		});
+	});
+
 	it('lets every principal that can chat withdraw a consent, and no other', async () => {
 		// Two principals as they stood before withdrawing had its own right: one that can chat,
 		// one whose rights were all revoked

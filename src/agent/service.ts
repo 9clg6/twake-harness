@@ -35,8 +35,8 @@ import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
 	consentsListTool,
-	consentsWithdrawTool,
 	languageTool,
+	makeConsentsWithdrawTool,
 	makeToolRegistry,
 	memoryTool,
 	runTool,
@@ -201,7 +201,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			skillsReadTool,
 			skillsProposeTool,
 			consentsListTool,
-			consentsWithdrawTool
+			makeConsentsWithdrawTool({
+				// Each application once, as consents_list names it
+				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort()
+			})
 		],
 		() => contracts.tools
 	);

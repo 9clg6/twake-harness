@@ -457,65 +457,81 @@ const consentsWithdrawArgs = z.object({
 	level: z.literal('write').optional()
 });
 
+export interface ConsentsWithdrawDeps {
+	// The applications the catalog offers now, as consents_list names them
+	readonly applications: () => readonly string[];
+}
+
 // The owner tells their assistant to stop using an application, or only to stop writing there:
 // the next call there asks them again. The model can take an access back, never give one.
-export const consentsWithdrawTool: Tool = {
-	definition: {
-		type: 'function',
-		function: {
-			name: 'consents_withdraw',
-			description:
-				'Withdraw what the user allowed you in one of their applications, when they tell you to stop using it, or only to stop writing there. The next time you need it, the harness asks them again. You can never grant an access.',
-			parameters: {
-				type: 'object',
-				properties: {
-					domain: {
-						type: 'string',
-						description: 'The application, as consents_list names it, such as mail'
+export function makeConsentsWithdrawTool(deps: ConsentsWithdrawDeps): Tool {
+	return {
+		definition: {
+			type: 'function',
+			function: {
+				name: 'consents_withdraw',
+				description:
+					'Withdraw what the user allowed you in one of their applications, when they tell you to stop using it, or only to stop writing there. The next time you need it, the harness asks them again. You can never grant an access.',
+				parameters: {
+					type: 'object',
+					properties: {
+						domain: {
+							type: 'string',
+							description: 'The application, as consents_list names it, such as mail'
+						},
+						level: {
+							type: 'string',
+							enum: ['write'],
+							description:
+								'write to withdraw only writing there and keep reading; leave it out to withdraw the whole application'
+						}
 					},
-					level: {
-						type: 'string',
-						enum: ['write'],
-						description:
-							'write to withdraw only writing there and keep reading; leave it out to withdraw the whole application'
-					}
-				},
-				required: ['domain'],
-				additionalProperties: false
+					required: ['domain'],
+					additionalProperties: false
+				}
 			}
-		}
-	},
-	argumentKeys: ['domain', 'level'],
-	requiredAction: WITHDRAW_OWN_CONSENTS,
-	run: async (args, context) => {
-		const owner = context.principalId;
-		if (owner === ORGANIZATION_PRINCIPAL) return { result: ACCESS_DENIED, denied: true };
-		const parsed = consentsWithdrawArgs.safeParse(args);
-		if (!parsed.success) {
-			return { result: { error: 'domain is required, and level can only be write' } };
-		}
-		const { domain, level } = parsed.data;
-		const { withdrawn, kept } = await withPrincipal(context.db, { id: owner }, async (tx) => ({
-			withdrawn: await withdrawConsents(
-				tx,
-				owner,
-				domain,
-				level === undefined ? ['read', 'write'] : [level]
-			),
-			kept: await listConsents(tx, owner)
-		}));
-		if (withdrawn.length > 0) {
-			context.log.info({ principal: owner, domain, levels: withdrawn }, 'consent withdrawn');
-		}
-		return {
-			result: {
-				domain,
-				withdrawn,
-				still_allowed: kept.filter((c) => c.domain === domain).map((c) => c.level)
+		},
+		argumentKeys: ['domain', 'level'],
+		requiredAction: WITHDRAW_OWN_CONSENTS,
+		run: async (args, context) => {
+			const owner = context.principalId;
+			if (owner === ORGANIZATION_PRINCIPAL) return { result: ACCESS_DENIED, denied: true };
+			const parsed = consentsWithdrawArgs.safeParse(args);
+			if (!parsed.success) {
+				return { result: { error: 'domain is required, and level can only be write' } };
 			}
-		};
-	}
-};
+			const { domain, level } = parsed.data;
+			const applications = deps.applications();
+			const done = await withPrincipal(context.db, { id: owner }, async (tx) => {
+				// A name the catalog does not offer withdraws nothing, and must not read as done; an
+				// application the owner allowed before the catalog dropped it is still theirs to close
+				const allowed = await listConsents(tx, owner);
+				if (!applications.includes(domain) && !allowed.some((c) => c.domain === domain)) {
+					return null;
+				}
+				const withdrawn = await withdrawConsents(
+					tx,
+					owner,
+					domain,
+					level === undefined ? ['read', 'write'] : [level]
+				);
+				return { withdrawn, kept: await listConsents(tx, owner) };
+			});
+			if (done === null) return { result: { error: 'unknown application', applications } };
+			const { withdrawn, kept } = done;
+			if (withdrawn.length > 0) {
+				context.log.info({ principal: owner, domain, levels: withdrawn }, 'consent withdrawn');
+			}
+			return {
+				result: {
+					domain,
+					withdrawn,
+					still_allowed: kept.filter((c) => c.domain === domain).map((c) => c.level)
+				}
+			};
+		}
+	};
+}
 
 const sessionSearchArgs = z.object({ query: z.string().min(1).max(200) });
 
