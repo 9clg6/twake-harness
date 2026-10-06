@@ -15,7 +15,7 @@ import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from '
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
-import { freePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
+import { reservePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
 
 export interface MatrixTestHarness {
 	// Stops and starts the matrix role again on the same database and encryption stores
@@ -45,7 +45,9 @@ export async function startMatrixHarness(
 	options: MatrixStartOptions = {}
 ): Promise<MatrixTestHarness> {
 	await ensureAppRole(false);
-	const port = await freePort();
+	// Held while Synapse starts, so its mapped port cannot land on the role's
+	const reserved = await reservePort();
+	const port = reserved.port;
 	const asToken = 'as-token-test';
 	const hsToken = 'hs-token-test';
 	const apisix = await startFakeApisix();
@@ -96,6 +98,7 @@ export async function startMatrixHarness(
 			bindAddress: '0.0.0.0',
 			pollIntervalMs: 100
 		});
+	await reserved.release();
 	let role = await startRole();
 	const api = makeClient({ app, issuer } as Parameters<typeof makeClient>[0]);
 	// On a CI runner the only window into a failed Matrix scenario is this summary
