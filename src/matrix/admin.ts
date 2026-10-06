@@ -8,6 +8,10 @@ export interface MatrixAdmin {
 	createDirectRoom(asUserId: string, inviteUserId: string): Promise<string>;
 	sendText(asUserId: string, roomId: string, text: string): Promise<void>;
 	leaveRoom(asUserId: string, roomId: string): Promise<void>;
+	// The cross-signing keys of an assistant, uploaded as the application service, which may
+	// replace an identity the user already has: the device's own token would need interactive
+	// authentication, which a user without a password cannot give
+	uploadSigningKeys(asUserId: string, keys: unknown): Promise<void>;
 }
 
 export interface MatrixAdminOptions {
@@ -94,6 +98,16 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 			if (response.status === 200) return;
 			if (response.body['errcode'] === 'M_USER_IN_USE') return;
 			fail('register', response);
+		},
+		async uploadSigningKeys(asUserId, keys) {
+			const response = await call(
+				'POST',
+				'/keys/device_signing/upload',
+				keys,
+				options.asToken,
+				asUserId
+			);
+			if (response.status !== 200) fail('upload of the cross-signing keys', response);
 		},
 		async setDisplayName(userId, name) {
 			const response = await call(

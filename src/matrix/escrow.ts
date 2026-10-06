@@ -41,61 +41,24 @@ function requireSecrets(owner: string, secrets: EscrowSecrets): Record<SecretNam
 	return found as Record<SecretName, string>;
 }
 
-// The master key the homeserver holds for the assistant, if it holds one
-async function findMasterPublicKey(intent: Intent): Promise<string | null> {
-	const userId = intent.userId;
-	const response = (await intent.underlyingClient.doRequest(
-		'POST',
-		'/_matrix/client/v3/keys/query',
-		null,
-		{ device_keys: { [userId]: [] } }
-	)) as { master_keys?: Record<string, { keys?: Record<string, string> }> };
-	return Object.values(response.master_keys?.[userId]?.keys ?? {})[0] ?? null;
-}
-
-// Escrows an assistant's identity once: its cross-signing keys are uploaded to the homeserver, a
-// key backup is opened there, and the private parts go to OpenBao; the database keeps the path,
-// the public key and the backup version only.
+// Escrows the identity the assistant holds, which ensureCrossSigning set up: a key backup is
+// opened on the homeserver, and the private parts go to OpenBao; the database keeps the path, the
+// public key and the backup version only. An escrow describes one identity: a replaced identity
+// is escrowed again.
 export async function ensureEscrow(
 	deps: EscrowDeps,
 	intent: Intent,
-	owner: string
+	owner: string,
+	masterPublicKey: string
 ): Promise<'kept' | 'written'> {
 	const { db, store, log } = deps;
 	const existing = await withPrincipal(db, { id: owner }, (tx) => findEscrow(tx, owner));
-	if (existing !== null) return 'kept';
+	if (existing !== null && existing.masterPublicKey === masterPublicKey) return 'kept';
 	const machine = machineOf(intent);
 	const client = intent.underlyingClient;
-	// The identity is uploaded whenever the homeserver lacks it, the local keys being reused
-	if ((await findMasterPublicKey(intent)) === null) {
-		const requests = await step('bootstrapping cross-signing', () =>
-			machine.bootstrapCrossSigning(false)
-		);
-		if (requests.uploadKeysReq !== undefined && requests.uploadKeysReq !== null) {
-			await sendRequest(
-				intent,
-				machine,
-				'POST',
-				'/_matrix/client/v3/keys/upload',
-				requests.uploadKeysReq
-			);
-		}
-		// A first upload of cross-signing keys needs no interactive authentication
-		await client.doRequest(
-			'POST',
-			'/_matrix/client/v3/keys/device_signing/upload',
-			null,
-			JSON.parse(requests.uploadSigningKeysReq)
-		);
-		if (requests.uploadSignaturesReq !== undefined && requests.uploadSignaturesReq !== null) {
-			await sendRequest(
-				intent,
-				machine,
-				'POST',
-				'/_matrix/client/v3/keys/signatures/upload',
-				requests.uploadSignaturesReq
-			);
-		}
+	const status = await step('reading the cross-signing status', () => machine.crossSigningStatus());
+	if (!status.hasMaster || !status.hasSelfSigning) {
+		throw new Error('the assistant holds no cross-signing identity to escrow');
 	}
 	const backupKey = BackupDecryptionKey.createRandomKey();
 	const publicKey = backupKey.megolmV1PublicKey.publicKeyBase64;
@@ -114,9 +77,6 @@ export async function ensureEscrow(
 	const items = await step('exporting the secrets', () =>
 		machine.exportSecretsForSecretStorage(secretKey)
 	);
-	const masterPublicKey = await findMasterPublicKey(intent);
-	if (masterPublicKey === null)
-		throw new Error('the homeserver holds no master key for the assistant');
 	await store.write(owner, {
 		secret_storage_key: secretKey.toBase58(),
 		secret_storage_key_event_type: secretKey.eventType(),
