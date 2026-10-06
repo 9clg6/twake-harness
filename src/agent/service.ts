@@ -19,6 +19,7 @@ import {
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
+import { checkInvitation, isInvitationEvent, type ToolRunner } from './invitation.js';
 import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
@@ -26,6 +27,7 @@ import {
 	clarifyTool,
 	makeToolRegistry,
 	memoryTool,
+	runTool,
 	sessionSearchTool,
 	sessionsListTool,
 	sessionsReadTool,
@@ -33,6 +35,7 @@ import {
 	skillsProposeTool,
 	skillsReadTool,
 	skillsSearchTool,
+	type ToolContext,
 	type ToolRegistry
 } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
@@ -61,6 +64,8 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
+	// The event a dispatcher posted, for a turn of origin event: its id and CloudEvent type
+	readonly event?: { readonly id: string; readonly type: string };
 }
 
 export type OwnerTurnResult =
@@ -127,6 +132,34 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const gate = makeTurnGate();
 	const admission = makeAdmission(config, db, deps.log);
 
+	// What the model is told. An invitation an event brings is read and its slot checked by the
+	// harness before the model speaks, through the same tools and context as the model's calls,
+	// and handed to it as data; any other message is told as it is.
+	async function messageFor(
+		input: OwnerTurnInput,
+		context: ToolContext,
+		log: FastifyBaseLogger
+	): Promise<string> {
+		const event = input.event;
+		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
+			return input.message;
+		}
+		const run: ToolRunner = async (name, args) => {
+			const tool = tools.find(name);
+			return tool === null ? null : runTool(tool, args, context);
+		};
+		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
+		log.info(
+			{
+				eventStatus: check.eventStatus,
+				freeBusyStatus: check.freeBusyStatus,
+				reason: check.reason
+			},
+			'invitation checked'
+		);
+		return messages.events.invitation(event.id, check.data);
+	}
+
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
 		const { principal } = input;
 		// Admitted before anything else runs; the slot is held until the turn ends
@@ -140,7 +173,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	}
 
 	async function runAdmittedTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
-		const { principal, target, message } = input;
+		const { principal, target } = input;
 		{
 			// A short transaction settles rights and the session; the model call runs outside it.
 			const opened = await withPrincipal(db, principal, async (tx) => {
@@ -169,7 +202,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				? await withPrincipal(db, principal, (tx) => listSkills(tx))
 				: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
-			log.info({ messageLength: message.length }, 'turn started');
+			const context: ToolContext = {
+				principalId: principal.id,
+				actions,
+				withheldActions: withheld,
+				db,
+				...(input.correlationId === undefined ? {} : { correlationId: input.correlationId })
+			};
+			const told = await messageFor(input, context, log);
+			log.info({ messageLength: told.length }, 'turn started');
 			// Read at the start of every turn, never kept: a session can span days
 			const moment = describeMoment(clock.now(), config.timeZone, config.locale);
 			try {
@@ -191,14 +232,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							nudgeInterval: config.turn.memoryNudgeInterval
 						}),
 						history: session.messages,
-						message,
-						context: {
-							principalId: principal.id,
-							actions,
-							withheldActions: withheld,
-							db,
-							...(input.correlationId === undefined ? {} : { correlationId: input.correlationId })
-						}
+						message: told,
+						context
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>

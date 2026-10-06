@@ -31,10 +31,48 @@ function pad(value: number): string {
 	return String(value).padStart(2, '0');
 }
 
-function formatOffset(minutes: number): string {
+// An offset in minutes as RFC 3339 writes it: "+02:00", "-04:00", never Z
+export function formatOffset(minutes: number): string {
 	const sign = minutes < 0 ? '-' : '+';
 	const absolute = Math.abs(minutes);
 	return `${sign}${pad(Math.floor(absolute / 60))}:${pad(absolute % 60)}`;
+}
+
+// The wall clock of a zone at an instant, as the parts a person there reads
+function wallClock(
+	instant: Date,
+	timeZone: string
+): (type: Intl.DateTimeFormatPartTypes) => string {
+	const parts = new Map(
+		new Intl.DateTimeFormat('en-US', {
+			timeZone,
+			year: 'numeric',
+			month: '2-digit',
+			day: '2-digit',
+			hour: '2-digit',
+			minute: '2-digit',
+			second: '2-digit',
+			hourCycle: 'h23'
+		})
+			.formatToParts(instant)
+			.map((part) => [part.type, part.value])
+	);
+	return (type) => parts.get(type) ?? '00';
+}
+
+// The zone's offset at that instant, in minutes, daylight saving time included, whatever the
+// server's own zone: the distance from the instant to the zone's wall clock then
+export function offsetMinutesAt(instant: Date, timeZone: string): number {
+	const field = wallClock(instant, timeZone);
+	const wall = Date.UTC(
+		Number(field('year')),
+		Number(field('month')) - 1,
+		Number(field('day')),
+		Number(field('hour')),
+		Number(field('minute')),
+		Number(field('second'))
+	);
+	return Math.round((wall - Math.floor(instant.getTime() / 1000) * 1000) / 60_000);
 }
 
 export function describeMoment(instant: Date, timeZone: string, locale: Locale): Moment {
@@ -51,32 +89,7 @@ export function describeMoment(instant: Date, timeZone: string, locale: Locale):
 		minute: '2-digit',
 		hourCycle: 'h23'
 	}).format(instant);
-	// The wall clock of the zone at this instant; its distance to the instant is the zone's offset
-	// then, daylight saving time included, whatever the server's own zone
-	const parts = new Map(
-		new Intl.DateTimeFormat('en-US', {
-			timeZone,
-			year: 'numeric',
-			month: '2-digit',
-			day: '2-digit',
-			hour: '2-digit',
-			minute: '2-digit',
-			second: '2-digit',
-			hourCycle: 'h23'
-		})
-			.formatToParts(instant)
-			.map((part) => [part.type, part.value])
-	);
-	const field = (type: Intl.DateTimeFormatPartTypes): string => parts.get(type) ?? '00';
-	const wall = Date.UTC(
-		Number(field('year')),
-		Number(field('month')) - 1,
-		Number(field('day')),
-		Number(field('hour')),
-		Number(field('minute')),
-		Number(field('second'))
-	);
-	const offsetMinutes = Math.round((wall - Math.floor(instant.getTime() / 1000) * 1000) / 60_000);
-	const iso = `${field('year')}-${field('month')}-${field('day')}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutes)}`;
+	const field = wallClock(instant, timeZone);
+	const iso = `${field('year')}-${field('month')}-${field('day')}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
 	return { words: `${date}, ${time}`, iso, timeZone };
 }
