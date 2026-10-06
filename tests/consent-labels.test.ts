@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 
-const APPLICATIONS = ['mail', 'drive', 'photos', 'tasks', 'notes'];
+const APPLICATIONS = ['mail', 'drive', 'photos', 'tasks', 'notes', 'wiki', 'boards'];
 
 // How the contracts service names its applications to their owners. Mail is named apart in each
 // language, to tell which one the owner reads; Drive is described in English only, Photos by its
@@ -36,6 +36,9 @@ const READS: Record<string, string> = {
 	'Show my photos': 'search_photos',
 	'Show my tasks': 'search_tasks',
 	'Search my notes': 'search_notes',
+	'Find the plan in my drive': 'search_drive',
+	'Open my wiki': 'search_wiki',
+	'Show my boards': 'search_boards',
 	'Cherche le budget dans mes mails': 'search_mail',
 	'Cherche le plan dans mon drive': 'search_drive'
 };
@@ -58,6 +61,12 @@ const HOW_TO_ANSWER = {
 	fr: "Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
 };
 
+// A question as Alice's client receives it: its plain body, and the HTML Twake Chat displays, in
+// which only the harness's own lines break
+function shown(...lines: string[]): { body: string; html: string } {
+	return { body: lines.join('\n'), html: lines.join('<br />\n') };
+}
+
 describe('the question names the application in plain words', () => {
 	let r: ConsentRoom;
 
@@ -67,12 +76,16 @@ describe('the question names the application in plain words', () => {
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(APPLICATIONS.length);
 	}
 
-	// What the harness asks after Alice's message, as her client shows it
-	async function askedAfter(message: string): Promise<string> {
-		const seen = r.questions().length;
+	// What the harness asks after Alice's message, as her client receives it
+	async function askedAfter(
+		message: string,
+		opening = 'This is the first time'
+	): Promise<{ body: string; html: unknown }> {
+		const seen = r.saying(opening).length;
 		await r.client.sendText(r.room, message);
-		await r.nextQuestion(seen);
-		return r.questions().at(-1)?.body ?? '';
+		await r.nextSaying(opening, seen);
+		const question = r.saying(opening).at(seen);
+		return { body: question?.body ?? '', html: question?.content['formatted_body'] };
 	}
 
 	// What the harness asks Bob, who talks to the API in the deployment's language
@@ -95,41 +108,41 @@ describe('the question names the application in plain words', () => {
 	});
 
 	it('names the application and says what reading covers there', async () => {
-		expect(await askedAfter('Find the budget in my mail')).toBe(
-			[
+		expect(await askedAfter('Find the budget in my mail')).toEqual(
+			shown(
 				'This is the first time I need to read your data in Twake Mail.',
 				'Reading: list, search and read your mail',
 				HOW_TO_ANSWER.en
-			].join('\n')
+			)
 		);
 		// An application the catalog names without saying what reading covers there
-		expect(await askedAfter('Show my photos')).toBe(
-			`This is the first time I need to read your data in Twake Photos. ${HOW_TO_ANSWER.en}`
+		expect(await askedAfter('Show my photos')).toEqual(
+			shown(`This is the first time I need to read your data in Twake Photos. ${HOW_TO_ANSWER.en}`)
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
 	it('names an application the catalog does not describe by its id', async () => {
-		expect(await askedAfter('Search my notes')).toBe(
-			`This is the first time I need to read your data in notes. ${HOW_TO_ANSWER.en}`
+		expect(await askedAfter('Search my notes')).toEqual(
+			shown(`This is the first time I need to read your data in notes. ${HOW_TO_ANSWER.en}`)
 		);
 	});
 
 	it('takes up the words a refresh of the catalog brings, without a restart', async () => {
-		expect(await askedAfter('Show my tasks')).toBe(
-			`This is the first time I need to read your data in tasks. ${HOW_TO_ANSWER.en}`
+		expect(await askedAfter('Show my tasks')).toEqual(
+			shown(`This is the first time I need to read your data in tasks. ${HOW_TO_ANSWER.en}`)
 		);
 		await serve({ ...DESCRIBED, tasks: TASKS });
-		const described = [
+		const described = shown(
 			'This is the first time I need to read your data in Twake Tasks.',
 			'Reading: list and read your tasks and boards',
 			HOW_TO_ANSWER.en
-		].join('\n');
-		expect(await askedAfter('Show my tasks')).toBe(described);
+		);
+		expect(await askedAfter('Show my tasks')).toEqual(described);
 		// A refresh that fails keeps the catalog as it was, its words included
 		r.h.apisix.contracts.spec = null;
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(APPLICATIONS.length);
-		expect(await askedAfter('Show my tasks')).toBe(described);
+		expect(await askedAfter('Show my tasks')).toEqual(described);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
@@ -137,7 +150,7 @@ describe('the question names the application in plain words', () => {
 		await serve({
 			...DESCRIBED,
 			photos: { name: { en: 'Twake Pictures' } },
-			notes: { name: { en: 'Twake\nNotes' } },
+			notes: { name: { en: 'Twake Notes'.padEnd(65, '!') } },
 			tasks: { name: 'Twake Tasks', read: TASKS.read }
 		});
 		const ignored = r.h
@@ -173,26 +186,70 @@ describe('the question names the application in plain words', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
+	it('keeps markup, links and line breaks out of its question', async () => {
+		const logged = r.h.logLines().length;
+		await serve({
+			mail: { name: { en: '[Twake Mail](https://evil.example/login)' } },
+			drive: { name: { en: 'Twake Drive' }, read: { en: 'browse <b>all</b> your files' } },
+			photos: { name: { en: 'Twake Photos' }, read: { en: 'see your albums on photos.example' } },
+			tasks: { name: { en: 'Twake Tasks' }, read: { en: 'write to support@twake.app' } },
+			notes: { name: { en: 'Twake\u2028Notes' } },
+			wiki: { name: { en: 'Twake Wiki' }, read: { en: 'read your pages\u2029and their history' } },
+			boards: { name: { en: 'Twake\u0085Boards' } }
+		});
+		const asked: Record<string, string> = {
+			mail: 'Find the budget in my mail',
+			drive: 'Find the plan in my drive',
+			photos: 'Show my photos',
+			tasks: 'Show my tasks',
+			notes: 'Search my notes',
+			wiki: 'Open my wiki',
+			boards: 'Show my boards'
+		};
+		// Each description is ignored whole, and Twake Chat shows the harness's sentence alone
+		for (const [domain, message] of Object.entries(asked)) {
+			expect(await askedAfter(message)).toEqual(
+				shown(`This is the first time I need to read your data in ${domain}. ${HOW_TO_ANSWER.en}`)
+			);
+		}
+		const problems = Object.fromEntries(
+			r.h
+				.logLines()
+				.slice(logged)
+				.filter((line) => line['msg'] === 'domain description ignored, named by its id')
+				.map((line) => [line['domain'], line['problem']])
+		);
+		expect(problems).toEqual({
+			mail: expect.stringContaining('must hold no markup character'),
+			drive: expect.stringContaining('must hold no markup character'),
+			photos: expect.stringContaining('must hold no link, address or domain name'),
+			tasks: expect.stringContaining('must hold no link, address or domain name'),
+			notes: expect.stringContaining('must be one line'),
+			wiki: expect.stringContaining('must be one line'),
+			boards: expect.stringContaining('must be one line')
+		});
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
 	it('asks in my language, with no word of another', async () => {
 		await serve(DESCRIBED);
 		const told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'Parle-moi en français');
 		expect(await r.nextSaying('Tool:', told)).toContain('"language":"fr"');
 
-		let asked = r.saying("C'est la première fois").length;
-		await r.client.sendText(r.room, 'Cherche le budget dans mes mails');
-		expect(await r.nextSaying("C'est la première fois", asked)).toBe(
-			[
+		const opening = "C'est la première fois";
+		expect(await askedAfter('Cherche le budget dans mes mails', opening)).toEqual(
+			shown(
 				"C'est la première fois que j'ai besoin de lire tes données dans Messagerie Twake.",
 				'Lecture : lister, chercher et lire tes mails',
 				HOW_TO_ANSWER.fr
-			].join('\n')
+			)
 		);
 		// Drive is described in English only: a French question names it by its id
-		asked = r.saying("C'est la première fois").length;
-		await r.client.sendText(r.room, 'Cherche le plan dans mon drive');
-		expect(await r.nextSaying("C'est la première fois", asked)).toBe(
-			`C'est la première fois que j'ai besoin de lire tes données dans drive. ${HOW_TO_ANSWER.fr}`
+		expect(await askedAfter('Cherche le plan dans mon drive', opening)).toEqual(
+			shown(
+				`C'est la première fois que j'ai besoin de lire tes données dans drive. ${HOW_TO_ANSWER.fr}`
+			)
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});

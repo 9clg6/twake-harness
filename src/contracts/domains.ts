@@ -29,27 +29,45 @@ export interface DescribedDomains {
 }
 
 // What an owner reads of an application in a question about one level: its name, and what the
-// level covers there when the catalog says
+// level covers there when the catalog says, both escaped for the Markdown the question is
 export interface DomainLabel {
 	readonly name: string;
 	readonly covers: string | null;
 }
 
-// A question shows these texts inside its own sentences, so each is one line of bounded length:
-// nothing the catalog writes can add lines that read as the harness's own
-function oneLine(max: number): z.ZodString {
+// A question is the harness's own text, which the chat renders as Markdown with HTML
+// (makeRichText): what the catalog writes there must read as plain words on one line. These are
+// what would read as anything else: a line or paragraph break, or any control character; a
+// character Markdown or HTML gives a meaning to in the middle of a line; and anything that looks
+// like a link, an address or a domain name, which a chat client may also link on its own.
+const BREAK = /[\p{Cc}\p{Zl}\p{Zp}]/u;
+const MARKUP = /[\\`*_~[\]<>&]/;
+const LINK = /[a-z][a-z0-9+.-]*:\S|\S@\S|[\p{L}\p{N}]\.[\p{L}\p{N}]/iu;
+
+function plainWords(max: number): z.ZodString {
 	return z
 		.string()
 		.trim()
 		.min(1)
 		.max(max)
-		.regex(/^[^\r\n]*$/, 'must be one line');
+		.refine((text) => !BREAK.test(text), 'must be one line, without control characters')
+		.refine((text) => !MARKUP.test(text), 'must hold no markup character')
+		.refine((text) => !LINK.test(text), 'must hold no link, address or domain name');
 }
 
-const coversSchema = z.record(z.string(), oneLine(200));
+// What goes into a question is escaped once more, should anything get past the parse. An
+// underscore inside a word is never emphasis, so a domain's id such as search_emails stays as it
+// is written.
+function escaped(text: string): string {
+	return text
+		.replace(/[\p{Cc}\p{Zl}\p{Zp}]/gu, ' ')
+		.replace(/[\\`*~[\]<>&]|(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu, (markup) => `\\${markup}`);
+}
+
+const coversSchema = z.record(z.string(), plainWords(200));
 
 const descriptionSchema = z.object({
-	name: z.record(z.string(), oneLine(64)),
+	name: z.record(z.string(), plainWords(64)),
 	read: coversSchema.optional(),
 	write: coversSchema.optional()
 });
@@ -96,6 +114,8 @@ export function labelOf(
 ): DomainLabel {
 	const description = descriptions.get(domain);
 	const name = description?.name[locale];
-	if (description === undefined || name === undefined) return { name: domain, covers: null };
-	return { name, covers: description[level]?.[locale] ?? null };
+	if (description === undefined || name === undefined)
+		return { name: escaped(domain), covers: null };
+	const covers = description[level]?.[locale];
+	return { name: escaped(name), covers: covers === undefined ? null : escaped(covers) };
 }
