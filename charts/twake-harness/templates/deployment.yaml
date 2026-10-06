@@ -99,6 +99,10 @@ spec:
               value: {{ $value | int64 | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.config.turnHistoryMaxChars }}
+            - name: TURN_HISTORY_MAX_CHARS
+              value: {{ . | int64 | quote }}
+            {{- end }}
             - name: ORG_AGENT_ENABLED
               value: {{ .Values.config.orgAgentEnabled | quote }}
             - name: ORG_AGENT_LOCALPART
