@@ -2,7 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import type { Config } from '../config.js';
-import { hasConsent, insertPendingCall } from '../consents/repository.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
+import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
 import { withPrincipal } from '../db/client.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
@@ -15,6 +16,8 @@ export interface ContractToolDeps {
 	readonly fetchImpl?: typeof fetch;
 	// The path of the document's server, from readServer: empty when the paths are absolute
 	readonly serverPath?: string;
+	// Where the api role counts the calls that wait for their owner
+	readonly consentMetrics: ConsentMetrics;
 }
 
 // Joins path segments under the gateway's address, keeping the path that address may carry: no
@@ -85,19 +88,21 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					hasConsent(tx, owner, contract.domain, contract.level)
 				))
 			) {
+				const call: PendingCallInput = {
+					owner,
+					tool: contract.toolName,
+					contract: contract.id,
+					domain: contract.domain,
+					level: contract.level,
+					reasons: ['consent'],
+					arguments: values,
+					correlationId: context.correlationId ?? null,
+					origin: context.origin ?? 'owner'
+				};
 				const pendingCallId = await withPrincipal(context.db, { id: owner }, (tx) =>
-					insertPendingCall(tx, {
-						owner,
-						tool: contract.toolName,
-						contract: contract.id,
-						domain: contract.domain,
-						level: contract.level,
-						reasons: ['consent'],
-						arguments: values,
-						correlationId: context.correlationId ?? null,
-						origin: context.origin ?? 'owner'
-					})
+					insertPendingCall(tx, call)
 				);
+				deps.consentMetrics.requested(call);
 				log.info(
 					{
 						pendingCallId,
