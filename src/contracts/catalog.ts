@@ -3,6 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config.js';
 import type { Tool } from '../agent/tools.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
+import { readDomains } from './domains.js';
 import { parseContracts, readServer, type ContractDefinition } from './openapi.js';
 import { makeContractTool } from './tools.js';
 
@@ -30,6 +31,8 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 	let timer: NodeJS.Timeout | null = null;
 	// The foreign hosts a document named, warned about once each
 	const warnedOrigins = new Set<string>();
+	// The descriptions of applications left out for their shape, warned about once each
+	const warnedDescriptions = new Set<string>();
 
 	async function load(): Promise<number> {
 		const base = config.apisix.baseUrl.href.endsWith('/')
@@ -57,6 +60,15 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 					'contracts server is another host, calls stay on the gateway'
 				);
 			}
+			// How the questions name the applications: an entry of another shape is left out, and
+			// its application named by its id, without failing the catalog
+			const domains = readDomains(document);
+			for (const { domain, problem } of domains.ignored) {
+				const key = `${domain ?? ''}\n${problem}`;
+				if (warnedDescriptions.has(key)) continue;
+				warnedDescriptions.add(key);
+				log.warn({ domain, problem }, 'domain description ignored, named by its id');
+			}
 			contracts = parsed;
 			tools = parsed.map((contract) =>
 				makeContractTool(contract, {
@@ -64,7 +76,8 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 					log,
 					fetchImpl,
 					serverPath: server.path,
-					consentMetrics
+					consentMetrics,
+					domains: domains.descriptions
 				})
 			);
 			log.info({ contracts: parsed.map((c) => c.id) }, 'contracts loaded');

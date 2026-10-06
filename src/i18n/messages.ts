@@ -53,9 +53,12 @@ export interface Messages {
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
-		firstRead(domain: string): string;
-		// Asked before the assistant first writes in an application, even one its owner lets it read
-		firstWrite(domain: string): string;
+		// The application as the catalog names it, or else by its id, and what reading covers there
+		// when the catalog says, both from labelOf
+		firstRead(application: string, covers: string | null): string;
+		// Asked before the assistant first writes in an application, even one its owner lets it read:
+		// the application as for reading, and what writing covers there when the catalog says
+		firstWrite(application: string, covers: string | null): string;
 		// The two buttons under a question: the assistant's own reactions, which a tap repeats
 		readonly buttons: { readonly yes: string; readonly no: string };
 		// The words that answer a question, alone in a message
@@ -86,6 +89,20 @@ export interface Messages {
 	// How the owner's assistant finds an invitation the conversation does not hold, as after a
 	// restart or in a new session: it searches the events, then reads the one it found
 	readonly lookup: string;
+}
+
+// A question about the first use of an application at one level. What the catalog says the level
+// covers goes on a line of its own, under the level's label and apart from the harness's
+// sentences, when it says anything.
+function firstUse(
+	asked: string,
+	level: string,
+	covers: string | null,
+	howToAnswer: string
+): string {
+	return covers === null
+		? `${asked} ${howToAnswer}`
+		: [asked, `${level} ${covers}`, howToAnswer].join('\n');
 }
 
 const ENGLISH: Messages = {
@@ -134,10 +151,20 @@ const ENGLISH: Messages = {
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.'
 	},
 	consent: {
-		firstRead: (domain) =>
-			`This is the first time I need to read your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`,
-		firstWrite: (domain) =>
-			`This is the first time I need to change your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`,
+		firstRead: (application, covers) =>
+			firstUse(
+				`This is the first time I need to read your data in ${application}.`,
+				'Reading:',
+				covers,
+				'Do you allow it? Answer with the buttons below, or reply yes or no.'
+			),
+		firstWrite: (application, covers) =>
+			firstUse(
+				`This is the first time I need to change your data in ${application}.`,
+				'Writing:',
+				covers,
+				'Do you allow it? Answer with the buttons below, or reply yes or no.'
+			),
 		buttons: { yes: '✅ YES', no: '❌ NO' },
 		yes: 'yes',
 		no: 'no',
@@ -221,10 +248,20 @@ const FRENCH: Messages = {
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant."
 	},
 	consent: {
-		firstRead: (domain) =>
-			`C'est la première fois que j'ai besoin de lire tes données dans ${domain}. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.`,
-		firstWrite: (domain) =>
-			`C'est la première fois que j'ai besoin de modifier tes données dans ${domain}. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.`,
+		firstRead: (application, covers) =>
+			firstUse(
+				`C'est la première fois que j'ai besoin de lire tes données dans ${application}.`,
+				'Lecture :',
+				covers,
+				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+			),
+		firstWrite: (application, covers) =>
+			firstUse(
+				`C'est la première fois que j'ai besoin de modifier tes données dans ${application}.`,
+				'Écriture :',
+				covers,
+				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+			),
 		buttons: { yes: '✅ OUI', no: '❌ NON' },
 		yes: 'oui',
 		no: 'non',

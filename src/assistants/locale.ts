@@ -7,12 +7,17 @@ export function localeOf(assistant: AssistantRecord | null, fallback: Locale): L
 	return assistant?.locale ?? fallback;
 }
 
+// The language an owner reads as it is now
+export async function fetchOwnerLocale(db: Db, owner: string, fallback: Locale): Promise<Locale> {
+	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+	return localeOf(assistant, fallback);
+}
+
 // The fixed texts an owner reads, in their language as it is now
 export async function fetchOwnerMessages(
 	db: Db,
 	owner: string,
 	fallback: Locale
 ): Promise<Messages> {
-	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-	return getMessages(localeOf(assistant, fallback));
+	return getMessages(await fetchOwnerLocale(db, owner, fallback));
 }
