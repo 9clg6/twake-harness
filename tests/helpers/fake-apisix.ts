@@ -64,6 +64,13 @@ export interface FakeApisix {
 		handler: (call: ContractCall) => ContractReply;
 	};
 	readonly audit: unknown[];
+	// The OpenBao behind the openbao route: a Kubernetes login and one KV v2 mount, in memory
+	readonly openbao: {
+		readonly token: string;
+		readonly podToken: string;
+		readonly store: Map<string, Record<string, string>>;
+		readonly calls: { method: string; path: string; status: number }[];
+	};
 	// Where the /matrix route forwards, once a homeserver is up
 	matrixUpstream: string | null;
 	// What went through the /matrix route, for diagnosis
@@ -113,6 +120,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		handler: () => ({ status: 200, body: { ok: true } })
 	};
 	const audit: unknown[] = [];
+	const openbao: FakeApisix['openbao'] = {
+		token: 'bao-test-token',
+		podToken: 'pod-service-account-token',
+		store: new Map(),
+		calls: []
+	};
 	const server: Server = createServer(async (req, res) => {
 		const url = new URL(req.url ?? '/', 'http://fake');
 		const apiKeyHeader = req.headers['apikey'];
@@ -153,6 +166,51 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			res.statusCode = upstream.status;
 			res.setHeader('content-type', upstream.headers.get('content-type') ?? 'application/json');
 			res.end(Buffer.from(await upstream.arrayBuffer()));
+			return;
+		}
+		if (url.pathname.startsWith('/openbao/')) {
+			const path = url.pathname.slice('/openbao'.length);
+			const record = (status: number): void => {
+				openbao.calls.push({ method: req.method ?? '', path, status });
+			};
+			if (req.method === 'POST' && path === '/v1/auth/kubernetes/login') {
+				const body = (await readJson(req)) as { role?: string; jwt?: string };
+				if (body.jwt !== openbao.podToken || body.role !== 'twake-harness') {
+					record(403);
+					sendJson(res, 403, { errors: ['permission denied'] });
+					return;
+				}
+				record(200);
+				sendJson(res, 200, { auth: { client_token: openbao.token, lease_duration: 3600 } });
+				return;
+			}
+			if (req.headers['x-vault-token'] !== openbao.token) {
+				record(403);
+				sendJson(res, 403, { errors: ['permission denied'] });
+				return;
+			}
+			const match = /^\/v1\/secret\/data\/(.+)$/.exec(path);
+			if (match === null || match[1] === undefined) {
+				record(404);
+				sendJson(res, 404, { errors: [] });
+				return;
+			}
+			const key = decodeURIComponent(match[1]);
+			if (req.method === 'POST') {
+				const body = (await readJson(req)) as { data?: Record<string, string> };
+				openbao.store.set(key, body.data ?? {});
+				record(200);
+				sendJson(res, 200, { data: { version: 1 } });
+				return;
+			}
+			const data = openbao.store.get(key);
+			if (data === undefined) {
+				record(404);
+				sendJson(res, 404, { errors: [] });
+				return;
+			}
+			record(200);
+			sendJson(res, 200, { data: { data, metadata: { version: 1 } } });
 			return;
 		}
 		if (req.method === 'GET' && url.pathname === '/contracts/openapi.json') {
@@ -230,6 +288,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		llm,
 		contracts,
 		audit,
+		openbao,
 		get matrixUpstream() {
 			return fake.matrixUpstream;
 		},

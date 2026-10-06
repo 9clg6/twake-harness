@@ -1,7 +1,7 @@
 import type { Db } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
-export type JobKind = 'turn' | 'send';
+export type JobKind = 'turn' | 'send' | 'recover';
 
 export interface Job {
 	readonly id: number;

@@ -85,3 +85,10 @@ export async function listActiveAssistantUserIds(db: Db): Promise<string[]> {
 	const rows = await db.sql<{ user_id: string }[]>`select distinct user_id from assistant_rooms`;
 	return rows.map((row) => row.user_id);
 }
+
+// From the rooms index, which has no owner policy: the assistants table is read by its owner only
+export async function listActiveAssistants(db: Db): Promise<{ owner: string; userId: string }[]> {
+	const rows = await db.sql<{ owner: string; user_id: string }[]>`
+		select distinct owner, user_id from assistant_rooms`;
+	return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
+}
