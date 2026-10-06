@@ -107,19 +107,19 @@ export function readDomains(document: unknown): DescribedDomains {
 	return { descriptions, ignored };
 }
 
-// The application as a question names it to an owner who reads `locale`: the name the catalog
-// gives it in that language, and what the level covers there when it says. An application the
-// catalog does not name in that language goes by its id, never by another language's words.
+// The application as a question names it to an owner who reads `locale`: by the name the catalog
+// gives it in that language, or else in the deployment's (`fallback`), since a product's name
+// rarely changes with the language, and else by its id. What the level covers there is said in
+// the owner's language only, or not at all.
 export function labelOf(
 	descriptions: DomainDescriptions,
 	domain: string,
 	level: ConsentLevel,
-	locale: Locale
+	locale: Locale,
+	fallback: Locale
 ): DomainLabel {
 	const description = descriptions.get(domain);
-	const name = description?.name[locale];
-	if (description === undefined || name === undefined)
-		return { name: escaped(domain), covers: null };
-	const covers = description[level]?.[locale];
+	const name = description?.name[locale] ?? description?.name[fallback] ?? domain;
+	const covers = description?.[level]?.[locale];
 	return { name: escaped(name), covers: covers === undefined ? null : escaped(covers) };
 }

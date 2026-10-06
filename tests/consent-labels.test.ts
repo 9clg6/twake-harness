@@ -6,8 +6,9 @@ import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 const APPLICATIONS = ['mail', 'drive', 'photos', 'tasks', 'notes', 'wiki', 'boards'];
 
 // How the contracts service names its applications to their owners. Mail is named apart in each
-// language, to tell which one the owner reads; Drive is described in English only, Photos by its
-// name alone, and Tasks and Notes not at all.
+// language, to tell which one the owner reads; Drive is described in English only, the
+// deployment's language, and Wiki in French only; Photos by its name alone, and Tasks and Notes
+// not at all.
 const DESCRIBED = {
 	mail: {
 		name: { en: 'Twake Mail', fr: 'Messagerie Twake' },
@@ -21,6 +22,7 @@ const DESCRIBED = {
 		name: { en: 'Twake Drive' },
 		read: { en: 'browse and read your files' }
 	},
+	wiki: { name: { fr: 'Wiki Twake' } },
 	photos: { name: { en: 'Twake Photos', fr: 'Twake Photos' } }
 };
 
@@ -40,7 +42,8 @@ const READS: Record<string, string> = {
 	'Open my wiki': 'search_wiki',
 	'Show my boards': 'search_boards',
 	'Cherche le budget dans mes mails': 'search_mail',
-	'Cherche le plan dans mon drive': 'search_drive'
+	'Cherche le plan dans mon drive': 'search_drive',
+	'Ouvre mon wiki': 'search_wiki'
 };
 
 function model(request: ChatRequest): ScriptedReply {
@@ -122,9 +125,13 @@ describe('the question names the application in plain words', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
-	it('names an application the catalog does not describe by its id', async () => {
+	it("names an application by its id when the catalog names it neither in my language nor in the deployment's", async () => {
 		expect(await askedAfter('Search my notes')).toEqual(
 			shown(`This is the first time I need to read your data in notes. ${HOW_TO_ANSWER.en}`)
+		);
+		// Wiki is named in French only, while Alice and the deployment speak English
+		expect(await askedAfter('Open my wiki')).toEqual(
+			shown(`This is the first time I need to read your data in wiki. ${HOW_TO_ANSWER.en}`)
 		);
 	});
 
@@ -247,7 +254,7 @@ describe('the question names the application in plain words', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
-	it('asks in my language, with no word of another', async () => {
+	it("asks in my language, with the deployment's name for an application the catalog does not name in it", async () => {
 		await serve(DESCRIBED);
 		const told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'Parle-moi en français');
@@ -261,10 +268,16 @@ describe('the question names the application in plain words', () => {
 				HOW_TO_ANSWER.fr
 			)
 		);
-		// Drive is described in English only: a French question names it by its id
+		// Drive is described in English only, the deployment's language: a French question takes
+		// its English name, and leaves out what reading covers there rather than say it in English
 		expect(await askedAfter('Cherche le plan dans mon drive', opening)).toEqual(
 			shown(
-				`C'est la première fois que j'ai besoin de lire tes données dans drive. ${HOW_TO_ANSWER.fr}`
+				`C'est la première fois que j'ai besoin de lire tes données dans Twake Drive. ${HOW_TO_ANSWER.fr}`
+			)
+		);
+		expect(await askedAfter('Ouvre mon wiki', opening)).toEqual(
+			shown(
+				`C'est la première fois que j'ai besoin de lire tes données dans Wiki Twake. ${HOW_TO_ANSWER.fr}`
 			)
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);

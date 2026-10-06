@@ -122,7 +122,13 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				// language, and says what reading covers there
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				const { consent } = getMessages(locale);
-				const application = labelOf(deps.domains, contract.domain, contract.level, locale);
+				const application = labelOf(
+					deps.domains,
+					contract.domain,
+					contract.level,
+					locale,
+					config.locale
+				);
 				return {
 					result: {
 						status: 'awaiting_owner',
