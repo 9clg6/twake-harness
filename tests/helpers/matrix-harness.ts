@@ -28,14 +28,22 @@ export interface MatrixTestHarness {
 	readonly port: number;
 	readonly hsToken: string;
 	readonly issuer: TestIssuer;
-	// The api role on the same database, driven over HTTP
+	// The api role on the same database, driven over HTTP, and its replicas
 	readonly api: TestClient;
+	readonly apps: readonly FastifyInstance[];
 	logLines(): Record<string, unknown>[];
 	close(): Promise<void>;
 }
 
 // The matrix role, a real Synapse pushing to it and the fake APISIX in between for its calls.
-export async function startMatrixHarness(): Promise<MatrixTestHarness> {
+export interface MatrixStartOptions {
+	// Settings of this harness, over the defaults
+	readonly env?: Record<string, string>;
+}
+
+export async function startMatrixHarness(
+	options: MatrixStartOptions = {}
+): Promise<MatrixTestHarness> {
 	await ensureAppRole(false);
 	const port = await freePort();
 	const asToken = 'as-token-test';
@@ -54,7 +62,8 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		MATRIX_AS_TOKEN: asToken,
 		MATRIX_HS_TOKEN: hsToken,
 		MATRIX_CRYPTO_STORE_PATH: join(await mkdtemp(join(tmpdir(), 'harness-crypto-')), 'crypto'),
-		LOG_LEVEL: 'info'
+		LOG_LEVEL: 'info',
+		...(options.env ?? {})
 	});
 	const synapse = await startTestSynapse({
 		file: buildRegistrationFile(config, `http://host.docker.internal:${port}`)
@@ -153,6 +162,7 @@ export async function startMatrixHarness(): Promise<MatrixTestHarness> {
 		hsToken,
 		issuer,
 		api,
+		apps,
 		logLines: () =>
 			chunks
 				.join('')
