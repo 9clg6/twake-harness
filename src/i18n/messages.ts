@@ -90,10 +90,18 @@ export interface Messages {
 	readonly lookup: string;
 }
 
-// A question about the first use of an application. What the catalog says the level covers goes
-// on a line of its own, apart from the harness's sentences, when it says anything.
-function firstUse(asked: string, covers: string | null, howToAnswer: string): string {
-	return covers === null ? `${asked} ${howToAnswer}` : [asked, covers, howToAnswer].join('\n');
+// A question about the first use of an application at one level. What the catalog says the level
+// covers goes on a line of its own, under the level's label and apart from the harness's
+// sentences, when it says anything.
+function firstUse(
+	asked: string,
+	level: string,
+	covers: string | null,
+	howToAnswer: string
+): string {
+	return covers === null
+		? `${asked} ${howToAnswer}`
+		: [asked, `${level} ${covers}`, howToAnswer].join('\n');
 }
 
 const ENGLISH: Messages = {
@@ -145,7 +153,8 @@ const ENGLISH: Messages = {
 		firstRead: (application, covers) =>
 			firstUse(
 				`This is the first time I need to read your data in ${application}.`,
-				covers === null ? null : `Reading: ${covers}`,
+				'Reading:',
+				covers,
 				'Do you allow it? Answer with the buttons below, or reply yes or no.'
 			),
 		firstWrite: (domain) =>
@@ -236,7 +245,8 @@ const FRENCH: Messages = {
 		firstRead: (application, covers) =>
 			firstUse(
 				`C'est la première fois que j'ai besoin de lire tes données dans ${application}.`,
-				covers === null ? null : `Lecture : ${covers}`,
+				'Lecture :',
+				covers,
 				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
 			),
 		firstWrite: (domain) =>
