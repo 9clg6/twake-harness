@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import type { Tool } from '../agent/tools.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
 import { parseContracts, readServer, type ContractDefinition } from './openapi.js';
 import { makeContractTool } from './tools.js';
 
@@ -16,12 +17,13 @@ export interface CatalogDeps {
 	readonly config: Config;
 	readonly log: FastifyBaseLogger;
 	readonly fetchImpl?: typeof fetch;
+	readonly consentMetrics: ConsentMetrics;
 }
 
 // The contracts the gateway serves, turned into tools at start and refreshed on an interval; a
 // failed refresh keeps the previous catalog.
 export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
-	const { config, log } = deps;
+	const { config, log, consentMetrics } = deps;
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	let contracts: ContractDefinition[] = [];
 	let tools: Tool[] = [];
@@ -57,7 +59,13 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 			}
 			contracts = parsed;
 			tools = parsed.map((contract) =>
-				makeContractTool(contract, { config, log, fetchImpl, serverPath: server.path })
+				makeContractTool(contract, {
+					config,
+					log,
+					fetchImpl,
+					serverPath: server.path,
+					consentMetrics
+				})
 			);
 			log.info({ contracts: parsed.map((c) => c.id) }, 'contracts loaded');
 		} catch (err: unknown) {

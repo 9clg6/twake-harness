@@ -62,7 +62,7 @@ describe('a question I leave unanswered expires', () => {
 		// The worker role's hourly pass, while I say nothing
 		const app = r.h.apps[0];
 		if (app === undefined) throw new Error('no api role');
-		await expireOverdueRequests(r.h.db, app.log, 1000);
+		await expireOverdueRequests(r.h.db, app.log, 1000, app.agent.consentMetrics);
 		expect(await r.callsTo('notes')).toEqual([{ status: 'expired', arguments: null }]);
 		// My answer, when it comes, gets the notice
 		const notices = r.saying('This request has expired').length;

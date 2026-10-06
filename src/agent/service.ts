@@ -4,6 +4,7 @@ import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
+import { makeConsentMetrics, replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
 import {
 	approvePendingCall,
 	grantConsent,
@@ -124,6 +125,9 @@ export interface AgentService {
 	readonly gate: TurnGate;
 	readonly contracts: ContractCatalog;
 	readonly admission: Admission;
+	// The consent counters its metrics serve: the calls this replica freezes and replays, or, in the
+	// worker role, the requests its hourly pass expires
+	readonly consentMetrics: ConsentMetrics;
 	runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult>;
 }
 
@@ -159,7 +163,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			maxTokens: config.llm.maxTokens,
 			timeoutMs: config.llm.timeoutMs
 		});
-	const contracts = makeContractCatalog({ config, log: deps.log });
+	const consentMetrics = makeConsentMetrics();
+	const contracts = makeContractCatalog({ config, log: deps.log, consentMetrics });
 	const tools = makeToolRegistry(
 		[
 			clarifyTool,
@@ -235,6 +240,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			? await runTool(tool, approved.arguments, context)
 			: { result: CONTRACT_CHANGED };
 		const httpStatus = statusOf(outcome.result);
+		consentMetrics.replayed(approved, replayOutcome(httpStatus));
 		log.info(
 			{
 				pendingCallId,
@@ -426,5 +432,5 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	return { llm, tools, gate, contracts, admission, runOwnerTurn };
+	return { llm, tools, gate, contracts, admission, consentMetrics, runOwnerTurn };
 }

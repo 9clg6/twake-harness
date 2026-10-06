@@ -23,6 +23,7 @@ import {
 } from '../assistants/repository.js';
 import { reactionAnswer } from '../consents/answers.js';
 import type { PendingQuestion } from '../consents/consent.js';
+import { makeConsentMetrics } from '../consents/metrics.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
@@ -294,6 +295,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// A push the SDK fails on no longer ends the role: see installRejectionGuard
 	const rejections = installRejectionGuard(log);
+	// What this role counts of consent: the owners' answers, and the requests closed unanswered
+	const consentMetrics = makeConsentMetrics();
 	appservice.expressAppInstance.get('/metrics', (_req, res) => {
 		res
 			.type('text/plain; version=0.0.4')
@@ -301,6 +304,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				[
 					'# TYPE harness_unhandled_rejections_total counter',
 					`harness_unhandled_rejections_total ${rejections.count}`,
+					...consentMetrics.exposition(),
 					''
 				].join('\n')
 			);
@@ -585,6 +589,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		fetchMessages,
 		lifetimeMs: config.consent.requestLifetimeMs,
+		metrics: consentMetrics,
 		react: async (room, eventId, key) => {
 			await appservice
 				.getIntentForUserId(room.assistantUserId)

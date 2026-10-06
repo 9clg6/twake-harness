@@ -233,7 +233,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				([reason, n]) => `harness_turns_refused_total{reason="${reason}"} ${n}`
 			),
 			'# TYPE harness_assistants_held gauge',
-			`harness_assistants_held ${assistants[0]?.n ?? 0}`
+			`harness_assistants_held ${assistants[0]?.n ?? 0}`,
+			...agent.consentMetrics.exposition()
 		];
 		return reply.type('text/plain; version=0.0.4').send(`${lines.join('\n')}\n`);
 	});

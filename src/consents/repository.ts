@@ -65,48 +65,93 @@ export async function recordRequestEvent(
 	return result.count === 1;
 }
 
+// What a waiting call is about: its application, its level and the reasons it waits for, as the
+// harness stored them. Its metrics count it by these, never by its owner nor what it would send.
+export interface CallSubject {
+	readonly domain: string;
+	readonly level: ConsentLevel;
+	readonly reasons: readonly string[];
+}
+
+interface SubjectRow {
+	domain: string;
+	level: ConsentLevel;
+	reasons: unknown;
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === 'string');
+}
+
+function subjectOf(row: SubjectRow): CallSubject {
+	const reasons = readJsonColumn(row.reasons);
+	return { domain: row.domain, level: row.level, reasons: isStringArray(reasons) ? reasons : [] };
+}
+
+// A request closed unanswered, and what its call was about
+export interface ClosedRequest extends CallSubject {
+	readonly pendingCallId: string;
+}
+
+interface ClosedRow extends SubjectRow {
+	id: string;
+}
+
+function closedRequests(rows: readonly ClosedRow[]): ClosedRequest[] {
+	return rows.map((row) => ({ pendingCallId: row.id, ...subjectOf(row) }));
+}
+
 // Marks the open requests of a room older than the one just asked as superseded, erasing what
-// their calls would have sent; resolves to their ids
+// their calls would have sent
 export async function supersedeRequests(
 	tx: Tx,
 	owner: string,
 	roomId: string,
 	newestId: string
-): Promise<string[]> {
-	const rows = await tx.sql<{ id: string }[]>`
+): Promise<ClosedRequest[]> {
+	const rows = await tx.sql<ClosedRow[]>`
 		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
 		where owner = ${owner} and room_id = ${roomId} and status = 'open' and id <> ${newestId}
-		returning id`;
-	return rows.map((row) => row.id);
+		returning id, domain, level, reasons`;
+	return closedRequests(rows);
 }
 
 // Closes the owner's requests left unanswered past their lifetime, erasing what their calls would
-// have sent; resolves to their ids
-export async function expireRequests(tx: Tx, owner: string, lifetimeMs: number): Promise<string[]> {
-	const rows = await tx.sql<{ id: string }[]>`
+// have sent
+export async function expireRequests(
+	tx: Tx,
+	owner: string,
+	lifetimeMs: number
+): Promise<ClosedRequest[]> {
+	const rows = await tx.sql<ClosedRow[]>`
 		update pending_calls set status = 'expired', decided_at = now(), arguments = null
 		where owner = ${owner} and status = 'open'
 			and created_at <= now() - make_interval(secs => ${lifetimeMs / 1000})
-		returning id`;
-	return rows.map((row) => row.id);
+		returning id, domain, level, reasons`;
+	return closedRequests(rows);
 }
 
 // What an answer finds: a request still open, one closed unanswered (its lifetime over, or a
 // newer one asked in its room), or one already decided
 export type RequestState = 'open' | 'expired' | 'superseded' | 'decided';
 
-export interface FoundRequest {
+export interface FoundRequest extends CallSubject {
 	readonly pendingCallId: string;
 	readonly state: RequestState;
 }
 
-function foundRequest(row: { id: string; status: string } | undefined): FoundRequest | null {
+interface RequestRow extends SubjectRow {
+	id: string;
+	status: string;
+}
+
+function foundRequest(row: RequestRow | undefined): FoundRequest | null {
 	if (row === undefined) return null;
 	const state =
 		row.status === 'open' || row.status === 'expired' || row.status === 'superseded'
 			? row.status
 			: 'decided';
-	return { pendingCallId: row.id, state };
+	return { pendingCallId: row.id, state, ...subjectOf(row) };
 }
 
 // The request asked in this event, whatever became of it
@@ -115,8 +160,8 @@ export async function findRequest(
 	owner: string,
 	requestEventId: string
 ): Promise<FoundRequest | null> {
-	const rows = await tx.sql<{ id: string; status: string }[]>`
-		select id, status from pending_calls
+	const rows = await tx.sql<RequestRow[]>`
+		select id, status, domain, level, reasons from pending_calls
 		where owner = ${owner} and request_event_id = ${requestEventId}`;
 	return foundRequest(rows[0]);
 }
@@ -128,8 +173,8 @@ export async function findRequestOpenToWords(
 	owner: string,
 	roomId: string
 ): Promise<FoundRequest | null> {
-	const rows = await tx.sql<{ id: string; status: string }[]>`
-		select id, status from pending_calls
+	const rows = await tx.sql<RequestRow[]>`
+		select id, status, domain, level, reasons from pending_calls
 		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
 			and words_closed_at is null
 		order by created_at desc
@@ -185,21 +230,17 @@ export async function recordAnswerEvent(
 		where id = ${id} and owner = ${owner} and answer_event_id is null`;
 }
 
-export interface ApprovedCall {
+export interface ApprovedCall extends CallSubject {
 	readonly tool: string;
 	readonly contract: string;
-	readonly domain: string;
-	readonly level: ConsentLevel;
 	readonly arguments: unknown;
 	readonly correlationId: string | null;
 	readonly origin: TurnOrigin;
 }
 
-interface ApprovedRow {
+interface ApprovedRow extends SubjectRow {
 	tool: string;
 	contract: string;
-	domain: string;
-	level: ConsentLevel;
 	arguments: unknown;
 	correlation_id: string | null;
 	origin: TurnOrigin;
@@ -217,15 +258,14 @@ export async function approvePendingCall(
 		update pending_calls set status = 'approved', decided_at = coalesce(decided_at, now())
 		where id = ${id} and owner = ${owner}
 			and (status = 'open' or (status = 'approved' and replayed_at is null))
-		returning tool, contract, domain, level, arguments, correlation_id, origin`;
+		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
 	const row = rows[0];
 	return row === undefined
 		? null
 		: {
+				...subjectOf(row),
 				tool: row.tool,
 				contract: row.contract,
-				domain: row.domain,
-				level: row.level,
 				arguments: readJsonColumn(row.arguments),
 				correlationId: row.correlation_id,
 				origin: row.origin

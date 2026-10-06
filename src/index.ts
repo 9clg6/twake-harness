@@ -16,7 +16,13 @@ if (config.role === 'worker') {
 	const app = await buildApp({ config, db });
 	app.log.info({ role: config.role, applied: report.applied }, 'harness starting');
 	const scheduler = startCurationScheduler(db, app.log, config.curation.intervalMs);
-	const expiry = startExpiryScheduler(db, app.log, config.consent.requestLifetimeMs);
+	// Its expiries are counted on the metrics its app serves
+	const expiry = startExpiryScheduler(
+		db,
+		app.log,
+		config.consent.requestLifetimeMs,
+		app.agent.consentMetrics
+	);
 	const stop = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
 		scheduler.stop();

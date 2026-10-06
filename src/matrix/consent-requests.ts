@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { wordAnswer, type Answer, type AnswerKind } from '../consents/answers.js';
 import type { ResumeRequest } from '../consents/consent.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
 import {
 	closeRequestsToWords,
 	decidePendingCall,
@@ -41,6 +42,8 @@ export interface ConsentRequestsOptions {
 	readonly lifetimeMs: number;
 	// Reacts to an event of the room as its assistant, encrypted when the room is
 	react(room: RequestRoom, eventId: string, key: string): Promise<void>;
+	// Where the matrix role counts the answers, and the requests closed unanswered
+	readonly metrics: ConsentMetrics;
 }
 
 // The harness's requests in an assistant's room, and its owner's answers to them. The matrix role
@@ -64,7 +67,7 @@ export interface ConsentRequests {
 }
 
 export function makeConsentRequests(options: ConsentRequestsOptions): ConsentRequests {
-	const { db, log, fetchMessages, lifetimeMs } = options;
+	const { db, log, fetchMessages, lifetimeMs, metrics } = options;
 
 	// Looks a request up once the owner's requests left unanswered past their lifetime expired, so
 	// that a late answer finds its request expired even between two passes of the worker role
@@ -73,7 +76,10 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			expired: await expireRequests(tx, owner, lifetimeMs),
 			found: await find(tx)
 		}));
-		for (const id of expired) log.info({ owner, pendingCallId: id }, 'request expired');
+		for (const request of expired) {
+			log.info({ owner, pendingCallId: request.pendingCallId }, 'request expired');
+			metrics.expired(request);
+		}
 		return found;
 	}
 
@@ -88,7 +94,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		const { roomId, owner } = room;
 		const { pendingCallId, state } = request;
 		if (state === 'open') {
-			await decide(room, pendingCallId, answer);
+			await decide(room, request, answer);
 			return;
 		}
 		log.info(
@@ -100,7 +106,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			recordAnswerEvent(tx, owner, pendingCallId, answer.eventId)
 		);
 		const messages = await fetchMessages(owner);
-		await enqueueJob(db, {
+		const told = await enqueueJob(db, {
 			kind: 'send',
 			payload: {
 				asUserId: room.assistantUserId,
@@ -110,6 +116,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			dedupKey: `closed:${answer.eventId}`,
 			groupKey: `send:${roomId}`
 		});
+		if (told) metrics.answered(request, answer.says, answer.kind, state);
 	}
 
 	// A yes approves the call at once, so that no later answer nor newer request undoes it, and
@@ -117,10 +124,11 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	// itself, without the model.
 	async function decide(
 		room: RequestRoom,
-		pendingCallId: string,
+		request: FoundRequest,
 		answer: GivenAnswer
 	): Promise<void> {
 		const { roomId, owner } = room;
+		const { pendingCallId } = request;
 		if (answer.says === 'yes') {
 			// Queued first: should the role stop before the approval, the same answer delivered
 			// again finds the call still open, and its job queued once
@@ -145,6 +153,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			{ roomId, owner, pendingCallId, answer: answer.says, via: answer.kind, decided },
 			'owner answered'
 		);
+		if (decided) metrics.answered(request, answer.says, answer.kind, 'decided');
 		if (answer.says === 'no' && decided) {
 			const messages = await fetchMessages(owner);
 			await enqueueJob(db, {
@@ -166,8 +175,9 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 					superseded: stored ? await supersedeRequests(tx, owner, roomId, pendingCallId) : []
 				};
 			});
-			for (const id of superseded) {
-				log.info({ roomId, owner, pendingCallId: id }, 'request superseded');
+			for (const request of superseded) {
+				log.info({ roomId, owner, pendingCallId: request.pendingCallId }, 'request superseded');
+				metrics.superseded(request);
 			}
 			if (!recorded) {
 				log.warn({ roomId, pendingCallId }, 'question sent for a call that is no longer stored');
