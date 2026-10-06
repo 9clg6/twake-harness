@@ -438,6 +438,9 @@ export const consentsListTool: Tool = {
 	argumentKeys: [],
 	requiredAction: null,
 	run: async (_args, context) => {
+		// The organization agent acts for no user, and no consent applies to its calls
+		if (context.principalId === ORGANIZATION_PRINCIPAL)
+			return { result: ACCESS_DENIED, denied: true };
 		const consents = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
 			listConsents(tx, context.principalId)
 		);
@@ -486,6 +489,7 @@ export const consentsWithdrawTool: Tool = {
 	requiredAction: WITHDRAW_OWN_CONSENTS,
 	run: async (args, context) => {
 		const owner = context.principalId;
+		if (owner === ORGANIZATION_PRINCIPAL) return { result: ACCESS_DENIED, denied: true };
 		const parsed = consentsWithdrawArgs.safeParse(args);
 		if (!parsed.success) {
 			return { result: { error: 'domain is required, and level can only be write' } };
