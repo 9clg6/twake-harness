@@ -54,6 +54,8 @@ export interface Messages {
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
 		firstRead(domain: string): string;
+		// Asked before the assistant first writes in an application, even one its owner lets it read
+		firstWrite(domain: string): string;
 		// The two buttons under a question: the assistant's own reactions, which a tap repeats
 		readonly buttons: { readonly yes: string; readonly no: string };
 		// The words that answer a question, alone in a message
@@ -134,6 +136,8 @@ const ENGLISH: Messages = {
 	consent: {
 		firstRead: (domain) =>
 			`This is the first time I need to read your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`,
+		firstWrite: (domain) =>
+			`This is the first time I need to change your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`,
 		buttons: { yes: '✅ YES', no: '❌ NO' },
 		yes: 'yes',
 		no: 'no',
@@ -219,6 +223,8 @@ const FRENCH: Messages = {
 	consent: {
 		firstRead: (domain) =>
 			`C'est la première fois que j'ai besoin de lire tes données dans ${domain}. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.`,
+		firstWrite: (domain) =>
+			`C'est la première fois que j'ai besoin de modifier tes données dans ${domain}. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.`,
 		buttons: { yes: '✅ OUI', no: '❌ NON' },
 		yes: 'oui',
 		no: 'non',

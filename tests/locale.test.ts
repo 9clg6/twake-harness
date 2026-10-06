@@ -140,4 +140,47 @@ describe('a deployment that speaks French', () => {
 		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
+
+	it('asks in French before its first write in an application', async () => {
+		h.apisix.contracts.spec = {
+			openapi: '3.0.3',
+			paths: {
+				'/contracts/v1/tasks/{task_id}': {
+					patch: {
+						operationId: 'complete_task',
+						summary: "Marks one of the user's tasks done",
+						tags: ['tasks.task.complete.v1'],
+						parameters: [
+							{ name: 'task_id', in: 'path', required: true, schema: { type: 'string' } }
+						]
+					}
+				}
+			}
+		};
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		h.apisix.contracts.calls.length = 0;
+		h.apisix.llm.script = () => ({
+			toolCalls: [
+				{
+					id: 'call_complete_task',
+					type: 'function',
+					function: { name: 'complete_task', arguments: JSON.stringify({ task_id: 'task-q4' }) }
+				}
+			]
+		});
+		await client.sendText(assistantRoom, 'Marque la tâche des chiffres du T4 comme faite');
+		const request = await client.waitForMessage(assistantRoom, assistantId, (t) =>
+			t.startsWith("C'est la première fois que j'ai besoin de modifier")
+		);
+		expect(request).toBe(
+			"C'est la première fois que j'ai besoin de modifier tes données dans tasks. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+		);
+		const asked = client.messages.find(
+			(m) => m.roomId === assistantRoom && m.sender === assistantId && m.body === request
+		);
+		if (asked === undefined) throw new Error('no question');
+		const buttons = await client.waitForReactions(assistantRoom, asked.eventId, assistantId, 2);
+		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
 });

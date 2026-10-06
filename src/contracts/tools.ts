@@ -73,13 +73,13 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		run: async (args, context): Promise<ToolOutcome> => {
 			const values =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
-			// The first read of an application waits for its owner: the call is frozen as the model
-			// wrote it, and the turn ends with the harness's own question. The organization agent
-			// acts for no user, so nobody's consent applies to it.
+			// The first read of an application waits for its owner, and so does the first write there,
+			// even once it may read: the call is frozen as the model wrote it, and the turn ends with
+			// the harness's own question. The organization agent acts for no user, so nobody's
+			// consent applies to it.
 			const owner = context.principalId;
 			if (
-				contract.level === 'read' &&
-				contract.domain !== FEED_DOMAIN &&
+				!(contract.domain === FEED_DOMAIN && contract.level === 'read') &&
 				owner !== ORGANIZATION_PRINCIPAL &&
 				!(await withPrincipal(context.db, { id: owner }, (tx) =>
 					hasConsent(tx, owner, contract.domain, contract.level)
@@ -109,6 +109,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					},
 					'contract call waits for its owner'
 				);
+				const { consent } = await fetchOwnerMessages(context.db, owner, config.locale);
 				return {
 					result: {
 						status: 'awaiting_owner',
@@ -116,9 +117,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 						domain: contract.domain,
 						level: contract.level
 					},
-					final: (await fetchOwnerMessages(context.db, owner, config.locale)).consent.firstRead(
-						contract.domain
-					),
+					final:
+						contract.level === 'read'
+							? consent.firstRead(contract.domain)
+							: consent.firstWrite(contract.domain),
 					pendingCallId
 				};
 			}
