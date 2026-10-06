@@ -5,7 +5,7 @@ import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.
 import { withPrincipal, type Db } from '../db/client.js';
 import { LlmError, makeLlmClient, type LlmClient } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
-import type { Principal } from '../principals/principal.js';
+import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import {
 	createSession,
@@ -16,7 +16,7 @@ import {
 } from '../sessions/repository.js';
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
-import { DEFAULT_SYSTEM_PROMPT } from './persona.js';
+import { DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
@@ -146,7 +146,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
 					{
 						systemPrompt: buildSystemPrompt({
-							persona: DEFAULT_SYSTEM_PROMPT,
+							persona:
+								principal.id === ORGANIZATION_PRINCIPAL
+									? organizationPrompt(config.org.name, config.org.persona)
+									: DEFAULT_SYSTEM_PROMPT,
 							memory,
 							skills,
 							history: session.messages,

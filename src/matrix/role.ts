@@ -20,9 +20,11 @@ import {
 } from '../assistants/service.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { makeMatrixAdmin } from './admin.js';
 import { helpText, runCreatorTurn } from './creator.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
+import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeAppserviceStorage } from './storage.js';
 
 export interface MatrixRoleOptions {
@@ -142,6 +144,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		asToken: config.matrix.asToken
 	});
 	const assistants = makeAssistantService({ config, db, admin, log });
+	const orgUserId = config.org.enabled ? orgAgentUserId(config) : null;
 
 	// Synapse checks the application service is alive before it pushes anything (MSC2659).
 	appservice.expressAppInstance.post('/_matrix/app/v1/ping', (req, res) => {
@@ -182,6 +185,33 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	appservice.on('room.invite', async (roomId: string, event: RoomEvent) => {
 		const invited = event.state_key ?? '';
+		if (orgUserId !== null && invited === orgUserId) {
+			// The organization agent joins the members of the organization and nobody else
+			const inviter = event.sender ?? '';
+			if (!isOrgMember(config, inviter)) {
+				log.info({ roomId, sender: inviter }, 'organization agent ignored an invite');
+				return;
+			}
+			try {
+				const intent = appservice.getIntentForUserId(invited);
+				await intent.enableEncryption();
+				await intent.joinRoom(roomId);
+			} catch (err: unknown) {
+				log.warn({ roomId, invited, err }, 'join failed');
+				return;
+			}
+			await db.sql`
+				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${ORGANIZATION_PRINCIPAL}, ${invited})
+				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
+			await enqueueJob(db, {
+				kind: 'send',
+				payload: { asUserId: invited, roomId, text: orgGreeting(config) },
+				dedupKey: `welcome:${roomId}`,
+				groupKey: `send:${roomId}`
+			});
+			log.info({ roomId, sender: inviter }, 'organization room opened');
+			return;
+		}
 		if (invited !== creator && !isAssistantUserId(config, invited)) return;
 		log.info({ roomId, invited, sender: event.sender }, 'invite accepted');
 		try {
@@ -236,17 +266,30 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (text === null) return;
 		const room = await assistantRoom(roomId);
 		if (room !== null) {
-			// An assistant's room: only its owner is heard, everyone else is ignored and logged
-			const owner = principalOfSender(config, sender);
-			if (owner === null || owner !== room.owner) {
-				log.info({ roomId, sender, owner: room.owner }, 'assistant ignored a foreign sender');
-				return;
+			let owner: string;
+			let message = text;
+			if (room.owner === ORGANIZATION_PRINCIPAL) {
+				// The organization agent hears the members only, and is told who is writing
+				if (!isOrgMember(config, sender)) {
+					log.info({ roomId, sender }, 'organization agent ignored a non-member');
+					return;
+				}
+				owner = ORGANIZATION_PRINCIPAL;
+				message = `[${sender}] ${text}`;
+			} else {
+				// An assistant's room: only its owner is heard, everyone else is ignored and logged
+				const principal = principalOfSender(config, sender);
+				if (principal === null || principal !== room.owner) {
+					log.info({ roomId, sender, owner: room.owner }, 'assistant ignored a foreign sender');
+					return;
+				}
+				owner = principal;
 			}
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			// The turns of one owner run one after the other, in the order they were sent
 			await enqueueJob(db, {
 				kind: 'turn',
-				payload: { owner, roomId, eventId, text },
+				payload: { owner, roomId, eventId, text: message },
 				dedupKey: `turn:${eventId}`,
 				groupKey: `turn:${owner}`
 			});
@@ -282,6 +325,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	});
 
+	if (config.org.enabled) {
+		try {
+			await ensureOrgAgent({ config, db, admin, log });
+		} catch (err: unknown) {
+			log.error({ err }, 'organization agent setup failed');
+		}
+	}
 	// Every assistant holds its encryption state from the start, so the key shares Synapse pushes
 	// while this role was away, or before an assistant speaks, are not lost
 	for (const userId of await listActiveAssistantUserIds(db)) {

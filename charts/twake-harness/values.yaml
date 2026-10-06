@@ -41,6 +41,13 @@ config:
   apisixBaseUrl: ''
   llmModel: qwen3.8
   logLevel: info
+  # The organization agent, a bot of the harness answering the organization's members, named by
+  # their Matrix identifiers (comma separated); its localpart lives in the assistants' namespace
+  orgAgentEnabled: false
+  orgAgentLocalpart: twake-space-assistant-org
+  orgAgentName: Twake Space
+  orgAgentPersona: ''
+  orgAgentMembers: ''
   # The matrix role: the homeserver's name and the application service identity
   matrixServerName: ''
   matrixAppserviceId: twake-harness

@@ -61,6 +61,15 @@ export interface Config {
 		// Where the matrix role keeps the assistants' encryption state, on its volume
 		readonly cryptoStorePath: string;
 	};
+	readonly org: {
+		// The organization agent: one bot of the harness answering the organization's members
+		readonly enabled: boolean;
+		readonly localpart: string;
+		readonly name: string;
+		readonly persona: string;
+		// The Matrix identifiers of the members it answers
+		readonly members: readonly string[];
+	};
 	readonly logLevel: LogLevel;
 }
 
@@ -97,6 +106,15 @@ const envSchema = z.object({
 	MATRIX_AS_TOKEN: z.string().default('injected-by-apisix'),
 	MATRIX_HS_TOKEN: z.string().default(''),
 	MATRIX_CRYPTO_STORE_PATH: z.string().min(1).default('/data/crypto'),
+	ORG_AGENT_ENABLED: z.enum(['true', 'false']).default('false'),
+	ORG_AGENT_LOCALPART: z.string().min(1).default('twake-space-assistant-org'),
+	ORG_AGENT_NAME: z.string().min(1).default('Twake Space'),
+	ORG_AGENT_PERSONA: z
+		.string()
+		.default(
+			'You are the organization agent of Twake Space. You answer the members of the organization about the organization, its usage and its practices.'
+		),
+	ORG_AGENT_MEMBERS: z.string().default(''),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -115,6 +133,15 @@ export function loadConfig(env: Env): Config {
 	) {
 		throw new Error(
 			'invalid configuration: the matrix role needs MATRIX_SERVER_NAME and MATRIX_HS_TOKEN'
+		);
+	}
+	// The organization agent lives in the namespace the application service owns
+	if (
+		values.ORG_AGENT_ENABLED === 'true' &&
+		!values.ORG_AGENT_LOCALPART.startsWith(values.MATRIX_ASSISTANT_PREFIX)
+	) {
+		throw new Error(
+			`invalid configuration: ORG_AGENT_LOCALPART must start with ${values.MATRIX_ASSISTANT_PREFIX}`
 		);
 	}
 	return {
@@ -165,6 +192,15 @@ export function loadConfig(env: Env): Config {
 			asToken: values.MATRIX_AS_TOKEN,
 			hsToken: values.MATRIX_HS_TOKEN,
 			cryptoStorePath: values.MATRIX_CRYPTO_STORE_PATH
+		},
+		org: {
+			enabled: values.ORG_AGENT_ENABLED === 'true',
+			localpart: values.ORG_AGENT_LOCALPART,
+			name: values.ORG_AGENT_NAME,
+			persona: values.ORG_AGENT_PERSONA,
+			members: values.ORG_AGENT_MEMBERS.split(',')
+				.map((id) => id.trim())
+				.filter((id) => id.length > 0)
 		},
 		logLevel: values.LOG_LEVEL
 	};
