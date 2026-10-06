@@ -41,6 +41,7 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `AUTH_JWKS_URL`                | JWKS of the OIDC provider the access tokens come from           |
 | `AUTH_ISSUER`, `AUTH_AUDIENCE` | expected `iss` and `aud` of the access tokens                   |
 | `LOG_LEVEL`                    | pino level, `info` by default                                   |
+| `ASSISTANT_LOCALE`             | language of the assistants' and creator's texts, `en` or `fr`   |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 

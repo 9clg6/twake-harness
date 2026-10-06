@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import { LOCALES, type Locale } from './i18n/messages.js';
+
 const ROLES = ['api', 'matrix', 'worker'] as const;
 export type Role = (typeof ROLES)[number];
 
@@ -93,6 +95,8 @@ export interface Config {
 		readonly k8sRole: string;
 		readonly k8sTokenPath: string;
 	};
+	// The language of the fixed texts of the assistants and the creator
+	readonly locale: Locale;
 	readonly logLevel: LogLevel;
 }
 
@@ -151,6 +155,7 @@ const envSchema = z.object({
 		.string()
 		.min(1)
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
+	ASSISTANT_LOCALE: z.enum(LOCALES).default('en'),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -257,6 +262,7 @@ export function loadConfig(env: Env): Config {
 			k8sRole: values.OPENBAO_K8S_ROLE,
 			k8sTokenPath: values.OPENBAO_K8S_TOKEN_PATH
 		},
+		locale: values.ASSISTANT_LOCALE,
 		logLevel: values.LOG_LEVEL
 	};
 }

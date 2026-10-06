@@ -3,6 +3,7 @@ import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { startCurationScheduler } from './curation/curation.js';
 import { makeDb } from './db/client.js';
+import { getMessages } from './i18n/messages.js';
 import { runMigrations } from './db/migrate.js';
 import { startMatrixRole } from './matrix/role.js';
 
@@ -48,7 +49,7 @@ if (config.role === 'worker') {
 	const agent = app.agent;
 	app.log.info({ role: config.role, applied: report.applied }, 'harness starting');
 	await agent.contracts.load();
-	const worker = startTurnWorker({ db, agent, log: app.log });
+	const worker = startTurnWorker({ db, agent, log: app.log, messages: getMessages(config.locale) });
 	const shutdown = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
 		agent.contracts.stop();
