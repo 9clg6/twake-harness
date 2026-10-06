@@ -79,6 +79,10 @@ spec:
             - name: ASSISTANT_LOCALE
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.assistantTimezone }}
+            - name: ASSISTANT_TIMEZONE
+              value: {{ . | quote }}
+            {{- end }}
             - name: ORG_AGENT_ENABLED
               value: {{ .Values.config.orgAgentEnabled | quote }}
             - name: ORG_AGENT_LOCALPART

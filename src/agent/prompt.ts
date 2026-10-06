@@ -4,6 +4,8 @@ import type { SkillSummary } from '../skills/repository.js';
 
 export interface PromptInput {
 	readonly persona: string;
+	// The present, as the turn started: what "today" and "this afternoon" mean
+	readonly moment?: string;
 	readonly memory: MemoryView;
 	readonly skills?: readonly SkillSummary[];
 	readonly history: readonly LlmMessage[];
@@ -38,6 +40,7 @@ export function countTurnsSinceMemory(history: readonly LlmMessage[]): number {
 
 export function buildSystemPrompt(input: PromptInput): string {
 	const parts: string[] = [input.persona];
+	if (input.moment !== undefined) parts.push(input.moment);
 	const memory = formatMemoryForPrompt(input.memory);
 	if (memory !== null) parts.push(memory);
 	const skills = formatSkillsForPrompt(input.skills ?? []);

@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 
 import { z } from 'zod';
 
+import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService } from './agent/service.js';
 import { runTool, toolCallStatus } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
@@ -47,6 +48,8 @@ export interface AppOptions {
 	readonly llm?: LlmClient;
 	readonly assistants?: AssistantService;
 	readonly agent?: AgentService;
+	// The present as the agent reads it; the system clock unless a test sets its own
+	readonly clock?: Clock;
 }
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
@@ -133,7 +136,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			config,
 			db,
 			log: app.log,
-			...(options.llm === undefined ? {} : { llm: options.llm })
+			...(options.llm === undefined ? {} : { llm: options.llm }),
+			...(options.clock === undefined ? {} : { clock: options.clock })
 		});
 	app.decorate('agent', agent);
 	const tools = agent.tools;

@@ -49,6 +49,9 @@ export interface Messages {
 		invitation(type: string, eventId: string): string;
 		other(type: string, eventId: string): string;
 	};
+	// What the model is told of the present at the start of every turn, so that it can place
+	// "today" or "this afternoon" and give contracts times with the right offset
+	now(words: string, iso: string, timeZone: string): string;
 }
 
 const ENGLISH: Messages = {
@@ -98,7 +101,14 @@ const ENGLISH: Messages = {
 			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with read_event, then check the slot with read_freebusy, passing the invitation uid (data.object.uid) as exclude. Tell me in a few words, in the language of our conversation, who invites me, to what and when, and whether I am free or what it conflicts with. Then ask me whether to accept it and stop there: do not accept it yourself, I will answer you here.`,
 		other: (type, eventId) =>
 			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`
-	}
+	},
+	now: (words, iso, timeZone) =>
+		[
+			'## Now',
+			`Date and time: ${words}, time zone ${timeZone}.`,
+			`In ISO 8601: ${iso}.`,
+			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.'
+		].join('\n')
 };
 
 // Tutoiement, as Hermes spoke. The name is chosen by the user, so no word around it agrees in
@@ -154,7 +164,14 @@ const FRENCH: Messages = {
 			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec read_event, puis vérifie le créneau avec read_freebusy, en passant l'uid de l'invitation (data.object.uid) en exclude. Dis-moi en quelques mots, dans la langue de notre conversation, qui m'invite, à quoi et quand, et si je suis libre ou avec quoi cela entre en conflit. Demande-moi ensuite si je l'accepte, et arrête-toi là : ne l'accepte pas toi-même, je te répondrai ici.`,
 		other: (type, eventId) =>
 			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec les contrats et dis-moi de quoi il s'agit.`
-	}
+	},
+	now: (words, iso, timeZone) =>
+		[
+			'## Maintenant',
+			`Date et heure : ${words}, fuseau ${timeZone}.`,
+			`En ISO 8601 : ${iso}.`,
+			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
+		].join('\n')
 };
 
 const CATALOG: Readonly<Record<Locale, Messages>> = { en: ENGLISH, fr: FRENCH };

@@ -1,5 +1,6 @@
 import { z } from 'zod';
 
+import { findTimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
 
 const ROLES = ['api', 'matrix', 'worker'] as const;
@@ -96,6 +97,8 @@ export interface Config {
 	};
 	// The language of the fixed texts of the assistants and the creator
 	readonly locale: Locale;
+	// The IANA time zone the assistants read the present in, such as Europe/Paris
+	readonly timeZone: string;
 	readonly logLevel: LogLevel;
 }
 
@@ -154,6 +157,7 @@ const envSchema = z.object({
 		.min(1)
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
 	ASSISTANT_LOCALE: z.enum(LOCALES).default('en'),
+	ASSISTANT_TIMEZONE: z.string().min(1).default('UTC'),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
 });
 
@@ -181,6 +185,12 @@ export function loadConfig(env: Env): Config {
 	) {
 		throw new Error(
 			`invalid configuration: ORG_AGENT_LOCALPART must start with ${values.MATRIX_ASSISTANT_PREFIX}`
+		);
+	}
+	const timeZone = findTimeZone(values.ASSISTANT_TIMEZONE);
+	if (timeZone === null) {
+		throw new Error(
+			`invalid configuration: ASSISTANT_TIMEZONE ${JSON.stringify(values.ASSISTANT_TIMEZONE)} is not a time zone the runtime knows; give an IANA name such as Europe/Paris`
 		);
 	}
 	return {
@@ -260,6 +270,7 @@ export function loadConfig(env: Env): Config {
 			k8sTokenPath: values.OPENBAO_K8S_TOKEN_PATH
 		},
 		locale: values.ASSISTANT_LOCALE,
+		timeZone,
 		logLevel: values.LOG_LEVEL
 	};
 }

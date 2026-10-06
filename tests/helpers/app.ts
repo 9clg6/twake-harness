@@ -1,6 +1,7 @@
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 
+import type { Clock } from '../../src/agent/clock.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
@@ -75,6 +76,8 @@ export interface StartOptions {
 	readonly keepData?: boolean;
 	// Settings of this harness, over the defaults
 	readonly env?: Record<string, string>;
+	// The present the agent reads, set by the test instead of the system clock
+	readonly clock?: Clock;
 }
 
 export async function startTestHarness(options: StartOptions = {}): Promise<TestHarness> {
@@ -105,7 +108,12 @@ export async function startTestHarness(options: StartOptions = {}): Promise<Test
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
 	const apps: FastifyInstance[] = [];
 	for (let i = 0; i < TEST_REPLICAS; i += 1) {
-		const app = await buildApp({ config, db, logStream });
+		const app = await buildApp({
+			config,
+			db,
+			logStream,
+			...(options.clock === undefined ? {} : { clock: options.clock })
+		});
 		await app.ready();
 		apps.push(app);
 	}
