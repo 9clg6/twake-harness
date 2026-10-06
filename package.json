@@ -18,7 +18,8 @@
 		"test": "vitest run",
 		"test:ci": "vitest run --reporter=default --reporter=json --outputFile=test-results/vitest.json",
 		"db:migrate": "tsx src/db/migrate-cli.ts",
-		"matrix:registration": "tsx src/matrix/registration-cli.ts"
+		"matrix:registration": "tsx src/matrix/registration-cli.ts",
+		"test:dev": "vitest run -c vitest.dev.config.ts --reporter=default --reporter=json --outputFile=dev-results/vitest.json"
 	},
 	"dependencies": {
 		"drizzle-orm": "^0.45.3",
