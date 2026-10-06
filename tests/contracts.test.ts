@@ -85,6 +85,7 @@ describe('contracts as tools', () => {
 				'memory',
 				'scoped_sessions_list',
 				'scoped_sessions_read',
+				'session_search',
 				'scoped_skills_list',
 				'scoped_skills_read',
 				'skills_propose',

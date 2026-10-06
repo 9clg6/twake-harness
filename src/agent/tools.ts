@@ -8,7 +8,7 @@ import {
 	replaceMemoryEntry,
 	toMemoryTarget
 } from '../memory/repository.js';
-import { findSession, listSessionIds } from '../sessions/repository.js';
+import { findSession, listSessionIds, searchSessions } from '../sessions/repository.js';
 import {
 	findSkill,
 	insertSkill,
@@ -331,5 +331,33 @@ export const skillsProposeTool: Tool = {
 			})
 		);
 		return { result: { proposed: skill.id, status: 'proposed' } };
+	}
+};
+
+const sessionSearchArgs = z.object({ query: z.string().min(1).max(200) });
+
+export const sessionSearchTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'session_search',
+			description: 'Find your past conversations with this user by words they contain.',
+			parameters: {
+				type: 'object',
+				properties: { query: { type: 'string' } },
+				required: ['query'],
+				additionalProperties: false
+			}
+		}
+	},
+	argumentKeys: ['query'],
+	requiredAction: 'sessions.read_own',
+	run: async (args, context) => {
+		const parsed = sessionSearchArgs.safeParse(args);
+		if (!parsed.success) return { result: { error: 'query is required' } };
+		const matches = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			searchSessions(tx, parsed.data.query)
+		);
+		return { result: { sessions: matches.map((m) => ({ session_id: m.id, snippet: m.snippet })) } };
 	}
 };

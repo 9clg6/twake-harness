@@ -29,6 +29,9 @@ export interface Config {
 		readonly maxToolCalls: number;
 		readonly memoryNudgeInterval: number;
 	};
+	readonly curation: {
+		readonly intervalMs: number;
+	};
 	readonly contracts: {
 		// Paths under the APISIX address: the curated OpenAPI, the contracts, the audit route
 		readonly openapiPath: string;
@@ -64,6 +67,7 @@ const envSchema = z.object({
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
+	CURATION_INTERVAL_MS: z.coerce.number().int().min(0).default(86_400_000),
 	CONTRACTS_OPENAPI_PATH: z.string().min(1).default('contracts/openapi.json'),
 	CONTRACTS_BASE_PATH: z.string().min(1).default('contracts'),
 	AUDIT_PATH: z.string().min(1).default('audit'),
@@ -117,6 +121,9 @@ export function loadConfig(env: Env): Config {
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL
+		},
+		curation: {
+			intervalMs: values.CURATION_INTERVAL_MS
 		},
 		contracts: {
 			openapiPath: values.CONTRACTS_OPENAPI_PATH,
