@@ -5,7 +5,7 @@ The Twake Space agent harness: one shared service, written in TypeScript, that g
 - Isolation between users is enforced in code and in the database, not by separate pods.
 - Assistants are created by their owner from Twake Chat, through a creator conversation, with nothing to configure.
 - Each assistant has memory, skills and self-learning, and acts in the applications with its owner's rights, through the platform's API gateway, asking before it acts.
-- The service reaches the outside world only through APISIX, keeps the assistants' encryption secrets in the platform's OpenBao, and logs every action and reasoning step in clear.
+- The service reaches the outside world only through APISIX, keeps the assistants' encryption secrets in the platform's OpenBao, and logs every action with its metadata at `info`, the conversation itself (prompt, answer, reasoning, tool arguments and results) only at `debug`, so the messages it decrypts stay out of production logs.
 
 ## Where things are
 
@@ -57,6 +57,10 @@ The Matrix tests start a real Synapse in a container, so Docker is needed to run
 ### Behind the gateway
 
 The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` set, every request of the API must carry that value in `x-twake-gateway`, which the gateway injects on what it forwards; anything else gets a 403 before any identity work, while the health check and the metrics stay open to the cluster. Every contract call is posted to the audit route as one record in the shape the audit relay takes from the gateway's own logger (agent, user, contract, method, path, status, correlation id), so it lands in the audit topic keyed by the agent.
+
+### Replaying against dev
+
+`npm run test:dev` replays the prototype's black-box checks (identity, default rights, memory and session isolation, identity override, two users at once) against a deployed harness through its gateway, with no database or container: set `HARNESS_BASE_URL` to the api route (for instance `https://apisix.dev.twake.lin-saas.com/agents`) and `HARNESS_TOKEN_A` and `HARNESS_TOKEN_B` to the access tokens of two users carrying the `twake-harness` audience. The results land in `dev-results/vitest.json`, to keep with the pilot. Without those variables the suite is skipped.
 
 ### Jobs between roles
 
