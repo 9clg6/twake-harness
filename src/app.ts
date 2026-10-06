@@ -16,6 +16,7 @@ import { withPrincipal, type Db } from './db/client.js';
 import { getMessages } from './i18n/messages.js';
 import { enqueueJob } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
+import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
 import { listMemory } from './memory/repository.js';
 import type { Principal } from './principals/principal.js';
@@ -115,6 +116,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	const app = Fastify({
 		logger: {
 			level: config.logLevel,
+			serializers: FAILURE_SERIALIZERS,
 			...(options.logStream === undefined ? {} : { stream: options.logStream })
 		},
 		genReqId: requestIdOf,
