@@ -19,17 +19,20 @@ export async function hasConsent(
 	return rows.length > 0;
 }
 
+// Resolves to whether the owner had not allowed it yet: a consent already given keeps when and how
+// it was given
 export async function grantConsent(
 	tx: Tx,
 	owner: string,
 	domain: string,
 	level: ConsentLevel,
 	source: ConsentSource
-): Promise<void> {
-	await tx.sql`
+): Promise<boolean> {
+	const result = await tx.sql`
 		insert into consents (owner, domain, level, granted_by)
 		values (${owner}, ${domain}, ${level}, ${source})
 		on conflict do nothing`;
+	return result.count === 1;
 }
 
 // What an owner's assistant may use: what the owner allowed, or the reading of its own feed of

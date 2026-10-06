@@ -13,7 +13,14 @@ import { findAssistant } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
+import { isBuiltInConsent, isConsentLevel } from './consents/consent.js';
 import { makeConsentMetrics, type ConsentMetrics } from './consents/metrics.js';
+import {
+	grantConsent,
+	listConsents,
+	toConsentView,
+	withdrawConsents
+} from './consents/repository.js';
 import { withPrincipal, type Db } from './db/client.js';
 import { getMessages } from './i18n/messages.js';
 import { enqueueJob } from './jobs/queue.js';
@@ -86,6 +93,8 @@ const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
+// The harness builds the consent in: no owner withdraws it
+const CONSENT_BUILT_IN = { error: 'consent built in' } as const;
 
 const eventSchema = z.object({
 	owner: z.string().min(1).max(128),
@@ -461,6 +470,74 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				if (!record.actions.includes('memory.read_own')) return reply.code(403).send(FORBIDDEN);
 				return withPrincipal(db, principal, (tx) => listMemory(tx, principal.id));
 			});
+
+			// The owner's consents, which a settings page lists, grants and withdraws with the owner's
+			// own token. The reading of the assistant's own feed of events is built in: it is listed,
+			// never granted nor withdrawn.
+			scope.get('/consents', async (request) => {
+				const principal = principalOf(request);
+				const consents = await withPrincipal(db, principal, (tx) => listConsents(tx, principal.id));
+				return { consents: consents.map(toConsentView) };
+			});
+
+			// Grants a level of an application the catalog offers, ahead of its first use
+			scope.put<{ Params: { domain: string; level: string } }>(
+				'/consents/:domain/:level',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					const { domain, level } = request.params;
+					const offered =
+						isConsentLevel(level) &&
+						(isBuiltInConsent(domain, level) ||
+							agent.contracts.contracts.some((c) => c.domain === domain && c.level === level));
+					if (!offered) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					const { created, consent } = await withPrincipal(db, principal, async (tx) => {
+						const created =
+							!isBuiltInConsent(domain, level) &&
+							(await grantConsent(tx, principal.id, domain, level, 'api'));
+						const consents = await listConsents(tx, principal.id);
+						return {
+							created,
+							consent: consents.find((c) => c.domain === domain && c.level === level)
+						};
+					});
+					if (consent === undefined) throw new Error('a granted consent is not listed');
+					if (created) {
+						request.log.info({ principal: principal.id, domain, level }, 'consent granted');
+					}
+					return reply.code(created ? 201 : 200).send(toConsentView(consent));
+				}
+			);
+
+			scope.delete<{ Params: { domain: string; level: string } }>(
+				'/consents/:domain/:level',
+				async (request, reply) => {
+					const principal = principalOf(request);
+					const { domain, level } = request.params;
+					if (!isConsentLevel(level)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					if (isBuiltInConsent(domain, level)) return reply.code(409).send(CONSENT_BUILT_IN);
+					// A level the owner never allowed is no consent to withdraw, and changes nothing
+					const withdrawal = await withPrincipal(db, principal, async (tx) => {
+						const allowed = await listConsents(tx, principal.id);
+						return allowed.some((c) => c.domain === domain && c.level === level)
+							? withdrawConsents(tx, principal.id, domain, [level])
+							: null;
+					});
+					if (withdrawal === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					request.log.info(
+						{ principal: principal.id, domain, levels: withdrawal.levels },
+						'consent withdrawn'
+					);
+					for (const closed of withdrawal.superseded) {
+						request.log.info(
+							{ owner: principal.id, pendingCallId: closed.pendingCallId },
+							'request superseded'
+						);
+						consentMetrics.superseded(closed);
+					}
+					return reply.code(204).send();
+				}
+			);
 
 			// Direct tool calls, under the same rules as the model's: identity from the token only,
 			// unknown tools and unknown arguments refused, ownership enforced by the database.
