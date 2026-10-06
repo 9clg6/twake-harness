@@ -38,8 +38,19 @@ function model(request: ChatRequest): ScriptedReply {
 	return { content: `Heard: ${content}` };
 }
 
-const FRENCH_QUESTION =
-	"C'est la première fois que j'ai besoin de lire tes données dans notes. Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non.";
+// The question about the first read of an application, the call it shows, and how to answer
+function question(asked: string, howToAnswer: string): string {
+	return [asked, JSON.stringify({ q: 'budget' }, null, 2), howToAnswer].join('\n\n');
+}
+
+const FRENCH_QUESTION = question(
+	"C'est la première fois que j'ai besoin de lire tes données dans notes. Tu m'autorises ? Je commencerais par ceci :",
+	'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+);
+const ENGLISH_QUESTION = question(
+	'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
+	'Answer with the buttons below, or reply yes or no.'
+);
 
 describe('my assistant speaks my language', () => {
 	let r: ConsentRoom;
@@ -114,9 +125,7 @@ describe('my assistant speaks my language', () => {
 		const seen = r.questions().length;
 		await r.client.sendText(r.room, 'Switch to English and find the budget in my mail');
 		const question = await r.nextQuestion(seen);
-		expect(r.questions().at(-1)?.body).toBe(
-			'This is the first time I need to read your data in mail. Do you allow it? Answer with the buttons below, or reply yes or no.'
-		);
+		expect(r.questions().at(-1)?.body).toBe(ENGLISH_QUESTION);
 		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);
 		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 	});
@@ -125,8 +134,6 @@ describe('my assistant speaks my language', () => {
 		const res = await r.h.api.post<{ answer: string }>('bob@test.local', '/v1/chat', {
 			message: 'Find the budget in my mail'
 		});
-		expect(res.body.answer).toBe(
-			'This is the first time I need to read your data in mail. Do you allow it? Answer with the buttons below, or reply yes or no.'
-		);
+		expect(res.body.answer).toBe(ENGLISH_QUESTION);
 	});
 });

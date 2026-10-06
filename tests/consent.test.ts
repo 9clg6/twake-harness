@@ -94,8 +94,13 @@ describe('my assistant asks before it first uses an application', () => {
 		const request = await client.waitForMessage(room, assistantId, (t) =>
 			t.startsWith('This is the first time')
 		);
+		// The question, the call as it would run, and how to answer
 		expect(request).toBe(
-			'This is the first time I need to read your data in mail. Do you allow it? Answer with the buttons below, or reply yes or no.'
+			[
+				'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
+				JSON.stringify({ from: 'paul@test.local' }, null, 2),
+				'Answer with the buttons below, or reply yes or no.'
+			].join('\n\n')
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 		// The wait is logged with what it is about, never with what the call would have sent
@@ -158,7 +163,19 @@ describe('my assistant asks before it first uses an application', () => {
 			t.includes('your data in calendar')
 		);
 		expect(request).toBe(
-			'This is the first time I need to read your data in calendar. Do you allow it? Answer with the buttons below, or reply yes or no.'
+			[
+				'This is the first time I need to read your data in calendar. Do you allow it? I would start with this:',
+				JSON.stringify(
+					{
+						start: '2026-10-09T09:00:00+02:00',
+						end: '2026-10-09T10:00:00+02:00',
+						exclude: ['uid-evt-inv']
+					},
+					null,
+					2
+				),
+				'Answer with the buttons below, or reply yes or no.'
+			].join('\n\n')
 		);
 		// The harness read the invitation, then stopped at the calendar: no slot read, no model
 		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-inv']);

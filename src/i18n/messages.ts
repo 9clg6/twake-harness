@@ -56,12 +56,23 @@ export interface Messages {
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
+		// Every question shows the call below it, then how to answer.
 		// The application as the catalog names it, or else by its id, and what reading covers there
 		// when the catalog says, both from labelOf
 		firstRead(application: string, covers: string | null): string;
 		// Asked before the assistant first writes in an application, even one its owner lets it read:
 		// the application as for reading, and what writing covers there when the catalog says
 		firstWrite(application: string, covers: string | null): string;
+		// Asked before every high-risk write, whatever its owner allowed: the application as for
+		// writing
+		highRisk(application: string): string;
+		// The same when it is also the first write in that application, with what writing covers there
+		// when the catalog says: one yes allows writing there and confirms that call
+		firstHighRisk(application: string, covers: string | null): string;
+		// Under the call a question shows, how to answer it
+		readonly howToAnswer: string;
+		// Above what the model wrote alongside the call, quoted apart from the harness's own words
+		readonly said: string;
 		// The platform's broker lacks the owner's permission for their assistant to act for them:
 		// what the call was about to do, in the application named as for a first use, why it waits,
 		// and whether to try again; with the deployment's consent link, where to give it first, and
@@ -106,17 +117,16 @@ export interface Messages {
 
 // A question about the first use of an application at one level. What the catalog says the level
 // covers goes on a line of its own, under the level's label and apart from the harness's
-// sentences, when it says anything.
-function firstUse(
-	asked: string,
-	level: string,
-	covers: string | null,
-	howToAnswer: string
-): string {
+// sentences, when it says anything; the question comes last.
+function firstUse(asked: string, level: string, covers: string | null, question: string): string {
 	return covers === null
-		? `${asked} ${howToAnswer}`
-		: [asked, `${level} ${covers}`, howToAnswer].join('\n');
+		? `${asked} ${question}`
+		: [asked, `${level} ${covers}`, question].join('\n');
 }
+
+// How an owner answers a request, the sentence every request ends with, in each language
+const ENGLISH_HOW_TO_ANSWER = 'Answer with the buttons below, or reply yes or no.';
+const FRENCH_HOW_TO_ANSWER = 'Réponds avec les boutons ci-dessous, ou par oui ou non.';
 
 const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
@@ -169,19 +179,30 @@ const ENGLISH: Messages = {
 				`This is the first time I need to read your data in ${application}.`,
 				'Reading:',
 				covers,
-				'Do you allow it? Answer with the buttons below, or reply yes or no.'
+				'Do you allow it? I would start with this:'
 			),
 		firstWrite: (application, covers) =>
 			firstUse(
 				`This is the first time I need to change your data in ${application}.`,
 				'Writing:',
 				covers,
-				'Do you allow it? Answer with the buttons below, or reply yes or no.'
+				'Do you allow it? I would start with this:'
 			),
+		highRisk: (application) =>
+			`Actions like this one in ${application} need your yes each time. Shall I do this one, exactly as below?`,
+		firstHighRisk: (application, covers) =>
+			firstUse(
+				`This is the first time I need to change your data in ${application}, and actions like this one need your yes each time.`,
+				'Writing:',
+				covers,
+				'Do you allow it, starting with this one, exactly as below?'
+			),
+		howToAnswer: ENGLISH_HOW_TO_ANSWER,
+		said: 'Your assistant wrote:',
 		delegation: (application, level, code, link) => {
 			const expired = code === 'delegation_expired';
 			const why = `To ${level === 'read' ? 'read' : 'change'} your data in ${application}, I need your permission to act on your behalf, and ${expired ? 'the one you gave me has expired' : 'you have not given it yet'}.`;
-			const answer = 'Answer with the buttons below, or reply yes or no.';
+			const answer = ENGLISH_HOW_TO_ANSWER;
 			return link === null
 				? `${why}\nShall I try again? ${answer}`
 				: `${why} Give it ${expired ? 'again ' : ''}here: ${link}\nOnce that is done, shall I try again? ${answer}`;
@@ -274,19 +295,30 @@ const FRENCH: Messages = {
 				`C'est la première fois que j'ai besoin de lire tes données dans ${application}.`,
 				'Lecture :',
 				covers,
-				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+				"Tu m'autorises ? Je commencerais par ceci :"
 			),
 		firstWrite: (application, covers) =>
 			firstUse(
 				`C'est la première fois que j'ai besoin de modifier tes données dans ${application}.`,
 				'Écriture :',
 				covers,
-				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+				"Tu m'autorises ? Je commencerais par ceci :"
 			),
+		highRisk: (application) =>
+			`Dans ${application}, les actions comme celle-ci demandent ton accord à chaque fois. Je fais celle-ci, exactement comme ci-dessous ?`,
+		firstHighRisk: (application, covers) =>
+			firstUse(
+				`C'est la première fois que j'ai besoin de modifier tes données dans ${application}, et les actions comme celle-ci demandent ton accord à chaque fois.`,
+				'Écriture :',
+				covers,
+				"Tu m'autorises, à commencer par celle-ci, exactement comme ci-dessous ?"
+			),
+		howToAnswer: FRENCH_HOW_TO_ANSWER,
+		said: 'Ton assistant a écrit :',
 		delegation: (application, level, code, link) => {
 			const expired = code === 'delegation_expired';
 			const why = `Pour ${level === 'read' ? 'lire' : 'modifier'} tes données dans ${application}, j'ai besoin de ton autorisation d'agir en ton nom, et ${expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée"}.`;
-			const answer = 'Réponds avec les boutons ci-dessous, ou par oui ou non.';
+			const answer = FRENCH_HOW_TO_ANSWER;
 			return link === null
 				? `${why}\nJe réessaie ? ${answer}`
 				: `${why} Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;

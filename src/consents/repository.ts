@@ -177,7 +177,11 @@ interface SubjectRow {
 
 // Every reason a call may wait for, so that a reason read back is known for one: a reason added
 // to WaitReason and missing here fails the build
-const WAIT_REASONS: Readonly<Record<WaitReason, true>> = { consent: true, delegation: true };
+const WAIT_REASONS: Readonly<Record<WaitReason, true>> = {
+	consent: true,
+	high_risk: true,
+	delegation: true
+};
 
 function isWaitReason(value: string): value is WaitReason {
 	return Object.hasOwn(WAIT_REASONS, value);
@@ -375,6 +379,15 @@ export async function approvePendingCall(
 				correlationId: row.correlation_id,
 				origin: row.origin
 			};
+}
+
+// The call its owner allowed waits again once replayed, under a newer request that asks about
+// everything that applies by then, such as writing they took back since: this one is closed as
+// superseded by that request, and what it would have sent is erased, the newer one holding it
+export async function supersedeApprovedCall(tx: Tx, owner: string, id: string): Promise<void> {
+	await tx.sql`
+		update pending_calls set status = 'superseded', arguments = null
+		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
 }
 
 // The call ran, and the conversation holds it: what it sent is erased

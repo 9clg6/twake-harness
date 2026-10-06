@@ -47,7 +47,7 @@ import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
-import { makeRichText } from './format.js';
+import { makeLaidOutText, makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
@@ -96,6 +96,8 @@ interface SendJob {
 	readonly outcome?: TurnOutcome;
 	// The text asks the owner about a frozen call: the event sent is remembered for their answer
 	readonly request?: PendingQuestion;
+	// The text as HTML, laid out by the harness itself
+	readonly html?: string;
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
@@ -133,7 +135,8 @@ function isSendJob(value: unknown): value is SendJob {
 		(job['outcome'] === undefined ||
 			job['outcome'] === 'answered' ||
 			job['outcome'] === 'failed') &&
-		(job['request'] === undefined || isPendingQuestion(job['request']))
+		(job['request'] === undefined || isPendingQuestion(job['request'])) &&
+		(job['html'] === undefined || typeof job['html'] === 'string')
 	);
 }
 
@@ -837,7 +840,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await refreshMembersDevices(intent, job.payload.roomId);
 			const turn = turnOf(job.payload);
 			if (turn !== null) await feedback.answerReady(turn);
-			const sent = await intent.sendEvent(job.payload.roomId, makeRichText(job.payload.text));
+			const { text, html } = job.payload;
+			const sent = await intent.sendEvent(
+				job.payload.roomId,
+				html === undefined ? makeRichText(text) : makeLaidOutText(text, html)
+			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			const request = job.payload.request;
 			if (request !== undefined) {

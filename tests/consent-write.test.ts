@@ -25,6 +25,7 @@ const CATALOG = {
 				operationId: 'accept_invitation',
 				summary: 'Accepts an invitation, once the user has said yes to this very invitation',
 				tags: ['calendar.invitation.accept.v1'],
+				'x-twake-risk': 'low',
 				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		},
@@ -33,6 +34,7 @@ const CATALOG = {
 				operationId: 'decline_invitation',
 				summary: 'Declines an invitation, once the user has said no to this very invitation',
 				tags: ['calendar.invitation.decline.v1'],
+				'x-twake-risk': 'low',
 				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		},
@@ -41,6 +43,7 @@ const CATALOG = {
 				operationId: 'complete_task',
 				summary: "Marks one of the user's tasks done",
 				tags: ['tasks.task.complete.v1'],
+				'x-twake-risk': 'low',
 				parameters: [{ name: 'task_id', in: 'path', required: true, schema: { type: 'string' } }],
 				requestBody: {
 					content: {
@@ -105,7 +108,11 @@ describe('my assistant asks again before it first writes in an application', () 
 		const asked = await r.client.sendText(r.room, 'Accept the budget review');
 		const question = await r.nextQuestion(seen);
 		expect(r.questions().at(-1)?.body).toBe(
-			'This is the first time I need to change your data in calendar. Do you allow it? Answer with the buttons below, or reply yes or no.'
+			[
+				'This is the first time I need to change your data in calendar. Do you allow it? I would start with this:',
+				JSON.stringify({ event_id: 'evt-budget' }, null, 2),
+				'Answer with the buttons below, or reply yes or no.'
+			].join('\n\n')
 		);
 		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);
 		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
@@ -159,7 +166,11 @@ describe('my assistant asks again before it first writes in an application', () 
 		await r.client.sendText(r.room, 'Mark the Q4 figures task done');
 		const question = await r.nextQuestion(seen);
 		expect(r.questions().at(-1)?.body).toBe(
-			'This is the first time I need to change your data in tasks. Do you allow it? Answer with the buttons below, or reply yes or no.'
+			[
+				'This is the first time I need to change your data in tasks. Do you allow it? I would start with this:',
+				JSON.stringify({ task_id: 'task-q4', body: { done: true } }, null, 2),
+				'Answer with the buttons below, or reply yes or no.'
+			].join('\n\n')
 		);
 		await r.client.waitForReactions(r.room, question, r.assistantId, 2);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);

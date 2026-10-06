@@ -9,8 +9,10 @@ import {
 	approvePendingCall,
 	grantConsent,
 	markReplayed,
+	supersedeApprovedCall,
 	type ApprovedCall
 } from '../consents/repository.js';
+import type { OwnerRequest } from '../consents/request.js';
 import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
@@ -81,12 +83,18 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 interface Question {
 	readonly text: string;
 	readonly pendingCallId: string;
+	// Its parts, when the harness laid it out as a request about the call
+	readonly request: OwnerRequest | null;
 }
 
 // The question a tool's outcome ends the turn on, when its call waits for its owner
 function questionOf(outcome: ToolOutcome): Question | null {
 	return outcome.final !== undefined && outcome.pendingCallId !== undefined
-		? { text: outcome.final, pendingCallId: outcome.pendingCallId }
+		? {
+				text: outcome.final,
+				pendingCallId: outcome.pendingCallId,
+				request: outcome.request ?? null
+			}
 		: null;
 }
 
@@ -137,6 +145,8 @@ export type OwnerTurnResult =
 			readonly model: string;
 			// The call the harness froze, when the turn ended on its question to the owner
 			readonly pendingCallId?: string;
+			// That question in its parts, when the harness laid it out as a request about the call
+			readonly request?: OwnerRequest;
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -249,9 +259,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	// Runs the call its owner allowed, exactly as it was frozen, and writes it in the session as
 	// the assistant's call followed by its result, for the model to go on from. A tool that no
-	// longer stands for the contract the owner allowed, at the same level, runs nothing. A call
-	// that waits for its owner again, such as one the platform's broker still refuses, comes back
-	// with the harness's new question.
+	// longer stands for the contract the owner allowed, at the same level, runs nothing. The call
+	// waits for nothing the owner's yes answered; one that waits for its owner again, such as one
+	// the platform's broker still refuses or one in an application whose writing they took back
+	// since, comes back with the harness's new question.
 	async function replay(
 		approved: ApprovedCall,
 		pendingCallId: string,
@@ -266,19 +277,28 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			definition.id === approved.contract &&
 			definition.level === approved.level;
 		const outcome: ToolOutcome = unchanged
-			? await runTool(tool, approved.arguments, context)
+			? await runTool(tool, approved.arguments, { ...context, answeredReasons: approved.reasons })
 			: { result: CONTRACT_CHANGED };
+		const question = questionOf(outcome);
 		const httpStatus = statusOf(outcome.result);
-		consentMetrics.replayed(approved, replayOutcome(httpStatus));
-		log.info(
-			{
-				pendingCallId,
-				tool: approved.tool,
-				status: unchanged ? toolCallStatus(outcome) : 'contract_changed',
-				...(httpStatus === null ? {} : { httpStatus })
-			},
-			'pending call replayed'
-		);
+		if (question === null) {
+			consentMetrics.replayed(approved, replayOutcome(httpStatus));
+			log.info(
+				{
+					pendingCallId,
+					tool: approved.tool,
+					status: unchanged ? toolCallStatus(outcome) : 'contract_changed',
+					...(httpStatus === null ? {} : { httpStatus })
+				},
+				'pending call replayed'
+			);
+		} else {
+			// Its new request is what counts: it asks about everything that applies now
+			log.info(
+				{ pendingCallId, tool: approved.tool, nextPendingCallId: question.pendingCallId },
+				'pending call waits again'
+			);
+		}
 		const callId = `replay_${pendingCallId}`;
 		return {
 			messages: [
@@ -300,7 +320,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					content: JSON.stringify(outcome.result)
 				}
 			],
-			question: questionOf(outcome)
+			question
 		};
 	}
 
@@ -391,14 +411,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					saveSessionMessages(tx, session.id, asked)
 				);
 				if (!saved) return { kind: 'missing' };
-				const { pendingCallId } = told.question;
+				const { pendingCallId, request } = told.question;
 				log.info({ pendingCallId }, 'turn stopped on a question to the owner');
 				return {
 					kind: 'ok',
 					sessionId: session.id,
 					answer: told.question.text,
 					model: llm.model,
-					pendingCallId
+					pendingCallId,
+					...(request === null ? {} : { request })
 				};
 			}
 			// Read at the start of every turn, never kept: a session can span days
@@ -418,11 +439,14 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						? []
 						: [{ role: 'assistant' as const, content: newQuestion.text }])
 				];
-				// The conversation holds the call at once, whatever happens to the rest of the turn
+				// The conversation holds the call at once, whatever happens to the rest of the turn. A
+				// call that waits again is not stamped as run: the newer request supersedes the one
+				// answered.
 				const kept = history;
 				await withPrincipal(db, principal, async (tx) => {
 					await saveSessionMessages(tx, session.id, kept);
-					await markReplayed(tx, pendingCallId);
+					if (newQuestion === null) await markReplayed(tx, pendingCallId);
+					else await supersedeApprovedCall(tx, principal.id, pendingCallId);
 				});
 				if (newQuestion !== null) {
 					log.info(
@@ -434,7 +458,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						sessionId: session.id,
 						answer: newQuestion.text,
 						model: llm.model,
-						pendingCallId: newQuestion.pendingCallId
+						pendingCallId: newQuestion.pendingCallId,
+						...(newQuestion.request === null ? {} : { request: newQuestion.request })
 					};
 				}
 			}
@@ -480,7 +505,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					sessionId: session.id,
 					answer: turn.answer,
 					model: llm.model,
-					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId })
+					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
+					...(turn.request === undefined ? {} : { request: turn.request })
 				};
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {

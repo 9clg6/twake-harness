@@ -183,8 +183,9 @@ function contractRoutes(spec: unknown, mount: string): ContractRoute[] {
 }
 
 // The calendar contracts as the contracts service publishes them, behind the gateway: absolute
-// paths, the versioned contract in tags[0], the verbs as operationIds, and exclude a plain array
-// of UIDs, the only list shape APISIX's validator turns a query value into
+// paths, the versioned contract in tags[0], the verbs as operationIds, exclude a plain array of
+// UIDs, the only list shape APISIX's validator turns a query value into, and accepting a low-risk
+// write, the owner's own answer to an invitation
 export const CALENDAR_CATALOG = {
 	openapi: '3.1.0',
 	paths: {
@@ -218,6 +219,7 @@ export const CALENDAR_CATALOG = {
 				operationId: 'accept_invitation',
 				summary: 'Accept an invitation, once the user has said yes to this very invitation',
 				tags: ['calendar.invitation.accept.v1'],
+				'x-twake-risk': 'low',
 				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		}

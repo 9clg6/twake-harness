@@ -16,6 +16,7 @@ const CATALOG = {
 				operationId: 'archive_mail',
 				summary: "Archives one of the user's mails",
 				tags: ['mail.item.archive.v1'],
+				'x-twake-risk': 'low',
 				parameters: [{ name: 'item_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		}
@@ -82,16 +83,37 @@ function model(request: ChatRequest): ScriptedReply {
 	return { content: `Heard: ${content}` };
 }
 
-// How the question ends, in each language
+// How the question ends, above the call it shows, and how to answer, under the call, in each
+// language
+const ALLOW = {
+	en: 'Do you allow it? I would start with this:',
+	fr: "Tu m'autorises ? Je commencerais par ceci :"
+};
 const HOW_TO_ANSWER = {
-	en: 'Do you allow it? Answer with the buttons below, or reply yes or no.',
-	fr: "Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
+	en: 'Answer with the buttons below, or reply yes or no.',
+	fr: 'Réponds avec les boutons ci-dessous, ou par oui ou non.'
 };
 
+// The calls of the model above: a search for the budget, and the archiving of a newsletter
+const SEARCH = { q: 'budget' };
+const ARCHIVE = { item_id: 'newsletter-42' };
+
 // A question as Alice's client receives it: its plain body, and the HTML Twake Chat displays, in
-// which only the harness's own lines break
-function shown(...lines: string[]): { body: string; html: string } {
-	return { body: lines.join('\n'), html: lines.join('<br />\n') };
+// which only the harness's own lines break; then the call it shows, and how to answer
+function shown(
+	question: readonly string[],
+	call: unknown = SEARCH,
+	language: 'en' | 'fr' = 'en'
+): { body: string; html: string } {
+	const json = JSON.stringify(call, null, 2);
+	return {
+		body: [question.join('\n'), json, HOW_TO_ANSWER[language]].join('\n\n'),
+		html: [
+			`<p>${question.join('<br />\n')}</p>`,
+			`<pre><code class="language-json">${json}</code></pre>`,
+			`<p>${HOW_TO_ANSWER[language]}</p>`
+		].join('\n')
+	};
 }
 
 describe('the question names the application in plain words', () => {
@@ -136,15 +158,15 @@ describe('the question names the application in plain words', () => {
 
 	it('names the application and says what reading covers there', async () => {
 		expect(await askedAfter('Find the budget in my mail')).toEqual(
-			shown(
+			shown([
 				'This is the first time I need to read your data in Twake Mail.',
 				'Reading: list, search and read your mail',
-				HOW_TO_ANSWER.en
-			)
+				ALLOW.en
+			])
 		);
 		// An application the catalog names without saying what reading covers there
 		expect(await askedAfter('Show my photos')).toEqual(
-			shown(`This is the first time I need to read your data in Twake Photos. ${HOW_TO_ANSWER.en}`)
+			shown([`This is the first time I need to read your data in Twake Photos. ${ALLOW.en}`])
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
@@ -152,9 +174,12 @@ describe('the question names the application in plain words', () => {
 	it('names the application and says what writing covers there, before its first write', async () => {
 		expect(await askedAfter('Archive the newsletter')).toEqual(
 			shown(
-				'This is the first time I need to change your data in Twake Mail.',
-				'Writing: move, archive and delete your mail',
-				HOW_TO_ANSWER.en
+				[
+					'This is the first time I need to change your data in Twake Mail.',
+					'Writing: move, archive and delete your mail',
+					ALLOW.en
+				],
+				ARCHIVE
 			)
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
@@ -162,24 +187,24 @@ describe('the question names the application in plain words', () => {
 
 	it("names an application by its id when the catalog names it neither in my language nor in the deployment's", async () => {
 		expect(await askedAfter('Search my notes')).toEqual(
-			shown(`This is the first time I need to read your data in notes. ${HOW_TO_ANSWER.en}`)
+			shown([`This is the first time I need to read your data in notes. ${ALLOW.en}`])
 		);
 		// Wiki is named in French only, while Alice and the deployment speak English
 		expect(await askedAfter('Open my wiki')).toEqual(
-			shown(`This is the first time I need to read your data in wiki. ${HOW_TO_ANSWER.en}`)
+			shown([`This is the first time I need to read your data in wiki. ${ALLOW.en}`])
 		);
 	});
 
 	it('takes up the words a refresh of the catalog brings, without a restart', async () => {
 		expect(await askedAfter('Show my tasks')).toEqual(
-			shown(`This is the first time I need to read your data in tasks. ${HOW_TO_ANSWER.en}`)
+			shown([`This is the first time I need to read your data in tasks. ${ALLOW.en}`])
 		);
 		await serve({ ...DESCRIBED, tasks: TASKS });
-		const described = shown(
+		const described = shown([
 			'This is the first time I need to read your data in Twake Tasks.',
 			'Reading: list and read your tasks and boards',
-			HOW_TO_ANSWER.en
-		);
+			ALLOW.en
+		]);
 		expect(await askedAfter('Show my tasks')).toEqual(described);
 		// A refresh that fails keeps the catalog as it was, its words included
 		r.h.apisix.contracts.spec = null;
@@ -221,12 +246,12 @@ describe('the question names the application in plain words', () => {
 		};
 		for (const [domain, message] of Object.entries(asked)) {
 			expect(await askedThroughApi(message)).toBe(
-				`This is the first time I need to read your data in ${domain}. ${HOW_TO_ANSWER.en}`
+				shown([`This is the first time I need to read your data in ${domain}. ${ALLOW.en}`]).body
 			);
 		}
 		// The rest of this catalog holds, a new name included
 		expect(await askedThroughApi('Show my photos')).toBe(
-			`This is the first time I need to read your data in Twake Pictures. ${HOW_TO_ANSWER.en}`
+			shown([`This is the first time I need to read your data in Twake Pictures. ${ALLOW.en}`]).body
 		);
 		// Descriptions that are no map of domains are ignored whole
 		await serve(['mail']);
@@ -239,7 +264,7 @@ describe('the question names the application in plain words', () => {
 				)
 		).toBe(true);
 		expect(await askedThroughApi('Find the budget in my mail')).toBe(
-			`This is the first time I need to read your data in mail. ${HOW_TO_ANSWER.en}`
+			shown([`This is the first time I need to read your data in mail. ${ALLOW.en}`]).body
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
@@ -267,7 +292,7 @@ describe('the question names the application in plain words', () => {
 		// Each description is ignored whole, and Twake Chat shows the harness's sentence alone
 		for (const [domain, message] of Object.entries(asked)) {
 			expect(await askedAfter(message)).toEqual(
-				shown(`This is the first time I need to read your data in ${domain}. ${HOW_TO_ANSWER.en}`)
+				shown([`This is the first time I need to read your data in ${domain}. ${ALLOW.en}`])
 			);
 		}
 		const problems = Object.fromEntries(
@@ -298,28 +323,42 @@ describe('the question names the application in plain words', () => {
 		const opening = "C'est la première fois";
 		expect(await askedAfter('Cherche le budget dans mes mails', opening)).toEqual(
 			shown(
-				"C'est la première fois que j'ai besoin de lire tes données dans Messagerie Twake.",
-				'Lecture : lister, chercher et lire tes mails',
-				HOW_TO_ANSWER.fr
+				[
+					"C'est la première fois que j'ai besoin de lire tes données dans Messagerie Twake.",
+					'Lecture : lister, chercher et lire tes mails',
+					ALLOW.fr
+				],
+				SEARCH,
+				'fr'
 			)
 		);
 		expect(await askedAfter("Archive la lettre d'information", opening)).toEqual(
 			shown(
-				"C'est la première fois que j'ai besoin de modifier tes données dans Messagerie Twake.",
-				'Écriture : déplacer, archiver et supprimer tes mails',
-				HOW_TO_ANSWER.fr
+				[
+					"C'est la première fois que j'ai besoin de modifier tes données dans Messagerie Twake.",
+					'Écriture : déplacer, archiver et supprimer tes mails',
+					ALLOW.fr
+				],
+				ARCHIVE,
+				'fr'
 			)
 		);
 		// Drive is described in English only, the deployment's language: a French question takes
 		// its English name, and leaves out what reading covers there rather than say it in English
 		expect(await askedAfter('Cherche le plan dans mon drive', opening)).toEqual(
 			shown(
-				`C'est la première fois que j'ai besoin de lire tes données dans Twake Drive. ${HOW_TO_ANSWER.fr}`
+				[
+					`C'est la première fois que j'ai besoin de lire tes données dans Twake Drive. ${ALLOW.fr}`
+				],
+				SEARCH,
+				'fr'
 			)
 		);
 		expect(await askedAfter('Ouvre mon wiki', opening)).toEqual(
 			shown(
-				`C'est la première fois que j'ai besoin de lire tes données dans Wiki Twake. ${HOW_TO_ANSWER.fr}`
+				[`C'est la première fois que j'ai besoin de lire tes données dans Wiki Twake. ${ALLOW.fr}`],
+				SEARCH,
+				'fr'
 			)
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);

@@ -127,6 +127,17 @@ function unwrapSingleParagraph(html: string): string {
 	return inner !== undefined && !inner.includes('<p>') ? inner : html;
 }
 
+// A text the harness laid out itself, as plain text and as HTML, such as its request about a call:
+// its HTML goes through the same filter as an answer's
+export function makeLaidOutText(body: string, html: string): RichText {
+	return {
+		msgtype: 'm.text',
+		body,
+		format: 'org.matrix.custom.html',
+		formatted_body: sanitizeHtml(html, SANITIZE).trim()
+	};
+}
+
 // The markdown stays the plain body, for clients that show no HTML and for notifications
 export function makeRichText(text: string): RichText {
 	const html = sanitizeHtml(markdown.render(text), SANITIZE).trim();
