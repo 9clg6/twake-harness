@@ -42,6 +42,8 @@ describe('I answer the question in words', () => {
 		// My yes answered the question: no turn of its own told the model about it
 		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
 		expect(told.some((m) => m.role === 'user' && m.content === 'Yes!')).toBe(false);
+		// Once run, the call keeps nothing of what it sent
+		expect(await r.callsTo('mail')).toEqual([{ status: 'approved', arguments: null }]);
 	});
 
 	it('drops the call and tells me so when I answer no, or react ❌', async () => {

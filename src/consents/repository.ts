@@ -232,7 +232,7 @@ export async function approvePendingCall(
 			};
 }
 
-// The call ran, and the conversation holds it
+// The call ran, and the conversation holds it: what it sent is erased
 export async function markReplayed(tx: Tx, id: string): Promise<void> {
-	await tx.sql`update pending_calls set replayed_at = now() where id = ${id}`;
+	await tx.sql`update pending_calls set replayed_at = now(), arguments = null where id = ${id}`;
 }
