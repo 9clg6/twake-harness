@@ -60,13 +60,15 @@ export interface TestHarness {
 export async function resetDatabase(db: Db): Promise<void> {
 	await runMigrations(db);
 	await db.sql.unsafe(
-		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index'
+		'truncate table principals, sessions, memory_entries, matrix_transactions, matrix_registered_users, assistants, creator_dialogs, jobs, assistant_rooms, skills, principal_index, usage_daily'
 	);
 }
 
 export interface StartOptions {
 	// Keep the rows of a previous harness, to check what survives a restart
 	readonly keepData?: boolean;
+	// Settings of this harness, over the defaults
+	readonly env?: Record<string, string>;
 }
 
 export async function startTestHarness(options: StartOptions = {}): Promise<TestHarness> {
@@ -83,7 +85,8 @@ export async function startTestHarness(options: StartOptions = {}): Promise<Test
 		APISIX_CONSUMER_KEY: apisix.consumerKey,
 		LLM_MODEL: 'qwen3.8',
 		CONTRACTS_REFRESH_MS: '0',
-		LOG_LEVEL: 'info'
+		LOG_LEVEL: 'info',
+		...(options.env ?? {})
 	});
 	const db = makeDb(config.databaseUrl);
 	if (options.keepData === true) {
