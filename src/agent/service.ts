@@ -96,6 +96,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const { config, db } = deps;
 	const clock = deps.clock ?? SYSTEM_CLOCK;
 	const messages = getMessages(config.locale);
+	// The persona's rules are in English; how to address people is told in the deployment's
+	// language, which the model then speaks in
+	const withAddressing = (persona: string): string =>
+		messages.addressing === null ? persona : `${persona} ${messages.addressing}`;
 	const llm =
 		deps.llm ??
 		makeLlmClient({
@@ -173,12 +177,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
 					{
 						systemPrompt: buildSystemPrompt({
-							persona:
+							persona: withAddressing(
 								principal.id === ORGANIZATION_PRINCIPAL
 									? organizationPrompt(config.org.name, config.org.persona)
 									: input.assistantName === undefined
 										? DEFAULT_SYSTEM_PROMPT
-										: assistantPrompt(input.assistantName),
+										: assistantPrompt(input.assistantName)
+							),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
 							memory,
 							skills,

@@ -52,6 +52,9 @@ export interface Messages {
 	// What the model is told of the present at the start of every turn, so that it can place
 	// "today" or "this afternoon" and give contracts times with the right offset
 	now(words: string, iso: string, timeZone: string): string;
+	// How the model addresses the person writing to it, told in that language, when the language
+	// marks it: null when it does not
+	readonly addressing: string | null;
 }
 
 const ENGLISH: Messages = {
@@ -108,7 +111,8 @@ const ENGLISH: Messages = {
 			`Date and time: ${words}, time zone ${timeZone}.`,
 			`In ISO 8601: ${iso}.`,
 			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.'
-		].join('\n')
+		].join('\n'),
+	addressing: null
 };
 
 // Tutoiement, as Hermes spoke. The name is chosen by the user, so no word around it agrees in
@@ -171,7 +175,9 @@ const FRENCH: Messages = {
 			`Date et heure : ${words}, fuseau ${timeZone}.`,
 			`En ISO 8601 : ${iso}.`,
 			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
-		].join('\n')
+		].join('\n'),
+	addressing:
+		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer."
 };
 
 const CATALOG: Readonly<Record<Locale, Messages>> = { en: ENGLISH, fr: FRENCH };
