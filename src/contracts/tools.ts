@@ -44,18 +44,25 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		...(contract.bodySchema === null ? [] : ['body'])
 	];
 
-	async function audit(context: ToolContext, status: number): Promise<void> {
+	// One record, in the shape the audit relay takes from the gateway's own logger, so the call
+	// lands in the audit topic keyed by the agent: who called, for whom, what, and how it ended
+	async function audit(context: ToolContext, status: number, path: string): Promise<void> {
 		try {
 			await fetchImpl(joinPath(config.apisix.baseUrl, config.contracts.auditPath), {
 				method: 'POST',
 				headers: { 'content-type': 'application/json', apikey: config.apisix.consumerKey },
-				body: JSON.stringify({
-					principal: context.principalId,
-					contract: contract.id,
-					method: contract.method,
-					status,
-					at: new Date().toISOString()
-				}),
+				body: JSON.stringify([
+					{
+						time: new Date().toISOString(),
+						agent: 'twake-harness',
+						user: context.principalId,
+						contract: contract.id,
+						method: contract.method.toUpperCase(),
+						path,
+						status,
+						correlation_id: context.correlationId ?? ''
+					}
+				]),
 				signal: AbortSignal.timeout(5000)
 			});
 		} catch (err: unknown) {
@@ -116,7 +123,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				{ contract: contract.id, method: contract.method, status, principal: context.principalId },
 				'contract called'
 			);
-			void audit(context, status);
+			void audit(context, status, path);
 			return { result };
 		}
 	};

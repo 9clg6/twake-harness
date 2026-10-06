@@ -122,11 +122,21 @@ describe('contracts as tools', () => {
 			await new Promise((resolve) => setTimeout(resolve, 100));
 		}
 		expect(h.apisix.audit).toHaveLength(1);
+		// The record the audit relay keys by agent and writes to the topic
 		expect(h.apisix.audit[0]).toMatchObject({
-			principal: 'alice',
+			agent: 'twake-harness',
+			user: 'alice',
 			contract: 'calendar.freebusy.read.v1',
+			method: 'GET',
+			path: '/calendar/freebusy',
 			status: 200
 		});
+		expect(typeof (h.apisix.audit[0] as { correlation_id?: unknown }).correlation_id).toBe(
+			'string'
+		);
+		expect((h.apisix.audit[0] as { correlation_id: string }).correlation_id.length).toBeGreaterThan(
+			0
+		);
 		expect(
 			h
 				.logLines()
