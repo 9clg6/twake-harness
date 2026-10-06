@@ -34,10 +34,18 @@ export async function findAssistant(tx: Tx, owner: string): Promise<AssistantRec
 	return row === undefined ? null : normalize(row);
 }
 
+// Saves the owner's assistant. A deleted row of another principal may still name its Matrix
+// account, as one an earlier build left under the owner's old principal: it is purged first, which
+// the reclaim policies allow for that row only, while app.reclaim_user_id names the account.
 export async function saveAssistant(
 	tx: Tx,
 	record: Omit<AssistantRecord, 'deletedAt'>
-): Promise<void> {
+): Promise<{ readonly reclaimed: number }> {
+	await tx.sql`select set_config('app.reclaim_user_id', ${record.userId}, true)`;
+	const purged = await tx.sql`
+		delete from assistants
+		where user_id = ${record.userId} and deleted_at is not null and owner <> ${record.owner}`;
+	await tx.sql`select set_config('app.reclaim_user_id', '', true)`;
 	await tx.sql`
 		insert into assistants (owner, user_id, name, room_id)
 		values (${record.owner}, ${record.userId}, ${record.name}, ${record.roomId})
@@ -46,6 +54,28 @@ export async function saveAssistant(
 			name = excluded.name,
 			room_id = excluded.room_id,
 			deleted_at = null`;
+	return { reclaimed: purged.count };
+}
+
+export async function setAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {
+	await tx.sql`update assistants set room_id = ${roomId} where owner = ${owner} and deleted_at is null`;
+}
+
+// The index the matrix role routes the rooms by, with the greeting the assistant still owes
+export async function saveAssistantRoom(
+	tx: Tx,
+	room: {
+		readonly roomId: string;
+		readonly owner: string;
+		readonly userId: string;
+		readonly welcome: string;
+	}
+): Promise<void> {
+	await tx.sql`
+		insert into assistant_rooms (room_id, owner, user_id, welcome)
+		values (${room.roomId}, ${room.owner}, ${room.userId}, ${room.welcome})
+		on conflict (room_id) do update set
+			owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;
 }
 
 export async function renameAssistant(tx: Tx, owner: string, name: string): Promise<boolean> {

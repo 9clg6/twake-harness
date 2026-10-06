@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
 import { ACT_THROUGH_CONTRACTS } from '../contracts/tools.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { getMessages } from '../i18n/messages.js';
 import { LlmError, makeLlmClient, type LlmClient } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
@@ -16,6 +17,7 @@ import {
 	type SessionRecord
 } from '../sessions/repository.js';
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
+import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
@@ -87,10 +89,17 @@ export interface AgentServiceDeps {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
 	readonly llm?: LlmClient;
+	readonly clock?: Clock;
 }
 
 export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const { config, db } = deps;
+	const clock = deps.clock ?? SYSTEM_CLOCK;
+	const messages = getMessages(config.locale);
+	// The persona's rules are in English; how to address people is told in the deployment's
+	// language, which the model then speaks in
+	const withAddressing = (persona: string): string =>
+		messages.addressing === null ? persona : `${persona} ${messages.addressing}`;
 	const llm =
 		deps.llm ??
 		makeLlmClient({
@@ -161,17 +170,21 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
 			log.info({ messageLength: message.length }, 'turn started');
+			// Read at the start of every turn, never kept: a session can span days
+			const moment = describeMoment(clock.now(), config.timeZone, config.locale);
 			try {
 				const turn = await runTurn(
 					{ llm, tools, log, maxToolCalls: config.turn.maxToolCalls },
 					{
 						systemPrompt: buildSystemPrompt({
-							persona:
+							persona: withAddressing(
 								principal.id === ORGANIZATION_PRINCIPAL
 									? organizationPrompt(config.org.name, config.org.persona)
 									: input.assistantName === undefined
 										? DEFAULT_SYSTEM_PROMPT
-										: assistantPrompt(input.assistantName),
+										: assistantPrompt(input.assistantName)
+							),
+							moment: messages.now(moment.words, moment.iso, moment.timeZone),
 							memory,
 							skills,
 							history: session.messages,

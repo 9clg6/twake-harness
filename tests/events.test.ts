@@ -164,6 +164,14 @@ describe('an event wakes my assistant', () => {
 		expect(told?.content).toContain('read_freebusy');
 		expect(told?.content).toContain('exclude');
 		expect(told?.content).toContain('do not accept it yourself');
+		// The event's turn knows the present too, to tell whether the slot is today or later
+		const eventCall = h.apisix.llm.calls.find((c) =>
+			c.request.messages.some((m) => m.role === 'user' && (m.content ?? '').includes('(id evt-1)'))
+		);
+		const eventPrompt = eventCall?.request.messages[0]?.content ?? '';
+		expect(eventPrompt).toContain('## Now');
+		expect(eventPrompt).toContain('time zone UTC');
+		expect(eventPrompt).toMatch(/In ISO 8601: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00\./);
 		// The gateway receives the paths of the contracts service as they are, never doubled
 		const call = h.apisix.contracts.calls.find((c) => c.path === '/contracts/v1/events/evt-1');
 		expect(call?.method).toBe('GET');

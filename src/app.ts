@@ -4,6 +4,7 @@ import Fastify, { type FastifyInstance, type FastifyRequest } from 'fastify';
 
 import { z } from 'zod';
 
+import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService } from './agent/service.js';
 import { runTool, toolCallStatus } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
@@ -47,6 +48,8 @@ export interface AppOptions {
 	readonly llm?: LlmClient;
 	readonly assistants?: AssistantService;
 	readonly agent?: AgentService;
+	// The present as the agent reads it; the system clock unless a test sets its own
+	readonly clock?: Clock;
 }
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
@@ -133,7 +136,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			config,
 			db,
 			log: app.log,
-			...(options.llm === undefined ? {} : { llm: options.llm })
+			...(options.llm === undefined ? {} : { llm: options.llm }),
+			...(options.clock === undefined ? {} : { clock: options.clock })
 		});
 	app.decorate('agent', agent);
 	const tools = agent.tools;
@@ -267,6 +271,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							return reply.code(409).send({ error: 'assistant already exists' });
 						case 'not_on_homeserver':
 							return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+						case 'failed':
+							return reply.code(502).send({ error: 'assistant creation failed' });
 						default:
 							return reply.code(400).send({ error: 'invalid request' });
 					}
