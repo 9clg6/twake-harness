@@ -82,6 +82,15 @@ jobs:
       # LLM_MAX_TOKENS is rendered only when config.llmMaxTokens is set
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q LLM_MAX_TOKENS /tmp/default.yaml
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.llmMaxTokens=16384 > /tmp/budget.yaml && grep -A1 LLM_MAX_TOKENS /tmp/budget.yaml | grep -q '"16384"'
+      # ADMISSION_* are rendered only when their config.admission* value is set, and as integers:
+      # 0 counts, and a large value from a values file comes out whole instead of as 1e+06
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q ADMISSION_ /tmp/default.yaml
+      - run: |
+          printf 'config:\n  admissionUserDailyTokens: 1000000\n' > /tmp/quota.yaml
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/quota.yaml --set config.admissionUserQueue=0 > /tmp/admission.yaml
+          grep -A1 ADMISSION_USER_DAILY_TOKENS /tmp/admission.yaml | grep -q '"1000000"'
+          grep -A1 ADMISSION_USER_QUEUE /tmp/admission.yaml | grep -q '"0"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/admission.yaml
 
   image:
     needs: [check, test, chart]

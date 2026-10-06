@@ -44,6 +44,11 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `ASSISTANT_LOCALE`             | language of the assistants' and creator's texts, `en` or `fr`                                                                                                   |
 | `ASSISTANT_TIMEZONE`           | IANA zone of the present each turn states, `UTC` by default                                                                                                     |
 | `LLM_MAX_TOKENS`               | token budget of one model call, `8192` by default; a call that ran out while thinking, with nothing written, is retried once at twice the budget, at most 32768 |
+| `ADMISSION_MAX_INFLIGHT`       | turns in flight on one replica, `32` by default                                                                                                                 |
+| `ADMISSION_USER_QUEUE`         | turns a user may wait for on a full replica, `2` by default, `0` for none                                                                                       |
+| `ADMISSION_USER_PER_MINUTE`    | turns one user may start per minute, `10` by default                                                                                                            |
+| `ADMISSION_USER_DAILY_TOKENS`  | tokens one user may spend per day, `200000` by default                                                                                                          |
+| `ADMISSION_GLOBAL_PER_MINUTE`  | turns the whole harness may start per minute, `400` by default                                                                                                  |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 
@@ -72,6 +77,8 @@ The roles hand work to each other through the `jobs` table: a Matrix message bec
 ### Admission
 
 A turn is admitted before any model call. The turns per minute of a user, those of the whole harness and the daily tokens of a user are counted in the database, so the limits hold whatever the number of replicas; the turns in flight, the queue of a full replica and the slots a user holds in it are each replica's own, as are the counters of `/metrics`. A refused turn gets a 429 with its reason.
+
+The limits are the `ADMISSION_*` variables of the configuration. The chart sets each one from its `config.admission*` value (`admissionMaxInflight`, `admissionUserQueue`, `admissionUserPerMinute`, `admissionUserDailyTokens`, `admissionGlobalPerMinute`) only when that value is set, as a whole number. One turn that calls several contracts can use tens of thousands of tokens, since every model call sends the conversation again, so a deployment where people test often may need a larger daily budget per user.
 
 ### Encryption
 
