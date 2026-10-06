@@ -38,6 +38,8 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 	let running = 0;
 	let stopped = false;
 	let timer: NodeJS.Timeout | null = null;
+	// The poll under way, if any: a stop waits for it, since it may be about to claim a job
+	let polling: Promise<void> | null = null;
 	const inflight = new Set<Promise<void>>();
 
 	async function runOne(job: Job): Promise<void> {
@@ -56,7 +58,8 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 		try {
 			const requeued = await requeueStaleJobs(options.db, leaseMs);
 			if (requeued > 0) options.log.warn({ requeued }, 'jobs requeued after their lease');
-			while (running < concurrency) {
+			// Once stopped, nothing new is claimed; a job the poll already holds still runs to its end
+			while (!stopped && running < concurrency) {
 				const job = await claimJob(options.db, options.kinds, workerId);
 				if (job === null) break;
 				running += 1;
@@ -69,14 +72,19 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 		} catch (err: unknown) {
 			options.log.warn({ err }, 'job poll failed');
 		}
-		if (!stopped) timer = setTimeout(() => void tick(), interval);
+		if (!stopped) timer = setTimeout(poll, interval);
 	}
 
-	void tick();
+	function poll(): void {
+		polling = tick();
+	}
+
+	poll();
 	return {
 		stop: async () => {
 			stopped = true;
 			if (timer !== null) clearTimeout(timer);
+			if (polling !== null) await polling;
 			await Promise.allSettled([...inflight]);
 		}
 	};
