@@ -2,6 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
+import { grantConsent } from './helpers/consents.js';
 import type { ChatRequest, ToolCall } from './helpers/fake-apisix.js';
 
 // The catalog of the contracts service as it is served: absolute paths under /contracts/v1, no
@@ -81,6 +82,8 @@ describe('contract calls reach the gateway at the paths the catalog gives', () =
 	beforeAll(async () => {
 		h = await startTestHarness();
 		c = makeClient(h);
+		// These tests are about paths: Alice already let her assistant read her calendar
+		await grantConsent(h.db, 'alice', 'calendar', 'read');
 	});
 	afterAll(async () => {
 		await h.close();

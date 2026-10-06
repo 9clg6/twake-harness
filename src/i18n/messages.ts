@@ -44,6 +44,11 @@ export interface Messages {
 		readonly recovered: string;
 		readonly noEscrow: string;
 	};
+	// What the harness itself asks the owner when a contract call waits for them: never words
+	// of the model, so that nothing a third party wrote can phrase or answer it
+	readonly consent: {
+		firstRead(domain: string, allow: string): string;
+	};
 	orgGreeting(name: string): string;
 	// What the assistant is told, as its owner's message, when a dispatcher posts an event: the
 	// model reads it, the owner never does. An invitation is proposed, never accepted: only the
@@ -108,6 +113,10 @@ const ENGLISH: Messages = {
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.'
+	},
+	consent: {
+		firstRead: (domain, allow) =>
+			`This is the first time I need to read your data in ${domain}. React with ${allow} to this message to allow it.`
 	},
 	orgGreeting: (name) =>
 		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
@@ -182,6 +191,10 @@ const FRENCH: Messages = {
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant."
+	},
+	consent: {
+		firstRead: (domain, allow) =>
+			`C'est la première fois que j'ai besoin de lire tes données dans ${domain}. Réagis ${allow} à ce message pour me l'autoriser.`
 	},
 	orgGreeting: (name) =>
 		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,

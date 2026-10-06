@@ -3,6 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { runMigrations } from '../src/db/migrate.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
+import { grantConsent } from './helpers/consents.js';
 import type { ChatRequest, ToolCall } from './helpers/fake-apisix.js';
 
 // The shape of the contracts service: absolute paths under /contracts/v1, a verb as operationId,
@@ -62,6 +63,8 @@ describe('contracts as tools', () => {
 	beforeAll(async () => {
 		h = await startTestHarness();
 		c = makeClient(h);
+		// These tests are about calling contracts: Alice already let her assistant read her calendar
+		await grantConsent(h.db, 'alice', 'calendar', 'read');
 		h.apisix.contracts.spec = CATALOG;
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 	});

@@ -96,4 +96,42 @@ describe('a deployment that speaks French', () => {
 		expect(told?.content).toContain("« Veux-tu que je l'accepte ? »");
 		expect(told?.content).toContain("arrête-toi là : ne l'accepte pas toi-même");
 	});
+
+	it('asks in French before its first read of an application', async () => {
+		h.apisix.contracts.spec = {
+			openapi: '3.0.3',
+			paths: {
+				'/contracts/v1/mail/emails': {
+					get: {
+						operationId: 'search_emails',
+						summary: "Searches the user's mail",
+						tags: ['mail.emails.read.v1'],
+						parameters: [{ name: 'from', in: 'query', schema: { type: 'string' } }]
+					}
+				}
+			}
+		};
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		h.apisix.contracts.calls.length = 0;
+		h.apisix.llm.script = () => ({
+			toolCalls: [
+				{
+					id: 'call_search_emails',
+					type: 'function',
+					function: {
+						name: 'search_emails',
+						arguments: JSON.stringify({ from: 'paul@test.local' })
+					}
+				}
+			]
+		});
+		await client.sendText(assistantRoom, "Qu'est-ce que Paul m'a envoyé hier ?");
+		const request = await client.waitForMessage(assistantRoom, assistantId, (t) =>
+			t.startsWith("C'est la première fois")
+		);
+		expect(request).toBe(
+			"C'est la première fois que j'ai besoin de lire tes données dans mail. Réagis ✅ à ce message pour me l'autoriser."
+		);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
 });
