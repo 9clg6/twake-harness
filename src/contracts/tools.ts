@@ -230,16 +230,28 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				'contract called'
 			);
 			// The platform's broker lacks the owner's permission for their assistant to act for them:
-			// the call waits for them, and the turn ends with the harness's own request, which tells
-			// them why and gives them the deployment's consent link, never one from the answer, which
-			// a contract could have written. The organization agent acts for no user: nobody could
-			// give it that permission.
+			// the call waits for them, and the turn ends with the harness's own request, which names
+			// the application as a first use does, tells them why and gives them the deployment's
+			// consent link, never one from the answer, which a contract could have written. The
+			// organization agent acts for no user: nobody could give it that permission.
 			if (delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				const pendingCallId = await freeze(values, context, ['delegation']);
-				const { consent } = getMessages(await fetchOwnerLocale(context.db, owner, config.locale));
+				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
+				const application = labelOf(
+					deps.domains,
+					contract.domain,
+					contract.level,
+					locale,
+					config.locale
+				);
 				return {
 					result: { status: 'awaiting_owner', reason: 'delegation', code: delegation },
-					final: consent.delegation(delegation, config.consent.brokerConsentUrl),
+					final: getMessages(locale).consent.delegation(
+						application.name,
+						contract.level,
+						delegation,
+						config.consent.brokerConsentUrl
+					),
 					pendingCallId
 				};
 			}

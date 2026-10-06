@@ -20,16 +20,20 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// The request about a read in an application, named as a first use names it
 const ANSWER = 'Answer with the buttons below, or reply yes or no.';
-const NEEDED = 'I need your permission to act on your behalf in your applications';
-const MISSING = `${NEEDED}, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
-const EXPIRED = `${NEEDED}, and the one you gave me has expired. Give it again here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
-const MISSING_WITHOUT_LINK = `${NEEDED}, and you have not given it yet.\nShall I try again? ${ANSWER}`;
-const EXPIRED_WITHOUT_LINK = `${NEEDED}, and the one you gave me has expired.\nShall I try again? ${ANSWER}`;
-const FRENCH_MISSING = `J'ai besoin de ton autorisation d'agir en ton nom dans tes applications, et tu ne l'as pas encore donnée. Donne-la ici : ${BROKER_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
+const NEEDED = (application: string): string =>
+	`To read your data in ${application}, I need your permission to act on your behalf`;
+const MISSING = (application: string): string =>
+	`${NEEDED(application)}, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
+const EXPIRED = (application: string): string =>
+	`${NEEDED(application)}, and the one you gave me has expired. Give it again here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
+const MISSING_WITHOUT_LINK = `${NEEDED('mail')}, and you have not given it yet.\nShall I try again? ${ANSWER}`;
+const EXPIRED_WITHOUT_LINK = `${NEEDED('mail')}, and the one you gave me has expired.\nShall I try again? ${ANSWER}`;
+const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${BROKER_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
 
 // The harness's requests for that permission, as Alice's client received them
-const ENGLISH_REQUEST = 'I need your permission';
+const ENGLISH_REQUEST = 'To read your data in';
 
 function requestsIn(r: ConsentRoom, prefix: string = ENGLISH_REQUEST): DecryptedMessage[] {
 	return r.saying(prefix);
@@ -107,7 +111,11 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 	let broker: ContractReply | null = null;
 	beforeAll(async () => {
 		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100', BROKER_CONSENT_URL });
-		r.h.apisix.contracts.spec = readCatalog(DOMAINS);
+		// The catalog names one application to the owners; the others go by their ids
+		r.h.apisix.contracts.spec = {
+			...readCatalog(DOMAINS),
+			'x-twake-domains': { mail: { name: { en: 'Twake Mail', fr: 'Twake Mail' } } }
+		};
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(DOMAINS.length);
 		// Alice let her assistant read these applications: what is missing here is the platform's
 		// own permission
@@ -132,7 +140,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		const modelCalls = r.h.apisix.llm.calls.length;
 		await r.client.sendText(r.room, 'Find the budget in my mail');
 		const request = await nextRequestIn(r, seen);
-		expect(request.body).toBe(MISSING);
+		expect(request.body).toBe(MISSING('Twake Mail'));
 		// The same two buttons as any question of the harness
 		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
 		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
@@ -190,7 +198,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		seen = requestsIn(r).length;
 		await r.client.react(r.room, first.eventId, '✅');
 		const second = await nextRequestIn(r, seen);
-		expect(second.body).toBe(MISSING);
+		expect(second.body).toBe(MISSING('tasks'));
 		await sleep(2000);
 		expect(r.h.apisix.contracts.calls.map((c) => c.query)).toEqual([
 			{ q: 'today' },
@@ -211,7 +219,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		r.h.apisix.llm.script = modelUsing('search_notes', { q: 'minutes' });
 		const seen = requestsIn(r).length;
 		await r.client.sendText(r.room, 'Find the minutes in my notes');
-		expect((await nextRequestIn(r, seen)).body).toBe(EXPIRED);
+		expect((await nextRequestIn(r, seen)).body).toBe(EXPIRED('notes'));
 		const acknowledged = r.saying('All right').length;
 		const modelCalls = r.h.apisix.llm.calls.length;
 		await r.client.sendText(r.room, 'No');
@@ -226,7 +234,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		const seen = requestsIn(r).length;
 		await r.client.sendText(r.room, 'Look for the party in my photos');
 		const request = await nextRequestIn(r, seen);
-		expect(request.body).toBe(MISSING);
+		expect(request.body).toBe(MISSING('photos'));
 		expect(request.content['formatted_body']).toContain(`href="${BROKER_CONSENT_URL}"`);
 		expect(shown(request)).not.toContain('phish.example');
 	});
@@ -265,9 +273,9 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		let told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'Parle-moi en français');
 		expect(await r.nextSaying('Tool:', told)).toContain('"language":"fr"');
-		const seen = requestsIn(r, "J'ai besoin").length;
+		const seen = requestsIn(r, 'Pour lire tes données dans').length;
 		await r.client.sendText(r.room, 'Cherche la facture dans mes mails');
-		const request = await nextRequestIn(r, seen, "J'ai besoin");
+		const request = await nextRequestIn(r, seen, 'Pour lire tes données dans');
 		expect(request.body).toBe(FRENCH_MISSING);
 		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
 		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);

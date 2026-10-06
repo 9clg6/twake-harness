@@ -1,6 +1,7 @@
 // What the assistants and the creator say to people: in the language each owner chose, or else
 // the deployment's. The model is told to speak it; these are the fixed texts around it.
 
+import type { ConsentLevel } from '../consents/consent.js';
 import type { DelegationCode } from '../consents/delegation.js';
 
 export const LOCALES = ['en', 'fr'] as const;
@@ -62,9 +63,15 @@ export interface Messages {
 		// the application as for reading, and what writing covers there when the catalog says
 		firstWrite(application: string, covers: string | null): string;
 		// The platform's broker lacks the owner's permission for their assistant to act for them:
-		// why, and whether to try again; with the deployment's consent link, where to give it first,
-		// and without one, no step the owner could not take
-		delegation(code: DelegationCode, link: string | null): string;
+		// what the call was about to do, in the application named as for a first use, why it waits,
+		// and whether to try again; with the deployment's consent link, where to give it first, and
+		// without one, no step the owner could not take
+		delegation(
+			application: string,
+			level: ConsentLevel,
+			code: DelegationCode,
+			link: string | null
+		): string;
 		// The two buttons under a question: the assistant's own reactions, which a tap repeats
 		readonly buttons: { readonly yes: string; readonly no: string };
 		// The words that answer a question, alone in a message
@@ -171,9 +178,9 @@ const ENGLISH: Messages = {
 				covers,
 				'Do you allow it? Answer with the buttons below, or reply yes or no.'
 			),
-		delegation: (code, link) => {
+		delegation: (application, level, code, link) => {
 			const expired = code === 'delegation_expired';
-			const why = `I need your permission to act on your behalf in your applications, and ${expired ? 'the one you gave me has expired' : 'you have not given it yet'}.`;
+			const why = `To ${level === 'read' ? 'read' : 'change'} your data in ${application}, I need your permission to act on your behalf, and ${expired ? 'the one you gave me has expired' : 'you have not given it yet'}.`;
 			const answer = 'Answer with the buttons below, or reply yes or no.';
 			return link === null
 				? `${why}\nShall I try again? ${answer}`
@@ -276,9 +283,9 @@ const FRENCH: Messages = {
 				covers,
 				"Tu m'autorises ? Réponds avec les boutons ci-dessous, ou par oui ou non."
 			),
-		delegation: (code, link) => {
+		delegation: (application, level, code, link) => {
 			const expired = code === 'delegation_expired';
-			const why = `J'ai besoin de ton autorisation d'agir en ton nom dans tes applications, et ${expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée"}.`;
+			const why = `Pour ${level === 'read' ? 'lire' : 'modifier'} tes données dans ${application}, j'ai besoin de ton autorisation d'agir en ton nom, et ${expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée"}.`;
 			const answer = 'Réponds avec les boutons ci-dessous, ou par oui ou non.';
 			return link === null
 				? `${why}\nJe réessaie ? ${answer}`
