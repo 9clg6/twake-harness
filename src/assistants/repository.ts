@@ -48,6 +48,27 @@ export async function saveAssistant(
 			deleted_at = null`;
 }
 
+export async function setAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {
+	await tx.sql`update assistants set room_id = ${roomId} where owner = ${owner} and deleted_at is null`;
+}
+
+// The index the matrix role routes the rooms by, with the greeting the assistant still owes
+export async function saveAssistantRoom(
+	tx: Tx,
+	room: {
+		readonly roomId: string;
+		readonly owner: string;
+		readonly userId: string;
+		readonly welcome: string;
+	}
+): Promise<void> {
+	await tx.sql`
+		insert into assistant_rooms (room_id, owner, user_id, welcome)
+		values (${room.roomId}, ${room.owner}, ${room.userId}, ${room.welcome})
+		on conflict (room_id) do update set
+			owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;
+}
+
 export async function renameAssistant(tx: Tx, owner: string, name: string): Promise<boolean> {
 	const result =
 		await tx.sql`update assistants set name = ${name} where owner = ${owner} and deleted_at is null`;

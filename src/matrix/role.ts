@@ -35,7 +35,7 @@ import {
 	type CrossSigningDeps,
 	type CrossSigningResult
 } from './cross-signing.js';
-import { helpText, runCreatorTurn } from './creator.js';
+import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
 import { makeListenerGuard } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
@@ -562,7 +562,15 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
-		const turn = await runCreatorTurn({ owner, text, state }, assistants, messages);
+		let turn: CreatorTurn;
+		try {
+			turn = await runCreatorTurn({ owner, text, state }, assistants, messages);
+		} catch (err: unknown) {
+			// The owner is told, and the dialog starts over: one left waiting for a name would take
+			// their next message for one
+			log.error({ roomId, sender, owner, err }, 'creator turn failed');
+			turn = { command: 'failed', nextState: null, reply: messages.creator.requestFailed };
+		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
 		await appservice.botIntent.sendEvent(roomId, makeRichText(turn.reply));

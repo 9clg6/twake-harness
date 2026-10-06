@@ -23,6 +23,7 @@ export interface Messages {
 			readonly invalid_name: string;
 			readonly exists: string;
 			readonly not_on_homeserver: string;
+			readonly failed: string;
 		};
 		readonly alreadyHasOne: string;
 		mine(name: string, userId: string, link: string): string;
@@ -34,6 +35,8 @@ export interface Messages {
 		readonly nothingToDelete: string;
 		readonly recoveryUnavailable: string;
 		notUnderstood(text: string): string;
+		// Any command that broke on the harness's side: the dialog starts over
+		readonly requestFailed: string;
 	};
 	readonly notices: {
 		readonly turnFailed: string;
@@ -71,7 +74,9 @@ const ENGLISH: Messages = {
 		refusals: {
 			invalid_name: 'That name is not usable: one line, 64 characters at most. Which name?',
 			exists: 'You already have an assistant. Send /mybot to see it.',
-			not_on_homeserver: 'Your account is not on this homeserver, so I cannot open a room with you.'
+			not_on_homeserver:
+				'Your account is not on this homeserver, so I cannot open a room with you.',
+			failed: 'I could not create your assistant. Send /newbot to try again in a moment.'
 		},
 		alreadyHasOne: 'You already have an assistant. Send /mybot to see it, or /delete first.',
 		mine: (name, userId, link) => `Your assistant ${name} is ${userId}: ${link}`,
@@ -82,7 +87,9 @@ const ENGLISH: Messages = {
 		deleted: 'Your assistant is deleted. Send /newbot when you want a new one.',
 		nothingToDelete: 'You have no assistant to delete.',
 		recoveryUnavailable: 'Key recovery is not available yet.',
-		notUnderstood: (text) => `I did not understand « ${text} ». Send /help for the commands.`
+		notUnderstood: (text) => `I did not understand « ${text} ». Send /help for the commands.`,
+		requestFailed:
+			'Something went wrong on my side and your request was not done. Please try again in a moment.'
 	},
 	notices: {
 		turnFailed: 'Something went wrong on my side. Please try again in a moment.',
@@ -125,7 +132,8 @@ const FRENCH: Messages = {
 				'Ce nom ne convient pas : une seule ligne, 64 caractères au plus. Quel nom veux-tu lui donner ?',
 			exists: 'Tu as déjà un assistant. Envoie /mybot pour le voir.',
 			not_on_homeserver:
-				"Ton compte n'est pas sur ce serveur : je ne peux pas ouvrir de conversation avec toi."
+				"Ton compte n'est pas sur ce serveur : je ne peux pas ouvrir de conversation avec toi.",
+			failed: "Je n'ai pas pu créer ton assistant. Envoie /newbot pour réessayer dans un instant."
 		},
 		alreadyHasOne: "Tu as déjà un assistant. Envoie /mybot pour le voir, ou /delete d'abord.",
 		mine: (name, userId, link) => `${name} est ${userId} : ${link}`,
@@ -137,7 +145,9 @@ const FRENCH: Messages = {
 		nothingToDelete: "Tu n'as pas d'assistant à supprimer.",
 		recoveryUnavailable: "La récupération des clés n'est pas encore disponible.",
 		notUnderstood: (text) =>
-			`Je n'ai pas compris « ${text} ». Envoie /help pour voir les commandes.`
+			`Je n'ai pas compris « ${text} ». Envoie /help pour voir les commandes.`,
+		requestFailed:
+			"Quelque chose s'est mal passé de mon côté : ta demande n'a pas abouti. Réessaie dans un instant."
 	},
 	notices: {
 		turnFailed: "Quelque chose s'est mal passé de mon côté. Réessaie dans un instant.",
