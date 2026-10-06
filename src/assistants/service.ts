@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { getMessages } from '../i18n/messages.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { assistantUserId } from '../matrix/registration.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
@@ -87,7 +88,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				saveAssistant(tx, { owner, userId, name, roomId })
 			);
 			// The greeting waits for the owner to join: the matrix role then encrypts it for their devices
-			const welcome = `Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`;
+			const welcome = getMessages(config.locale).welcome(name);
 			await db.sql`
 				insert into assistant_rooms (room_id, owner, user_id, welcome) values (${roomId}, ${owner}, ${userId}, ${welcome})
 				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;

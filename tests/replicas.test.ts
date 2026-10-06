@@ -4,6 +4,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startTurnWorker } from '../src/agent/turn-worker.js';
 import { buildApp } from '../src/app.js';
 import { loadConfig } from '../src/config.js';
+import { getMessages } from '../src/i18n/messages.js';
 import { makeDb, withPrincipal } from '../src/db/client.js';
 import { saveAssistant } from '../src/assistants/repository.js';
 import { enqueueJob } from '../src/jobs/queue.js';
@@ -59,6 +60,7 @@ async function startReplica(h: TestHarness): Promise<Replica> {
 		db,
 		agent: app.agent,
 		log: app.log,
+		messages: getMessages(config.locale),
 		pollIntervalMs: 100,
 		concurrency: 2
 	});
@@ -125,6 +127,7 @@ describe('two api replicas on one database', () => {
 			db: h.db,
 			agent: h.app.agent,
 			log: h.app.log,
+			messages: getMessages(h.config.locale),
 			pollIntervalMs: 100,
 			concurrency: 2
 		});
@@ -254,6 +257,7 @@ describe('two api replicas on one database', () => {
 			db: h.db,
 			agent: h.app.agent,
 			log: h.app.log,
+			messages: getMessages(h.config.locale),
 			pollIntervalMs: 100,
 			concurrency: 2
 		});
@@ -267,6 +271,7 @@ describe('two api replicas on one database', () => {
 			db: h.db,
 			agent: h.app.agent,
 			log: h.app.log,
+			messages: getMessages(h.config.locale),
 			pollIntervalMs: 100,
 			concurrency: 2
 		});

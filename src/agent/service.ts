@@ -16,7 +16,7 @@ import {
 } from '../sessions/repository.js';
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
-import { DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
+import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
@@ -46,6 +46,8 @@ export interface OwnerTurnInput {
 	readonly log: FastifyBaseLogger;
 	// What links the turn's calls in the audit: the request id, or the Matrix event id
 	readonly correlationId?: string;
+	// The name the owner gave the assistant answering in this turn, when there is one
+	readonly assistantName?: string;
 }
 
 export type OwnerTurnResult =
@@ -151,7 +153,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							persona:
 								principal.id === ORGANIZATION_PRINCIPAL
 									? organizationPrompt(config.org.name, config.org.persona)
-									: DEFAULT_SYSTEM_PROMPT,
+									: input.assistantName === undefined
+										? DEFAULT_SYSTEM_PROMPT
+										: assistantPrompt(input.assistantName),
 							memory,
 							skills,
 							history: session.messages,

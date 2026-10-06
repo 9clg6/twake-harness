@@ -44,7 +44,10 @@ describe('an encrypted conversation with my assistant', () => {
 		);
 		expect(state.body['algorithm']).toBe('m.megolm.v1.aes-sha2');
 		const welcome = await client.waitForMessage(room, assistantId, (t) => t.includes('Jarvis'));
-		expect(welcome).toContain('assistant');
+		// English unless the deployment chose another language
+		expect(welcome).toBe(
+			'Hello, I am Jarvis, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.'
+		);
 	});
 
 	it('reads the encrypted message of the owner and answers encrypted', async () => {

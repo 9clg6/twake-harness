@@ -11,6 +11,7 @@ import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
+import { getMessages } from '../../src/i18n/messages.js';
 import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
@@ -85,7 +86,13 @@ export async function startMatrixHarness(
 		await replica.ready();
 		apps.push(replica);
 		workers.push(
-			startTurnWorker({ db, agent: replica.agent, log: replica.log, pollIntervalMs: 100 })
+			startTurnWorker({
+				db,
+				agent: replica.agent,
+				log: replica.log,
+				messages: getMessages(config.locale),
+				pollIntervalMs: 100
+			})
 		);
 	}
 	const app = apps[0];
