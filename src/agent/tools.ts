@@ -84,6 +84,9 @@ export interface ToolContext {
 	// For the call its owner allowed, run again as it was frozen: the reasons their yes answered,
 	// which it no longer waits for
 	readonly answeredReasons?: readonly WaitReason[];
+	// For that call, when its contract showed them what it would do: the digest of that preview,
+	// which the call carries so that its contract refuses it should what it acts on have changed
+	readonly previewDigest?: string;
 }
 
 export interface Tool {

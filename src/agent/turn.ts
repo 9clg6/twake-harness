@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { LlmClient, LlmCompletion, LlmMessage } from '../llm/client.js';
-import type { OwnerRequest } from '../consents/request.js';
+import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	runTool,
@@ -218,7 +218,12 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 						content: JSON.stringify(NOT_RUN)
 					});
 				}
-				messages.push({ role: 'assistant', content: outcome.final });
+				// The conversation keeps a request as the model may read it: without what an application
+				// said of the call, which only its owner reads
+				messages.push({
+					role: 'assistant',
+					content: outcome.request === undefined ? outcome.final : conversationText(outcome.request)
+				});
 				return {
 					answer: outcome.final,
 					messages: [...input.history, ...messages],

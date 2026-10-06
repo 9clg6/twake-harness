@@ -79,6 +79,9 @@ export interface Messages {
 		readonly howToAnswer: string;
 		// Above what the model wrote alongside the call, quoted apart from the harness's own words
 		readonly said: string;
+		// Above what an application said a call would do, which its owner reads in the call's place,
+		// quoted apart from the harness's own words: the application as the question names it
+		described(application: string): string;
 		// The platform's broker lacks the owner's permission for their assistant to act for them:
 		// what the call was about to do, in the application named as for a first use, why it waits,
 		// and whether to try again; with the deployment's consent link, where to give it first, and
@@ -99,6 +102,12 @@ export interface Messages {
 		// Answers to a request no longer open, which run nothing
 		readonly expired: string;
 		readonly superseded: string;
+		// The call its owner allowed did not run: its application refused it, as what it acts on
+		// changed since the preview they were shown
+		readonly changed: string;
+		// The call was made without its owner's yes: asked only what it would do, its application,
+		// named as a question names it, did it
+		actedOnPreview(application: string): string;
 	};
 	orgGreeting(name: string): string;
 	// What the assistant is told, as its owner's message, when a dispatcher posts an event: the
@@ -214,6 +223,7 @@ const ENGLISH: Messages = {
 			),
 		howToAnswer: ENGLISH_HOW_TO_ANSWER,
 		said: 'Your assistant wrote:',
+		described: (application) => `${application} describes it as:`,
 		delegation: (application, level, code, link) => {
 			const expired = code === 'delegation_expired';
 			const why = `To ${level === 'read' ? 'read' : 'change'} your data in ${application}, I need your permission to act on your behalf, and ${expired ? 'the one you gave me has expired' : 'you have not given it yet'}.`;
@@ -227,7 +237,11 @@ const ENGLISH: Messages = {
 		no: 'no',
 		refused: 'All right, I will not do it.',
 		expired: 'This request has expired, so I did nothing. Ask me again if you still need it.',
-		superseded: 'A newer request replaced this one, so I did nothing. Answer the latest one.'
+		superseded: 'A newer request replaced this one, so I did nothing. Answer the latest one.',
+		changed:
+			'What this action affects changed since I showed it to you, so I did not do it. Ask me again if you still need it.',
+		actedOnPreview: (application) =>
+			`I asked ${application} what this action would do, to show you before you decide, but it did the action right away, without waiting for your yes. Check the result in ${application}.`
 	},
 	orgGreeting: (name) =>
 		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
@@ -339,6 +353,7 @@ const FRENCH: Messages = {
 			),
 		howToAnswer: FRENCH_HOW_TO_ANSWER,
 		said: 'Ton assistant a écrit :',
+		described: (application) => `Description donnée par ${application} :`,
 		delegation: (application, level, code, link) => {
 			const expired = code === 'delegation_expired';
 			const why = `Pour ${level === 'read' ? 'lire' : 'modifier'} tes données dans ${application}, j'ai besoin de ton autorisation d'agir en ton nom, et ${expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée"}.`;
@@ -354,7 +369,11 @@ const FRENCH: Messages = {
 		expired:
 			"Cette demande a expiré, je n'ai donc rien fait. Redemande-moi si tu en as encore besoin.",
 		superseded:
-			"Une demande plus récente a remplacé celle-ci, je n'ai donc rien fait. Réponds à la dernière."
+			"Une demande plus récente a remplacé celle-ci, je n'ai donc rien fait. Réponds à la dernière.",
+		changed:
+			"Ce sur quoi porte cette action a changé depuis que je te l'ai montrée, je ne l'ai donc pas faite. Redemande-moi si tu en as encore besoin.",
+		actedOnPreview: (application) =>
+			`J'ai demandé à ${application} ce que ferait cette action, pour te la montrer avant que tu décides, mais l'action a été faite tout de suite, sans attendre ton accord. Vérifie le résultat dans ${application}.`
 	},
 	orgGreeting: (name) =>
 		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,

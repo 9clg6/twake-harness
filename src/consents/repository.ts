@@ -86,7 +86,8 @@ export interface Withdrawal {
 // Takes back what an owner allowed in an application, at the levels given. The calls there that
 // still wait for the owner's answer, or that the owner allowed and that have not run yet, close
 // with it, as an older question closes when a newer one is asked, and what they would have sent is
-// erased: nothing runs there after the withdrawal unless the owner allows it again.
+// erased, with the digest of what the owner was shown: nothing runs there after the withdrawal
+// unless the owner allows it again.
 export async function withdrawConsents(
 	tx: Tx,
 	owner: string,
@@ -98,7 +99,8 @@ export async function withdrawConsents(
 		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
 		returning level`;
 	const superseded = await tx.sql<ClosedRow[]>`
-		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null,
+			preview_digest = null
 		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
 			and (status = 'open' or (status = 'approved' and replayed_at is null))
 		returning id, domain, level, reasons`;
@@ -133,6 +135,9 @@ export interface PendingCallInput {
 	readonly level: ConsentLevel;
 	readonly reasons: readonly WaitReason[];
 	readonly arguments: unknown;
+	// The digest of the preview its owner is shown, which the call carries once they allowed it;
+	// null when its contract showed none
+	readonly previewDigest: string | null;
 	readonly correlationId: string | null;
 	readonly origin: TurnOrigin;
 	// The session of the turn that froze the call; none for a direct tool call through the API
@@ -145,10 +150,11 @@ export interface PendingCallInput {
 export async function insertPendingCall(tx: Tx, input: PendingCallInput): Promise<string> {
 	const rows = await tx.sql<{ id: string }[]>`
 		insert into pending_calls (owner, tool, contract, domain, level, reasons, arguments,
-			correlation_id, origin, session_id, request_text)
+			preview_digest, correlation_id, origin, session_id, request_text)
 		values (${input.owner}, ${input.tool}, ${input.contract}, ${input.domain}, ${input.level},
 			${JSON.stringify(input.reasons)}::jsonb, ${JSON.stringify(input.arguments)}::jsonb,
-			${input.correlationId}, ${input.origin}, ${input.sessionId}, ${input.request})
+			${input.previewDigest}, ${input.correlationId}, ${input.origin}, ${input.sessionId},
+			${input.request})
 		returning id`;
 	const row = rows[0];
 	if (row === undefined) throw new Error('the pending call was not stored');
@@ -218,7 +224,7 @@ function closedRequests(rows: readonly ClosedRow[]): ClosedRequest[] {
 }
 
 // Marks the open requests of a room older than the one just asked as superseded, erasing what
-// their calls would have sent, and the question with it
+// their calls would have sent, the question and the digest of what their owner was shown
 export async function supersedeRequests(
 	tx: Tx,
 	owner: string,
@@ -227,14 +233,14 @@ export async function supersedeRequests(
 ): Promise<ClosedRequest[]> {
 	const rows = await tx.sql<ClosedRow[]>`
 		update pending_calls set status = 'superseded', decided_at = now(), arguments = null,
-			request_text = null
+			request_text = null, preview_digest = null
 		where owner = ${owner} and room_id = ${roomId} and status = 'open' and id <> ${newestId}
 		returning id, domain, level, reasons`;
 	return closedRequests(rows);
 }
 
 // Closes the owner's requests left unanswered past their lifetime, erasing what their calls would
-// have sent, and the question with it
+// have sent, the question and the digest of what their owner was shown
 export async function expireRequests(
 	tx: Tx,
 	owner: string,
@@ -242,7 +248,7 @@ export async function expireRequests(
 ): Promise<ClosedRequest[]> {
 	const rows = await tx.sql<ClosedRow[]>`
 		update pending_calls set status = 'expired', decided_at = now(), arguments = null,
-			request_text = null
+			request_text = null, preview_digest = null
 		where owner = ${owner} and status = 'open'
 			and created_at <= now() - make_interval(secs => ${lifetimeMs / 1000})
 		returning id, domain, level, reasons`;
@@ -317,9 +323,10 @@ export async function isAnswerEvent(tx: Tx, owner: string, eventId: string): Pro
 }
 
 // The owner's answer to a call still waiting, once: a yes approves it, for its resume job to run,
-// and a no refuses it, erasing what it would have sent. From then on no other answer, nor a newer
-// request, changes it. A yes also lands on a call its resume job approved first, so that the
-// answer is recorded. False when the call was no longer waiting.
+// and a no refuses it, erasing what it would have sent and the digest of what they were shown.
+// From then on no other answer, nor a newer request, changes it. A yes also lands on a call its
+// resume job approved first, so that the answer is recorded. False when the call was no longer
+// waiting.
 export async function decidePendingCall(
 	tx: Tx,
 	owner: string,
@@ -331,7 +338,8 @@ export async function decidePendingCall(
 		update pending_calls set status = ${decision}, decided_at = coalesce(decided_at, now()),
 			answer_event_id = ${answerEventId},
 			arguments = case when ${decision} = 'refused' then null else arguments end,
-			request_text = case when ${decision} = 'refused' then null else request_text end
+			request_text = case when ${decision} = 'refused' then null else request_text end,
+			preview_digest = case when ${decision} = 'refused' then null else preview_digest end
 		where id = ${id} and owner = ${owner}
 			and (status = 'open' or (status = ${decision} and answer_event_id is null))`;
 	return result.count === 1;
@@ -339,9 +347,9 @@ export async function decidePendingCall(
 
 // The owner's answer through the API to a call still waiting, recorded under an id of its own:
 // a yes approves it, for its resume job to run, and a no drops it, erasing what it would have
-// sent and the question. The answer goes in as the room's do, so that an answer read in the room
-// as the call still waited finds it answered and decides nothing. False when the call was no
-// longer waiting.
+// sent, the question and the digest of what they were shown. The answer goes in as the room's do,
+// so that an answer read in the room as the call still waited finds it answered and decides
+// nothing. False when the call was no longer waiting.
 export async function answerPendingCall(
 	tx: Tx,
 	owner: string,
@@ -353,7 +361,8 @@ export async function answerPendingCall(
 		update pending_calls set status = ${decision}, decided_at = now(),
 			answer_event_id = ${answerId},
 			arguments = case when ${decision} = 'refused' then null else arguments end,
-			request_text = case when ${decision} = 'refused' then null else request_text end
+			request_text = case when ${decision} = 'refused' then null else request_text end,
+			preview_digest = case when ${decision} = 'refused' then null else preview_digest end
 		where id = ${id} and owner = ${owner} and status = 'open'`;
 	return result.count === 1;
 }
@@ -376,6 +385,9 @@ export interface ApprovedCall extends CallSubject {
 	readonly tool: string;
 	readonly contract: string;
 	readonly arguments: unknown;
+	// The digest of the preview its owner was shown, which the call carries; null when its contract
+	// showed none
+	readonly previewDigest: string | null;
 	readonly correlationId: string | null;
 	readonly origin: TurnOrigin;
 }
@@ -384,6 +396,7 @@ interface ApprovedRow extends SubjectRow {
 	tool: string;
 	contract: string;
 	arguments: unknown;
+	preview_digest: string | null;
 	correlation_id: string | null;
 	origin: TurnOrigin;
 }
@@ -396,6 +409,7 @@ function approvedCall(row: ApprovedRow | undefined): ApprovedCall | null {
 				tool: row.tool,
 				contract: row.contract,
 				arguments: readJsonColumn(row.arguments),
+				previewDigest: row.preview_digest,
 				correlationId: row.correlation_id,
 				origin: row.origin
 			};
@@ -413,7 +427,8 @@ export async function approvePendingCall(
 		update pending_calls set status = 'approved', decided_at = coalesce(decided_at, now())
 		where id = ${id} and owner = ${owner}
 			and (status = 'open' or (status = 'approved' and replayed_at is null))
-		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
+		returning tool, contract, domain, level, reasons, arguments, preview_digest, correlation_id,
+			origin`;
 	return approvedCall(rows[0]);
 }
 
@@ -434,24 +449,28 @@ export async function takeAllowedCall(
 			and (status = 'open'
 				or (status = 'approved' and replayed_at is null and answer_event_id like 'api:%'
 					and decided_at <= now() - make_interval(secs => ${leaseMs / 1000})))
-		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
+		returning tool, contract, domain, level, reasons, arguments, preview_digest, correlation_id,
+			origin`;
 	return approvedCall(rows[0]);
 }
 
 // The call its owner allowed waits again once replayed, under a newer request that asks about
 // everything that applies by then, such as writing they took back since: this one is closed as
-// superseded by that request, and what it would have sent is erased with its question, the newer
-// one holding both
+// superseded by that request, and what it would have sent is erased with its question and the
+// digest of what its owner was shown, the newer one holding all three
 export async function supersedeApprovedCall(tx: Tx, owner: string, id: string): Promise<void> {
 	await tx.sql`
-		update pending_calls set status = 'superseded', arguments = null, request_text = null
+		update pending_calls set status = 'superseded', arguments = null, request_text = null,
+			preview_digest = null
 		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
 }
 
-// The call ran, and the conversation holds it: what it sent is erased, and the question with it
+// The call ran, and the conversation holds it: what it sent is erased, with the question and the
+// digest it carried
 export async function markReplayed(tx: Tx, id: string): Promise<void> {
 	await tx.sql`
-		update pending_calls set replayed_at = now(), arguments = null, request_text = null
+		update pending_calls set replayed_at = now(), arguments = null, request_text = null,
+			preview_digest = null
 		where id = ${id}`;
 }
 
