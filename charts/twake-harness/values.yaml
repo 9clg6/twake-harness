@@ -62,6 +62,9 @@ config:
   openbaoTokenAudience: twake-harness-openbao
   # The matrix role: the homeserver's name and the application service identity
   matrixServerName: ''
+  # The mail domain of the homeserver's users, the principal of @alice:<server> being
+  # alice@<mail domain>; empty means the server name
+  matrixMailDomain: ''
   matrixAppserviceId: twake-harness
   matrixSenderLocalpart: twake-space-assistant
   matrixAssistantPrefix: twake-space-assistant-

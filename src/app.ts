@@ -74,6 +74,8 @@ const skillBodySchema = z
 
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
+// The owner has no account on the homeserver the assistants live on, so no room can be opened
+const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
 
 const eventSchema = z.object({
 	owner: z.string().min(1).max(128),
@@ -253,9 +255,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
 				const created = await assistants.create(principal.id, parsed.data.name);
 				if (!created.ok) {
-					return created.reason === 'exists'
-						? reply.code(409).send({ error: 'assistant already exists' })
-						: reply.code(400).send({ error: 'invalid request' });
+					switch (created.reason) {
+						case 'exists':
+							return reply.code(409).send({ error: 'assistant already exists' });
+						case 'not_on_homeserver':
+							return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+						default:
+							return reply.code(400).send({ error: 'invalid request' });
+					}
 				}
 				return reply.code(201).send(created.assistant);
 			});

@@ -47,8 +47,9 @@ export function creatorUserId(config: Config): string {
 	return `@${config.matrix.senderLocalpart}:${config.matrix.serverName}`;
 }
 
-export function assistantUserId(config: Config, owner: string): string {
-	return `@${config.matrix.assistantPrefix}${owner}:${config.matrix.serverName}`;
+// The assistant of the owner whose account on our homeserver has this localpart
+export function assistantUserId(config: Config, ownerLocalpart: string): string {
+	return `@${config.matrix.assistantPrefix}${ownerLocalpart}:${config.matrix.serverName}`;
 }
 
 export function isAssistantUserId(config: Config, userId: string): boolean {
