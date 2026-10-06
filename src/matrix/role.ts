@@ -187,10 +187,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				return;
 			}
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
+			// The turns of one owner run one after the other, in the order they were sent
 			await enqueueJob(db, {
 				kind: 'turn',
 				payload: { owner, roomId, eventId, text },
-				dedupKey: `turn:${eventId}`
+				dedupKey: `turn:${eventId}`,
+				groupKey: `turn:${owner}`
 			});
 			log.info({ roomId, owner, eventId }, 'turn queued');
 			return;
