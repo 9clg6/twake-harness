@@ -459,7 +459,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				const outcome = await runTool(tool, parsed.data.arguments ?? {}, {
 					principalId: principal.id,
 					actions: record.actions,
-					db
+					db,
+					correlationId: request.id
 				});
 				request.log.info(
 					{ tool: parsed.data.tool, arguments: parsed.data.arguments, result: outcome.result },
