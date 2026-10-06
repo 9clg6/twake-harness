@@ -271,6 +271,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							return reply.code(409).send({ error: 'assistant already exists' });
 						case 'not_on_homeserver':
 							return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+						case 'failed':
+							return reply.code(502).send({ error: 'assistant creation failed' });
 						default:
 							return reply.code(400).send({ error: 'invalid request' });
 					}

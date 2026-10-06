@@ -35,7 +35,8 @@ import {
 	type CrossSigningDeps,
 	type CrossSigningResult
 } from './cross-signing.js';
-import { helpText, runCreatorTurn } from './creator.js';
+import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
+import { makeListenerGuard } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeRichText } from './format.js';
@@ -224,6 +225,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		res.status(200).json({ status: 'ok', role: 'matrix' });
 	});
 
+	const guard = makeListenerGuard(log);
+
 	// Only the creator and the assistants the harness created exist; nothing is made on demand.
 	appservice.on('query.user', (userId: string, createUser: (profile: unknown) => void) => {
 		log.info({ userId }, 'user query refused');
@@ -310,100 +313,126 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// The SDK applies a transaction's device list changes only to the users it also carried keys
 	// for: every assistant is told here, so an owner's new device gets the next room key
-	appservice.on('device_lists', async (lists: { changed?: string[]; removed?: string[] }) => {
-		const changed = lists.changed ?? [];
-		const removed = lists.removed ?? [];
-		if (changed.length === 0 && removed.length === 0) return;
-		for (const { userId } of await listActiveAssistants(db)) {
-			try {
-				const intent = appservice.getIntentForUserId(userId);
-				await intent.enableEncryption();
-				await intent.underlyingClient.crypto.updateSyncData(
-					[],
-					await lastCounts(userId),
-					(await lastFallbacks(userId)) as Parameters<
-						typeof intent.underlyingClient.crypto.updateSyncData
-					>[2],
-					changed,
-					removed
-				);
-			} catch (err: unknown) {
-				log.warn({ userId, err }, 'device list update failed');
-			}
-		}
-	});
+	appservice.on(
+		'device_lists',
+		guard(
+			'device list update',
+			async (lists: { changed?: string[]; removed?: string[] }) => {
+				const changed = lists.changed ?? [];
+				const removed = lists.removed ?? [];
+				if (changed.length === 0 && removed.length === 0) return;
+				for (const { userId } of await listActiveAssistants(db)) {
+					try {
+						const intent = appservice.getIntentForUserId(userId);
+						await intent.enableEncryption();
+						await intent.underlyingClient.crypto.updateSyncData(
+							[],
+							await lastCounts(userId),
+							(await lastFallbacks(userId)) as Parameters<
+								typeof intent.underlyingClient.crypto.updateSyncData
+							>[2],
+							changed,
+							removed
+						);
+					} catch (err: unknown) {
+						log.warn({ userId, err }, 'device list update failed');
+					}
+				}
+			},
+			() => ({})
+		)
+	);
 
 	appservice.on(
 		'room.failed_decryption',
-		async (roomId: string, event: RoomEvent, err: unknown) => {
-			log.error(
-				{ roomId, sender: event.sender, eventId: event.event_id, err },
-				'decryption failed'
-			);
-			const room = await assistantRoom(roomId);
-			if (room === null || event.sender === room.userId) return;
-			try {
-				const fetched = await fetchMissedKeyShares(room.userId, roomId);
-				log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
-				if (fetched === 0) return;
-				const intent = appservice.getIntentForUserId(room.userId);
-				const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
-					// What the SDK hands here is the raw event itself
-					new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
-					roomId
+		guard(
+			'decryption retry',
+			async (roomId: string, event: RoomEvent, err: unknown) => {
+				log.error(
+					{ roomId, sender: event.sender, eventId: event.event_id, err },
+					'decryption failed'
 				);
-				if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted);
-			} catch (retryErr: unknown) {
-				log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
-			}
-		}
+				const room = await assistantRoom(roomId);
+				if (room === null || event.sender === room.userId) return;
+				try {
+					const fetched = await fetchMissedKeyShares(room.userId, roomId);
+					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
+					if (fetched === 0) return;
+					const intent = appservice.getIntentForUserId(room.userId);
+					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
+						// What the SDK hands here is the raw event itself
+						new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
+						roomId
+					);
+					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted);
+				} catch (retryErr: unknown) {
+					log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
+				}
+			},
+			(roomId: string, event: RoomEvent) => ({
+				roomId,
+				eventId: event.event_id,
+				sender: event.sender
+			})
+		)
 	);
 
-	appservice.on('room.invite', async (roomId: string, event: RoomEvent) => {
-		const invited = event.state_key ?? '';
-		if (orgUserId !== null && invited === orgUserId) {
-			// The organization agent joins the members of the organization and nobody else
-			const inviter = event.sender ?? '';
-			if (!isOrgMember(config, inviter)) {
-				log.info({ roomId, sender: inviter }, 'organization agent ignored an invite');
-				return;
-			}
-			try {
-				const intent = appservice.getIntentForUserId(invited);
-				await intent.enableEncryption();
-				await intent.joinRoom(roomId);
-			} catch (err: unknown) {
-				log.warn({ roomId, invited, err }, 'join failed');
-				return;
-			}
-			await db.sql`
+	appservice.on(
+		'room.invite',
+		guard(
+			'invite',
+			async (roomId: string, event: RoomEvent) => {
+				const invited = event.state_key ?? '';
+				if (orgUserId !== null && invited === orgUserId) {
+					// The organization agent joins the members of the organization and nobody else
+					const inviter = event.sender ?? '';
+					if (!isOrgMember(config, inviter)) {
+						log.info({ roomId, sender: inviter }, 'organization agent ignored an invite');
+						return;
+					}
+					try {
+						const intent = appservice.getIntentForUserId(invited);
+						await intent.enableEncryption();
+						await intent.joinRoom(roomId);
+					} catch (err: unknown) {
+						log.warn({ roomId, invited, err }, 'join failed');
+						return;
+					}
+					await db.sql`
 				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${ORGANIZATION_PRINCIPAL}, ${invited})
 				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
-			await enqueueJob(db, {
-				kind: 'send',
-				payload: { asUserId: invited, roomId, text: orgGreeting(config) },
-				dedupKey: `welcome:${roomId}`,
-				groupKey: `send:${roomId}`
-			});
-			log.info({ roomId, sender: inviter }, 'organization room opened');
-			return;
-		}
-		if (invited !== creator && !isAssistantUserId(config, invited)) return;
-		log.info({ roomId, invited, sender: event.sender }, 'invite accepted');
-		try {
-			const intent = appservice.getIntentForUserId(invited);
-			// Key shares for this room may arrive with the next transaction: be ready to receive them
-			await intent.enableEncryption();
-			await intent.joinRoom(roomId);
-		} catch (err: unknown) {
-			log.warn({ roomId, invited, err }, 'join failed');
-			return;
-		}
-		// Synapse delivers nothing sent before the join, so the creator opens the conversation
-		// itself rather than let a first message go unanswered.
-		if (invited === creator)
-			await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(messages)));
-	});
+					await enqueueJob(db, {
+						kind: 'send',
+						payload: { asUserId: invited, roomId, text: orgGreeting(config) },
+						dedupKey: `welcome:${roomId}`,
+						groupKey: `send:${roomId}`
+					});
+					log.info({ roomId, sender: inviter }, 'organization room opened');
+					return;
+				}
+				if (invited !== creator && !isAssistantUserId(config, invited)) return;
+				log.info({ roomId, invited, sender: event.sender }, 'invite accepted');
+				try {
+					const intent = appservice.getIntentForUserId(invited);
+					// Key shares for this room may arrive with the next transaction: be ready to receive them
+					await intent.enableEncryption();
+					await intent.joinRoom(roomId);
+				} catch (err: unknown) {
+					log.warn({ roomId, invited, err }, 'join failed');
+					return;
+				}
+				// Synapse delivers nothing sent before the join, so the creator opens the conversation
+				// itself rather than let a first message go unanswered.
+				if (invited === creator)
+					await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(messages)));
+			},
+			(roomId: string, event: RoomEvent) => ({
+				roomId,
+				eventId: event.event_id,
+				sender: event.sender
+			})
+		)
+	);
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
 	async function assistantRoom(
@@ -418,21 +447,32 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 
 	// The owner has joined: their devices are in the room, the greeting can be encrypted for them
-	appservice.on('room.event', async (roomId: string, event: RoomEvent) => {
-		if (event.type !== 'm.room.member' || event.content?.['membership'] !== 'join') return;
-		const room = await assistantRoom(roomId);
-		if (room === null || room.welcome === null) return;
-		if (event.state_key !== matrixUserIdOfPrincipal(config, room.owner)) return;
-		const claimed = await db.sql`
+	appservice.on(
+		'room.event',
+		guard(
+			'room event',
+			async (roomId: string, event: RoomEvent) => {
+				if (event.type !== 'm.room.member' || event.content?.['membership'] !== 'join') return;
+				const room = await assistantRoom(roomId);
+				if (room === null || room.welcome === null) return;
+				if (event.state_key !== matrixUserIdOfPrincipal(config, room.owner)) return;
+				const claimed = await db.sql`
 			update assistant_rooms set welcome = null where room_id = ${roomId} and welcome is not null`;
-		if (claimed.count !== 1) return;
-		await enqueueJob(db, {
-			kind: 'send',
-			payload: { asUserId: room.userId, roomId, text: room.welcome },
-			dedupKey: `welcome:${roomId}`
-		});
-		log.info({ roomId, owner: room.owner }, 'welcome queued');
-	});
+				if (claimed.count !== 1) return;
+				await enqueueJob(db, {
+					kind: 'send',
+					payload: { asUserId: room.userId, roomId, text: room.welcome },
+					dedupKey: `welcome:${roomId}`
+				});
+				log.info({ roomId, owner: room.owner }, 'welcome queued');
+			},
+			(roomId: string, event: RoomEvent) => ({
+				roomId,
+				eventId: event.event_id,
+				sender: event.sender
+			})
+		)
+	);
 
 	// Eyes and typing while a turn works, a check mark once it answered
 	const feedback = makeChatFeedback({
@@ -453,7 +493,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	});
 
-	appservice.on('room.message', onRoomMessage);
+	appservice.on(
+		'room.message',
+		guard(
+			'room message',
+			onRoomMessage,
+			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) => ({
+				roomId,
+				eventId: (event as RoomEvent).event_id,
+				sender: (event as RoomEvent).sender
+			})
+		)
+	);
 
 	async function onRoomMessage(
 		roomId: string,
@@ -511,7 +562,15 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
-		const turn = await runCreatorTurn({ owner, text, state }, assistants, messages);
+		let turn: CreatorTurn;
+		try {
+			turn = await runCreatorTurn({ owner, text, state }, assistants, messages);
+		} catch (err: unknown) {
+			// The owner is told, and the dialog starts over: one left waiting for a name would take
+			// their next message for one
+			log.error({ roomId, sender, owner, err }, 'creator turn failed');
+			turn = { command: 'failed', nextState: null, reply: messages.creator.requestFailed };
+		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
 		await appservice.botIntent.sendEvent(roomId, makeRichText(turn.reply));

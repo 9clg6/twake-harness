@@ -11,6 +11,8 @@ import {
 	markAssistantDeleted,
 	renameAssistant,
 	saveAssistant,
+	saveAssistantRoom,
+	setAssistantRoomId,
 	type AssistantRecord
 } from './repository.js';
 
@@ -23,7 +25,10 @@ export interface AssistantView {
 
 export type CreateResult =
 	| { readonly ok: true; readonly assistant: AssistantView }
-	| { readonly ok: false; readonly reason: 'exists' | 'invalid_name' | 'not_on_homeserver' };
+	| {
+			readonly ok: false;
+			readonly reason: 'exists' | 'invalid_name' | 'not_on_homeserver' | 'failed';
+	  };
 
 export interface AssistantService {
 	create(owner: string, name: string): Promise<CreateResult>;
@@ -66,6 +71,31 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 		return record === null || record.deletedAt !== null ? null : record;
 	}
 
+	// Takes back what a failed creation made, so the owner's next /newbot starts clean. The row goes
+	// back to deleted. A room exists only when the failure came after it: the assistant leaves it,
+	// and the owner's invitation stays, since the owner holds the same power and cannot be kicked.
+	async function undoCreation(
+		owner: string,
+		userId: string,
+		roomId: string | null,
+		saved: boolean
+	): Promise<void> {
+		if (saved) {
+			try {
+				await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
+			} catch (err: unknown) {
+				log.warn({ owner, userId, err }, 'failed creation not undone');
+			}
+		}
+		if (roomId !== null) {
+			try {
+				await admin.leaveRoom(userId, roomId);
+			} catch (err: unknown) {
+				log.warn({ userId, roomId, err }, 'room not left');
+			}
+		}
+	}
+
 	return {
 		async create(owner, rawName) {
 			const name = rawName.trim();
@@ -75,25 +105,40 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
+			const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
 			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
-			// The account is registered once and kept, since a Matrix identifier is never reused;
-			// its device belongs to the application service, which creates and keeps it.
-			await admin.registerUser(localpart);
-			const named = await admin.setDisplayName(userId, name);
-			const roomId = await admin.createDirectRoom(
-				userId,
-				`@${ownerLocalpart}:${config.matrix.serverName}`
-			);
-			await withPrincipal(db, { id: owner }, (tx) =>
-				saveAssistant(tx, { owner, userId, name, roomId })
-			);
-			// The greeting waits for the owner to join: the matrix role then encrypts it for their devices
-			const welcome = getMessages(config.locale).welcome(name);
-			await db.sql`
-				insert into assistant_rooms (room_id, owner, user_id, welcome) values (${roomId}, ${owner}, ${userId}, ${welcome})
-				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;
-			log.info({ owner, userId, roomId, named }, 'assistant created');
-			return { ok: true, assistant: toView({ owner, userId, name, roomId, deletedAt: null }) };
+			let saved = false;
+			let roomId: string | null = null;
+			try {
+				// The account is registered once and kept, since a Matrix identifier is never reused;
+				// its device belongs to the application service, which creates and keeps it.
+				await admin.registerUser(localpart);
+				const named = await admin.setDisplayName(userId, name);
+				// Saved before its room exists: a save that fails, as when another row still holds the
+				// account, leaves nothing behind on the homeserver
+				const { reclaimed } = await withPrincipal(db, { id: owner }, (tx) =>
+					saveAssistant(tx, { owner, userId, name, roomId: null })
+				);
+				saved = true;
+				const opened = await admin.createDirectRoom(userId, ownerUserId);
+				roomId = opened;
+				// The greeting waits for the owner to join: the matrix role then encrypts it for their
+				// devices. The room and its index land together or not at all.
+				const welcome = getMessages(config.locale).welcome(name);
+				await withPrincipal(db, { id: owner }, async (tx) => {
+					await setAssistantRoomId(tx, owner, opened);
+					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
+				});
+				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
+				return {
+					ok: true,
+					assistant: toView({ owner, userId, name, roomId: opened, deletedAt: null })
+				};
+			} catch (err: unknown) {
+				log.error({ owner, userId, roomId, err }, 'assistant creation failed');
+				await undoCreation(owner, userId, roomId, saved);
+				return { ok: false, reason: 'failed' };
+			}
 		},
 		async find(owner) {
 			const record = await current(owner);
