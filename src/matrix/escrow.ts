@@ -1,9 +1,7 @@
 import {
 	BackupDecryptionKey,
 	SecretStorageItems,
-	SecretStorageKey,
-	type OlmMachine,
-	type RequestType
+	SecretStorageKey
 } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { FastifyBaseLogger } from 'fastify';
 import type { Intent } from 'matrix-bot-sdk';
@@ -11,6 +9,7 @@ import type { Intent } from 'matrix-bot-sdk';
 import { withPrincipal, type Db } from '../db/client.js';
 import type { EscrowSecrets, EscrowStore } from '../escrow/openbao.js';
 import { findEscrow, markRecovered, saveEscrow } from '../escrow/repository.js';
+import { machineOf, sendRequest, step } from './crypto-requests.js';
 
 const BACKUP_ALGORITHM = 'm.megolm_backup.v1.curve25519-aes-sha2';
 const SECRET_NAMES = [
@@ -32,12 +31,6 @@ export interface EscrowDeps {
 	readonly log: FastifyBaseLogger;
 }
 
-interface CryptoRequest {
-	readonly id: string;
-	readonly body: string;
-	readonly type: RequestType;
-}
-
 function requireSecrets(owner: string, secrets: EscrowSecrets): Record<SecretName, string> {
 	const found: Partial<Record<SecretName, string>> = {};
 	for (const name of SECRET_NAMES) {
@@ -48,107 +41,24 @@ function requireSecrets(owner: string, secrets: EscrowSecrets): Record<SecretNam
 	return found as Record<SecretName, string>;
 }
 
-// A step of the escrow, named in the error it may raise: the bindings' own errors say nothing of where
-async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
-	try {
-		return await run();
-	} catch (err: unknown) {
-		const message = err instanceof Error ? err.message : String(err);
-		throw new Error(`${name}: ${message}`, { cause: err });
-	}
-}
-
-// The OlmMachine behind an intent's crypto client, which the SDK keeps to itself
-function machineOf(intent: Intent): OlmMachine {
-	const crypto = intent.underlyingClient.crypto as unknown as {
-		engine?: { machine?: OlmMachine };
-	};
-	const machine = crypto.engine?.machine;
-	if (machine === undefined) throw new Error('the assistant has no encryption state yet');
-	return machine;
-}
-
-// The HTTP body of a request the machine prepared: the signatures upload comes wrapped in the
-// field the Rust SDK names it by, which the homeserver would take for a user
-function bodyOf(request: CryptoRequest): unknown {
-	const parsed = JSON.parse(request.body) as Record<string, unknown>;
-	return 'signed_keys' in parsed ? parsed['signed_keys'] : parsed;
-}
-
-// Sends a request the crypto machine prepared, as the assistant, and tells the machine
-async function sendRequest(
-	intent: Intent,
-	machine: OlmMachine,
-	method: 'POST' | 'PUT',
-	path: string,
-	request: CryptoRequest,
-	query: Record<string, string> | null = null
-): Promise<unknown> {
-	const response: unknown = await step(`${method} ${path}`, () =>
-		intent.underlyingClient.doRequest(method, path, query, bodyOf(request))
-	);
-	const reply = JSON.stringify(response ?? {});
-	await step(`marking ${path} as sent (reply ${reply.slice(0, 400)})`, () =>
-		machine.markRequestAsSent(request.id, request.type, reply)
-	);
-	return response;
-}
-
-// The master key the homeserver holds for the assistant, if it holds one
-async function findMasterPublicKey(intent: Intent): Promise<string | null> {
-	const userId = intent.userId;
-	const response = (await intent.underlyingClient.doRequest(
-		'POST',
-		'/_matrix/client/v3/keys/query',
-		null,
-		{ device_keys: { [userId]: [] } }
-	)) as { master_keys?: Record<string, { keys?: Record<string, string> }> };
-	return Object.values(response.master_keys?.[userId]?.keys ?? {})[0] ?? null;
-}
-
-// Escrows an assistant's identity once: its cross-signing keys are uploaded to the homeserver, a
-// key backup is opened there, and the private parts go to OpenBao; the database keeps the path,
-// the public key and the backup version only.
+// Escrows the identity the assistant holds, which ensureCrossSigning set up: a key backup is
+// opened on the homeserver, and the private parts go to OpenBao; the database keeps the path, the
+// public key and the backup version only. An escrow describes one identity: a replaced identity
+// is escrowed again.
 export async function ensureEscrow(
 	deps: EscrowDeps,
 	intent: Intent,
-	owner: string
+	owner: string,
+	masterPublicKey: string
 ): Promise<'kept' | 'written'> {
 	const { db, store, log } = deps;
 	const existing = await withPrincipal(db, { id: owner }, (tx) => findEscrow(tx, owner));
-	if (existing !== null) return 'kept';
+	if (existing !== null && existing.masterPublicKey === masterPublicKey) return 'kept';
 	const machine = machineOf(intent);
 	const client = intent.underlyingClient;
-	// The identity is uploaded whenever the homeserver lacks it, the local keys being reused
-	if ((await findMasterPublicKey(intent)) === null) {
-		const requests = await step('bootstrapping cross-signing', () =>
-			machine.bootstrapCrossSigning(false)
-		);
-		if (requests.uploadKeysReq !== undefined && requests.uploadKeysReq !== null) {
-			await sendRequest(
-				intent,
-				machine,
-				'POST',
-				'/_matrix/client/v3/keys/upload',
-				requests.uploadKeysReq
-			);
-		}
-		// A first upload of cross-signing keys needs no interactive authentication
-		await client.doRequest(
-			'POST',
-			'/_matrix/client/v3/keys/device_signing/upload',
-			null,
-			JSON.parse(requests.uploadSigningKeysReq)
-		);
-		if (requests.uploadSignaturesReq !== undefined && requests.uploadSignaturesReq !== null) {
-			await sendRequest(
-				intent,
-				machine,
-				'POST',
-				'/_matrix/client/v3/keys/signatures/upload',
-				requests.uploadSignaturesReq
-			);
-		}
+	const status = await step('reading the cross-signing status', () => machine.crossSigningStatus());
+	if (!status.hasMaster || !status.hasSelfSigning) {
+		throw new Error('the assistant holds no cross-signing identity to escrow');
 	}
 	const backupKey = BackupDecryptionKey.createRandomKey();
 	const publicKey = backupKey.megolmV1PublicKey.publicKeyBase64;
@@ -167,9 +77,6 @@ export async function ensureEscrow(
 	const items = await step('exporting the secrets', () =>
 		machine.exportSecretsForSecretStorage(secretKey)
 	);
-	const masterPublicKey = await findMasterPublicKey(intent);
-	if (masterPublicKey === null)
-		throw new Error('the homeserver holds no master key for the assistant');
 	await store.write(owner, {
 		secret_storage_key: secretKey.toBase58(),
 		secret_storage_key_event_type: secretKey.eventType(),
