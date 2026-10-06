@@ -30,6 +30,7 @@ import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
+import { makeEnsureEncryption, routeEncryptionSetups } from './encryption.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
 import {
 	ensureCrossSigning,
@@ -160,6 +161,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	);
 	mkdirSync(config.matrix.cryptoStorePath, { recursive: true });
 	const storage = makeAppserviceStorage(db);
+	// One encryption store per assistant, on the volume of this role
+	const cryptoStorage = new RustSdkAppserviceCryptoStorageProvider(
+		config.matrix.cryptoStorePath,
+		StoreType.Sqlite
+	);
 	const appservice = new Appservice({
 		port: options.port,
 		bindAddress: options.bindAddress ?? '0.0.0.0',
@@ -168,12 +174,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// The url only matters to Synapse, which reads it from its own registration file
 		registration: buildRegistration(config, ''),
 		storage,
-		// One encryption store per assistant, on the volume of this role
-		cryptoStorage: new RustSdkAppserviceCryptoStorageProvider(
-			config.matrix.cryptoStorePath,
-			StoreType.Sqlite
-		)
+		cryptoStorage
 	});
+	const ensureEncryption = makeEnsureEncryption({
+		log,
+		storedDeviceId: async (userId) => {
+			// What the SDK types as a string is null, or missing, in a store never used
+			const stored: string | null | undefined = await cryptoStorage
+				.storageForUser(userId)
+				.getDeviceId();
+			return stored ?? null;
+		}
+	});
+	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start
 	const inFlight = makeWorkTracker();
 	const creator = creatorUserId(config);
@@ -284,7 +297,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const syncSince = new Map<string, string>();
 	async function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
 		const intent = appservice.getIntentForUserId(userId);
-		await intent.enableEncryption();
+		await ensureEncryption(intent);
 		const client = intent.underlyingClient;
 		const since = syncSince.get(userId);
 		const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
@@ -346,7 +359,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				for (const { userId } of await listActiveAssistants(db)) {
 					try {
 						const intent = appservice.getIntentForUserId(userId);
-						await intent.enableEncryption();
+						await ensureEncryption(intent);
 						await intent.underlyingClient.crypto.updateSyncData(
 							[],
 							await lastCounts(userId),
@@ -414,7 +427,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					}
 					try {
 						const intent = appservice.getIntentForUserId(invited);
-						await intent.enableEncryption();
+						await ensureEncryption(intent);
 						await intent.joinRoom(roomId);
 					} catch (err: unknown) {
 						log.warn({ roomId, invited, err }, 'join failed');
@@ -437,7 +450,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				try {
 					const intent = appservice.getIntentForUserId(invited);
 					// Key shares for this room may arrive with the next transaction: be ready to receive them
-					await intent.enableEncryption();
+					await ensureEncryption(intent);
 					await intent.joinRoom(roomId);
 				} catch (err: unknown) {
 					log.warn({ roomId, invited, err }, 'join failed');
@@ -506,7 +519,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		},
 		sendEvent: async (userId, roomId, type, content) => {
 			const intent = appservice.getIntentForUserId(userId);
-			await intent.enableEncryption();
+			await ensureEncryption(intent);
 			await refreshMembersDevices(intent, roomId);
 			return intent.underlyingClient.sendEvent(roomId, type, content);
 		},
@@ -613,7 +626,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		const intent = appservice.getIntentForUserId(assistant.userId);
-		await intent.enableEncryption();
+		await ensureEncryption(intent);
 		const result = await recoverFromEscrow(escrow, intent, owner);
 		log.info({ owner, userId: assistant.userId, result }, 'recovery done');
 		if (assistant.roomId === null) return;
@@ -643,7 +656,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
 			const intent = appservice.getIntentForUserId(job.payload.asUserId);
-			await intent.enableEncryption();
+			await ensureEncryption(intent);
 			const room = await assistantRoom(job.payload.roomId);
 			if (room !== null) await onEncryptionReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
@@ -674,12 +687,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	for (const { owner, userId } of await listActiveAssistants(db)) {
 		try {
 			const intent = appservice.getIntentForUserId(userId);
-			await intent.enableEncryption();
+			await ensureEncryption(intent);
 			await onEncryptionReady(intent, owner);
 		} catch (err: unknown) {
 			log.warn({ userId, err }, 'encryption setup failed at start');
 		}
 	}
+	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
+	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts
+	// and that fails leaves the push unanswered in the SDK.
+	await ensureEncryption(appservice.botIntent);
 	await appservice.begin();
 	// The SDK serves Synapse's pushes on its own HTTP server, and its stop only closes the listening
 	// socket: Synapse keeps its connection alive and goes on pushing on it, and the SDK goes on
@@ -726,8 +743,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await new Promise((resolve) => setTimeout(resolve, 50));
 		}
 	}
-	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages encrypted
-	await appservice.botIntent.enableEncryption();
 	log.info({ port: options.port, creator, homeserverUrl }, 'matrix role listening');
 	let stopping: Promise<void> | null = null;
 	return {
