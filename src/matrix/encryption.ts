@@ -1,14 +1,16 @@
 import type { FastifyBaseLogger } from 'fastify';
 import { Intent, type Appservice, type UserDevice } from 'matrix-bot-sdk';
 
+import { describeRejection } from './last-resort.js';
+
 export interface EncryptionSetupDeps {
 	readonly log: FastifyBaseLogger;
 	// The device the encryption store of a user was made for, null for a store never used
 	readonly storedDeviceId: (userId: string) => Promise<string | null>;
 }
 
-// Sets the encryption of an intent up, once per intent. Every setup of the matrix role goes
-// through it, the SDK's own included.
+// Sets the encryption of an intent up, once per intent; a setup that failed is tried again on the
+// next call. Every setup of the matrix role goes through it, the SDK's own included.
 export type EnsureEncryption = (intent: Intent) => Promise<void>;
 
 function hasIdentityKey(deviceId: string, device: UserDevice): boolean {
@@ -53,6 +55,21 @@ async function ensureDeviceToSpeakFor(deps: EncryptionSetupDeps, intent: Intent)
 	deps.log.info({ userId, deviceId }, 'encryption device created');
 }
 
+// matrix-bot-sdk 0.8 keeps the promise of an intent's first encryption setup in a private field and
+// hands it to every later call, a rejected one included: one failure, as a homeserver hiccup, would
+// leave the user unable to encrypt until the process restarts. Dropping it lets the next call set
+// the encryption up again.
+function forgetSdkSetup(intent: Intent): void {
+	Reflect.deleteProperty(intent, 'cryptoSetupPromise');
+}
+
+// The HTTP status of a failed request, which the SDK carries on what it throws
+function statusOf(err: unknown): number | null {
+	if (typeof err !== 'object' || err === null) return null;
+	const status: unknown = Reflect.get(err, 'statusCode');
+	return typeof status === 'number' ? status : null;
+}
+
 export function makeEnsureEncryption(deps: EncryptionSetupDeps): EnsureEncryption {
 	const setups = new WeakMap<Intent, Promise<void>>();
 	return (intent) => {
@@ -62,7 +79,17 @@ export function makeEnsureEncryption(deps: EncryptionSetupDeps): EnsureEncryptio
 			await ensureDeviceToSpeakFor(deps, intent);
 			// The SDK's own setup, which routeEncryptionSetups puts this one in front of
 			await Intent.prototype.enableEncryption.call(intent);
-		})();
+		})().catch((err: unknown) => {
+			setups.delete(intent);
+			forgetSdkSetup(intent);
+			// What failed and where, never what the homeserver answered: the SDK may throw the whole
+			// response, its request and its token with it
+			deps.log.error(
+				{ userId: intent.userId, status: statusOf(err), rejection: describeRejection(err) },
+				'encryption setup failed'
+			);
+			throw err;
+		});
 		setups.set(intent, setup);
 		return setup;
 	};
