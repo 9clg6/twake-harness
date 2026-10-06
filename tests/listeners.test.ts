@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it } from 'vitest';
 
-import { makeListenerGuard, type ErrorLog } from '../src/matrix/listeners.js';
+import { makeListenerGuard, makeWorkTracker, type ErrorLog } from '../src/matrix/listeners.js';
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -63,6 +63,39 @@ describe('a guarded matrix listener', () => {
 		await sleep(50);
 		expect(seen).toEqual(['!a:test.local', '!b:test.local']);
 		expect(errors).toEqual([]);
+		expect(unhandled).toEqual([]);
+	});
+
+	it('counts a listener as work under way until it settles, whether it fails or not', async () => {
+		const tracker = makeWorkTracker();
+		const guard = makeListenerGuard(log, tracker);
+		const seen: string[] = [];
+		const succeeds = guard(
+			'room event',
+			async (roomId: string) => {
+				await sleep(30);
+				seen.push(roomId);
+			},
+			(roomId: string) => ({ roomId })
+		);
+		const fails = guard(
+			'room message',
+			async (roomId: string) => {
+				await sleep(60);
+				throw new Error(`could not answer in ${roomId}`);
+			},
+			(roomId: string) => ({ roomId })
+		);
+		succeeds('!a:test.local');
+		fails('!b:test.local');
+		expect(tracker.size).toBe(2);
+		await sleep(45);
+		expect(tracker.size).toBe(1);
+		await sleep(45);
+		expect(tracker.size).toBe(0);
+		expect(seen).toEqual(['!a:test.local']);
+		expect(errors).toHaveLength(1);
+		expect(errors[0]?.msg).toBe('room message failed');
 		expect(unhandled).toEqual([]);
 	});
 });

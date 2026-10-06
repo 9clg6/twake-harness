@@ -1,4 +1,5 @@
 import { mkdirSync } from 'node:fs';
+import { Server, type IncomingMessage, type ServerResponse } from 'node:http';
 import {
 	EncryptedRoomEvent,
 	type Intent,
@@ -36,7 +37,7 @@ import {
 	type CrossSigningResult
 } from './cross-signing.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
-import { makeListenerGuard } from './listeners.js';
+import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeRichText } from './format.js';
@@ -77,6 +78,8 @@ interface SendJob {
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
+// How long a stop waits for the pushes and listeners under way before it goes on regardless
+const STOP_DRAIN_MS = 10_000;
 
 // A sync that brings the to-device messages and the device lists, and nothing of the rooms
 const TO_DEVICE_ONLY_FILTER = JSON.stringify({
@@ -170,6 +173,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			StoreType.Sqlite
 		)
 	});
+	// What a stop waits for: the listeners under way, and the backups they start
+	const inFlight = makeWorkTracker();
 	const creator = creatorUserId(config);
 	const admin = makeMatrixAdmin({
 		apisixBaseUrl: config.apisix.baseUrl,
@@ -207,9 +212,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 	function backupInBackground(userId: string, owner: string): void {
 		if (escrow === null) return;
-		backupRoomKeys(escrow, appservice.getIntentForUserId(userId), owner).catch((err: unknown) => {
-			log.warn({ owner, userId, err }, 'room keys backup failed');
-		});
+		inFlight.track(
+			backupRoomKeys(escrow, appservice.getIntentForUserId(userId), owner).catch((err: unknown) => {
+				log.warn({ owner, userId, err }, 'room keys backup failed');
+			})
+		);
 	}
 
 	// Synapse checks the application service is alive before it pushes anything (MSC2659).
@@ -225,7 +232,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		res.status(200).json({ status: 'ok', role: 'matrix' });
 	});
 
-	const guard = makeListenerGuard(log);
+	const guard = makeListenerGuard(log, inFlight);
 
 	// Only the creator and the assistants the harness created exist; nothing is made on demand.
 	appservice.on('query.user', (userId: string, createUser: (profile: unknown) => void) => {
@@ -659,17 +666,72 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 	await appservice.begin();
+	// The SDK serves Synapse's pushes on its own HTTP server, and its stop only closes the listening
+	// socket: Synapse keeps its connection alive and goes on pushing on it, and the SDK goes on
+	// processing those pushes, its storage queries included, after the role has stopped. Its request
+	// listeners are wrapped here. Once the role stops, a push is refused, and Synapse pushes it again
+	// later; the pushes already accepted are counted, so that the stop waits for them.
+	let closing = false;
+	let pushesInFlight = 0;
+	const server: unknown = Reflect.get(appservice, 'appServer');
+	const appServer = server instanceof Server ? server : null;
+	if (appServer !== null) {
+		const sdkListeners = appServer.listeners('request');
+		appServer.removeAllListeners('request');
+		appServer.on('request', (request: IncomingMessage, response: ServerResponse) => {
+			if (closing) {
+				response.writeHead(503, { 'content-type': 'application/json', connection: 'close' });
+				response.end(
+					JSON.stringify({ errcode: 'M_UNKNOWN', error: 'the matrix role is stopping' })
+				);
+				return;
+			}
+			pushesInFlight += 1;
+			response.on('close', () => {
+				pushesInFlight -= 1;
+			});
+			for (const listener of sdkListeners) Reflect.apply(listener, appServer, [request, response]);
+		});
+	} else {
+		log.warn('appservice HTTP server not found: a stop will not wait for the pushes under way');
+	}
+	// Waits for the pushes and the listeners under way, a push being able to start more listeners. It
+	// polls on a timer, so that the work it waits for keeps the event loop to itself; a push the SDK
+	// fails to finish never answers, so the wait is bounded.
+	async function drain(): Promise<void> {
+		const deadline = Date.now() + STOP_DRAIN_MS;
+		while (pushesInFlight > 0 || inFlight.size > 0) {
+			if (Date.now() >= deadline) {
+				log.warn(
+					{ pushesInFlight, listeners: inFlight.size },
+					'matrix role stopped with work under way'
+				);
+				return;
+			}
+			await new Promise((resolve) => setTimeout(resolve, 50));
+		}
+	}
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages encrypted
 	await appservice.botIntent.enableEncryption();
 	log.info({ port: options.port, creator, homeserverUrl }, 'matrix role listening');
+	let stopping: Promise<void> | null = null;
 	return {
 		appservice,
 		creatorUserId: creator,
 		assistants,
-		stop: async () => {
-			await sender.stop();
-			await feedback.stop();
-			appservice.stop();
+		stop: (): Promise<void> => {
+			stopping ??= (async () => {
+				// What Synapse pushes from now on is refused; what it already pushed finishes, listeners
+				// included, then the sends and the feedback. The server closes last: until then the
+				// work above may still need it.
+				closing = true;
+				await drain();
+				await sender.stop();
+				await feedback.stop();
+				appservice.stop();
+				appServer?.closeAllConnections();
+			})();
+			return stopping;
 		}
 	};
 }
