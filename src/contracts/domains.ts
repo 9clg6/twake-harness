@@ -1,10 +1,10 @@
 import { z } from 'zod';
 
 import type { ConsentLevel } from '../consents/consent.js';
-import type { Locale } from '../i18n/messages.js';
+import { LOCALES, type Locale } from '../i18n/messages.js';
 
-// One text per language, by its code, such as en or fr
-export type Texts = Readonly<Record<string, string>>;
+// One text per language the harness speaks, by its code, such as en or fr
+export type Texts = Readonly<Partial<Record<Locale, string>>>;
 
 // How the catalog describes an application to the owners, at the root of the OpenAPI document:
 // its name, and what reading and writing cover there when it says
@@ -64,10 +64,14 @@ function escaped(text: string): string {
 		.replace(/[\\`*~[\]<>&]|(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu, (markup) => `\\${markup}`);
 }
 
-const coversSchema = z.record(z.string(), plainWords(200));
+// An entry holds what the README says and nothing else: a key it does not know, such as a
+// misspelt level or a language the harness does not speak, is a mistake to warn about rather
+// than words to drop in silence
+const nameSchema = z.partialRecord(z.enum(LOCALES), plainWords(64));
+const coversSchema = z.partialRecord(z.enum(LOCALES), plainWords(200));
 
-const descriptionSchema = z.object({
-	name: z.record(z.string(), plainWords(64)),
+const descriptionSchema = z.strictObject({
+	name: nameSchema,
 	read: coversSchema.optional(),
 	write: coversSchema.optional()
 });

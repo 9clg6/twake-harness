@@ -151,21 +151,37 @@ describe('the question names the application in plain words', () => {
 			...DESCRIBED,
 			photos: { name: { en: 'Twake Pictures' } },
 			notes: { name: { en: 'Twake Notes'.padEnd(65, '!') } },
-			tasks: { name: 'Twake Tasks', read: TASKS.read }
+			tasks: { name: 'Twake Tasks', read: TASKS.read },
+			// A misspelt level, and languages the harness does not speak
+			drive: { name: { en: 'Twake Drive' }, reads: { en: 'browse and read your files' } },
+			wiki: { name: { en: 'Twake Wiki', 'fr-FR': 'Wiki Twake' } },
+			boards: { name: { EN: 'Twake Boards' } }
 		});
 		const ignored = r.h
 			.logLines()
 			.filter((line) => line['msg'] === 'domain description ignored, named by its id');
 		expect(ignored.map((line) => line['domain'])).toEqual(
-			expect.arrayContaining(['notes', 'tasks'])
+			expect.arrayContaining(['notes', 'tasks', 'drive', 'wiki', 'boards'])
 		);
 		expect(ignored.every((line) => line['level'] === 40)).toBe(true);
-		expect(await askedThroughApi('Search my notes')).toBe(
-			`This is the first time I need to read your data in notes. ${HOW_TO_ANSWER.en}`
-		);
-		expect(await askedThroughApi('Show my tasks')).toBe(
-			`This is the first time I need to read your data in tasks. ${HOW_TO_ANSWER.en}`
-		);
+		const problems = Object.fromEntries(ignored.map((line) => [line['domain'], line['problem']]));
+		expect(problems).toMatchObject({
+			drive: 'Unrecognized key: "reads"',
+			wiki: 'name: Unrecognized key: "fr-FR"',
+			boards: 'name: Unrecognized key: "EN"'
+		});
+		const asked: Record<string, string> = {
+			notes: 'Search my notes',
+			tasks: 'Show my tasks',
+			drive: 'Find the plan in my drive',
+			wiki: 'Open my wiki',
+			boards: 'Show my boards'
+		};
+		for (const [domain, message] of Object.entries(asked)) {
+			expect(await askedThroughApi(message)).toBe(
+				`This is the first time I need to read your data in ${domain}. ${HOW_TO_ANSWER.en}`
+			);
+		}
 		// The rest of this catalog holds, a new name included
 		expect(await askedThroughApi('Show my photos')).toBe(
 			`This is the first time I need to read your data in Twake Pictures. ${HOW_TO_ANSWER.en}`
