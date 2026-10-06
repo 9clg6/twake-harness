@@ -16,7 +16,7 @@ env:
 # whose code never runs inside the organization: GitHub's own runners take them
 jobs:
   check:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora-runner' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -28,7 +28,7 @@ jobs:
       - run: npm run typecheck
 
   test:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora-runner' }}
     strategy:
       fail-fast: false
       matrix:
@@ -69,7 +69,7 @@ jobs:
           path: test-results/
 
   chart:
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora-runner' }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -102,7 +102,7 @@ jobs:
 
   image:
     needs: [check, test, chart]
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora-runner' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -131,7 +131,7 @@ jobs:
   chart-publish:
     needs: [image]
     if: github.event_name == 'push'
-    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora-runner' }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
