@@ -33,6 +33,9 @@ export interface MatrixTestHarness {
 	readonly api: TestClient;
 	readonly apps: readonly FastifyInstance[];
 	logLines(): Record<string, unknown>[];
+	// What the matrix role made of a message of an assistant's room, as it logged it: the line of
+	// the turn it queued, or of the message it ignored; null when it logged neither in time
+	decisionOn(eventId: string): Promise<Record<string, unknown> | null>;
 	close(): Promise<void>;
 }
 
@@ -43,6 +46,9 @@ export interface MatrixStartOptions {
 	// How long the role lets the SDK process a push before it gives the push up
 	readonly pushDeadlineMs?: number;
 }
+
+// The lines by which the matrix role tells what it made of a message of an assistant's room
+const MESSAGE_DECISIONS = new Set(['turn queued', 'assistant ignored an unencrypted message']);
 
 export async function startMatrixHarness(
 	options: MatrixStartOptions = {}
@@ -80,6 +86,12 @@ export async function startMatrixHarness(
 	const logStream = new PassThrough();
 	const chunks: string[] = [];
 	logStream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
+	const logLines = (): Record<string, unknown>[] =>
+		chunks
+			.join('')
+			.split('\n')
+			.filter((line) => line.length > 0)
+			.map((line) => JSON.parse(line) as Record<string, unknown>);
 	// The api role, replicated as in the deployment: each replica has its own turn worker
 	const apps: FastifyInstance[] = [];
 	const workers: JobWorker[] = [];
@@ -127,6 +139,7 @@ export async function startMatrixHarness(
 			'job failed',
 			'creator command',
 			'assistant ignored a foreign sender',
+			'assistant ignored an unencrypted message',
 			'assistant created',
 			'to-device received',
 			'encryption ready',
@@ -135,11 +148,7 @@ export async function startMatrixHarness(
 			'missed key shares fetched',
 			'decryption retry failed'
 		]);
-		const lines = chunks
-			.join('')
-			.split('\n')
-			.filter((line) => line.length > 0)
-			.map((line) => JSON.parse(line) as Record<string, unknown>)
+		const lines = logLines()
 			.filter(
 				(line) =>
 					interesting.has(String(line['msg'])) ||
@@ -196,12 +205,17 @@ export async function startMatrixHarness(
 		issuer,
 		api,
 		apps,
-		logLines: () =>
-			chunks
-				.join('')
-				.split('\n')
-				.filter((line) => line.length > 0)
-				.map((line) => JSON.parse(line) as Record<string, unknown>),
+		logLines,
+		decisionOn: async (eventId) => {
+			for (let i = 0; i < 120; i += 1) {
+				const decision = logLines().find(
+					(line) => line['eventId'] === eventId && MESSAGE_DECISIONS.has(String(line['msg']))
+				);
+				if (decision !== undefined) return decision;
+				await new Promise((resolve) => setTimeout(resolve, 250));
+			}
+			return null;
+		},
 		close: async () => {
 			if (process.env['CI'] !== undefined) await printDiagnostics();
 			for (const worker of workers) await worker.stop();

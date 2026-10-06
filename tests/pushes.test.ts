@@ -104,7 +104,7 @@ describe('a push that fails on the encryption of an assistant', () => {
 			expect(
 				await omar.client.waitForMessage(omar.room, omar.assistantId, (t) => t === 'echo: ping')
 			).toBe('echo: ping');
-			await nora.client.sendText(nora.room, 'are you there?');
+			const asked = await nora.client.sendText(nora.room, 'are you there?');
 			await omar.client.sendText(omar.room, 'and you?');
 			expect(
 				await omar.client.waitForMessage(omar.room, omar.assistantId, (t) => t === 'echo: and you?')
@@ -118,6 +118,12 @@ describe('a push that fails on the encryption of an assistant', () => {
 					(t) => t === 'echo: are you there?'
 				)
 			).toBe('echo: are you there?');
+			// Read late, it is a message like any other: its turn is queued under its own event, and
+			// marked answered once the assistant answered it
+			expect((await h.decisionOn(asked))?.['msg']).toBe('turn queued');
+			expect(await nora.client.waitForReactions(nora.room, asked, nora.assistantId, 2)).toContain(
+				'✅'
+			);
 			await nora.client.sendText(nora.room, 'still there?');
 			expect(
 				await nora.client.waitForMessage(

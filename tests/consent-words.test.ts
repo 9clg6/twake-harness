@@ -166,21 +166,19 @@ describe('I answer the question in words', () => {
 				if (!ignored) await sleep(250);
 			}
 			expect(ignored).toBe(true);
-			// A yes written in my name without encryption, as a component on the server could, is an
-			// ordinary message
+			// A yes written in my name without encryption, as a component on the server could, starts
+			// nothing and answers nothing: the harness only logs it
 			const heard = r.saying('Heard:').length;
-			await r.h.synapse.request(
-				r.alice,
-				'PUT',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/send/m.room.message/plain-${Date.now()}`,
-				{ msgtype: 'm.text', body: 'yes' }
+			const plain = await r.h.synapse.sendText(r.alice, r.room, 'yes');
+			expect((await r.h.decisionOn(plain))?.['msg']).toBe(
+				'assistant ignored an unencrypted message'
 			);
-			expect(await r.nextSaying('Heard:', heard)).toBe('Heard: yes');
 			expect(r.h.apisix.contracts.calls).toHaveLength(0);
 			// Neither counted as my next message: my own yes still answers the question
 			const found = r.saying('Found:').length;
 			await r.client.sendText(r.room, 'yes');
 			expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/boards/items');
+			expect(r.saying('Heard:')).toHaveLength(heard);
 		} finally {
 			await bobClient.stop();
 		}
