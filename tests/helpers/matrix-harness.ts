@@ -1,4 +1,4 @@
-import { mkdtemp } from 'node:fs/promises';
+import { mkdtemp, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
@@ -18,8 +18,9 @@ import { startTestIssuer, type TestIssuer } from './jwks-server.js';
 import { reservePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
 
 export interface MatrixTestHarness {
-	// Stops and starts the matrix role again on the same database and encryption stores
-	restartRole(): Promise<void>;
+	// Stops and starts the matrix role again on the same database and encryption stores, or
+	// with the stores and the devices' tokens lost, as a volume would be
+	restartRole(options?: { wipeCryptoStore?: boolean }): Promise<void>;
 	readonly synapse: TestSynapse;
 	readonly apisix: FakeApisix;
 	role: MatrixRole;
@@ -116,14 +117,25 @@ export async function startMatrixHarness(
 			'job failed',
 			'creator command',
 			'assistant ignored a foreign sender',
-			'assistant created'
+			'assistant created',
+			'to-device received',
+			'encryption ready',
+			'missed key shares fetched',
+			'decryption retry failed'
 		]);
 		const lines = chunks
 			.join('')
 			.split('\n')
 			.filter((line) => line.length > 0)
 			.map((line) => JSON.parse(line) as Record<string, unknown>)
-			.filter((line) => interesting.has(String(line['msg'])) || Number(line['level']) >= 40)
+			.filter(
+				(line) =>
+					interesting.has(String(line['msg'])) ||
+					Number(line['level']) >= 40 ||
+					// With HARNESS_SDK_LOGS=1, what the SDK does with the pushed to-device events
+					(line['msg'] === 'matrix sdk' &&
+						/to_device|Updating crypto|Processing transaction/.test(JSON.stringify(line['rest'])))
+			)
 			.map((line) => {
 				const { time, pid, hostname, ...rest } = line;
 				void pid;
@@ -134,16 +146,18 @@ export async function startMatrixHarness(
 			`\n--- matrix role diagnostics (${lines.length} lines) ---\n${lines.join('\n')}\n`
 		);
 		const proxy = apisix.matrixCalls
-			.filter((c) => /keys|sendToDevice|send\/m\.room|login|devices/.test(c.path))
+			.filter((c) => /keys|sendToDevice|send\/m\.room|login|devices|sync/.test(c.path))
 			.map((c) => `${c.method} ${c.path.slice(0, 110)} -> ${c.status} ${c.ms}ms`);
 		process.stdout.write(`--- matrix proxy calls (${proxy.length}) ---\n${proxy.join('\n')}\n`);
 		const synapseLog = await synapse.logs().catch(() => '');
 		const pushes = synapseLog
 			.split('\n')
 			.filter((line) =>
-				/as-sender|as-recoverer|appservice\.scheduler|to_device|msc2409/i.test(line)
+				/as-sender|as-recoverer|appservice\.scheduler|to_device|msc2409|send\/m\.room|sendToDevice|keys\/(claim|query|upload)/i.test(
+					line
+				)
 			)
-			.slice(-40)
+			.slice(-80)
 			.map((line) => line.slice(0, 220));
 		process.stdout.write(
 			`--- synapse appservice log (last ${pushes.length}) ---\n${pushes.join('\n')}\n`
@@ -151,8 +165,12 @@ export async function startMatrixHarness(
 	}
 
 	const harness: MatrixTestHarness = {
-		restartRole: async () => {
+		restartRole: async (options = {}) => {
 			await role.stop();
+			if (options.wipeCryptoStore === true) {
+				await rm(config.matrix.cryptoStorePath, { recursive: true, force: true });
+				await db.sql`delete from matrix_user_storage`;
+			}
 			role = await startRole();
 			harness.role = role;
 		},

@@ -29,6 +29,8 @@ export interface MatrixReply {
 export interface TestSynapse {
 	readonly url: string;
 	registerUser(localpart: string): Promise<MatrixUser>;
+	// A new session of a registered user, as a client opened anew: a new device with its own token
+	login(localpart: string): Promise<MatrixUser>;
 	request(
 		user: MatrixUser | null,
 		method: string,
@@ -145,6 +147,21 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 			...(body === undefined ? {} : { body: JSON.stringify(body) })
 		});
 		return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+	}
+
+	async function login(localpart: string): Promise<MatrixUser> {
+		const res = await request(null, 'POST', '/_matrix/client/v3/login', {
+			type: 'm.login.password',
+			identifier: { type: 'm.id.user', user: localpart },
+			password: `${localpart}-password`
+		});
+		if (res.status !== 200) {
+			throw new Error(`login of ${localpart} failed: ${JSON.stringify(res.body)}`);
+		}
+		return {
+			userId: res.body['user_id'] as string,
+			accessToken: res.body['access_token'] as string
+		};
 	}
 
 	async function registerUser(localpart: string): Promise<MatrixUser> {
@@ -281,6 +298,7 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 	return {
 		url,
 		registerUser,
+		login,
 		request,
 		createDirectRoom,
 		sendText,

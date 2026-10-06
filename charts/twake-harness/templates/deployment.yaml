@@ -100,6 +100,22 @@ spec:
               value: {{ .Values.config.matrixAssistantPrefix | quote }}
             - name: MATRIX_CRYPTO_STORE_PATH
               value: {{ printf "%s/crypto" .Values.persistence.mountPath | quote }}
+            {{- if .Values.config.escrowEnabled }}
+            - name: ESCROW_ENABLED
+              value: "true"
+            - name: OPENBAO_PATH
+              value: {{ .Values.config.openbaoPath | quote }}
+            - name: OPENBAO_KV_MOUNT
+              value: {{ .Values.config.openbaoKvMount | quote }}
+            - name: OPENBAO_ESCROW_PREFIX
+              value: {{ .Values.config.openbaoEscrowPrefix | quote }}
+            - name: OPENBAO_AUTH_PATH
+              value: {{ .Values.config.openbaoAuthPath | quote }}
+            - name: OPENBAO_K8S_ROLE
+              value: {{ .Values.config.openbaoK8sRole | quote }}
+            - name: OPENBAO_K8S_TOKEN_PATH
+              value: /var/run/secrets/openbao/token
+            {{- end }}
             {{- end }}
           envFrom:
             - secretRef:
@@ -129,11 +145,26 @@ spec:
           {{- end }}
           {{- if .Values.persistence.enabled }}
           volumeMounts:
+            {{- if and (eq .Values.role "matrix") .Values.config.escrowEnabled }}
+            - name: openbao-token
+              mountPath: /var/run/secrets/openbao
+              readOnly: true
+            {{- end }}
             - name: data
               mountPath: {{ .Values.persistence.mountPath }}
           {{- end }}
       {{- if .Values.persistence.enabled }}
       volumes:
+        {{- if and (eq .Values.role "matrix") .Values.config.escrowEnabled }}
+        # A token bound to the OpenBao audience, for the Kubernetes auth method
+        - name: openbao-token
+          projected:
+            sources:
+              - serviceAccountToken:
+                  audience: openbao
+                  expirationSeconds: 3600
+                  path: token
+        {{- end }}
         - name: data
           persistentVolumeClaim:
             claimName: {{ .Release.Name }}-data

@@ -1,5 +1,7 @@
 import { mkdirSync } from 'node:fs';
 import {
+	EncryptedRoomEvent,
+	type Intent,
 	Appservice,
 	getRequestFn,
 	LogService,
@@ -9,8 +11,14 @@ import {
 } from 'matrix-bot-sdk';
 import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { FastifyBaseLogger } from 'fastify';
+import { z } from 'zod';
 
-import { findDialog, listActiveAssistantUserIds, saveDialog } from '../assistants/repository.js';
+import {
+	findAssistant,
+	findDialog,
+	listActiveAssistants,
+	saveDialog
+} from '../assistants/repository.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import {
@@ -22,6 +30,8 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { makeMatrixAdmin } from './admin.js';
+import { makeOpenBaoEscrow } from '../escrow/openbao.js';
+import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
 import { helpText, runCreatorTurn } from './creator.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
@@ -55,6 +65,31 @@ interface SendJob {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
+}
+
+const RECOVERED_TEXT =
+	'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.';
+const NO_ESCROW_TEXT = 'I found no escrow to recover from; my identity is new from here on.';
+const recoverPayload = z.object({ owner: z.string().min(1) });
+
+// A sync that brings the to-device messages and the device lists, and nothing of the rooms
+const TO_DEVICE_ONLY_FILTER = JSON.stringify({
+	room: {
+		timeline: { limit: 0 },
+		state: { limit: 0 },
+		ephemeral: { limit: 0 },
+		account_data: { limit: 0 }
+	},
+	presence: { limit: 0 },
+	account_data: { limit: 0 }
+});
+
+interface ToDeviceSync {
+	readonly next_batch?: string;
+	readonly to_device?: { events?: unknown[] };
+	readonly device_one_time_keys_count?: Record<string, number>;
+	readonly device_unused_fallback_key_types?: string[];
+	readonly device_lists?: { changed?: string[]; left?: string[] };
 }
 
 function isSendJob(value: unknown): value is SendJob {
@@ -123,6 +158,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	);
 	mkdirSync(config.matrix.cryptoStorePath, { recursive: true });
+	const storage = makeAppserviceStorage(db);
 	const appservice = new Appservice({
 		port: options.port,
 		bindAddress: options.bindAddress ?? '0.0.0.0',
@@ -130,7 +166,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		homeserverUrl,
 		// The url only matters to Synapse, which reads it from its own registration file
 		registration: buildRegistration(config, ''),
-		storage: makeAppserviceStorage(db),
+		storage,
 		// One encryption store per assistant, on the volume of this role
 		cryptoStorage: new RustSdkAppserviceCryptoStorageProvider(
 			config.matrix.cryptoStorePath,
@@ -145,6 +181,28 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	});
 	const assistants = makeAssistantService({ config, db, admin, log });
 	const orgUserId = config.org.enabled ? orgAgentUserId(config) : null;
+	// The escrow of the assistants' identities in the platform OpenBao, when it is reachable
+	const escrow: EscrowDeps | null = config.escrow.enabled
+		? { db, store: makeOpenBaoEscrow({ config, log }), log }
+		: null;
+	async function escrowOnceReady(intent: Intent, owner: string): Promise<void> {
+		log.info(
+			{ owner, userId: intent.userId, deviceId: intent.underlyingClient.crypto?.clientDeviceId },
+			'encryption ready'
+		);
+		if (escrow === null) return;
+		try {
+			await ensureEscrow(escrow, intent, owner);
+		} catch (err: unknown) {
+			log.error({ owner, userId: intent.userId, err }, 'escrow failed');
+		}
+	}
+	function backupInBackground(userId: string, owner: string): void {
+		if (escrow === null) return;
+		backupRoomKeys(escrow, appservice.getIntentForUserId(userId), owner).catch((err: unknown) => {
+			log.warn({ owner, userId, err }, 'room keys backup failed');
+		});
+	}
 
 	// Synapse checks the application service is alive before it pushes anything (MSC2659).
 	appservice.expressAppInstance.post('/_matrix/app/v1/ping', (req, res) => {
@@ -179,9 +237,120 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 
-	appservice.on('room.failed_decryption', (roomId: string, event: RoomEvent, err: unknown) => {
-		log.error({ roomId, sender: event.sender, eventId: event.event_id, err }, 'decryption failed');
+	// The to-device events Synapse pushes, mostly the owners' key shares: which device they target
+	appservice.on('ephemeral.event', (event: Record<string, unknown>) => {
+		if (event['type'] !== 'm.room.encrypted') return;
+		log.info(
+			{ toUser: event['to_user_id'], toDevice: event['to_device_id'], sender: event['sender'] },
+			'to-device received'
+		);
 	});
+
+	// Synapse's push of to-device messages (MSC2409) can skip a key share when another to-device
+	// message lands at the same instant, while the device's own inbox still holds it: after a failed
+	// decryption, the assistant's device fetches what the homeserver kept for it and reads again.
+	const syncSince = new Map<string, string>();
+	async function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
+		const intent = appservice.getIntentForUserId(userId);
+		await intent.enableEncryption();
+		const client = intent.underlyingClient;
+		const since = syncSince.get(userId);
+		const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
+			timeout: 0,
+			filter: TO_DEVICE_ONLY_FILTER,
+			...(since === undefined ? {} : { since })
+		})) as ToDeviceSync;
+		if (typeof sync.next_batch === 'string') syncSince.set(userId, sync.next_batch);
+		const events = sync.to_device?.events ?? [];
+		// The members' devices are looked up again too: a first sync carries no device lists
+		const members = await client.getJoinedRoomMembers(roomId);
+		await client.crypto.updateSyncData(
+			events as Parameters<typeof client.crypto.updateSyncData>[0],
+			sync.device_one_time_keys_count ?? (await lastCounts(userId)),
+			(sync.device_unused_fallback_key_types ?? (await lastFallbacks(userId))) as Parameters<
+				typeof client.crypto.updateSyncData
+			>[2],
+			[...new Set([...(sync.device_lists?.changed ?? []), ...members])],
+			sync.device_lists?.left ?? []
+		);
+		return events.length;
+	}
+
+	// What the SDK last stored of a device's one-time keys, to hand its crypto a change of device
+	// lists without telling it anything false about those keys
+	async function lastCounts(userId: string): Promise<Record<string, number>> {
+		const raw = await storage.storageForUser?.(userId)?.readValue?.('last_counts');
+		return JSON.parse(raw ?? '{}') as Record<string, number>;
+	}
+	async function lastFallbacks(userId: string): Promise<string[]> {
+		const raw = await storage.storageForUser?.(userId)?.readValue?.('last_unused_fallbacks');
+		return JSON.parse(raw ?? '[]') as string[];
+	}
+
+	// Before an assistant encrypts for a room, its crypto looks the members' devices up again: a
+	// device the owner opened since is then given the key, whatever the homeserver pushed about it
+	async function refreshMembersDevices(intent: Intent, roomId: string): Promise<void> {
+		const client = intent.underlyingClient;
+		const members = await client.getJoinedRoomMembers(roomId);
+		await client.crypto.updateSyncData(
+			[],
+			await lastCounts(intent.userId),
+			(await lastFallbacks(intent.userId)) as Parameters<typeof client.crypto.updateSyncData>[2],
+			members,
+			[]
+		);
+	}
+
+	// The SDK applies a transaction's device list changes only to the users it also carried keys
+	// for: every assistant is told here, so an owner's new device gets the next room key
+	appservice.on('device_lists', async (lists: { changed?: string[]; removed?: string[] }) => {
+		const changed = lists.changed ?? [];
+		const removed = lists.removed ?? [];
+		if (changed.length === 0 && removed.length === 0) return;
+		for (const { userId } of await listActiveAssistants(db)) {
+			try {
+				const intent = appservice.getIntentForUserId(userId);
+				await intent.enableEncryption();
+				await intent.underlyingClient.crypto.updateSyncData(
+					[],
+					await lastCounts(userId),
+					(await lastFallbacks(userId)) as Parameters<
+						typeof intent.underlyingClient.crypto.updateSyncData
+					>[2],
+					changed,
+					removed
+				);
+			} catch (err: unknown) {
+				log.warn({ userId, err }, 'device list update failed');
+			}
+		}
+	});
+
+	appservice.on(
+		'room.failed_decryption',
+		async (roomId: string, event: RoomEvent, err: unknown) => {
+			log.error(
+				{ roomId, sender: event.sender, eventId: event.event_id, err },
+				'decryption failed'
+			);
+			const room = await assistantRoom(roomId);
+			if (room === null || event.sender === room.userId) return;
+			try {
+				const fetched = await fetchMissedKeyShares(room.userId, roomId);
+				log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
+				if (fetched === 0) return;
+				const intent = appservice.getIntentForUserId(room.userId);
+				const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
+					// What the SDK hands here is the raw event itself
+					new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
+					roomId
+				);
+				if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted);
+			} catch (retryErr: unknown) {
+				log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
+			}
+		}
+	);
 
 	appservice.on('room.invite', async (roomId: string, event: RoomEvent) => {
 		const invited = event.state_key ?? '';
@@ -257,7 +426,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log.info({ roomId, owner: room.owner }, 'welcome queued');
 	});
 
-	appservice.on('room.message', async (roomId: string, event: MatrixEvent<unknown> | RoomEvent) => {
+	appservice.on('room.message', onRoomMessage);
+
+	async function onRoomMessage(
+		roomId: string,
+		event: MatrixEvent<unknown> | RoomEvent
+	): Promise<void> {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
 		log.info({ roomId, sender, eventId: raw.event_id }, 'message received');
@@ -294,6 +468,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				groupKey: `turn:${owner}`
 			});
 			log.info({ roomId, owner, eventId }, 'turn queued');
+			backupInBackground(room.userId, owner);
 			return;
 		}
 		if (!(await creatorIsInRoom(roomId))) return;
@@ -307,21 +482,60 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
 		await appservice.botIntent.sendText(roomId, turn.reply);
-	});
+	}
 
 	// Answers computed by the api role, sent as the assistant through its intent, which encrypts
 	// them when the room is encrypted
+	// The owner asked for the escrowed identity back, after a lost store: the (new) device takes
+	// the cross-signing keys and the backup key, and the owner is told in the room
+	async function recover(owner: string): Promise<void> {
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant === null || assistant.deletedAt !== null) {
+			log.info({ owner }, 'recovery dropped: no assistant');
+			return;
+		}
+		if (escrow === null) {
+			log.warn({ owner }, 'recovery requested but no escrow is configured');
+			return;
+		}
+		const intent = appservice.getIntentForUserId(assistant.userId);
+		await intent.enableEncryption();
+		const result = await recoverFromEscrow(escrow, intent, owner);
+		log.info({ owner, userId: assistant.userId, result }, 'recovery done');
+		if (assistant.roomId === null) return;
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId: assistant.roomId,
+				text: result === 'recovered' ? RECOVERED_TEXT : NO_ESCROW_TEXT
+			},
+			dedupKey: `recover-notice:${owner}:${Date.now()}`,
+			groupKey: `send:${assistant.roomId}`
+		});
+	}
+
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send'],
+		kinds: ['send', 'recover'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
+			if (job.kind === 'recover') {
+				const parsed = recoverPayload.safeParse(job.payload);
+				if (!parsed.success) throw new Error('recover payload is malformed');
+				await recover(parsed.data.owner);
+				return;
+			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
 			const intent = appservice.getIntentForUserId(job.payload.asUserId);
 			await intent.enableEncryption();
+			const room = await assistantRoom(job.payload.roomId);
+			if (room !== null) await escrowOnceReady(intent, room.owner);
+			await refreshMembersDevices(intent, job.payload.roomId);
 			await intent.sendText(job.payload.roomId, job.payload.text);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
+			if (room !== null) backupInBackground(room.userId, room.owner);
 		}
 	});
 
@@ -334,9 +548,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 	// Every assistant holds its encryption state from the start, so the key shares Synapse pushes
 	// while this role was away, or before an assistant speaks, are not lost
-	for (const userId of await listActiveAssistantUserIds(db)) {
+	for (const { owner, userId } of await listActiveAssistants(db)) {
 		try {
-			await appservice.getIntentForUserId(userId).enableEncryption();
+			const intent = appservice.getIntentForUserId(userId);
+			await intent.enableEncryption();
+			await escrowOnceReady(intent, owner);
 		} catch (err: unknown) {
 			log.warn({ userId, err }, 'encryption setup failed at start');
 		}
