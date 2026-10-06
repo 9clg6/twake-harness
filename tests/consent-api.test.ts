@@ -24,8 +24,19 @@ const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'wiki', 'boards', 'contacts'
 // The reading of the assistant's own feed of events, which every listing shows as built in
 const FEED = { domain: 'events', level: 'read', granted_by: 'built_in', granted_at: null };
 
+// The harness's question about a first read, all the API shows of its request
 function question(domain: string): string {
-	return `This is the first time I need to read your data in ${domain}. Do you allow it? Answer with the buttons below, or reply yes or no.`;
+	return `This is the first time I need to read your data in ${domain}. Do you allow it? I would start with this:`;
+}
+
+// The whole request, as the room and the chat through the API show it: the question, the call as
+// frozen, and how to answer
+function requestFor(domain: string, args: unknown): string {
+	return [
+		question(domain),
+		JSON.stringify(args, null, 2),
+		'Answer with the buttons below, or reply yes or no.'
+	].join('\n\n');
 }
 
 function call(name: string, args: unknown): ToolCall[] {
@@ -194,7 +205,7 @@ describe('my consents through the API', () => {
 		const asked = await c.post<{ answer: string }>('alice', '/v1/chat', {
 			message: 'Find the budget in my mail'
 		});
-		expect(asked.body.answer).toBe(question('mail'));
+		expect(asked.body.answer).toBe(requestFor('mail', { q: 'budget' }));
 		expect(h.apisix.contracts.calls).toHaveLength(1);
 	});
 	it("keeps my consents out of everyone else's reach", async () => {
@@ -275,7 +286,7 @@ describe('my consents through the API', () => {
 		}>();
 		expect(body).toEqual({
 			session_id: expect.any(String),
-			answer: question('tasks'),
+			answer: requestFor('tasks', { q: 'budget' }),
 			model: 'qwen3.8',
 			pending_call: pendingInTurn('tasks', body.session_id)
 		});
@@ -610,7 +621,7 @@ describe('my answer through the API to a question in my room', () => {
 		if (call === undefined) throw new Error('nothing waits for my answer');
 		// The API shows the question as my room does
 		expect(call.channel).toBe('room');
-		expect(call.request).toBe(r.questions().at(-1)?.body);
+		expect(r.questions().at(-1)?.body.startsWith(call.request)).toBe(true);
 		return { id: call.id, messageId, questionId };
 	}
 
