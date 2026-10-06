@@ -103,12 +103,23 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		error: (module: string, ...rest: unknown[]) => log.error({ module, rest }, 'matrix sdk')
 	});
 	const homeserverUrl = new URL('matrix', ensureTrailingSlash(config.apisix.baseUrl)).href;
-	// Every call of the SDK goes to APISIX, which admits the harness by its consumer key
+	// Every call of the SDK goes to APISIX, which admits the harness by its consumer key. The SDK
+	// still names the device it acts as with the unstable MSC3202 parameter, which Synapse 1.162
+	// dropped: the stable one goes along, so the assistants keep their devices on either side.
 	const originalRequest = getRequestFn();
-	setRequestFn((params: { headers?: Record<string, string> }, callback: unknown) => {
-		params.headers = { ...(params.headers ?? {}), apikey: config.apisix.consumerKey };
-		return originalRequest(params, callback);
-	});
+	setRequestFn(
+		(
+			params: { headers?: Record<string, string>; qs?: Record<string, string> },
+			callback: unknown
+		) => {
+			params.headers = { ...(params.headers ?? {}), apikey: config.apisix.consumerKey };
+			const unstableDeviceId = params.qs?.['org.matrix.msc3202.device_id'];
+			if (unstableDeviceId !== undefined && params.qs !== undefined) {
+				params.qs['device_id'] = unstableDeviceId;
+			}
+			return originalRequest(params, callback);
+		}
+	);
 	mkdirSync(config.matrix.cryptoStorePath, { recursive: true });
 	const appservice = new Appservice({
 		port: options.port,
