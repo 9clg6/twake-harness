@@ -14,7 +14,7 @@ function sleep(ms: number): Promise<void> {
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
-		'/v1/usage/summary': {
+		'/contracts/v1/usage/summary': {
 			get: { operationId: 'usage.summary.read.v1', summary: 'Aggregated usage of the organization' }
 		}
 	}
@@ -100,7 +100,7 @@ describe('the organization agent', () => {
 		await aliceClient.sendText(room, 'what is our usage?');
 		const answer = await aliceClient.waitForMessage(room, orgId, (t) => t.startsWith('Usage:'));
 		expect(answer).toBe('Usage: 42 turns');
-		const call = h.apisix.contracts.calls.find((c) => c.path === '/v1/usage/summary');
+		const call = h.apisix.contracts.calls.find((c) => c.path === '/contracts/v1/usage/summary');
 		expect(call?.headers['apikey']).toBe(h.apisix.consumerKey);
 		expect(call?.headers['x-twake-on-behalf-of']).toBeUndefined();
 		const prompt = h.apisix.llm.calls.at(-1)?.request.messages[0]?.content ?? '';

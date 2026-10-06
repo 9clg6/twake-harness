@@ -9,12 +9,13 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The catalog of the contracts service as the gateway exposes it: read_event under events.read.v1,
-// and accept_invitation, the contract that acts, under calendar.invitation.accept.v1
+// The catalog of the contracts service as the gateway exposes it, with its absolute paths:
+// read_event under events.read.v1, read_freebusy under calendar.freebusy.read.v1, and
+// accept_invitation, the contract that acts, under calendar.invitation.accept.v1
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
-		'/v1/events/{event_id}': {
+		'/contracts/v1/events/{event_id}': {
 			get: {
 				operationId: 'read_event',
 				summary: 'Reads one stored event of the user',
@@ -22,7 +23,19 @@ const CATALOG = {
 				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		},
-		'/v1/calendar/invitations/{event_id}/accept': {
+		'/contracts/v1/calendar/freebusy': {
+			get: {
+				operationId: 'read_freebusy',
+				summary: 'Tells whether the user is free between two instants',
+				tags: ['calendar.freebusy.read.v1'],
+				parameters: [
+					{ name: 'start', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'end', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'exclude', in: 'query', required: false, schema: { type: 'string' } }
+				]
+			}
+		},
+		'/contracts/v1/calendar/invitations/{event_id}/accept': {
 			post: {
 				operationId: 'accept_invitation',
 				summary: 'Accepts an invitation, once the user has said yes to this very invitation',
@@ -54,15 +67,20 @@ describe('an event wakes my assistant', () => {
 	beforeAll(async () => {
 		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service' } });
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
-		h.apisix.contracts.handler = (call: ContractCall) => ({
-			status: 200,
-			body: {
-				id: call.path.split('/').at(-1) ?? '',
-				type: 'calendar.invitation',
-				subject: 'Budget review moved to Friday'
-			}
-		});
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		h.apisix.contracts.handler = (call: ContractCall) => {
+			if (call.path.endsWith('/freebusy')) return { status: 200, body: { busy: [] } };
+			const id = call.path.split('/').at(-1) ?? '';
+			return {
+				status: 200,
+				body: {
+					id,
+					uid: `uid-${id}`,
+					type: 'calendar.invitation',
+					subject: 'Budget review moved to Friday'
+				}
+			};
+		};
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -77,11 +95,32 @@ describe('an event wakes my assistant', () => {
 		}
 		await client.joinRoom(room);
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Jarvis'));
-		// The model reads the event with the contract, then tells the owner what it is about
+		// The model reads the event with the contract, checks the slot leaving the invitation out,
+		// then tells the owner what it is about
 		h.apisix.llm.script = (request: ChatRequest) => {
 			const last = request.messages.at(-1);
+			if (last?.role === 'tool' && last.name === 'read_event') {
+				const data = JSON.parse(last.content ?? '{}') as { body?: { uid?: string } };
+				return {
+					toolCalls: [
+						{
+							id: 'call_read_freebusy',
+							type: 'function',
+							function: {
+								name: 'read_freebusy',
+								arguments: JSON.stringify({
+									start: '2026-10-09T09:00:00+02:00',
+									end: '2026-10-09T10:00:00+02:00',
+									exclude: data.body?.uid ?? ''
+								})
+							}
+						}
+					]
+				};
+			}
 			if (last?.role === 'tool') {
-				const data = JSON.parse(last.content ?? '{}') as {
+				const read = request.messages.find((m) => m.role === 'tool' && m.name === 'read_event');
+				const data = JSON.parse(read?.content ?? '{}') as {
 					body?: { type?: string; subject?: string };
 				};
 				return {
@@ -125,8 +164,17 @@ describe('an event wakes my assistant', () => {
 		expect(told?.content).toContain('read_freebusy');
 		expect(told?.content).toContain('exclude');
 		expect(told?.content).toContain('do not accept it yourself');
-		const call = h.apisix.contracts.calls.find((c) => c.path === '/v1/events/evt-1');
+		// The gateway receives the paths of the contracts service as they are, never doubled
+		const call = h.apisix.contracts.calls.find((c) => c.path === '/contracts/v1/events/evt-1');
 		expect(call?.method).toBe('GET');
+		const slot = h.apisix.contracts.calls.find((c) => c.path === '/contracts/v1/calendar/freebusy');
+		expect(slot?.method).toBe('GET');
+		expect(slot?.query).toEqual({
+			start: '2026-10-09T09:00:00+02:00',
+			end: '2026-10-09T10:00:00+02:00',
+			exclude: 'uid-evt-1'
+		});
+		expect(slot?.headers['x-twake-contract']).toBe('calendar.freebusy.read.v1');
 		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
 		// The contract is named by its first tag, not by the verb the model calls
 		expect(call?.headers['x-twake-contract']).toBe('events.read.v1');
@@ -227,7 +275,7 @@ describe('an event wakes my assistant', () => {
 		const yes = await client.client.sendText(room, 'oui');
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Accepted: evt-act'));
 		const accept = h.apisix.contracts.calls.find((c) => c.method === 'POST');
-		expect(accept?.path).toBe('/v1/calendar/invitations/evt-act/accept');
+		expect(accept?.path).toBe('/contracts/v1/calendar/invitations/evt-act/accept');
 		expect(accept?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
 		expect(accept?.headers['x-twake-contract']).toBe('calendar.invitation.accept.v1');
 		expect(accept?.headers['x-correlation-id']).toBe(yes);

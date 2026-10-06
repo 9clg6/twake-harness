@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import type { Tool } from '../agent/tools.js';
-import { parseContracts, type ContractDefinition } from './openapi.js';
+import { parseContracts, readServer, type ContractDefinition } from './openapi.js';
 import { makeContractTool } from './tools.js';
 
 export interface ContractCatalog {
@@ -26,6 +26,8 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 	let contracts: ContractDefinition[] = [];
 	let tools: Tool[] = [];
 	let timer: NodeJS.Timeout | null = null;
+	// The foreign hosts a document named, warned about once each
+	const warnedOrigins = new Set<string>();
 
 	async function load(): Promise<number> {
 		const base = config.apisix.baseUrl.href.endsWith('/')
@@ -38,9 +40,25 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 				signal: AbortSignal.timeout(config.contracts.timeoutMs)
 			});
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
-			const parsed = parseContracts(await response.json());
+			const document: unknown = await response.json();
+			const parsed = parseContracts(document);
+			const server = readServer(document);
+			// A server on another host does not take the calls there: only its path is kept
+			if (
+				server.origin !== null &&
+				server.origin !== config.apisix.baseUrl.origin &&
+				!warnedOrigins.has(server.origin)
+			) {
+				warnedOrigins.add(server.origin);
+				log.warn(
+					{ server: server.origin, path: server.path },
+					'contracts server is another host, calls stay on the gateway'
+				);
+			}
 			contracts = parsed;
-			tools = parsed.map((contract) => makeContractTool(contract, { config, log, fetchImpl }));
+			tools = parsed.map((contract) =>
+				makeContractTool(contract, { config, log, fetchImpl, serverPath: server.path })
+			);
 			log.info({ contracts: parsed.map((c) => c.id) }, 'contracts loaded');
 		} catch (err: unknown) {
 			log.warn({ url: url.href, err }, 'contracts not loaded, keeping the previous catalog');

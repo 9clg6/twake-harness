@@ -5,11 +5,12 @@ import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import type { ChatRequest, ToolCall } from './helpers/fake-apisix.js';
 
-// The shape of the contracts service: a verb as operationId, the versioned contract as first tag
+// The shape of the contracts service: absolute paths under /contracts/v1, a verb as operationId,
+// the versioned contract as first tag
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
-		'/calendar/freebusy': {
+		'/contracts/v1/calendar/freebusy': {
 			get: {
 				operationId: 'read_freebusy',
 				tags: ['calendar.freebusy.read.v1'],
@@ -30,7 +31,7 @@ const CATALOG = {
 				]
 			}
 		},
-		'/calendar/events/{id}/accept': {
+		'/contracts/v1/calendar/events/{id}/accept': {
 			post: {
 				operationId: 'accept_event',
 				tags: ['calendar.event.accept.v1'],
@@ -114,7 +115,7 @@ describe('contracts as tools', () => {
 		expect(res.body.answer).toBe('you are free');
 		const call = h.apisix.contracts.calls[0];
 		expect(call?.method).toBe('GET');
-		expect(call?.path).toBe('/calendar/freebusy');
+		expect(call?.path).toBe('/contracts/v1/calendar/freebusy');
 		expect(call?.query).toEqual({ start: '2026-10-06T17:00:00Z', end: '2026-10-06T18:00:00Z' });
 		expect(call?.headers['apikey']).toBe(h.apisix.consumerKey);
 		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice');
@@ -196,7 +197,7 @@ describe('contracts as tools', () => {
 		await c.post('alice', '/v1/chat', { message: 'accept it' });
 		const call = h.apisix.contracts.calls[0];
 		expect(call?.method).toBe('POST');
-		expect(call?.path).toBe('/calendar/events/evt%2042/accept');
+		expect(call?.path).toBe('/contracts/v1/calendar/events/evt%2042/accept');
 		expect(call?.headers['x-twake-contract']).toBe('calendar.event.accept.v1');
 		expect(call?.body).toEqual({ comment: 'ok' });
 		expect(call?.headers['content-type']).toBe('application/json');
@@ -250,7 +251,7 @@ describe('contracts as tools', () => {
 			openapi: '3.0.3',
 			paths: {
 				...CATALOG.paths,
-				'/drive/files/{id}': {
+				'/contracts/v1/drive/files/{id}': {
 					get: {
 						operationId: 'drive.file.read.v1',
 						parameters: [{ name: 'id', in: 'path', schema: { type: 'string' } }]

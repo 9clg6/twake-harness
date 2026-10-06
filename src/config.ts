@@ -45,7 +45,9 @@ export interface Config {
 		readonly globalPerMinute: number;
 	};
 	readonly contracts: {
-		// Paths under the APISIX address: the curated OpenAPI, the contracts, the audit route
+		// Under the APISIX address: where the curated OpenAPI is served, and an optional prefix for
+		// the calls. Empty, the calls go to the paths the document gives (its server path, then the
+		// operation path); set, it prefixes them, for a gateway mounting the contracts elsewhere.
 		readonly openapiPath: string;
 		readonly basePath: string;
 		readonly refreshMs: number;
@@ -121,7 +123,7 @@ const envSchema = z.object({
 	ADMISSION_USER_DAILY_TOKENS: z.coerce.number().int().min(1).default(200_000),
 	ADMISSION_GLOBAL_PER_MINUTE: z.coerce.number().int().min(1).default(400),
 	CONTRACTS_OPENAPI_PATH: z.string().min(1).default('contracts/openapi.json'),
-	CONTRACTS_BASE_PATH: z.string().min(1).default('contracts'),
+	CONTRACTS_BASE_PATH: z.string().default(''),
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
 	CONTRACTS_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30_000),
 	MATRIX_SERVER_NAME: z.string().default(''),

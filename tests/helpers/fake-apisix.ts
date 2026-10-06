@@ -39,6 +39,7 @@ export interface RecordedCall {
 
 export interface ContractCall {
 	readonly method: string;
+	// The whole path the gateway received, as APISIX matches its routes on it
 	readonly path: string;
 	readonly query: Record<string, string>;
 	readonly headers: Record<string, string>;
@@ -57,9 +58,12 @@ export interface FakeApisix {
 		calls: RecordedCall[];
 		script: LlmScript;
 	};
-	// The contract catalog APISIX serves, the contracts' behaviour, and the audit route
+	// The contract catalog APISIX serves, the contracts' behaviour, and the audit route. Like the
+	// gateway, it forwards only what matches an operation of the catalog: its server path plus its
+	// path, under `mount` when the gateway mounts the contracts under a prefix of its own.
 	readonly contracts: {
 		spec: unknown;
+		mount: string;
 		calls: ContractCall[];
 		handler: (call: ContractCall) => ContractReply;
 	};
@@ -109,6 +113,50 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+interface ContractRoute {
+	readonly method: string;
+	readonly pattern: RegExp;
+}
+
+const HTTP_METHODS = ['get', 'post', 'put', 'patch', 'delete'];
+
+function escapeRegExp(text: string): string {
+	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+// The routes a gateway publishes for a catalog, one per operation: the document's server path (its
+// path part when the server is an absolute URL, the root when there is none) and the operation
+// path, under the mount. A path parameter matches one segment.
+function contractRoutes(spec: unknown, mount: string): ContractRoute[] {
+	if (typeof spec !== 'object' || spec === null) return [];
+	const document = spec as {
+		servers?: { url?: unknown }[];
+		paths?: Record<string, Record<string, unknown>>;
+	};
+	const server = document.servers?.[0]?.url;
+	const serverUrl = typeof server === 'string' ? server : '/';
+	const serverPath = /^[a-z][a-z0-9+.-]*:\/\//i.test(serverUrl)
+		? new URL(serverUrl).pathname
+		: serverUrl;
+	const routes: ContractRoute[] = [];
+	for (const [path, item] of Object.entries(document.paths ?? {})) {
+		const full = [mount, serverPath, path]
+			.map((segment) => segment.replace(/^\/+|\/+$/g, ''))
+			.filter((segment) => segment.length > 0)
+			.join('/');
+		const pattern = new RegExp(
+			`^/${full
+				.split(/\{[^}]+\}/)
+				.map(escapeRegExp)
+				.join('[^/]+')}$`
+		);
+		for (const method of Object.keys(item).filter((key) => HTTP_METHODS.includes(key))) {
+			routes.push({ method: method.toUpperCase(), pattern });
+		}
+	}
+	return routes;
+}
+
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
@@ -116,6 +164,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
 	const contracts: FakeApisix['contracts'] = {
 		spec: null,
+		mount: '',
 		calls: [],
 		handler: () => ({ status: 200, body: { ok: true } })
 	};
@@ -221,7 +270,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			sendJson(res, 200, contracts.spec);
 			return;
 		}
-		if (url.pathname.startsWith('/contracts/')) {
+		const routed = contractRoutes(contracts.spec, contracts.mount).some(
+			(route) => route.method === (req.method ?? 'GET') && route.pattern.test(url.pathname)
+		);
+		if (routed) {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(chunk as Buffer);
 			const text = Buffer.concat(chunks).toString('utf8');
@@ -231,7 +283,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			}
 			const call: ContractCall = {
 				method: req.method ?? 'GET',
-				path: url.pathname.slice('/contracts'.length),
+				path: url.pathname,
 				query: Object.fromEntries(url.searchParams.entries()),
 				headers,
 				body: text.length === 0 ? null : (JSON.parse(text) as unknown)
@@ -275,7 +327,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			});
 			return;
 		}
-		sendJson(res, 404, { error: 'no route' });
+		// What APISIX answers when no route matches: the request goes nowhere
+		sendJson(res, 404, { error_msg: '404 Route Not Found' });
 	});
 	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
 	const address = server.address();
