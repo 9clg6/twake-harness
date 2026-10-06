@@ -16,6 +16,7 @@ import {
 import type { OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
+import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
@@ -365,13 +366,19 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	}
 
 	// A call a direct tool call froze has no turn to go on with: once its owner allowed it through
-	// the API, it runs as it was frozen, under the correlation id of the request that froze it,
-	// only if it still waited
+	// the API, it runs as it was frozen, under the correlation id of the request that froze it, if
+	// it still waited, or if an earlier yes left it unrun past the lease
 	async function runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult> {
 		const { principal, pendingCallId, answerId, log } = input;
 		const opened = await withPrincipal(db, principal, async (tx) => {
 			const record = await ensurePrincipal(tx, principal);
-			const approved = await takeAllowedCall(tx, principal.id, pendingCallId, answerId);
+			const approved = await takeAllowedCall(
+				tx,
+				principal.id,
+				pendingCallId,
+				answerId,
+				DEFAULT_LEASE_MS
+			);
 			if (approved === null) return null;
 			// As in a turn: a yes to a first use allows the application from now on, a yes to the
 			// broker's request grants nothing
@@ -433,7 +440,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					approved =
 						answerId === undefined
 							? await approvePendingCall(tx, principal.id, pendingCallId)
-							: await takeAllowedCall(tx, principal.id, pendingCallId, answerId);
+							: await takeAllowedCall(tx, principal.id, pendingCallId, answerId, DEFAULT_LEASE_MS);
 					if (approved === null) {
 						return answerId === undefined
 							? { kind: 'missing' as const }

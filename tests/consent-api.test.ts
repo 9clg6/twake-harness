@@ -70,6 +70,19 @@ async function keptOf(
 	return { arguments: rows[0]?.arguments ?? null, request: rows[0]?.request_text ?? null };
 }
 
+// What an approval through the API leaves when its replica dies before the call runs: the call
+// approved by that answer, never run, its arguments kept
+async function leftUnrun(db: Db, owner: string, id: string, minutesAgo: number): Promise<void> {
+	await withPrincipal(
+		db,
+		{ id: owner },
+		(tx) => tx.sql`
+			update pending_calls set status = 'approved', answer_event_id = 'api:lost-replica',
+				decided_at = now() - make_interval(mins => ${minutesAgo})
+			where id = ${id}`
+	);
+}
+
 // Holds a lock in a transaction of its own until released, so that two answers meet in the order
 // a race could give them
 async function holdLock(
@@ -131,7 +144,8 @@ describe('my consents through the API', () => {
 	let h: TestHarness;
 	let c: TestClient;
 	beforeAll(async () => {
-		h = await startTestHarness();
+		// Many turns of one owner in a row: admission is the subject of its own suite below
+		h = await startTestHarness({ env: { ADMISSION_USER_PER_MINUTE: '100' } });
 		c = makeClient(h);
 		h.apisix.contracts.spec = readCatalog(DOMAINS);
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(DOMAINS.length);
@@ -393,6 +407,36 @@ describe('my consents through the API', () => {
 		expect(await countedLines(h)).toContain(
 			'harness_consent_answers_total{domain="notes",level="read",reason="consent",answer="no",via="api",outcome="decided"} 1'
 		);
+	});
+	it('runs a call a lost replica left approved, once I approve it again past its lease', async () => {
+		const turn = await c.post<WaitingTurn>('alice', '/v1/chat', {
+			message: 'Find the budget in my mail'
+		});
+		const { session_id: sessionId, pending_call: pending } = turn.body;
+		// My yes through the API took the call, then its replica died before the call ran
+		await leftUnrun(h.db, 'alice', pending.id, 1);
+		// While that replica could still be running it, a second yes gets a conflict
+		expect(await c.post('alice', `/v1/pending-calls/${pending.id}/approve`, {})).toEqual({
+			status: 409,
+			body: { error: 'pending call closed', state: 'decided' }
+		});
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+		// Once a replica would have let go of it, my yes runs it, once
+		await leftUnrun(h.db, 'alice', pending.id, 20);
+		expect(await c.post('alice', `/v1/pending-calls/${pending.id}/approve`, {})).toEqual({
+			status: 200,
+			body: {
+				session_id: sessionId,
+				answer: 'Told: {"status":200,"body":{"found":"/contracts/v1/mail/items"}}',
+				model: 'qwen3.8'
+			}
+		});
+		expect(h.apisix.contracts.calls).toHaveLength(1);
+		expect(await c.post('alice', `/v1/pending-calls/${pending.id}/approve`, {})).toEqual({
+			status: 409,
+			body: { error: 'pending call closed', state: 'decided' }
+		});
+		expect(h.apisix.contracts.calls).toHaveLength(1);
 	});
 });
 

@@ -417,18 +417,23 @@ export async function approvePendingCall(
 	return approvedCall(rows[0]);
 }
 
-// Takes a call for the owner's yes through the API, which runs it at once with no job behind it,
-// while it still waits. The yes is recorded under its own id, so that a second answer, through the
-// API or in the room, finds the call decided.
+// Takes a call for the owner's yes through the API, which runs it at once with no job behind it:
+// a call still waiting, or one an earlier yes through the API took and left unrun past the lease
+// a replica holds a job for, its replica taken for gone. The yes is recorded under its own id,
+// so that a second answer, through the API or in the room, finds the call decided.
 export async function takeAllowedCall(
 	tx: Tx,
 	owner: string,
 	id: string,
-	answerId: string
+	answerId: string,
+	leaseMs: number
 ): Promise<ApprovedCall | null> {
 	const rows = await tx.sql<ApprovedRow[]>`
 		update pending_calls set status = 'approved', decided_at = now(), answer_event_id = ${answerId}
-		where id = ${id} and owner = ${owner} and status = 'open'
+		where id = ${id} and owner = ${owner}
+			and (status = 'open'
+				or (status = 'approved' and replayed_at is null and answer_event_id like 'api:%'
+					and decided_at <= now() - make_interval(secs => ${leaseMs / 1000})))
 		returning tool, contract, domain, level, reasons, arguments, correlation_id, origin`;
 	return approvedCall(rows[0]);
 }

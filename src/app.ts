@@ -708,18 +708,29 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 						findPendingCall(tx, principal.id, id)
 					);
 					if (call === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
-					if (call.state !== 'open') {
-						if (call.state !== 'decided') {
-							answeredThroughApi(request.log, principal.id, call, 'yes', call.state);
-						}
+					if (call.state === 'expired' || call.state === 'superseded') {
+						answeredThroughApi(request.log, principal.id, call, 'yes', call.state);
 						return reply.code(409).send(pendingCallClosed(call.state));
 					}
 					const { channel } = call;
+					// A call asked in the room runs through the job its first answer queued: a later yes
+					// changes nothing
+					if (call.state === 'decided' && channel.kind === 'room') {
+						return reply.code(409).send(pendingCallClosed('decided'));
+					}
 					// The yes goes in under an id of its own, so that the first answer wins, in the room
 					// or through the API
 					const answerId = `api:${request.id}`;
 					const answered = (): void => {
-						answeredThroughApi(request.log, principal.id, call, 'yes', 'decided');
+						// A yes that takes back a call a lost replica left unrun was counted when it first came
+						if (call.state === 'open') {
+							answeredThroughApi(request.log, principal.id, call, 'yes', 'decided');
+						} else {
+							request.log.info(
+								{ owner: principal.id, pendingCallId: id, answer: 'yes', via: 'api' },
+								'owner answered again'
+							);
+						}
 					};
 					if (channel.kind === 'room') {
 						// A call asked in the owner's room resumes there, with their turns, as after their
