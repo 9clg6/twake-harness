@@ -115,7 +115,8 @@ const envSchema = z.object({
 	APISIX_BASE_URL: z.url(),
 	APISIX_CONSUMER_KEY: z.string().min(1),
 	LLM_MODEL: z.string().min(1).default('qwen3.8'),
-	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(1024),
+	// Reasoning models spend part of it deliberating before they write the answer
+	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),

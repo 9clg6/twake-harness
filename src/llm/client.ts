@@ -38,11 +38,19 @@ export interface LlmCompletion {
 	readonly usage: LlmUsage | null;
 }
 
+// What one call may change from the client's defaults
+export interface LlmCallOptions {
+	readonly maxTokens?: number;
+}
+
 export interface LlmClient {
 	readonly model: string;
+	// The token budget of a call that does not set its own
+	readonly maxTokens: number;
 	complete(
 		messages: readonly LlmMessage[],
-		tools: readonly LlmToolDefinition[]
+		tools: readonly LlmToolDefinition[],
+		options?: LlmCallOptions
 	): Promise<LlmCompletion>;
 }
 
@@ -107,11 +115,12 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 	const endpoint = new URL('llm/v1/chat/completions', ensureTrailingSlash(options.baseUrl));
 	return {
 		model: options.model,
-		async complete(messages, tools) {
+		maxTokens: options.maxTokens,
+		async complete(messages, tools, callOptions) {
 			const body: Record<string, unknown> = {
 				model: options.model,
 				messages,
-				max_tokens: options.maxTokens
+				max_tokens: callOptions?.maxTokens ?? options.maxTokens
 			};
 			if (tools.length > 0) body['tools'] = tools;
 			let response: Response;

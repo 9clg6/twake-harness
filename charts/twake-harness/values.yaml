@@ -40,6 +40,8 @@ config:
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
   llmModel: qwen3.8
+  # Token budget of one model call; empty means the harness default, 8192
+  llmMaxTokens: ''
   logLevel: info
   # The language of the assistants' and the creator's fixed texts: en or fr; empty means en
   assistantLocale: ''

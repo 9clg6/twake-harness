@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
-import type { LlmClient, LlmMessage } from '../llm/client.js';
+import type { LlmClient, LlmCompletion, LlmMessage } from '../llm/client.js';
 import {
 	runTool,
 	toolCallStatus,
@@ -43,6 +43,50 @@ function countCharacters(messages: readonly LlmMessage[]): number {
 	return total;
 }
 
+// The most one model call may spend: a call that ran out is retried once at twice the budget,
+// up to this
+export const MAX_RETRY_TOKENS = 32_768;
+
+function usedTokens(completion: LlmCompletion): number {
+	return (completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
+}
+
+// A reasoning model can spend its whole budget deliberating and stop before it writes a word: the
+// reasoning is stripped, so nothing visible is left
+function ranOutOfBudget(completion: LlmCompletion): boolean {
+	return (
+		completion.finishReason === 'length' &&
+		(completion.content ?? '').length === 0 &&
+		completion.toolCalls.length === 0
+	);
+}
+
+// Logging only: the metadata at info, the conversation itself at debug
+function logAnswer(log: FastifyBaseLogger, iteration: number, completion: LlmCompletion): void {
+	log.info(
+		{
+			iteration,
+			finishReason: completion.finishReason,
+			usage: completion.usage,
+			toolNames: completion.toolCalls.map((call) => call.function.name),
+			answerLength: completion.content?.length ?? 0,
+			hasReasoning: completion.reasoning !== null && completion.reasoning.length > 0
+		},
+		'model answered'
+	);
+	log.debug(
+		{
+			iteration,
+			content: completion.content,
+			reasoning: completion.reasoning,
+			toolCalls: completion.toolCalls,
+			finishReason: completion.finishReason,
+			usage: completion.usage
+		},
+		'model answered'
+	);
+}
+
 function parseArguments(raw: string): unknown {
 	try {
 		return JSON.parse(raw) as unknown;
@@ -68,30 +112,25 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			'model asked'
 		);
 		deps.log.debug({ iteration, messages: prompt }, 'model asked');
-		const completion = await deps.llm.complete(prompt, deps.tools.definitions);
-		tokens += (completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
-		deps.log.info(
-			{
-				iteration,
-				finishReason: completion.finishReason,
-				usage: completion.usage,
-				toolNames: completion.toolCalls.map((call) => call.function.name),
-				answerLength: completion.content?.length ?? 0,
-				hasReasoning: completion.reasoning !== null && completion.reasoning.length > 0
-			},
-			'model answered'
-		);
-		deps.log.debug(
-			{
-				iteration,
-				content: completion.content,
-				reasoning: completion.reasoning,
-				toolCalls: completion.toolCalls,
-				finishReason: completion.finishReason,
-				usage: completion.usage
-			},
-			'model answered'
-		);
+		let completion = await deps.llm.complete(prompt, deps.tools.definitions);
+		tokens += usedTokens(completion);
+		logAnswer(deps.log, iteration, completion);
+		if (ranOutOfBudget(completion)) {
+			const budget = deps.llm.maxTokens;
+			const retryBudget = Math.min(budget * 2, MAX_RETRY_TOKENS);
+			// Already at the ceiling, a second call would end the same way
+			if (retryBudget > budget) {
+				deps.log.info(
+					{ iteration, budget, retryBudget, usage: completion.usage },
+					'model ran out of budget'
+				);
+				completion = await deps.llm.complete(prompt, deps.tools.definitions, {
+					maxTokens: retryBudget
+				});
+				tokens += usedTokens(completion);
+				logAnswer(deps.log, iteration, completion);
+			}
+		}
 		if (completion.toolCalls.length === 0) {
 			const answer = completion.content ?? '';
 			if (answer.length === 0) throw new TurnError('the model answered nothing');

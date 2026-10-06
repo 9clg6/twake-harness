@@ -26,6 +26,9 @@ export interface ScriptedReply {
 	reasoning?: string;
 	toolCalls?: ToolCall[];
 	delayMs?: number;
+	// Why the model stopped: stop or tool_calls unless told otherwise, such as length when it ran
+	// out of tokens, in which case it reports the whole budget as spent
+	finishReason?: string;
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -320,10 +323,15 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 					{
 						index: 0,
 						message,
-						finish_reason: reply.toolCalls === undefined ? 'stop' : 'tool_calls'
+						finish_reason:
+							reply.finishReason ?? (reply.toolCalls === undefined ? 'stop' : 'tool_calls')
 					}
 				],
-				usage: { prompt_tokens: 10, completion_tokens: 5, total_tokens: 15 }
+				usage: {
+					prompt_tokens: 10,
+					completion_tokens: reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5,
+					total_tokens: 15
+				}
 			});
 			return;
 		}
