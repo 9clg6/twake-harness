@@ -24,7 +24,7 @@ const CATALOG = {
 	}
 };
 
-const EVENT = { owner: 'alice', event_id: 'evt-1', type: 'calendar.invitation' };
+const EVENT = { owner: 'alice@test.local', event_id: 'evt-1', type: 'calendar.invitation' };
 
 describe('an event wakes my assistant', () => {
 	let h: MatrixTestHarness;
@@ -46,7 +46,7 @@ describe('an event wakes my assistant', () => {
 		});
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
-		const created = await h.api.post<{ roomId: string }>('alice', '/v1/assistants', {
+		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
 			name: 'Jarvis'
 		});
 		expect(created.status).toBe(201);
@@ -101,7 +101,7 @@ describe('an event wakes my assistant', () => {
 		expect(answer).toBe('You received a calendar.invitation: Budget review moved to Friday');
 		const call = h.apisix.contracts.calls.find((c) => c.path === '/v1/events/evt-1');
 		expect(call?.method).toBe('GET');
-		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice');
+		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
 		expect(
 			h.logLines().some((l) => l['msg'] === 'event queued' && l['client'] === 'dispatcher')
 		).toBe(true);
@@ -124,7 +124,10 @@ describe('an event wakes my assistant', () => {
 		if (app === undefined) throw new Error('no api replica');
 		const anonymous = await app.inject({ method: 'POST', url: '/v1/events', payload: EVENT });
 		expect(anonymous.statusCode).toBe(401);
-		const asUser = await h.api.post('alice', '/v1/events', { ...EVENT, event_id: 'evt-2' });
+		const asUser = await h.api.post('alice@test.local', '/v1/events', {
+			...EVENT,
+			event_id: 'evt-2'
+		});
 		expect(asUser.status).toBe(403);
 		const nobody = await h.api.post('dispatcher', '/v1/events', {
 			owner: 'nobody',

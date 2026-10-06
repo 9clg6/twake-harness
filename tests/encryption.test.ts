@@ -19,7 +19,7 @@ describe('an encrypted conversation with my assistant', () => {
 		h = await startMatrixHarness();
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
-		const created = await h.api.post<{ roomId: string }>('alice', '/v1/assistants', {
+		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
 			name: 'Jarvis'
 		});
 		expect(created.status).toBe(201);
