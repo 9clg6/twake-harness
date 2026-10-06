@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
+import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { LlmError, makeLlmClient, type LlmClient } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
@@ -53,12 +54,14 @@ export interface AgentService {
 	readonly llm: LlmClient;
 	readonly tools: ToolRegistry;
 	readonly gate: TurnGate;
+	readonly contracts: ContractCatalog;
 	runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult>;
 }
 
 export interface AgentServiceDeps {
 	readonly config: Config;
 	readonly db: Db;
+	readonly log: FastifyBaseLogger;
 	readonly llm?: LlmClient;
 }
 
@@ -73,7 +76,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			maxTokens: config.llm.maxTokens,
 			timeoutMs: config.llm.timeoutMs
 		});
-	const tools = makeToolRegistry([clarifyTool, memoryTool, sessionsListTool, sessionsReadTool]);
+	const contracts = makeContractCatalog({ config, log: deps.log });
+	const tools = makeToolRegistry(
+		[clarifyTool, memoryTool, sessionsListTool, sessionsReadTool],
+		() => contracts.tools
+	);
 	const gate = makeTurnGate();
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
@@ -130,5 +137,5 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		});
 	}
 
-	return { llm, tools, gate, runOwnerTurn };
+	return { llm, tools, gate, contracts, runOwnerTurn };
 }

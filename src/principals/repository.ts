@@ -6,7 +6,8 @@ export const DEFAULT_ACTIONS: readonly string[] = [
 	'sessions.read_own',
 	'skills.read_own',
 	'memory.read_own',
-	'memory.write_own'
+	'memory.write_own',
+	'contracts.call'
 ];
 
 export interface PrincipalRecord {
