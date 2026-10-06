@@ -92,6 +92,10 @@ spec:
             {{- if eq .Values.role "matrix" }}
             - name: MATRIX_SERVER_NAME
               value: {{ .Values.config.matrixServerName | quote }}
+            {{- with .Values.config.matrixMailDomain }}
+            - name: MATRIX_MAIL_DOMAIN
+              value: {{ . | quote }}
+            {{- end }}
             - name: MATRIX_APPSERVICE_ID
               value: {{ .Values.config.matrixAppserviceId | quote }}
             - name: MATRIX_SENDER_LOCALPART
