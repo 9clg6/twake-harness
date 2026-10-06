@@ -53,6 +53,10 @@ One image, one role per deployment, chosen by `HARNESS_ROLE`:
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
 
+### Skills
+
+Skills follow the Agent Skills format: a name, a description and Markdown instructions. Each user has a library, the organization has one, and every skill has exactly one owner. The system prompt lists the skills a user may read, with their descriptions; the model reads one with `scoped_skills_read` when it applies and searches them with `skills_search`. What the assistant learns becomes a proposal through `skills_propose`, invisible to the model until its owner approves it (`POST /v1/skills/proposals/:id/approve`). An administrator, a principal with the `skills.admin` right, writes organization skills (`POST /v1/org/skills`) and promotes a user's proposal into the organization library by copy (`POST /v1/org/skills/promote/:id`), leaving the user's library untouched. Row-level security enforces all of it: a user never sees another user's skill, and the organization's are written by administrators only.
+
 ### Contracts as tools
 
 The harness reads the curated OpenAPI that APISIX serves and turns every operation that has an `operationId` into a tool named after it, dots replaced by underscores. A tool call goes to APISIX under the contracts path with the harness consumer key, the contract id and the owner in `x-twake-on-behalf-of`; the gateway attaches the owner's token, so the harness never holds one. What a contract returns is handed to the model as data, status included, and every call is logged and posted to the audit route. The catalog is loaded at start and refreshed on an interval; a failed refresh keeps the previous catalog.

@@ -25,10 +25,12 @@ export function makeDb(databaseUrl: string): Db {
 export async function withPrincipal<T>(
 	db: Db,
 	principal: Principal,
-	run: (tx: Tx) => Promise<T>
+	run: (tx: Tx) => Promise<T>,
+	options: { readonly admin?: boolean } = {}
 ): Promise<T> {
 	return db.sql.begin(async (sql) => {
 		await sql`select set_config('app.principal', ${principal.id}, true)`;
+		if (options.admin === true) await sql`select set_config('app.admin', 'true', true)`;
 		return run({ sql });
 	}) as Promise<T>;
 }

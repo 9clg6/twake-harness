@@ -84,7 +84,11 @@ describe('contracts as tools', () => {
 				'clarify',
 				'memory',
 				'scoped_sessions_list',
-				'scoped_sessions_read'
+				'scoped_sessions_read',
+				'scoped_skills_list',
+				'scoped_skills_read',
+				'skills_propose',
+				'skills_search'
 			].sort()
 		);
 	});
