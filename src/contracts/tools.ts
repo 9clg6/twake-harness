@@ -14,6 +14,13 @@ import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
 import { labelOf, type DomainDescriptions } from './domains.js';
 import { toolParametersOf, type ContractDefinition } from './openapi.js';
+import {
+	PREVIEW_DIGEST_HEADER,
+	PREVIEW_HEADER,
+	readPreview,
+	type Preview,
+	type PreviewAnswer
+} from './preview.js';
 
 export interface ContractToolDeps {
 	readonly config: Config;
@@ -61,6 +68,27 @@ const TOO_LARGE_TO_CONFIRM = {
 	hint: 'The owner must see a call whole before it runs, and this one is too large to show in one message. Nothing was done. Make the call smaller, for instance with a shorter text, then make it again.'
 } as const;
 
+// What the model reads when its call would wait for its owner, and the contract, asked what the
+// call would do, answered with an error: its owner is not asked about a call they cannot see as
+// its application tells it, so nothing waits, and the contract's answer follows, as data
+const PREVIEW_REFUSED = {
+	error: 'preview_refused',
+	hint: 'The application answered with an error when asked what this call would do, so the owner was not asked about it. Its answer follows: fix the call if it says how, or tell the owner.'
+} as const;
+
+// The same when the contract did not answer in time, or at all: whether it did anything is unknown
+const PREVIEW_UNANSWERED = {
+	error: 'preview_unanswered',
+	hint: 'The application did not answer when asked what this call would do, so the owner was not asked about it, and whether the application did anything is unknown. Tell the owner, and make the call again only if they ask.'
+} as const;
+
+// What the model reads when the contract, asked what a call would do, did it instead: the call was
+// made without its owner's yes, and the harness told them so
+const MADE_WITHOUT_OWNER = {
+	status: 'made_without_owner',
+	hint: "Asked what this call would do, the application did it instead: the call was made, without the owner's yes, and the harness told the owner so. Do not make it again."
+} as const;
+
 // A call as the model wrote it, ready to go on the gateway: the operation's address, with its
 // parameters, and its body
 interface ContractRequest {
@@ -68,9 +96,17 @@ interface ContractRequest {
 	readonly body: string | undefined;
 }
 
-// What a contract answered, as the model reads it, and the broker's refusal to act for the owner,
-// when the gateway relayed one
-interface Answered {
+// What goes to a contract: the action itself, carrying the digest of the preview its owner was
+// shown when there was one; or a preview, which asks what the action would do without doing it,
+// in the owner's language for the words of its summary
+type Sending =
+	| { readonly kind: 'action'; readonly previewDigest: string | null }
+	| { readonly kind: 'preview'; readonly locale: Locale };
+
+// What a contract answered: its status, 0 when it could not be called, the preview header it
+// carries back, if any, and its body; what the model reads of it; and the broker's refusal to act
+// for the owner, when the gateway relayed one
+interface Answered extends PreviewAnswer {
 	readonly result: unknown;
 	readonly delegation: DelegationCode | null;
 }
@@ -92,15 +128,21 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		...contract.parameters.map((p) => p.name),
 		...(contract.bodySchema === null ? [] : ['body'])
 	];
+	// Whether the contract is asked what a call would do before its owner is: as the catalog
+	// declares, until a preview of it does what the call asks, a sign that it takes the preview
+	// header for nothing. The catalog's next load makes the tool again, previews included.
+	let previewing = contract.preview;
 
-	// Freezes the call as the model wrote it until its owner answers, with the turn's session and
-	// the harness's question as its owner reads it, counts it, and logs why it waits, never what
-	// it would send; resolves to the frozen call's id
+	// Freezes the call as the model wrote it until its owner answers, with the turn's session, the
+	// harness's question as its owner reads it and the digest of the preview they are shown, if
+	// any, counts it, and logs why it waits, never what it would send; resolves to the frozen call's
+	// id
 	async function freeze(
 		values: Record<string, unknown>,
 		context: ToolContext,
 		reasons: readonly WaitReason[],
-		request: string
+		request: string,
+		previewDigest: string | null
 	): Promise<string> {
 		const owner = context.principalId;
 		const call: PendingCallInput = {
@@ -111,6 +153,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			level: contract.level,
 			reasons,
 			arguments: values,
+			previewDigest,
 			correlationId: context.correlationId ?? null,
 			origin: context.origin ?? 'owner',
 			sessionId: context.sessionId ?? null,
@@ -129,6 +172,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				domain: contract.domain,
 				level: contract.level,
 				...(contract.risk === null ? {} : { risk: contract.risk }),
+				...(previewDigest === null ? {} : { preview: true }),
 				principal: owner
 			},
 			'contract call waits for its owner'
@@ -190,8 +234,14 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		return { url, body };
 	}
 
-	// Calls the contract through APISIX, and logs the call, never what it sent or got back
-	async function send(request: ContractRequest, context: ToolContext): Promise<Answered> {
+	// Calls the contract through APISIX, and logs the call, never what it sent or got back. Only a
+	// preview carries the header that asks for one, and the action carries the digest of the
+	// preview its owner allowed, never that header.
+	async function send(
+		request: ContractRequest,
+		context: ToolContext,
+		sending: Sending
+	): Promise<Answered> {
 		// The organization agent calls with the harness key alone: it acts for no user
 		const headers: Record<string, string> = {
 			apikey: config.apisix.consumerKey,
@@ -204,8 +254,16 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		if (context.correlationId !== undefined && context.correlationId.length > 0) {
 			headers['x-correlation-id'] = context.correlationId;
 		}
+		if (sending.kind === 'preview') {
+			headers[PREVIEW_HEADER] = 'true';
+			headers['accept-language'] = sending.locale;
+		} else if (sending.previewDigest !== null) {
+			headers[PREVIEW_DIGEST_HEADER] = sending.previewDigest;
+		}
 		if (request.body !== undefined) headers['content-type'] = 'application/json';
 		let status = 0;
+		let echoed: string | null = null;
+		let body: unknown = null;
 		let result: unknown;
 		let delegation: DelegationCode | null = null;
 		try {
@@ -216,9 +274,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				signal: AbortSignal.timeout(config.contracts.timeoutMs)
 			});
 			status = response.status;
-			const answered = parseBody(await response.text());
-			result = { status, body: answered };
-			delegation = readDelegationCode(status, answered);
+			echoed = response.headers.get(PREVIEW_HEADER);
+			body = parseBody(await response.text());
+			result = { status, body };
+			delegation = readDelegationCode(status, body);
 		} catch (err: unknown) {
 			result = {
 				error: `the contract could not be called: ${err instanceof Error ? err.message : String(err)}`
@@ -230,21 +289,24 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				method: contract.method,
 				status,
 				principal: context.principalId,
+				...(sending.kind === 'preview' ? { preview: true } : {}),
 				...(delegation === null ? {} : { delegation })
 			},
 			'contract called'
 		);
-		return { result, delegation };
+		return { status, echoed, body, result, delegation };
 	}
 
 	// The platform's broker lacks the owner's permission for their assistant to act for them: the
 	// call waits for them, and the turn ends with the harness's own request, which names the
 	// application as a first use does, tells them why and gives them the deployment's consent link,
-	// never one from the answer, which a contract could have written
+	// never one from the answer, which a contract could have written. A call that carries the digest
+	// of the preview its owner allowed keeps it for when it runs.
 	async function waitForDelegation(
 		values: Record<string, unknown>,
 		context: ToolContext,
 		code: DelegationCode,
+		previewDigest: string | null,
 		locale: Locale
 	): Promise<ToolOutcome> {
 		const application = labelOf(
@@ -260,7 +322,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			code,
 			config.consent.brokerConsentUrl
 		);
-		const pendingCallId = await freeze(values, context, ['delegation'], request);
+		const pendingCallId = await freeze(values, context, ['delegation'], request, previewDigest);
 		return {
 			result: { status: 'awaiting_owner', reason: 'delegation', code },
 			final: request,
@@ -268,8 +330,39 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		};
 	}
 
+	// Asked only what a call would do, the contract did it: the call was made without its owner's
+	// yes. The turn ends on the harness's own notice that tells them so, the model reads that the
+	// call was made, the operator reads an error, and the contract is previewed no more until the
+	// catalog loads again, so that no other preview of it acts.
+	function actedOnPreview(
+		answered: Answered,
+		context: ToolContext,
+		problem: string,
+		application: string,
+		locale: Locale
+	): ToolOutcome {
+		previewing = false;
+		log.error(
+			{
+				contract: contract.id,
+				tool: contract.toolName,
+				status: answered.status,
+				problem,
+				principal: context.principalId
+			},
+			'contract acted on a preview, previews stop until the catalog loads again'
+		);
+		// Of the contract's answer, the model reads its status alone: its body may be the preview the
+		// contract meant to give, which only the owner reads
+		return {
+			result: { ...MADE_WITHOUT_OWNER, answer: { status: answered.status } },
+			final: getMessages(locale).consent.actedOnPreview(application)
+		};
+	}
+
 	// The call waits for its owner: it is frozen as the model wrote it, and the turn ends with the
-	// harness's own request
+	// harness's own request. A contract that offers a preview is asked first what the call would
+	// do, without doing it, and the request shows its owner that, rather than the call.
 	async function ask(
 		values: Record<string, unknown>,
 		context: ToolContext,
@@ -286,12 +379,47 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			locale,
 			config.locale
 		);
+		let preview: Preview | null = null;
+		if (previewing) {
+			const built = build(values);
+			if ('error' in built) return { result: { error: built.error } };
+			const answered = await send(built, context, { kind: 'preview', locale });
+			// The broker refuses a preview as it would the call: its owner gives that permission
+			// first, and sees the preview once it may be asked for
+			if (answered.delegation !== null) {
+				return waitForDelegation(values, context, answered.delegation, null, locale);
+			}
+			const reading = readPreview(answered);
+			if (reading.kind === 'acted') {
+				return actedOnPreview(answered, context, reading.problem, application.name, locale);
+			}
+			if (reading.kind !== 'preview') {
+				const refused = reading.kind === 'refused';
+				log.warn(
+					{
+						contract: contract.id,
+						tool: contract.toolName,
+						problem: refused ? reading.problem : 'no answer',
+						principal: owner
+					},
+					'contract preview failed'
+				);
+				return {
+					result: {
+						...(refused ? PREVIEW_REFUSED : PREVIEW_UNANSWERED),
+						answer: answered.result
+					}
+				};
+			}
+			preview = reading.preview;
+		}
 		const request = makeOwnerRequest(
 			{
 				application,
 				level: contract.level,
 				reasons,
 				arguments: values,
+				summary: preview?.summary ?? null,
 				said: context.accompanyingText ?? null
 			},
 			getMessages(locale)
@@ -305,9 +433,15 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			);
 			return { result: TOO_LARGE_TO_CONFIRM };
 		}
-		// The call keeps the harness's question alone, never the call nor the model's words: it is what
-		// the API shows of the request
-		const pendingCallId = await freeze(values, context, reasons, request.question);
+		// The call keeps the harness's question alone, never the call, the model's words nor what its
+		// application said of it: it is what the API shows of the request
+		const pendingCallId = await freeze(
+			values,
+			context,
+			reasons,
+			request.question,
+			preview?.digest ?? null
+		);
 		return {
 			result: {
 				status: 'awaiting_owner',
@@ -339,12 +473,14 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			}
 			const built = build(values);
 			if ('error' in built) return { result: { error: built.error } };
-			const answered = await send(built, context);
+			// The call its owner allowed once they saw its preview carries that preview's digest
+			const previewDigest = context.previewDigest ?? null;
+			const answered = await send(built, context, { kind: 'action', previewDigest });
 			// The organization agent acts for no user: nobody could give it that permission
 			const owner = context.principalId;
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
-				return waitForDelegation(values, context, answered.delegation, locale);
+				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
 			}
 			return { result: answered.result };
 		}

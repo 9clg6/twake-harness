@@ -28,6 +28,11 @@ export interface ContractDefinition {
 	// For a write, what x-twake-risk declares: high unless the document says low, so that a write
 	// declared wrongly, or not at all, is confirmed call by call. A read carries no risk.
 	readonly risk: WriteRisk | null;
+	// Whether its contract tells what a call would do without doing it, as x-twake-preview declares:
+	// only a write that declares exactly true is ever called for a preview, since a contract that
+	// never promised one would take that call for the action itself, and a read before its owner
+	// allowed it would read their data
+	readonly preview: boolean;
 	// What the model calls: the operationId, a verb such as read_freebusy, in the alphabet a model
 	// tool name allows
 	readonly toolName: string;
@@ -53,6 +58,9 @@ const operationSchema = z.object({
 	description: z.string().optional(),
 	// Read whatever it holds: a value of another shape makes the write high, never drops it
 	'x-twake-risk': z.unknown().optional(),
+	// Read whatever it holds as well: anything but true asks for no preview, and never drops the
+	// operation
+	'x-twake-preview': z.unknown().optional(),
 	parameters: z.array(parameterSchema).optional(),
 	requestBody: z
 		.object({
@@ -104,9 +112,18 @@ export interface UnknownRisk {
 	readonly declared: unknown;
 }
 
+// An operation whose x-twake-preview the harness does not follow: a value other than true or
+// false, or a preview a read declares. It gets no preview, and the operator who curates the
+// catalog is told what it declared.
+export interface IgnoredPreview {
+	readonly contract: string;
+	readonly declared: unknown;
+}
+
 export interface ParsedContracts {
 	readonly contracts: ContractDefinition[];
 	readonly unknownRisks: readonly UnknownRisk[];
+	readonly ignoredPreviews: readonly IgnoredPreview[];
 }
 
 // Reads the curated OpenAPI APISIX serves and keeps one contract per operation that has an id.
@@ -119,6 +136,7 @@ export function parseContracts(document: unknown): ParsedContracts {
 	if (!parsed.success) throw new Error('the OpenAPI document has an unexpected shape');
 	const contracts: ContractDefinition[] = [];
 	const unknownRisks: UnknownRisk[] = [];
+	const ignoredPreviews: IgnoredPreview[] = [];
 	for (const [pathTemplate, item] of Object.entries(parsed.data.paths)) {
 		for (const method of METHODS) {
 			const raw = item[method];
@@ -148,11 +166,17 @@ export function parseContracts(document: unknown): ParsedContracts {
 			) {
 				unknownRisks.push({ contract: id, declared });
 			}
+			const previewed = operation.data['x-twake-preview'];
+			const preview = level === 'write' && previewed === true;
+			if (!preview && previewed !== undefined && previewed !== false) {
+				ignoredPreviews.push({ contract: id, declared: previewed });
+			}
 			contracts.push({
 				id,
 				domain: id.split('.')[0] ?? id,
 				level,
 				risk: level === 'read' ? null : declared === 'low' ? 'low' : 'high',
+				preview,
 				toolName: toToolName(operation.data.operationId),
 				method,
 				pathTemplate,
@@ -163,7 +187,7 @@ export function parseContracts(document: unknown): ParsedContracts {
 			});
 		}
 	}
-	return { contracts, unknownRisks };
+	return { contracts, unknownRisks, ignoredPreviews };
 }
 
 // The JSON schema the model sees: one property per path or query parameter, plus `body`

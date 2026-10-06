@@ -66,6 +66,10 @@ function queryOf(params: URLSearchParams): Record<string, string | readonly stri
 export interface ContractReply {
 	readonly status: number;
 	readonly body: unknown;
+	// Headers of the answer, such as the one by which a contract says it only previewed a call
+	readonly headers?: Readonly<Record<string, string>>;
+	// A wait before the answer: a contract slower than the harness waits for
+	readonly delayMs?: number;
 }
 
 export interface FakeApisix {
@@ -460,6 +464,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			};
 			contracts.calls.push(call);
 			const reply = contracts.handler(call);
+			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
+			// The caller may have given up meanwhile
+			if (res.destroyed) return;
+			for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
 			sendJson(res, reply.status, reply.body);
 			return;
 		}

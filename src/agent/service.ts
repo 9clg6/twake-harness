@@ -13,7 +13,7 @@ import {
 	supersedeApprovedCall,
 	type ApprovedCall
 } from '../consents/repository.js';
-import type { OwnerRequest } from '../consents/request.js';
+import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
@@ -83,6 +83,9 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
 	readonly text: string;
+	// What the conversation keeps of it, for later turns of the model: the request without what an
+	// application said of the call, which only its owner reads
+	readonly kept: string;
 	readonly pendingCallId: string;
 	// Its parts, when the harness laid it out as a request about the call
 	readonly request: OwnerRequest | null;
@@ -93,6 +96,7 @@ function questionOf(outcome: ToolOutcome): Question | null {
 	return outcome.final !== undefined && outcome.pendingCallId !== undefined
 		? {
 				text: outcome.final,
+				kept: outcome.request === undefined ? outcome.final : conversationText(outcome.request),
 				pendingCallId: outcome.pendingCallId,
 				request: outcome.request ?? null
 			}
@@ -111,6 +115,31 @@ const CONTRACT_CHANGED = {
 	error: 'contract_changed',
 	hint: 'The contract the owner allowed is no longer offered as it was, so nothing ran. Tell the owner.'
 } as const;
+
+// What came of the call its owner allowed: the call and its result, as the session keeps them;
+// the harness's new question, when the call waits for its owner again; and the harness's own
+// notice, when the call did not run as its owner allowed it: its contract refused it, as what it
+// acts on changed since the preview its owner was shown, or, asked anew what the call would do,
+// did it
+interface Replayed {
+	readonly messages: LlmMessage[];
+	readonly question: Question | null;
+	readonly notice: string | null;
+}
+
+// What a contract answers the call its owner allowed once they saw its preview, when what the call
+// acts on changed since: nothing was done
+const CHANGED_SINCE_PREVIEW = 409;
+
+// Whether the contract refused the call its owner allowed, as what it acts on changed since the
+// preview they were shown: the call carried that preview's digest, and the contract answered 409
+function changedSincePreview(approved: ApprovedCall, outcome: ToolOutcome): boolean {
+	return (
+		approved.previewDigest !== null &&
+		questionOf(outcome) === null &&
+		statusOf(outcome.result) === CHANGED_SINCE_PREVIEW
+	);
+}
 
 // The HTTP status a contract answered with, when the result carries one
 function statusOf(result: unknown): number | null {
@@ -290,7 +319,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// the contract the owner allowed, at the same level, runs nothing. The call waits for nothing the
 	// owner's yes answered; one that waits for its owner again, such as one the platform's broker
 	// still refuses or one in an application whose writing they took back since, comes back with
-	// the harness's new question.
+	// the harness's new question. A call whose contract showed its owner what it would do carries
+	// the digest of that preview, which the contract checks.
 	async function runFrozenCall(
 		approved: ApprovedCall,
 		pendingCallId: string,
@@ -305,10 +335,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			definition.id === approved.contract &&
 			definition.level === approved.level;
 		const outcome: ToolOutcome = unchanged
-			? await runTool(tool, approved.arguments, { ...context, answeredReasons: approved.reasons })
+			? await runTool(tool, approved.arguments, {
+					...context,
+					answeredReasons: approved.reasons,
+					...(approved.previewDigest === null ? {} : { previewDigest: approved.previewDigest })
+				})
 			: { result: CONTRACT_CHANGED };
 		const question = questionOf(outcome);
 		const httpStatus = statusOf(outcome.result);
+		const changed = changedSincePreview(approved, outcome);
 		if (question === null) {
 			consentMetrics.replayed(approved, replayOutcome(httpStatus));
 			log.info(
@@ -316,7 +351,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					pendingCallId,
 					tool: approved.tool,
 					status: unchanged ? toolCallStatus(outcome) : 'contract_changed',
-					...(httpStatus === null ? {} : { httpStatus })
+					...(httpStatus === null ? {} : { httpStatus }),
+					...(changed ? { changedSincePreview: true } : {})
 				},
 				'pending call replayed'
 			);
@@ -332,14 +368,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	// Runs the call its owner allowed, and writes it in the session as the assistant's call followed
 	// by its result, for the model to go on from, with the harness's new question when it waits
-	// again
+	// again, or its own notice when the call did not run as its owner allowed it
 	async function replay(
 		approved: ApprovedCall,
 		pendingCallId: string,
 		context: ToolContext,
-		log: FastifyBaseLogger
-	): Promise<{ readonly messages: LlmMessage[]; readonly question: Question | null }> {
+		log: FastifyBaseLogger,
+		consent: Messages['consent']
+	): Promise<Replayed> {
 		const outcome = await runFrozenCall(approved, pendingCallId, context, log);
+		const question = questionOf(outcome);
 		const callId = `replay_${pendingCallId}`;
 		return {
 			messages: [
@@ -361,7 +399,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					content: JSON.stringify(outcome.result)
 				}
 			],
-			question: questionOf(outcome)
+			question,
+			// A call that did not run as its owner allowed it ends the turn on the harness's notice:
+			// one its contract refused, as what it acts on changed since the preview they were shown,
+			// or one a preview asked for anew did, which the tool's outcome carries without a question
+			notice: changedSincePreview(approved, outcome)
+				? consent.changed
+				: question === null
+					? (outcome.final ?? null)
+					: null
 		};
 	}
 
@@ -504,7 +550,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				const asked: LlmMessage[] = [
 					...session.messages,
 					{ role: 'user', content: told.message },
-					{ role: 'assistant', content: told.question.text }
+					{ role: 'assistant', content: told.question.kept }
 				];
 				const saved = await withPrincipal(db, principal, (tx) =>
 					saveSessionMessages(tx, session.id, asked)
@@ -526,17 +572,22 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			let history: readonly LlmMessage[] = session.messages;
 			if (approved !== null && input.resume !== undefined) {
 				const { pendingCallId } = input.resume;
-				const replayed = await replay(approved, pendingCallId, context, log);
+				const replayed = await replay(approved, pendingCallId, context, log, messages.consent);
 				// A call that waits for its owner again ends the turn on the harness's new question,
 				// which the conversation keeps as the assistant's answer: the owner's next yes tries it
 				// once more, never the model
 				const newQuestion = replayed.question;
+				// A call that did not run as its owner allowed it ends the turn on the harness's own
+				// notice: the owner learns it from the harness, never from the model, which reads the
+				// call, its result and the notice in the conversation
+				const { notice } = replayed;
 				history = [
 					...history,
 					...replayed.messages,
 					...(newQuestion === null
 						? []
-						: [{ role: 'assistant' as const, content: newQuestion.text }])
+						: [{ role: 'assistant' as const, content: newQuestion.kept }]),
+					...(notice === null ? [] : [{ role: 'assistant' as const, content: notice }])
 				];
 				// The conversation holds the call at once, whatever happens to the rest of the turn. A
 				// call that waits again is not stamped as run: the newer request supersedes the one
@@ -560,6 +611,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						pendingCallId: newQuestion.pendingCallId,
 						...(newQuestion.request === null ? {} : { request: newQuestion.request })
 					};
+				}
+				if (notice !== null) {
+					log.info({ pendingCallId }, 'turn stopped on a notice to the owner');
+					return { kind: 'ok', sessionId: session.id, answer: notice, model: llm.model };
 				}
 			}
 			try {

@@ -78,7 +78,9 @@ const descriptionSchema = z.strictObject({
 
 const documentSchema = z.object({ 'x-twake-domains': z.unknown().optional() });
 
-function problemOf(error: z.ZodError): string {
+// What is wrong in data read from outside, by where it is wrong, for the operator who fixes it:
+// zod's messages, never the values themselves
+export function problemOf(error: z.ZodError): string {
 	return error.issues
 		.map((issue) =>
 			issue.path.length === 0 ? issue.message : `${issue.path.join('.')}: ${issue.message}`

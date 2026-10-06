@@ -36,6 +36,8 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 	// The writes whose risk the document gave a value the harness does not know, warned about once
 	// each
 	const warnedRisks = new Set<string>();
+	// The operations whose preview the harness does not follow, warned about once each
+	const warnedPreviews = new Set<string>();
 
 	async function load(): Promise<number> {
 		const base = config.apisix.baseUrl.href.endsWith('/')
@@ -49,7 +51,7 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 			});
 			if (!response.ok) throw new Error(`HTTP ${response.status}`);
 			const document: unknown = await response.json();
-			const { contracts: parsed, unknownRisks } = parseContracts(document);
+			const { contracts: parsed, unknownRisks, ignoredPreviews } = parseContracts(document);
 			const server = readServer(document);
 			// A server on another host does not take the calls there: only its path is kept
 			if (
@@ -79,6 +81,14 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 				if (warnedRisks.has(key)) continue;
 				warnedRisks.add(key);
 				log.warn({ contract, declared }, 'contract risk unknown, treated as high');
+			}
+			// An operation that declares a preview the harness does not follow is asked about with the
+			// call as the model wrote it, as one without a preview is: its operator learns why
+			for (const { contract, declared } of ignoredPreviews) {
+				const key = `${contract}\n${JSON.stringify(declared)}`;
+				if (warnedPreviews.has(key)) continue;
+				warnedPreviews.add(key);
+				log.warn({ contract, declared }, 'contract preview ignored');
 			}
 			contracts = parsed;
 			tools = parsed.map((contract) =>

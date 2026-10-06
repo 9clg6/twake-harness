@@ -78,6 +78,9 @@ export interface ConsentRoom {
 	nextSaying(prefix: string, seen: number): Promise<string>;
 	// What the harness keeps of Alice's calls to an application, oldest first
 	callsTo(domain: string): Promise<{ status: string; arguments: unknown }[]>;
+	// The digests of the previews Alice was shown for her calls to an application, as the harness
+	// keeps them, oldest first
+	previewDigestsOf(domain: string): Promise<(string | null)[]>;
 	close(): Promise<void>;
 }
 
@@ -139,6 +142,17 @@ export async function startConsentRoom(env: Record<string, string> = {}): Promis
 					order by created_at`
 			);
 			return rows.map((row) => ({ status: row.status, arguments: readJsonColumn(row.arguments) }));
+		},
+		previewDigestsOf: async (domain) => {
+			const rows = await withPrincipal(
+				h.db,
+				{ id: 'alice@test.local' },
+				(tx) =>
+					tx.sql<{ preview_digest: string | null }[]>`
+					select preview_digest from pending_calls where domain = ${domain}
+					order by created_at`
+			);
+			return rows.map((row) => row.preview_digest);
 		},
 		close: async () => {
 			await client.stop();

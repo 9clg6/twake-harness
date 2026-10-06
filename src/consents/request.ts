@@ -14,29 +14,40 @@ export interface RequestedCall {
 	readonly reasons: readonly WaitReason[];
 	// The call as it was frozen, which may hold what a third party wrote
 	readonly arguments: unknown;
+	// What its contract said the call would do, from its preview, which its owner reads in place of
+	// the call, and nothing else ever shows; null for a contract that offers none. It is that
+	// application's data, which may hold what a third party wrote.
+	readonly summary: string | null;
 	// What the model wrote alongside the call, or null when it wrote nothing
 	readonly said: string | null;
 }
 
 // The harness's request to an owner about a call it froze, in the parts their client shows apart,
-// in this order. Only the question and how to answer are the harness's own words, and the parts
-// stay apart wherever the request goes, so that the API can show the question without the call.
+// in this order. Only the question, the labels and how to answer are the harness's own words, and
+// the parts stay apart wherever the request goes, so that the API can show the question without
+// the call.
 export interface OwnerRequest {
 	// What the model wrote alongside the call, under the harness's label for it, or null when it
 	// wrote nothing
 	readonly said: { readonly label: string; readonly text: string } | null;
 	// The harness's question, in Markdown: the application named as the catalog does
 	readonly question: string;
-	// The call as it was frozen, whole, as indented JSON
+	// The call as it was frozen, whole, as indented JSON: what its owner reads of it when its
+	// contract offers no preview, and what the conversation keeps of it either way
 	readonly call: string;
+	// What its contract said the call would do, under the harness's label for it, in Markdown,
+	// which names the application: what its owner reads in the call's place; null for a contract
+	// that offers no preview
+	readonly summary: { readonly label: string; readonly text: string } | null;
 	readonly howToAnswer: string;
 }
 
 // The most a request quotes of what the model wrote: its words, never what runs
 const SAID_LENGTH = 2_000;
 
-// The most a call may take in the message that shows it, as plain text and as HTML together:
-// with the rest of the request, well within what one Matrix event carries
+// The most a call, or the summary shown in its place, may take in the message that shows it, as
+// plain text and as HTML together: with the rest of the request, well within what one Matrix
+// event carries
 export const CALL_BYTES = 16_384;
 
 function escapeHtml(text: string): string {
@@ -68,10 +79,11 @@ function questionFor(call: RequestedCall, consent: Messages['consent']): string 
 	return call.level === 'read' ? consent.firstRead(name, covers) : consent.firstWrite(name, covers);
 }
 
-// The request about a frozen call, or null when the call is too large to show whole in one
-// message: an owner is never asked about a call they cannot see whole
+// The request about a frozen call, or null when the call, or its summary, is too large to show
+// whole in one message: an owner is never asked about a call they cannot see whole
 export function makeOwnerRequest(call: RequestedCall, messages: Messages): OwnerRequest | null {
-	const shown = JSON.stringify(call.arguments, null, 2) ?? 'null';
+	const frozen = JSON.stringify(call.arguments, null, 2) ?? 'null';
+	const shown = call.summary ?? frozen;
 	if (byteLength(shown) + byteLength(escapeHtml(shown)) > CALL_BYTES) return null;
 	const { consent } = messages;
 	const said = Array.from(call.said?.trim() ?? '');
@@ -85,20 +97,38 @@ export function makeOwnerRequest(call: RequestedCall, messages: Messages): Owner
 							said.length > SAID_LENGTH ? `${said.slice(0, SAID_LENGTH).join('')}…` : said.join('')
 					},
 		question: questionFor(call, consent),
-		call: shown,
+		call: frozen,
+		summary:
+			call.summary === null
+				? null
+				: { label: consent.described(call.application.name), text: call.summary },
 		howToAnswer: consent.howToAnswer
 	};
 }
 
-// The request as plain text: the body of its message, what later turns of the model read, and
-// what the API answers. The model's words are quoted line by line under the harness's label.
+// A text that is not the harness's, quoted line by line under the harness's label for it, so that
+// none of its lines passes for the harness's own
+function quoted(label: string, text: string): string {
+	return [label, ...linesOf(text).map((line) => `> ${line}`.trimEnd())].join('\n');
+}
+
+// The request as plain text: the body of its message, and what the API answers. The model's
+// words, and what an application said of the call, are quoted under the harness's labels.
 export function requestText(request: OwnerRequest): string {
-	const { said } = request;
-	const quoted =
-		said === null
-			? []
-			: [[said.label, ...linesOf(said.text).map((line) => `> ${line}`.trimEnd())].join('\n')];
-	return [...quoted, request.question, request.call, request.howToAnswer].join('\n\n');
+	const { said, summary } = request;
+	return [
+		...(said === null ? [] : [quoted(said.label, said.text)]),
+		request.question,
+		summary === null ? request.call : quoted(summary.label, summary.text),
+		request.howToAnswer
+	].join('\n\n');
+}
+
+// The request as the conversation keeps it, which later turns of the model read: the call as it
+// was frozen, never what its application said of it. That is the application's data, which may
+// hold what a third party wrote, and only its owner reads it.
+export function conversationText(request: OwnerRequest): string {
+	return requestText({ ...request, summary: null });
 }
 
 // The harness's own Markdown: no HTML of its own, and no link it did not write
@@ -106,10 +136,11 @@ const QUESTION_MARKDOWN = new MarkdownIt({ html: false, linkify: false, breaks: 
 
 // The request as HTML, laid out by the harness. The model's words are plain text in a quote under
 // the harness's label, never rendered: no heading, table, image or link they hold can stand out
-// against the question or its buttons. The call is code, and only the question is rendered, from
-// the harness's own Markdown.
+// against the question or its buttons. The call, or its contract's summary under the harness's
+// label, is code, and only the question and that label are rendered, from the harness's own
+// Markdown.
 export function requestHtml(request: OwnerRequest): string {
-	const { said } = request;
+	const { said, summary } = request;
 	const quoted =
 		said === null
 			? []
@@ -120,7 +151,12 @@ export function requestHtml(request: OwnerRequest): string {
 	return [
 		...quoted,
 		QUESTION_MARKDOWN.render(request.question).trim(),
-		`<pre><code class="language-json">${escapeHtml(request.call)}</code></pre>`,
+		...(summary === null
+			? [`<pre><code class="language-json">${escapeHtml(request.call)}</code></pre>`]
+			: [
+					QUESTION_MARKDOWN.render(summary.label).trim(),
+					`<pre><code>${escapeHtml(summary.text)}</code></pre>`
+				]),
 		`<p>${escapeHtml(request.howToAnswer)}</p>`
 	].join('\n');
 }
