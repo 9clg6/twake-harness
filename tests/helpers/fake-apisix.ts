@@ -44,9 +44,19 @@ export interface ContractCall {
 	readonly method: string;
 	// The whole path the gateway received, as APISIX matches its routes on it
 	readonly path: string;
-	readonly query: Record<string, string>;
+	// A key sent once is a string, a key sent several times the list of its values, in order
+	readonly query: Record<string, string | readonly string[]>;
 	readonly headers: Record<string, string>;
 	readonly body: unknown;
+}
+
+function queryOf(params: URLSearchParams): Record<string, string | readonly string[]> {
+	const query: Record<string, string | readonly string[]> = {};
+	for (const key of new Set(params.keys())) {
+		const values = params.getAll(key);
+		query[key] = values.length === 1 ? (values[0] ?? '') : values;
+	}
+	return query;
 }
 
 export interface ContractReply {
@@ -301,7 +311,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const call: ContractCall = {
 				method: req.method ?? 'GET',
 				path: url.pathname,
-				query: Object.fromEntries(url.searchParams.entries()),
+				query: queryOf(url.searchParams),
 				headers,
 				body: text.length === 0 ? null : (JSON.parse(text) as unknown)
 			};

@@ -126,6 +126,28 @@ describe('contract calls reach the gateway at the paths the catalog gives', () =
 		]);
 	});
 
+	it('sends a list as one key per item, and a single value as one key', async () => {
+		await loadCatalog(h, CATALOG);
+		h.apisix.llm.script = callingAtOnce([
+			call('c1', 'read_freebusy', {
+				start: '2026-10-06T14:00:00+02:00',
+				end: '2026-10-06T15:00:00+02:00',
+				exclude: ['u1', 'u2']
+			}),
+			call('c2', 'read_freebusy', {
+				start: '2026-10-06T14:00:00+02:00',
+				end: '2026-10-06T15:00:00+02:00',
+				exclude: 'u3'
+			})
+		]);
+		const res = await c.post<{ answer: string }>('alice', '/v1/chat', { message: 'am I free?' });
+		expect(res.body.answer).toBe('statuses 200,200');
+		const [several, single] = h.apisix.contracts.calls;
+		// Repeated keys, the OpenAPI default for a query array: never "u1,u2" in one value
+		expect(several?.query['exclude']).toEqual(['u1', 'u2']);
+		expect(single?.query['exclude']).toBe('u3');
+	});
+
 	it('calls under the server path when the catalog gives relative paths', async () => {
 		await loadCatalog(h, servedUnder('/contracts'));
 		h.apisix.llm.script = callingAtOnce([call('c1', 'read_event', { event_id: 'evt-8' })]);
