@@ -76,6 +76,11 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				}
 				if (parameter.location === 'path') {
 					path = path.replace(`{${parameter.name}}`, encodeURIComponent(String(value)));
+				} else if (Array.isArray(value)) {
+					// One key per item, the OpenAPI default for a query array (form, exploded): a
+					// joined "a,b" would reach the contract as a single value
+					for (const item of value as readonly unknown[])
+						query.append(parameter.name, String(item));
 				} else {
 					query.set(parameter.name, String(value));
 				}
