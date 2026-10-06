@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	CALENDAR_CATALOG,
@@ -49,6 +50,8 @@ describe('an event wakes my assistant', () => {
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
 		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service' } });
+		// These tests are about events: Alice already let her assistant read her calendar
+		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
 		h.apisix.contracts.spec = CALENDAR_CATALOG;
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		h.apisix.contracts.handler = (call: ContractCall) => {

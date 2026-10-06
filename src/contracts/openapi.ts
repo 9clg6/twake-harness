@@ -1,5 +1,7 @@
 import { z } from 'zod';
 
+import type { ConsentLevel } from '../consents/repository.js';
+
 export type HttpMethod = 'get' | 'post' | 'put' | 'patch' | 'delete';
 
 export interface ContractParameter {
@@ -14,6 +16,10 @@ export interface ContractDefinition {
 	// The versioned contract, such as calendar.freebusy.read.v1: the first tag of the operation,
 	// or its operationId when it has no tag
 	readonly id: string;
+	// The application the contract belongs to, the first segment of its id, such as calendar:
+	// what its owner allows the assistant to use, together with the level
+	readonly domain: string;
+	readonly level: ConsentLevel;
 	// What the model calls: the operationId, a verb such as read_freebusy, in the alphabet a model
 	// tool name allows
 	readonly toolName: string;
@@ -107,8 +113,12 @@ export function parseContracts(document: unknown): ContractDefinition[] {
 				}));
 			const body = operation.data.requestBody?.content['application/json']?.schema ?? null;
 			const contractName = operation.data.tags?.find((tag) => tag.length > 0);
+			const id = contractName ?? operation.data.operationId;
 			contracts.push({
-				id: contractName ?? operation.data.operationId,
+				id,
+				domain: id.split('.')[0] ?? id,
+				// A GET reads; every other method writes
+				level: method === 'get' ? 'read' : 'write',
 				toolName: toToolName(operation.data.operationId),
 				method,
 				pathTemplate,

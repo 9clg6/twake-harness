@@ -1,6 +1,9 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
+import { hasConsent, insertPendingCall } from '../consents/repository.js';
+import { withPrincipal } from '../db/client.js';
+import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolOutcome } from '../agent/tools.js';
@@ -41,11 +44,16 @@ function parseBody(text: string): unknown {
 export const CALL_CONTRACTS = 'contracts.call';
 export const ACT_THROUGH_CONTRACTS = 'contracts.act';
 
+// The assistant's own feed of workplace events, read without asking: it is how events reach the
+// owner in the first place
+const FEED_DOMAIN = 'events';
+
 // A contract becomes a tool that calls it through APISIX, naming the owner so that the gateway
 // attaches the owner's token: the harness never holds one. What comes back is data for the model.
 export function makeContractTool(contract: ContractDefinition, deps: ContractToolDeps): Tool {
 	const { config, log } = deps;
 	const fetchImpl = deps.fetchImpl ?? fetch;
+	const messages = getMessages(config.locale);
 	const definition: LlmToolDefinition = {
 		type: 'function',
 		function: {
@@ -66,6 +74,51 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		run: async (args, context): Promise<ToolOutcome> => {
 			const values =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
+			// The first read of an application waits for its owner: the call is frozen as the model
+			// wrote it, and the turn ends with the harness's own question. The organization agent
+			// acts for no user, so nobody's consent applies to it.
+			const owner = context.principalId;
+			if (
+				contract.level === 'read' &&
+				contract.domain !== FEED_DOMAIN &&
+				owner !== ORGANIZATION_PRINCIPAL &&
+				!(await withPrincipal(context.db, { id: owner }, (tx) =>
+					hasConsent(tx, owner, contract.domain, contract.level)
+				))
+			) {
+				const pendingCall = await withPrincipal(context.db, { id: owner }, (tx) =>
+					insertPendingCall(tx, {
+						owner,
+						tool: contract.toolName,
+						contract: contract.id,
+						domain: contract.domain,
+						level: contract.level,
+						reasons: ['consent'],
+						arguments: values,
+						correlationId: context.correlationId ?? null
+					})
+				);
+				log.info(
+					{
+						pendingCall,
+						contract: contract.id,
+						tool: contract.toolName,
+						domain: contract.domain,
+						level: contract.level,
+						principal: owner
+					},
+					'contract call waits for its owner'
+				);
+				return {
+					result: {
+						status: 'awaiting_owner',
+						reason: 'consent',
+						domain: contract.domain,
+						level: contract.level
+					},
+					final: messages.consent.firstRead(contract.domain)
+				};
+			}
 			let path = contract.pathTemplate;
 			const query = new URLSearchParams();
 			for (const parameter of contract.parameters) {
