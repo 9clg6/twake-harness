@@ -27,6 +27,8 @@ export interface TurnWorkerOptions {
 	readonly agent: AgentService;
 	readonly log: FastifyBaseLogger;
 	readonly pollIntervalMs?: number;
+	// How many turns this replica runs at once
+	readonly concurrency?: number;
 }
 
 const FAILURE_TEXT = 'Something went wrong on my side. Please try again in a moment.';
@@ -41,6 +43,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		log,
 		kinds: ['turn'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+		...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
 		handler: async (job) => {
 			const parsed = turnPayload.safeParse(job.payload);
 			if (!parsed.success) throw new Error('turn payload is malformed');
