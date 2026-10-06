@@ -3,8 +3,14 @@ image:
   # Empty uses the chart's appVersion
   tag: ''
   pullPolicy: IfNotPresent
-# The registry is private: name a Secret of type kubernetes.io/dockerconfigjson
+# The registry is private: either name Secrets of type kubernetes.io/dockerconfigjson here, or
+# let the chart create one from a read token
 imagePullSecrets: []
+imagePullSecret:
+  create: false
+  registry: ghcr.io
+  username: ''
+  password: ''
 
 # api, matrix or worker
 role: api
@@ -49,5 +55,13 @@ networkPolicy:
   databasePort: 5432
   # Extra egress rules, in NetworkPolicy syntax
   extraEgress: []
+
+# The matrix role keeps the assistants' encryption state on a volume
+persistence:
+  enabled: false
+  size: 1Gi
+  # Empty uses the cluster default
+  storageClass: ''
+  mountPath: /data
 
 podAnnotations: {}
