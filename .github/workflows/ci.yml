@@ -12,9 +12,11 @@ permissions:
 env:
   IMAGE: ghcr.io/linagora/twake-harness
 
+# The jobs run on the organization's runners, except those of a pull request from a fork,
+# whose code never runs inside the organization: GitHub's own runners take them
 jobs:
   check:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -26,7 +28,7 @@ jobs:
       - run: npm run typecheck
 
   test:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
     strategy:
       fail-fast: false
       matrix:
@@ -58,6 +60,9 @@ jobs:
       - run: npm run test:ci
         env:
           TEST_ADMIN_DATABASE_URL: postgres://harness:harness@127.0.0.1:5433/harness
+          # The tests share Synapse's configuration through a folder Docker mounts: on the
+          # organization's runners Docker runs beside the job and sees its work directory only
+          TMPDIR: ${{ runner.temp }}
           SYNAPSE_IMAGE: ${{ matrix.synapse }}
           TEST_REPLICAS: ${{ matrix.replicas }}
       - uses: actions/upload-artifact@v4
@@ -67,7 +72,7 @@ jobs:
           path: test-results/
 
   chart:
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
@@ -100,7 +105,7 @@ jobs:
 
   image:
     needs: [check, test, chart]
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
     steps:
       - uses: actions/checkout@v4
       - uses: docker/setup-buildx-action@v3
@@ -129,7 +134,7 @@ jobs:
   chart-publish:
     needs: [image]
     if: github.event_name == 'push'
-    runs-on: ubuntu-latest
+    runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
     steps:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
