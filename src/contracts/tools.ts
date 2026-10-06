@@ -1,13 +1,15 @@
 import type { FastifyBaseLogger } from 'fastify';
 
-import { fetchOwnerMessages } from '../assistants/locale.js';
+import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
 import { withPrincipal } from '../db/client.js';
+import { getMessages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolOutcome } from '../agent/tools.js';
+import { labelOf, type DomainDescriptions } from './domains.js';
 import { toolParametersOf, type ContractDefinition } from './openapi.js';
 
 export interface ContractToolDeps {
@@ -18,6 +20,8 @@ export interface ContractToolDeps {
 	readonly serverPath?: string;
 	// Where the api role counts the calls that wait for their owner
 	readonly consentMetrics: ConsentMetrics;
+	// How the document names the applications to their owners, from readDomains
+	readonly domains: DomainDescriptions;
 }
 
 // Joins path segments under the gateway's address, keeping the path that address may carry: no
@@ -114,7 +118,11 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					},
 					'contract call waits for its owner'
 				);
-				const { consent } = await fetchOwnerMessages(context.db, owner, config.locale);
+				// The read question names the application as the catalog does in its owner's
+				// language, and says what reading covers there
+				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
+				const { consent } = getMessages(locale);
+				const application = labelOf(deps.domains, contract.domain, contract.level, locale);
 				return {
 					result: {
 						status: 'awaiting_owner',
@@ -124,7 +132,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 					},
 					final:
 						contract.level === 'read'
-							? consent.firstRead(contract.domain)
+							? consent.firstRead(application.name, application.covers)
 							: consent.firstWrite(contract.domain),
 					pendingCallId
 				};
