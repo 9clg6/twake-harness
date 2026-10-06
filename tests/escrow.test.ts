@@ -41,7 +41,7 @@ describe("the escrow of an assistant's identity", () => {
 	let freshClient: E2eeClient | undefined;
 	let room: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
-	const escrowPath = 'twake-harness/assistants/alice';
+	const escrowPath = 'twake-harness/assistants/alice@test.local';
 
 	async function keysOf(userId: string): Promise<KeysQuery> {
 		const res = await h.synapse.request(alice, 'POST', '/_matrix/client/v3/keys/query', {
@@ -68,7 +68,7 @@ describe("the escrow of an assistant's identity", () => {
 		alice = await h.synapse.registerUser('alice');
 		await h.synapse.registerUser('bob');
 		client = await startE2eeClient(h.synapse.url, alice);
-		const created = await h.api.post<{ roomId: string }>('alice', '/v1/assistants', {
+		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
 			name: 'Jarvis'
 		});
 		expect(created.status).toBe(201);
@@ -97,7 +97,9 @@ describe("the escrow of an assistant's identity", () => {
 		expect(
 			h.apisix.openbao.calls.some((c) => c.path === '/v1/auth/kubernetes/login' && c.status === 200)
 		).toBe(true);
-		const record = await withPrincipal(h.db, { id: 'alice' }, (tx) => findEscrow(tx, 'alice'));
+		const record = await withPrincipal(h.db, { id: 'alice@test.local' }, (tx) =>
+			findEscrow(tx, 'alice@test.local')
+		);
 		expect(record?.path).toBe(`secret/data/${escrowPath}`);
 		expect(record?.backupVersion).toBe(secrets['backup_version']);
 		// The homeserver holds the identity the escrow describes
@@ -115,9 +117,11 @@ describe("the escrow of an assistant's identity", () => {
 			.logLines()
 			.filter((l) => l['msg'] === 'escrow write' || l['msg'] === 'escrow read')
 			.map((l) => [l['principal'], l['operation']]);
-		expect(accesses).toContainEqual(['alice', 'write']);
+		expect(accesses).toContainEqual(['alice@test.local', 'write']);
 		expect(
-			h.logLines().some((l) => l['msg'] === 'assistant escrowed' && l['principal'] === 'alice')
+			h
+				.logLines()
+				.some((l) => l['msg'] === 'assistant escrowed' && l['principal'] === 'alice@test.local')
 		).toBe(true);
 	});
 
@@ -132,12 +136,14 @@ describe("the escrow of an assistant's identity", () => {
 			'the keys backup upload'
 		);
 		expect(
-			h.logLines().some((l) => l['msg'] === 'room keys backed up' && l['principal'] === 'alice')
+			h
+				.logLines()
+				.some((l) => l['msg'] === 'room keys backed up' && l['principal'] === 'alice@test.local')
 		).toBe(true);
 	});
 
 	it('refuses the recovery of my assistant to anyone else', async () => {
-		expect((await h.api.post('bob', '/v1/assistants/me/recover', {})).status).toBe(404);
+		expect((await h.api.post('bob@test.local', '/v1/assistants/me/recover', {})).status).toBe(404);
 		expect(h.apisix.openbao.calls.filter((c) => c.method === 'GET')).toHaveLength(0);
 	});
 
@@ -145,7 +151,11 @@ describe("the escrow of an assistant's identity", () => {
 		const before = await keysOf(assistantId);
 		const devicesBefore = Object.keys(before.device_keys?.[assistantId] ?? {});
 		await h.restartRole({ wipeCryptoStore: true });
-		const asked = await h.api.post<{ queued: boolean }>('alice', '/v1/assistants/me/recover', {});
+		const asked = await h.api.post<{ queued: boolean }>(
+			'alice@test.local',
+			'/v1/assistants/me/recover',
+			{}
+		);
 		expect(asked.status).toBe(202);
 		expect(asked.body.queued).toBe(true);
 		// The new device tells the owner, who reads it: her client learns the device from its key share
@@ -156,11 +166,13 @@ describe("the escrow of an assistant's identity", () => {
 			90_000
 		);
 		expect(notice).toContain('My identity is back from the escrow');
-		expect(h.logLines().some((l) => l['msg'] === 'escrow read' && l['principal'] === 'alice')).toBe(
-			true
-		);
 		expect(
-			h.logLines().some((l) => l['msg'] === 'assistant recovered' && l['principal'] === 'alice')
+			h.logLines().some((l) => l['msg'] === 'escrow read' && l['principal'] === 'alice@test.local')
+		).toBe(true);
+		expect(
+			h
+				.logLines()
+				.some((l) => l['msg'] === 'assistant recovered' && l['principal'] === 'alice@test.local')
 		).toBe(true);
 		const after = await keysOf(assistantId);
 		// The same identity, on a new device signed with it
@@ -174,7 +186,9 @@ describe("the escrow of an assistant's identity", () => {
 		const signatures =
 			after.device_keys?.[assistantId]?.[newDevices[0] ?? '']?.signatures?.[assistantId] ?? {};
 		expect(Object.keys(signatures)).toContain(`ed25519:${selfSigningKey}`);
-		const record = await withPrincipal(h.db, { id: 'alice' }, (tx) => findEscrow(tx, 'alice'));
+		const record = await withPrincipal(h.db, { id: 'alice@test.local' }, (tx) =>
+			findEscrow(tx, 'alice@test.local')
+		);
 		expect(record?.recoveredAt).not.toBeNull();
 		// Only one escrow: the recovered device writes no second one
 		expect(

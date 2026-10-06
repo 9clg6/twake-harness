@@ -61,8 +61,18 @@ export function makeOpenBaoEscrow(deps: EscrowStoreDeps): EscrowStore {
 		return value;
 	}
 
+	// The path of the owner's secret in the KV mount, as OpenBao names it; the owner is an email
 	function pathOf(owner: string): string {
-		return `${escrow.kvMount}/data/${escrow.prefix}/${encodeURIComponent(owner)}`;
+		return `${escrow.kvMount}/data/${escrow.prefix}/${owner}`;
+	}
+
+	function urlOf(owner: string): URL {
+		return joinPath(
+			config.apisix.baseUrl,
+			escrow.path,
+			'v1',
+			`${escrow.kvMount}/data/${escrow.prefix}/${encodeURIComponent(owner)}`
+		);
 	}
 
 	async function call(
@@ -72,7 +82,7 @@ export function makeOpenBaoEscrow(deps: EscrowStoreDeps): EscrowStore {
 		body?: unknown
 	): Promise<{ status: number; body: unknown }> {
 		const vaultToken = await login();
-		const url = joinPath(config.apisix.baseUrl, escrow.path, 'v1', pathOf(owner));
+		const url = urlOf(owner);
 		const response = await fetchImpl(url, {
 			method,
 			headers: {

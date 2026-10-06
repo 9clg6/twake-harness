@@ -133,7 +133,10 @@ describe('the organization agent', () => {
 		expect(await aliceClient.waitForMessage(room, orgId, (t) => t === 'Noted.')).toBe('Noted.');
 		const organization = await withPrincipal(h.db, { id: 'org' }, (tx) => listMemory(tx, 'org'));
 		expect(organization.memory.some((e) => e.includes('Fridays'))).toBe(true);
-		const mine = await h.api.get<{ memory: { content: string }[] }>('alice', '/v1/memory');
+		const mine = await h.api.get<{ memory: { content: string }[] }>(
+			'alice@test.local',
+			'/v1/memory'
+		);
 		expect(mine.status).toBe(200);
 		expect(JSON.stringify(mine.body)).not.toContain('Fridays');
 		// No token carries the organization principal

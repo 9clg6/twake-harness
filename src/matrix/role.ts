@@ -21,14 +21,11 @@ import {
 } from '../assistants/repository.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
-import {
-	makeAssistantService,
-	ownerMatrixId,
-	type AssistantService
-} from '../assistants/service.js';
+import { makeAssistantService, type AssistantService } from '../assistants/service.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
+import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
@@ -107,24 +104,6 @@ function textOf(event: RoomEvent): string | null {
 	return content['msgtype'] === 'm.text' && typeof content['body'] === 'string'
 		? content['body']
 		: null;
-}
-
-const LOCALPART = /^[a-z0-9._=\-/+]+$/;
-
-// The owner of a conversation is the localpart of a user of our own homeserver, which is also
-// their principal identity everywhere else in the harness.
-export function principalOfSender(config: Config, sender: string): string | null {
-	const match = /^@([^:]+):(.+)$/.exec(sender);
-	if (match === null) return null;
-	const [, localpart, server] = match;
-	if (
-		localpart === undefined ||
-		server !== config.matrix.serverName ||
-		!LOCALPART.test(localpart)
-	) {
-		return null;
-	}
-	return localpart;
 }
 
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
@@ -414,7 +393,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (event.type !== 'm.room.member' || event.content?.['membership'] !== 'join') return;
 		const room = await assistantRoom(roomId);
 		if (room === null || room.welcome === null) return;
-		if (event.state_key !== ownerMatrixId(config, room.owner)) return;
+		if (event.state_key !== matrixUserIdOfPrincipal(config, room.owner)) return;
 		const claimed = await db.sql`
 			update assistant_rooms set welcome = null where room_id = ${roomId} and welcome is not null`;
 		if (claimed.count !== 1) return;
@@ -452,7 +431,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				message = `[${sender}] ${text}`;
 			} else {
 				// An assistant's room: only its owner is heard, everyone else is ignored and logged
-				const principal = principalOfSender(config, sender);
+				const principal = principalOfMatrixUser(config, sender);
 				if (principal === null || principal !== room.owner) {
 					log.info({ roomId, sender, owner: room.owner }, 'assistant ignored a foreign sender');
 					return;
@@ -472,7 +451,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		if (!(await creatorIsInRoom(roomId))) return;
-		const owner = principalOfSender(config, sender);
+		const owner = principalOfMatrixUser(config, sender);
 		if (owner === null) {
 			log.info({ roomId, sender }, 'creator ignored a foreign sender');
 			return;
