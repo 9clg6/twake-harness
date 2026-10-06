@@ -65,4 +65,11 @@ describe('a deployment that speaks French', () => {
 		);
 	});
 
+	it('tells the model the name the owner chose, so the assistant introduces itself by it', async () => {
+		await client.sendText(assistantRoom, 'Qui es-tu ?');
+		await client.waitForMessage(assistantRoom, assistantId, (t) => t === 'echo: Qui es-tu ?');
+		const system = h.apisix.llm.calls.at(-1)?.request.messages[0];
+		expect(system?.role).toBe('system');
+		expect(system?.content).toContain('You are "Lucie", the Twake Space assistant');
+	});
 });

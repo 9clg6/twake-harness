@@ -65,7 +65,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				target: { kind: 'room', roomId },
 				message: text,
 				log: turnLog,
-				correlationId: eventId
+				correlationId: eventId,
+				assistantName: assistant.name
 			});
 			const answer =
 				result.kind === 'ok'
