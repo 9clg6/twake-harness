@@ -1,6 +1,12 @@
 import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
-import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
+import {
+	FEED_DOMAIN,
+	isBuiltInConsent,
+	type ConsentLevel,
+	type ConsentSource,
+	type WaitReason
+} from './consent.js';
 
 export async function hasConsent(
 	tx: Tx,
@@ -24,6 +30,96 @@ export async function grantConsent(
 		insert into consents (owner, domain, level, granted_by)
 		values (${owner}, ${domain}, ${level}, ${source})
 		on conflict do nothing`;
+}
+
+// What an owner's assistant may use: what the owner allowed, or the reading of its own feed of
+// events, built into the harness, which no owner gives
+export interface ConsentRecord {
+	readonly domain: string;
+	readonly level: ConsentLevel;
+	readonly grantedBy: ConsentSource | 'built_in';
+	// When the owner allowed it; null for the one built in
+	readonly grantedAt: Date | null;
+}
+
+const BUILT_IN_FEED: ConsentRecord = {
+	domain: FEED_DOMAIN,
+	level: 'read',
+	grantedBy: 'built_in',
+	grantedAt: null
+};
+
+interface ConsentRow {
+	domain: string;
+	level: ConsentLevel;
+	granted_by: ConsentSource;
+	granted_at: Date;
+}
+
+// Everything an owner's assistant may use, application by application, reading before writing
+export async function listConsents(tx: Tx, owner: string): Promise<ConsentRecord[]> {
+	const rows = await tx.sql<ConsentRow[]>`
+		select domain, level, granted_by, granted_at from consents where owner = ${owner}`;
+	const given = rows
+		.filter((row) => !isBuiltInConsent(row.domain, row.level))
+		.map((row): ConsentRecord => ({
+			domain: row.domain,
+			level: row.level,
+			grantedBy: row.granted_by,
+			grantedAt: row.granted_at
+		}));
+	return [...given, BUILT_IN_FEED].sort(
+		(a, b) => a.domain.localeCompare(b.domain, 'en') || a.level.localeCompare(b.level, 'en')
+	);
+}
+
+// What a withdrawal took back: the levels the owner had allowed in the application, and the calls
+// there it closed
+export interface Withdrawal {
+	readonly levels: readonly ConsentLevel[];
+	readonly superseded: readonly ClosedRequest[];
+}
+
+// Takes back what an owner allowed in an application, at the levels given. The calls there that
+// still wait for the owner's answer, or that the owner allowed and that have not run yet, close
+// with it, as an older question closes when a newer one is asked, and what they would have sent is
+// erased: nothing runs there after the withdrawal unless the owner allows it again.
+export async function withdrawConsents(
+	tx: Tx,
+	owner: string,
+	domain: string,
+	levels: readonly ConsentLevel[]
+): Promise<Withdrawal> {
+	const withdrawn = await tx.sql<{ level: ConsentLevel }[]>`
+		delete from consents
+		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
+		returning level`;
+	const superseded = await tx.sql<ClosedRow[]>`
+		update pending_calls set status = 'superseded', decided_at = now(), arguments = null
+		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
+			and (status = 'open' or (status = 'approved' and replayed_at is null))
+		returning id, domain, level, reasons`;
+	return {
+		levels: withdrawn.map((row) => row.level).sort(),
+		superseded: closedRequests(superseded)
+	};
+}
+
+// A consent as the model and the owner's clients read it
+export interface ConsentView {
+	readonly domain: string;
+	readonly level: ConsentLevel;
+	readonly granted_by: ConsentSource | 'built_in';
+	readonly granted_at: string | null;
+}
+
+export function toConsentView(record: ConsentRecord): ConsentView {
+	return {
+		domain: record.domain,
+		level: record.level,
+		granted_by: record.grantedBy,
+		granted_at: record.grantedAt?.toISOString() ?? null
+	};
 }
 
 export interface PendingCallInput {

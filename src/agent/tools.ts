@@ -1,6 +1,9 @@
+import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import { setAssistantLocale } from '../assistants/repository.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
+import { listConsents, toConsentView, withdrawConsents } from '../consents/repository.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
 import type { LlmToolDefinition } from '../llm/client.js';
@@ -62,6 +65,8 @@ export interface ToolContext {
 	readonly db: Db;
 	// What links this turn's calls in the audit: the request id, or the Matrix event id
 	readonly correlationId?: string;
+	// The turn's or the request's logger, for what a tool changes on its owner's behalf
+	readonly log: FastifyBaseLogger;
 }
 
 export interface Tool {
@@ -418,6 +423,125 @@ export const skillsProposeTool: Tool = {
 		return { result: { proposed: skill.id, status: 'proposed' } };
 	}
 };
+
+// What the owner allowed their assistant to use in their applications, which the model reads to
+// answer them; only the owner's own answer to the harness's question ever grants an access
+export const consentsListTool: Tool = {
+	definition: {
+		type: 'function',
+		function: {
+			name: 'consents_list',
+			description:
+				"List what the user allowed you to use in their applications: each application for reading or for writing, and how it was allowed. For anything else, the harness asks the user the first time you need it; only the user's answer grants an access, never you.",
+			parameters: { type: 'object', properties: {}, additionalProperties: false }
+		}
+	},
+	argumentKeys: [],
+	requiredAction: null,
+	run: async (_args, context) => {
+		// The organization agent acts for no user, and no consent applies to its calls
+		if (context.principalId === ORGANIZATION_PRINCIPAL)
+			return { result: ACCESS_DENIED, denied: true };
+		const consents = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+			listConsents(tx, context.principalId)
+		);
+		return { result: { consents: consents.map(toConsentView) } };
+	}
+};
+
+// The right to take back what the owner allowed: a turn an event started never holds it, so that
+// a third party's text cannot change what the owner decided
+export const WITHDRAW_OWN_CONSENTS: string = 'consents.withdraw_own';
+
+const consentsWithdrawArgs = z.object({
+	domain: z.string().min(1).max(64),
+	level: z.literal('write').optional()
+});
+
+export interface ConsentsWithdrawDeps {
+	// The applications the catalog offers now, as consents_list names them
+	readonly applications: () => readonly string[];
+	// Where the api role counts the questions a withdrawal closes
+	readonly consentMetrics: ConsentMetrics;
+}
+
+// The owner tells their assistant to stop using an application, or only to stop writing there:
+// the next call there asks them again. The model can take an access back, never give one.
+export function makeConsentsWithdrawTool(deps: ConsentsWithdrawDeps): Tool {
+	return {
+		definition: {
+			type: 'function',
+			function: {
+				name: 'consents_withdraw',
+				description:
+					'Withdraw what the user allowed you in one of their applications, when they tell you to stop using it, or only to stop writing there. The next time you need it, the harness asks them again. You can never grant an access.',
+				parameters: {
+					type: 'object',
+					properties: {
+						domain: {
+							type: 'string',
+							description: 'The application, as consents_list names it, such as mail'
+						},
+						level: {
+							type: 'string',
+							enum: ['write'],
+							description:
+								'write to withdraw only writing there and keep reading; leave it out to withdraw the whole application'
+						}
+					},
+					required: ['domain'],
+					additionalProperties: false
+				}
+			}
+		},
+		argumentKeys: ['domain', 'level'],
+		requiredAction: WITHDRAW_OWN_CONSENTS,
+		run: async (args, context) => {
+			const owner = context.principalId;
+			if (owner === ORGANIZATION_PRINCIPAL) return { result: ACCESS_DENIED, denied: true };
+			const parsed = consentsWithdrawArgs.safeParse(args);
+			if (!parsed.success) {
+				return { result: { error: 'domain is required, and level can only be write' } };
+			}
+			const { domain, level } = parsed.data;
+			const applications = deps.applications();
+			const done = await withPrincipal(context.db, { id: owner }, async (tx) => {
+				// A name the catalog does not offer withdraws nothing, and must not read as done; an
+				// application the owner allowed before the catalog dropped it is still theirs to close
+				const allowed = await listConsents(tx, owner);
+				if (!applications.includes(domain) && !allowed.some((c) => c.domain === domain)) {
+					return null;
+				}
+				const withdrawal = await withdrawConsents(
+					tx,
+					owner,
+					domain,
+					level === undefined ? ['read', 'write'] : [level]
+				);
+				return { withdrawal, kept: await listConsents(tx, owner) };
+			});
+			if (done === null) return { result: { error: 'unknown application', applications } };
+			const { withdrawal, kept } = done;
+			if (withdrawal.levels.length > 0) {
+				context.log.info(
+					{ principal: owner, domain, levels: withdrawal.levels },
+					'consent withdrawn'
+				);
+			}
+			for (const request of withdrawal.superseded) {
+				context.log.info({ owner, pendingCallId: request.pendingCallId }, 'request superseded');
+				deps.consentMetrics.superseded(request);
+			}
+			return {
+				result: {
+					domain,
+					withdrawn: withdrawal.levels,
+					still_allowed: kept.filter((c) => c.domain === domain).map((c) => c.level)
+				}
+			};
+		}
+	};
+}
 
 const sessionSearchArgs = z.object({ query: z.string().min(1).max(200) });
 

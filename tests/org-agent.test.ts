@@ -46,6 +46,12 @@ describe('the organization agent', () => {
 		bobClient = await startE2eeClient(h.synapse.url, bob);
 		h.apisix.llm.script = (request: ChatRequest) => {
 			const last = request.messages.at(-1);
+			if (last?.role === 'tool' && last.name?.startsWith('consents_') === true) {
+				const told = request.messages
+					.filter((m) => m.role === 'tool' && m.name?.startsWith('consents_') === true)
+					.map((m) => JSON.parse(m.content ?? 'null') as unknown);
+				return { content: `Consents: ${JSON.stringify(told)}` };
+			}
 			if (last?.role === 'tool') {
 				const data = JSON.parse(last.content ?? '{}') as { body?: { turns?: number } };
 				return {
@@ -60,6 +66,22 @@ describe('the organization agent', () => {
 							id: 'call_usage',
 							type: 'function',
 							function: { name: 'usage_summary_read_v1', arguments: '{}' }
+						}
+					]
+				};
+			}
+			if (text.includes('may you access')) {
+				return {
+					toolCalls: [
+						{
+							id: 'call_list',
+							type: 'function',
+							function: { name: 'consents_list', arguments: '{}' }
+						},
+						{
+							id: 'call_withdraw',
+							type: 'function',
+							function: { name: 'consents_withdraw', arguments: JSON.stringify({ domain: 'mail' }) }
 						}
 					]
 				};
@@ -217,5 +239,14 @@ describe('the organization agent', () => {
 			h.apisix.contracts.handler = handler;
 			h.apisix.llm.script = script;
 		}
+	});
+
+	it('holds no consent, since it acts for no user: it neither lists nor withdraws one', async () => {
+		await aliceClient.sendText(room, 'what may you access?');
+		const answer = await aliceClient.waitForMessage(room, orgId, (t) => t.startsWith('Consents:'));
+		expect(JSON.parse(answer.slice('Consents: '.length))).toEqual([
+			{ error: 'access denied' },
+			{ error: 'access denied' }
+		]);
 	});
 });

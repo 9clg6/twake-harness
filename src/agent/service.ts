@@ -34,7 +34,9 @@ import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
+	consentsListTool,
 	languageTool,
+	makeConsentsWithdrawTool,
 	makeToolRegistry,
 	memoryTool,
 	runTool,
@@ -50,6 +52,7 @@ import {
 	type ToolOutcome,
 	type ToolRegistry,
 	type TurnOrigin,
+	WITHDRAW_OWN_CONSENTS,
 	WRITE_OWN_MEMORY,
 	WRITE_OWN_SETTINGS
 } from './tools.js';
@@ -63,13 +66,15 @@ export type SessionTarget =
 	| { readonly kind: 'room'; readonly roomId: string };
 
 // What a turn an event started may not do, whatever its owner may: act through a contract, change
-// how the assistant speaks to its owner, or keep a note or a skill proposal that later turns would
-// read as the assistant's own. The event's own text comes from a third party, so only the owner's
-// yes, in a turn of their own, can make the assistant act or remember.
+// how the assistant speaks to its owner, keep a note or a skill proposal that later turns would
+// read as the assistant's own, or withdraw a consent. The event's own text comes from a third
+// party, so only the owner's yes, in a turn of their own, can make the assistant act, remember or
+// change what the owner decided.
 const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	ACT_THROUGH_CONTRACTS,
 	WRITE_OWN_SETTINGS,
-	WRITE_OWN_MEMORY
+	WRITE_OWN_MEMORY,
+	WITHDRAW_OWN_CONSENTS
 ];
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
@@ -194,7 +199,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			skillsListTool,
 			skillsSearchTool,
 			skillsReadTool,
-			skillsProposeTool
+			skillsProposeTool,
+			consentsListTool,
+			makeConsentsWithdrawTool({
+				// Each application once, as consents_list names it
+				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort(),
+				consentMetrics
+			})
 		],
 		() => contracts.tools
 	);
@@ -359,7 +370,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				actions,
 				withheldActions: withheld,
 				db,
-				...(correlationId === undefined ? {} : { correlationId })
+				...(correlationId === undefined ? {} : { correlationId }),
+				log
 			};
 			// A resumed turn has no new message: it goes on from the call its owner allowed
 			const told: Told =

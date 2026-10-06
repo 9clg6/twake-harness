@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
-import type { WaitReason } from '../consents/consent.js';
+import { isBuiltInConsent, type WaitReason } from '../consents/consent.js';
 import { readDelegationCode, type DelegationCode } from '../consents/delegation.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
@@ -52,10 +52,6 @@ function parseBody(text: string): unknown {
 // the first and never the second
 export const CALL_CONTRACTS = 'contracts.call';
 export const ACT_THROUGH_CONTRACTS = 'contracts.act';
-
-// The assistant's own feed of workplace events, read without asking: it is how events reach the
-// owner in the first place
-const FEED_DOMAIN = 'events';
 
 // A contract becomes a tool that calls it through APISIX, naming the owner so that the gateway
 // attaches the owner's token: the harness never holds one. What comes back is data for the model.
@@ -126,7 +122,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// consent applies to it.
 			const owner = context.principalId;
 			if (
-				!(contract.domain === FEED_DOMAIN && contract.level === 'read') &&
+				!isBuiltInConsent(contract.domain, contract.level) &&
 				owner !== ORGANIZATION_PRINCIPAL &&
 				!(await withPrincipal(context.db, { id: owner }, (tx) =>
 					hasConsent(tx, owner, contract.domain, contract.level)
