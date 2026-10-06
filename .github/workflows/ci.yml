@@ -31,9 +31,10 @@ jobs:
       fail-fast: false
       matrix:
         # Every suite runs with one api replica and with two sharing the database, on the
-        # Synapse of the platform and on the latest release to see an upgrade coming
+        # Synapse of the platform; the latest release, there to see an upgrade coming, runs on
+        # main only, so a pull request costs half the runner time
         replicas: [1, 2]
-        synapse: ['ghcr.io/element-hq/synapse:v1.160.0', 'ghcr.io/element-hq/synapse:latest']
+        synapse: ${{ github.event_name == 'push' && fromJSON('["ghcr.io/element-hq/synapse:v1.160.0", "ghcr.io/element-hq/synapse:latest"]') || fromJSON('["ghcr.io/element-hq/synapse:v1.160.0"]') }}
     services:
       postgres:
         image: postgres:16
