@@ -11,9 +11,11 @@ export interface ContractParameter {
 }
 
 export interface ContractDefinition {
-	// The contract id, the operationId of the OpenAPI, such as calendar.freebusy.read.v1
+	// The versioned contract, such as calendar.freebusy.read.v1: the first tag of the operation,
+	// or its operationId when it has no tag
 	readonly id: string;
-	// The same, in the alphabet a model tool name allows
+	// What the model calls: the operationId, a verb such as read_freebusy, in the alphabet a model
+	// tool name allows
 	readonly toolName: string;
 	readonly method: HttpMethod;
 	readonly pathTemplate: string;
@@ -32,6 +34,7 @@ const parameterSchema = z.object({
 
 const operationSchema = z.object({
 	operationId: z.string().min(1).optional(),
+	tags: z.array(z.string()).optional(),
 	summary: z.string().optional(),
 	description: z.string().optional(),
 	parameters: z.array(parameterSchema).optional(),
@@ -52,13 +55,15 @@ const documentSchema = z.object({
 
 const METHODS: readonly HttpMethod[] = ['get', 'post', 'put', 'patch', 'delete'];
 
-export function toToolName(contractId: string): string {
-	return contractId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
+export function toToolName(operationId: string): string {
+	return operationId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 64);
 }
 
 // Reads the curated OpenAPI APISIX serves and keeps one contract per operation that has an id.
 // Operations without an id, and header or cookie parameters, are left out on purpose: a
-// contract is called by its name and nothing travels in headers but what APISIX adds.
+// contract is called by its name and nothing travels in headers but what APISIX adds. The
+// contracts service names each operation with a verb (operationId) and the versioned contract it
+// belongs to with its first tag; the model sees the verb, everything else names the contract.
 export function parseContracts(document: unknown): ContractDefinition[] {
 	const parsed = documentSchema.safeParse(document);
 	if (!parsed.success) throw new Error('the OpenAPI document has an unexpected shape');
@@ -79,8 +84,9 @@ export function parseContracts(document: unknown): ContractDefinition[] {
 					description: p.description ?? null
 				}));
 			const body = operation.data.requestBody?.content['application/json']?.schema ?? null;
+			const contractName = operation.data.tags?.find((tag) => tag.length > 0);
 			contracts.push({
-				id: operation.data.operationId,
+				id: contractName ?? operation.data.operationId,
 				toolName: toToolName(operation.data.operationId),
 				method,
 				pathTemplate,

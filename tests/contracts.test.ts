@@ -4,12 +4,14 @@ import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import type { ChatRequest, ToolCall } from './helpers/fake-apisix.js';
 
+// The shape of the contracts service: a verb as operationId, the versioned contract as first tag
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
 		'/calendar/freebusy': {
 			get: {
-				operationId: 'calendar.freebusy.read.v1',
+				operationId: 'read_freebusy',
+				tags: ['calendar.freebusy.read.v1'],
 				summary: 'Tells whether the user is free between two instants',
 				parameters: [
 					{
@@ -29,7 +31,8 @@ const CATALOG = {
 		},
 		'/calendar/events/{id}/accept': {
 			post: {
-				operationId: 'calendar.event.accept.v1',
+				operationId: 'accept_event',
+				tags: ['calendar.event.accept.v1'],
 				description: 'Accepts an invitation on behalf of the user',
 				parameters: [{ name: 'id', in: 'path', required: true, schema: { type: 'string' } }],
 				requestBody: {
@@ -79,8 +82,8 @@ describe('contracts as tools', () => {
 		const names = offered.map((t) => t.function.name).sort();
 		expect(names).toEqual(
 			[
-				'calendar_event_accept_v1',
-				'calendar_freebusy_read_v1',
+				'accept_event',
+				'read_freebusy',
 				'clarify',
 				'memory',
 				'scoped_sessions_list',
@@ -98,7 +101,7 @@ describe('contracts as tools', () => {
 		h.apisix.llm.script = (_request: ChatRequest, index: number) =>
 			index === 0
 				? {
-						toolCalls: toolCall('calendar_freebusy_read_v1', {
+						toolCalls: toolCall('read_freebusy', {
 							start: '2026-10-06T17:00:00Z',
 							end: '2026-10-06T18:00:00Z'
 						})
@@ -151,7 +154,7 @@ describe('contracts as tools', () => {
 		h.apisix.llm.script = (_request: ChatRequest, index: number) =>
 			index === 0
 				? {
-						toolCalls: toolCall('calendar_freebusy_read_v1', {
+						toolCalls: toolCall('read_freebusy', {
 							start: '2026-10-06T17:00:00Z',
 							end: '2026-10-06T18:00:00Z'
 						})
@@ -169,7 +172,7 @@ describe('contracts as tools', () => {
 
 	it('forwards the correlation id of a direct tool call to the gateway', async () => {
 		const res = await injectAs('alice', 'corr-tool-7', '/v1/tool', {
-			tool: 'calendar_freebusy_read_v1',
+			tool: 'read_freebusy',
 			arguments: { start: '2026-10-06T17:00:00Z', end: '2026-10-06T18:00:00Z' }
 		});
 		expect(res.statusCode).toBe(200);
@@ -183,7 +186,7 @@ describe('contracts as tools', () => {
 		h.apisix.llm.script = (_request: ChatRequest, index: number) =>
 			index === 0
 				? {
-						toolCalls: toolCall('calendar_event_accept_v1', {
+						toolCalls: toolCall('accept_event', {
 							id: 'evt 42',
 							body: { comment: 'ok' }
 						})
@@ -193,6 +196,7 @@ describe('contracts as tools', () => {
 		const call = h.apisix.contracts.calls[0];
 		expect(call?.method).toBe('POST');
 		expect(call?.path).toBe('/calendar/events/evt%2042/accept');
+		expect(call?.headers['x-twake-contract']).toBe('calendar.event.accept.v1');
 		expect(call?.body).toEqual({ comment: 'ok' });
 		expect(call?.headers['content-type']).toBe('application/json');
 	});
@@ -206,7 +210,7 @@ describe('contracts as tools', () => {
 		});
 		h.apisix.llm.script = (_request: ChatRequest, index: number) =>
 			index === 0
-				? { toolCalls: toolCall('calendar_freebusy_read_v1', { start: 'a', end: 'b' }) }
+				? { toolCalls: toolCall('read_freebusy', { start: 'a', end: 'b' }) }
 				: { content: 'the calendar answered with a note' };
 		const res = await c.post<{ answer: string }>('alice', '/v1/chat', { message: 'check' });
 		expect(res.body.answer).toBe('the calendar answered with a note');
@@ -220,7 +224,7 @@ describe('contracts as tools', () => {
 		h.apisix.contracts.handler = () => ({ status: 503, body: { error: 'calendar down' } });
 		h.apisix.llm.script = (_request: ChatRequest, index: number) =>
 			index === 0
-				? { toolCalls: toolCall('calendar_freebusy_read_v1', { start: 'a', end: 'b' }) }
+				? { toolCalls: toolCall('read_freebusy', { start: 'a', end: 'b' }) }
 				: { content: 'the calendar is not available right now' };
 		const res = await c.post<{ answer: string }>('alice', '/v1/chat', { message: 'free?' });
 		expect(res.status).toBe(200);
@@ -230,16 +234,13 @@ describe('contracts as tools', () => {
 
 	it('refuses a contract call for a user without the right, and refuses unknown arguments', async () => {
 		expect(
-			(await c.tool('alice', 'calendar_freebusy_read_v1', { start: 'a', end: 'b', user_id: 'bob' }))
-				.status
+			(await c.tool('alice', 'read_freebusy', { start: 'a', end: 'b', user_id: 'bob' })).status
 		).toBe(404);
 		await h.db.sql.begin(async (sql) => {
 			await sql`select set_config('app.principal', 'carol', true)`;
 			await sql`insert into principals (id, actions) values ('carol', '["chat"]'::jsonb)`;
 		});
-		expect(
-			(await c.tool('carol', 'calendar_freebusy_read_v1', { start: 'a', end: 'b' })).status
-		).toBe(403);
+		expect((await c.tool('carol', 'read_freebusy', { start: 'a', end: 'b' })).status).toBe(403);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 

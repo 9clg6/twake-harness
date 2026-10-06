@@ -102,6 +102,8 @@ describe('an event wakes my assistant', () => {
 		const call = h.apisix.contracts.calls.find((c) => c.path === '/v1/events/evt-1');
 		expect(call?.method).toBe('GET');
 		expect(call?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
+		// The contract is named by its first tag, not by the verb the model calls
+		expect(call?.headers['x-twake-contract']).toBe('events.read.v1');
 		expect(
 			h.logLines().some((l) => l['msg'] === 'event queued' && l['client'] === 'dispatcher')
 		).toBe(true);
