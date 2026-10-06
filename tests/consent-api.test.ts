@@ -151,6 +151,29 @@ describe('my consents through the API', () => {
 		expect(anonymous.json()).toEqual({ error: 'invalid token' });
 	});
 
+	it('asks of my token the rights the other owner routes ask', async () => {
+		// Erin may no longer chat with her assistant; Frank may, but not withdraw what he allowed
+		for (const [id, actions] of [
+			['erin', ['contracts.call']],
+			['frank', ['chat', 'contracts.call']]
+		] as const) {
+			await h.db.sql.begin(async (sql) => {
+				await sql`select set_config('app.principal', ${id}, true)`;
+				await sql`insert into principals (id, actions) values (${id}, ${sql.json([...actions])})`;
+			});
+		}
+		const someCall = '00000000-0000-4000-8000-000000000000';
+		const refused = { status: 403, body: { error: 'forbidden' } };
+		expect(await c.get('erin', '/v1/consents')).toEqual(refused);
+		expect(await c.put('erin', '/v1/consents/mail/read', {})).toEqual(refused);
+		expect(await c.get('erin', '/v1/pending-calls')).toEqual(refused);
+		expect(await c.post('erin', `/v1/pending-calls/${someCall}/approve`, {})).toEqual(refused);
+		expect(await c.post('erin', `/v1/pending-calls/${someCall}/refuse`, {})).toEqual(refused);
+		expect((await c.put('frank', '/v1/consents/mail/read', {})).status).toBe(201);
+		expect(await c.delete('frank', '/v1/consents/mail/read')).toEqual(refused);
+		expect((await c.get('frank', '/v1/consents')).status).toBe(200);
+	});
+
 	it('shows the feed of events as built in, and grants only what the catalog offers', async () => {
 		expect(await c.put('alice', '/v1/consents/events/read', {})).toEqual({
 			status: 200,

@@ -10,7 +10,7 @@ import { z } from 'zod';
 
 import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
-import { runTool, toolCallStatus } from './agent/tools.js';
+import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
 import { localeOf } from './assistants/locale.js';
 import { findAssistant } from './assistants/repository.js';
@@ -577,8 +577,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			// The owner's consents, which a settings page lists, grants and withdraws with the owner's
 			// own token. The reading of the assistant's own feed of events is built in: it is listed,
 			// never granted nor withdrawn.
-			scope.get('/consents', async (request) => {
+			scope.get('/consents', async (request, reply) => {
 				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 				const consents = await withPrincipal(db, principal, (tx) => listConsents(tx, principal.id));
 				return { consents: consents.map(toConsentView) };
 			});
@@ -588,6 +590,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				'/consents/:domain/:level',
 				async (request, reply) => {
 					const principal = principalOf(request);
+					// Granting is the owner's own yes, given ahead of the question: it takes the same
+					// right as answering one
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 					const { domain, level } = request.params;
 					const offered =
 						isConsentLevel(level) &&
@@ -616,6 +622,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				'/consents/:domain/:level',
 				async (request, reply) => {
 					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes(WITHDRAW_OWN_CONSENTS)) {
+						return reply.code(403).send(FORBIDDEN);
+					}
 					const { domain, level } = request.params;
 					if (!isConsentLevel(level)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					if (isBuiltInConsent(domain, level)) return reply.code(409).send(CONSENT_BUILT_IN);
@@ -644,8 +654,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 			// What waits for the owner's answer, asked in their room or through the API, which they
 			// answer here as they would in the chat
-			scope.get('/pending-calls', async (request) => {
+			scope.get('/pending-calls', async (request, reply) => {
 				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 				const calls = await withOverdueExpired(principal, request.log, (tx) =>
 					listPendingCalls(tx, principal.id)
 				);
@@ -661,6 +673,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				'/pending-calls/:id/refuse',
 				async (request, reply) => {
 					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 					const { id } = request.params;
 					if (!PENDING_CALL_ID.test(id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const call = await withOverdueExpired(principal, request.log, (tx) =>
@@ -696,6 +710,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				'/pending-calls/:id/approve',
 				async (request, reply) => {
 					const principal = principalOf(request);
+					const record = await loadPrincipal(principal);
+					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 					const { id } = request.params;
 					if (!PENDING_CALL_ID.test(id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const call = await withOverdueExpired(principal, request.log, (tx) =>
@@ -762,7 +778,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					// A direct tool call runs once allowed, under the same rules as when it was made, and
 					// answers as it would have: the rights to call and act through contracts stay a
 					// switch above the owner's consents
-					const record = await loadPrincipal(principal);
 					const tool = tools.find(call.tool);
 					if (
 						tool !== null &&
