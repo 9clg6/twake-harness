@@ -6,3 +6,10 @@ export function fenced(label: string, data: unknown): string {
 	const nonce = randomBytes(6).toString('hex');
 	return [`<<<${label} ${nonce}`, JSON.stringify(data), `${label} ${nonce}>>>`].join('\n');
 }
+
+// Text people wrote, cut to its first characters rather than refused, as the contracts cap theirs:
+// it is shown as data anyway
+export function cut(text: string, max: number): string {
+	const characters = Array.from(text);
+	return characters.length <= max ? text : characters.slice(0, max).join('');
+}

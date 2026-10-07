@@ -2,6 +2,7 @@ import { DeadLetterError, RabbitMQClient } from '@linagora/rabbitmq-client';
 import { z } from 'zod';
 
 import type { ActivitySource } from '../config.js';
+import { cut } from '../llm/data.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
@@ -15,10 +16,9 @@ export const DELIVERY_LIMIT = 5;
 // The most recipients of one event the listener reads, in their order: the others are left out
 const MAX_RECIPIENTS = 100;
 
-// Text people wrote, cut to its first characters rather than refused, as the contracts cap theirs:
-// it is shown as data anyway
+// Text people wrote, cut rather than refused
 function untrustedText(max: number) {
-	return z.string().transform((text) => Array.from(text).slice(0, max).join(''));
+	return z.string().transform((text) => cut(text, max));
 }
 
 // Someone an event is for, as its application names them

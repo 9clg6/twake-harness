@@ -6,6 +6,7 @@ import { z } from 'zod';
 import { formatOffset } from '../agent/clock.js';
 import { wallTimeIn } from '../agent/invitation.js';
 import type { CalendarSource, Config } from '../config.js';
+import { cut } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { DELIVERY_LIMIT } from './activity.js';
 import { INVITED_EVENT_TYPE } from './event-types.js';
@@ -43,11 +44,6 @@ function organizerOf(vevent: ICAL.Component, sender: unknown): string | null {
 		if (candidate !== null && EMAIL.safeParse(candidate).success) return candidate;
 	}
 	return null;
-}
-
-function cut(text: string, max: number): string {
-	const characters = Array.from(text);
-	return characters.length <= max ? text : characters.slice(0, max).join('');
 }
 
 // A property's value as the calendar wrote it, escapes included
