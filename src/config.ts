@@ -262,10 +262,31 @@ function isAmqpUrl(value: string): boolean {
 	return URL.canParse(value) && ['amqp:', 'amqps:'].includes(new URL(value).protocol);
 }
 
+// The address a source the worker listens to is read at, as its settings give it: an amqp or
+// amqps URL, which holds the password of the instance's user, so that a refusal never says it. The
+// owners a source wakes are the recipients whose email is on the mail domain: without one, it
+// would wake nobody, and say nothing.
+function sourceAddress(
+	source: 'ACTIVITY' | 'CALENDAR',
+	address: string,
+	values: { MATRIX_SERVER_NAME: string; MATRIX_MAIL_DOMAIN: string }
+): string {
+	if (!isAmqpUrl(address)) {
+		throw new Error(
+			`invalid configuration: ${source}_ENABLED needs ${source}_AMQP_URL, an amqp or amqps URL`
+		);
+	}
+	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
+		throw new Error(
+			`invalid configuration: ${source}_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes`
+		);
+	}
+	return address;
+}
+
 // The activity exchange as the worker listens to it. The routing keys its queue is bound to are
 // CloudEvent types, each exactly, since a word * or # of a topic binding would let in events of
-// other types, or every event. The owners it wakes are the recipients whose email is on the mail
-// domain: without one, it would wake nobody, and say nothing.
+// other types, or every event.
 function activitySource(values: {
 	ACTIVITY_AMQP_URL: string;
 	ACTIVITY_TYPES: string;
@@ -275,17 +296,7 @@ function activitySource(values: {
 	amqpUrl: string;
 	types: string[];
 } {
-	// The address holds the password of the instance's user: a refusal never says it
-	if (!isAmqpUrl(values.ACTIVITY_AMQP_URL)) {
-		throw new Error(
-			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
-		);
-	}
-	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
-		throw new Error(
-			'invalid configuration: ACTIVITY_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
-		);
-	}
+	const amqpUrl = sourceAddress('ACTIVITY', values.ACTIVITY_AMQP_URL, values);
 	const types = listOf(values.ACTIVITY_TYPES);
 	if (types.length === 0) {
 		throw new Error('invalid configuration: ACTIVITY_TYPES lists no CloudEvent type');
@@ -296,28 +307,17 @@ function activitySource(values: {
 			`invalid configuration: ACTIVITY_TYPES lists the CloudEvent types that wake an assistant, never a pattern such as ${JSON.stringify(pattern)}`
 		);
 	}
-	return { amqpUrl: values.ACTIVITY_AMQP_URL, types };
+	return { amqpUrl, types };
 }
 
-// Calendar's fanout, on the vhost its address names. A notification names its invitee by email,
-// which only the instance's mail domain makes one of its owners.
+// Calendar's fanout, on the vhost its address names, whose notifications name their invitee by
+// email
 function calendarSource(values: {
 	CALENDAR_AMQP_URL: string;
-	MATRIX_MAIL_DOMAIN: string;
 	MATRIX_SERVER_NAME: string;
+	MATRIX_MAIL_DOMAIN: string;
 }): CalendarSource {
-	// The address holds the password of the instance's user: a refusal never says it
-	if (!isAmqpUrl(values.CALENDAR_AMQP_URL)) {
-		throw new Error(
-			'invalid configuration: CALENDAR_ENABLED needs CALENDAR_AMQP_URL, an amqp or amqps URL'
-		);
-	}
-	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
-		throw new Error(
-			'invalid configuration: CALENDAR_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
-		);
-	}
-	return { amqpUrl: values.CALENDAR_AMQP_URL };
+	return { amqpUrl: sourceAddress('CALENDAR', values.CALENDAR_AMQP_URL, values) };
 }
 
 export function loadConfig(env: Env): Config {
