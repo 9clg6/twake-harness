@@ -980,6 +980,30 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect((await broker.queue(DEAD_LETTERS, CALENDAR))?.messages).toBe(before);
 	});
 
+	it('ends an invitation that gives its length instead of its end, and checks its slot', async () => {
+		await publish(
+			notification({
+				uid: 'uid-duration',
+				lines: [
+					'SUMMARY:Point',
+					'DTSTART;TZID=Europe/Paris:20261009T090000',
+					'DURATION:PT1H30M',
+					'ORGANIZER;CN=Bob:mailto:bob@test.local'
+				]
+			})
+		);
+		const told = await toldOfId(producerId('uid-duration', 'alice@test.local', '0'));
+		expect(shownIn(told)?.object).toMatchObject({
+			start: '2026-10-09T09:00:00+02:00',
+			end: '2026-10-09T10:30:00+02:00'
+		});
+		expect(checkIn(told)?.['arguments']).toEqual({
+			start: '2026-10-09T09:00:00+02:00',
+			end: '2026-10-09T10:30:00+02:00',
+			exclude: ['uid-duration']
+		});
+	});
+
 	it('hashes a UID as the calendar wrote it, a bare comma and semicolon and an escape included', async () => {
 		// The calendar producer hashed the UID as it stands in the iCalendar, which the audit's
 		// records are found by: the harness reads it the same, never as the parser unescapes it

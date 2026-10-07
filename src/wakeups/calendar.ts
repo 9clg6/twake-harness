@@ -114,27 +114,45 @@ interface When {
 
 const NO_TIME: When = { at: null, timezone: null };
 
+// A time of an invitation in the zone it names
+function timeAt(time: ICAL.Time, tzid: unknown): When {
+	if (time.isDate) return { at: time.toString(), timezone: null };
+	if (time.zone === ICAL.Timezone.utcTimezone) return { at: time.toString(), timezone: 'UTC' };
+	if (typeof tzid !== 'string' || tzid.length === 0) return { at: time.toString(), timezone: null };
+	// A zone the calendar does not define is read as the runtime knows it, an IANA name such as
+	// Europe/Paris; any other leaves the time floating, its wall time as written
+	if (time.zone === ICAL.Timezone.localTimezone) {
+		return { at: wallTimeIn(time.toString(), tzid) ?? time.toString(), timezone: tzid };
+	}
+	// The zone as the calendar defines it, as sabre writes every zone an invitation names
+	return { at: `${time.toString()}${formatOffset(time.utcOffset() / 60)}`, timezone: tzid };
+}
+
 function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend'): When {
 	const property = vevent.getFirstProperty(name);
 	if (property === null) return NO_TIME;
 	try {
 		const time = property.getFirstValue();
-		if (!(time instanceof ICAL.Time)) return NO_TIME;
-		if (time.isDate) return { at: time.toString(), timezone: null };
-		if (time.zone === ICAL.Timezone.utcTimezone) return { at: time.toString(), timezone: 'UTC' };
-		const tzid = property.getParameter('tzid');
-		if (typeof tzid !== 'string' || tzid.length === 0) {
-			return { at: time.toString(), timezone: null };
-		}
-		// A zone the calendar does not define is read as the runtime knows it, an IANA name such as
-		// Europe/Paris; any other leaves the time floating, its wall time as written
-		if (time.zone === ICAL.Timezone.localTimezone) {
-			return { at: wallTimeIn(time.toString(), tzid) ?? time.toString(), timezone: tzid };
-		}
-		// The zone as the calendar defines it, as sabre writes every zone an invitation names
-		return { at: `${time.toString()}${formatOffset(time.utcOffset() / 60)}`, timezone: tzid };
+		return time instanceof ICAL.Time ? timeAt(time, property.getParameter('tzid')) : NO_TIME;
 	} catch {
 		// A time the calendar wrote wrong is no time: the rest of the invitation still counts
+		return NO_TIME;
+	}
+}
+
+// The end of an invitation: its DTEND, or else its start and its DURATION, in the start's zone
+function endOf(vevent: ICAL.Component): When {
+	if (vevent.hasProperty('dtend')) return whenOf(vevent, 'dtend');
+	const start = vevent.getFirstProperty('dtstart');
+	if (start === null || !vevent.hasProperty('duration')) return NO_TIME;
+	try {
+		const time = start.getFirstValue();
+		const duration = vevent.getFirstPropertyValue('duration');
+		if (!(time instanceof ICAL.Time) || !(duration instanceof ICAL.Duration)) return NO_TIME;
+		const end = time.clone();
+		end.addDuration(duration);
+		return timeAt(end, start.getParameter('tzid'));
+	} catch {
 		return NO_TIME;
 	}
 }
@@ -211,7 +229,7 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 	const id = invitationId(vevent, writtenUid, recipient);
 	const organizer = organizerOf(vevent.parsed, message['senderEmail']);
 	const start = whenOf(vevent.parsed, 'dtstart');
-	const end = whenOf(vevent.parsed, 'dtend');
+	const end = endOf(vevent.parsed);
 	const occurrence = writtenValue(vevent.written, 'RECURRENCE-ID');
 	const title = vevent.parsed.getFirstPropertyValue('summary');
 	return {
