@@ -131,20 +131,66 @@ describe('a chat turn with the scripted model', () => {
 		expect(toolLine?.['arguments']).toBeUndefined();
 	});
 
-	it('stops a model that keeps calling tools after the allowed number of calls', async () => {
-		h.apisix.llm.script = () => ({
-			toolCalls: [
-				{
-					id: 'loop',
-					type: 'function',
-					function: { name: 'unknown_tool', arguments: '{}' }
-				}
-			]
-		});
-		const { status, body } = await chat('alice', { message: 'loop' });
-		expect(status).toBe(502);
-		expect(body.error).toBe('execution failed');
-		expect(h.apisix.llm.calls.length).toBeLessThanOrEqual(7);
+	it('ends a turn that reaches its limit of tool calls with what the model did and what remains', async () => {
+		// Four calls at a time for as long as it has tools: its second answer goes past the six calls
+		// one message may run, and asked without tools, it tells where it stands
+		const progress = 'I read your consents six times; two reads remain. Ask me to continue.';
+		h.apisix.llm.script = (request, index) =>
+			request.tools === undefined
+				? { content: progress }
+				: {
+						toolCalls: [0, 1, 2, 3].map((n) => ({
+							id: `read_${index}_${n}`,
+							type: 'function' as const,
+							function: { name: 'consents_list', arguments: '{}' }
+						}))
+					};
+		const { status, body } = await chat('alice', { message: 'Read them all' }, 'turn-limit');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(progress);
+		expect(h.apisix.llm.calls).toHaveLength(3);
+		expect(h.apisix.llm.calls.slice(0, 2).every((c) => (c.request.tools ?? []).length > 0)).toBe(
+			true
+		);
+		const last = h.apisix.llm.calls[2]?.request;
+		expect(last?.tools).toBeUndefined();
+		// The model is told, in its system prompt, what to answer: what it did, what remains, and that
+		// the owner can ask it to continue
+		const instruction = last?.messages[0];
+		expect(instruction?.role).toBe('system');
+		expect(instruction?.content).toMatch(/limit of 6 tool calls/);
+		expect(instruction?.content).toMatch(/what you did, what remains/);
+		expect(instruction?.content).toMatch(/ask you to continue/);
+		// Six calls ran; each call past the limit reads that it did not run
+		const results = (last?.messages ?? [])
+			.filter((m) => m.role === 'tool')
+			.map((m) => ({ id: m.tool_call_id, result: JSON.parse(m.content ?? '{}') as unknown }));
+		expect(results.map((r) => r.id)).toEqual([
+			'read_0_0',
+			'read_0_1',
+			'read_0_2',
+			'read_0_3',
+			'read_1_0',
+			'read_1_1',
+			'read_1_2',
+			'read_1_3'
+		]);
+		for (const ran of results.slice(0, 6)) expect(ran.result).toHaveProperty('consents');
+		for (const skipped of results.slice(6)) {
+			expect(skipped.result).toMatchObject({ error: 'tool_call_limit' });
+			expect(JSON.stringify(skipped.result)).toMatch(/limit of 6 tool calls/);
+		}
+		const reached = h
+			.logLines()
+			.find((line) => line['reqId'] === 'turn-limit' && line['msg'] === 'tool call limit reached');
+		expect(reached).toMatchObject({ level: 30, limit: 6, toolCalls: 6, notRun: 2 });
+		// The conversation keeps the calls and the answer, never the instruction of that last call
+		h.apisix.llm.script = echoScript;
+		await chat('alice', { session_id: body.session_id, message: 'Go on' });
+		const next = h.apisix.llm.calls[3]?.request.messages ?? [];
+		expect(next.filter((m) => m.role === 'tool')).toHaveLength(8);
+		expect(next.at(-2)).toMatchObject({ role: 'assistant', content: progress });
+		expect(next.some((m) => /ask you to continue/.test(m.content ?? ''))).toBe(false);
 	});
 
 	// The calls a held model received, in order of arrival, and the most it held at once

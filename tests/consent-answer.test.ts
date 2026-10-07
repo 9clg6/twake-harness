@@ -186,6 +186,14 @@ describe('my answer lets my assistant carry on', () => {
 		);
 	}
 
+	// The notices of the turns that failed
+	function failures(): DecryptedMessage[] {
+		return client.messages.filter(
+			(m) =>
+				m.roomId === room && m.sender === assistantId && m.body.startsWith('Something went wrong')
+		);
+	}
+
 	async function nextAnswer(seen: number): Promise<string> {
 		for (let i = 0; i < 120; i += 1) {
 			const latest = answers().at(seen);
@@ -577,6 +585,39 @@ describe('my answer lets my assistant carry on', () => {
 			'/v1/memory'
 		);
 		expect(kept.body.memory).not.toContain(INJECTED_NOTE);
+	});
+
+	it('tells me what it did and what remains when my yes takes it past its limit of calls', async () => {
+		await withdrawConsent(h.db, 'alice@test.local', 'notes', 'read');
+		// One note at a time for as long as it has tools: the call I allow, the six my yes lets it
+		// run, then one past that limit; asked without tools, it tells where it stands
+		const progress = 'Found: I read 7 of your 10 notes, 3 remain. Ask me to continue.';
+		let made = 0;
+		h.apisix.llm.script = (request) => {
+			if (request.tools === undefined) return { content: progress };
+			made += 1;
+			return {
+				toolCalls: [
+					{
+						id: `note_${made}`,
+						type: 'function',
+						function: { name: 'search_notes', arguments: JSON.stringify({ q: `note ${made}` }) }
+					}
+				]
+			};
+		};
+		const seen = requests().length;
+		await client.sendText(room, 'Read my ten notes, one at a time');
+		const request = await nextRequest(seen);
+		const answered = answers().length;
+		const failed = failures().length;
+		await client.react(room, request, '✅');
+		expect(await nextAnswer(answered)).toBe(progress);
+		expect(failures()).toHaveLength(failed);
+		expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual(
+			[1, 2, 3, 4, 5, 6, 7].map((n) => ({ q: `note ${n}` }))
+		);
+		expect(made).toBe(8);
 	});
 });
 
