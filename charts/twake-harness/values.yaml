@@ -114,6 +114,16 @@ config:
   # whatever their source (worker role); past it, an event wakes them no more. Empty means the
   # harness default, 20
   wakeupsPerHour: ''
+  # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
+  # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new
+  # invitation who has an assistant is told of it in their room. It needs the mail domain,
+  # matrixMailDomain or matrixServerName.
+  calendarEnabled: false
+  # The Secret and key holding the AMQP URL of Calendar's vhost, which carries the password of the
+  # instance's own RabbitMQ user; an empty name means the chart's own Secret (secretEnv or
+  # existingSecret)
+  calendarAmqpUrlSecret: ''
+  calendarAmqpUrlSecretKey: CALENDAR_AMQP_URL
   # The service clients, by token subject, allowed to provision an owner's assistant through the
   # provisioning API, such as the identity server Twake Chat asks (comma separated)
   provisionerClientIds: ''
@@ -140,7 +150,8 @@ config:
 # Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY, and for the
 # matrix role MATRIX_HS_TOKEN (and MATRIX_AS_TOKEN when APISIX does not inject it)
 # and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards;
-# for the worker role that listens to RabbitMQ, ACTIVITY_AMQP_URL unless another Secret holds it
+# for the worker role that listens to RabbitMQ, ACTIVITY_AMQP_URL and CALENDAR_AMQP_URL unless
+# another Secret holds them
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''
@@ -163,7 +174,7 @@ networkPolicy:
   databaseCidrs: []
   databasePort: 5432
   # The RabbitMQ broker's namespace and AMQP port, which the worker role alone reaches, when it
-  # listens to the activity exchange
+  # listens to the activity exchange or to Calendar's fanout
   rabbitmqNamespace: ''
   rabbitmqPort: 5672
   # Extra egress rules, in NetworkPolicy syntax

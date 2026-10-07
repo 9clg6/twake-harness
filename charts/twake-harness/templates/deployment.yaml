@@ -174,6 +174,22 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- if and (eq .Values.role "worker") .Values.config.calendarEnabled }}
+            - name: CALENDAR_ENABLED
+              value: "true"
+            - name: CALENDAR_AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.calendarAmqpUrlSecret | default (include "twake-harness.secretName" .) }}
+                  key: {{ .Values.config.calendarAmqpUrlSecretKey }}
+            {{- /* Rendered with the activity exchange's settings when the worker listens to both */}}
+            {{- if not .Values.config.activityEnabled }}
+            {{- with .Values.config.rabbitmqPrefix }}
+            - name: RABBITMQ_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- end }}
             {{- /* The worker role wakes the assistants for the events of every source it listens to */}}
             {{- if eq .Values.role "worker" }}
             {{- with .Values.config.wakeupsPerHour }}

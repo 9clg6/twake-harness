@@ -213,6 +213,32 @@ jobs:
           done
           grep -A1 TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-api.yaml | grep -q '"7200000"'
           if grep -q TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-worker.yaml /tmp/event-delay-matrix.yaml; then exit 1; fi
+      # Calendar's fanout is rendered on the worker role only, once config.calendarEnabled is set, on
+      # its own or with the activity exchange: its AMQP URL from the chart's own Secret or another
+      # one, the prefix and the mail domain when set, and the egress rule to the broker alone
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.calendarEnabled=true --set secretEnv.CALENDAR_AMQP_URL=amqp://u:p@rabbitmq.dbs:5672/calendar --set config.rabbitmqPrefix=twake-harness-b2b --set config.matrixMailDomain=twake.example --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-worker.yaml
+          grep -A1 'name: CALENDAR_ENABLED' /tmp/calendar-worker.yaml | grep -q '"true"'
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-worker.yaml | grep -q 'name: agent-worker-env'
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-worker.yaml | grep -q 'key: CALENDAR_AMQP_URL'
+          grep -A1 'name: RABBITMQ_PREFIX' /tmp/calendar-worker.yaml | grep -q '"twake-harness-b2b"'
+          grep -A1 'name: MATRIX_MAIL_DOMAIN' /tmp/calendar-worker.yaml | grep -q '"twake.example"'
+          grep -A3 'kubernetes.io/metadata.name: dbs' /tmp/calendar-worker.yaml | grep -q 'port: 5672'
+          if grep -q 'ACTIVITY_' /tmp/calendar-worker.yaml; then exit 1; fi
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/calendar-worker.yaml
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set config.calendarEnabled=true --set config.calendarAmqpUrlSecret=harness-rabbitmq --set config.calendarAmqpUrlSecretKey=calendar-url --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-both.yaml
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-both.yaml | grep -q 'name: harness-rabbitmq'
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-both.yaml | grep -q 'key: calendar-url'
+          grep -A1 'name: ACTIVITY_ENABLED' /tmp/calendar-both.yaml | grep -q '"true"'
+          test "$(grep -c 'name: RABBITMQ_PREFIX' /tmp/calendar-both.yaml)" -eq 1
+          test "$(grep -c 'port: 5672' /tmp/calendar-both.yaml)" -eq 1
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/calendar-both.yaml
+      - run: |
+          for role in api matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.calendarEnabled=true --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-$role.yaml
+            if grep -q -E 'CALENDAR_|RABBITMQ_|port: 5672' /tmp/calendar-$role.yaml; then exit 1; fi
+          done
 
   image:
     needs: [check, test, chart]

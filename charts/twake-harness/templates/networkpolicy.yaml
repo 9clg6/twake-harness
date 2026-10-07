@@ -44,7 +44,7 @@ spec:
         - port: {{ $.Values.networkPolicy.databasePort }}
           protocol: TCP
     {{- end }}
-    {{- if and (eq .Values.role "worker") .Values.config.activityEnabled .Values.networkPolicy.rabbitmqNamespace }}
+    {{- if and (eq .Values.role "worker") (or .Values.config.activityEnabled .Values.config.calendarEnabled) .Values.networkPolicy.rabbitmqNamespace }}
     - to:
         - namespaceSelector:
             matchLabels:
