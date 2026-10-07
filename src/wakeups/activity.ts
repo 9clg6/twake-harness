@@ -29,39 +29,73 @@ const recipientSchema = z.object({
 	reason: z.string().min(1).max(100)
 });
 
+// A field the event may leave out: one the application got wrong is left out too, rather than the
+// event refused
+function optional<T extends z.ZodType>(schema: T) {
+	return schema.optional().catch(undefined);
+}
+
 // A CloudEvent 1.0 in structured JSON, as ADR 001 and 006 shape them: what its object is, and the
-// people it is for
+// people it is for. Only an event without its id, source, type or object goes to the dead letter
+// queue.
 const activityEventSchema = z.object({
 	specversion: z.literal('1.0'),
 	id: z.string().min(1).max(200),
 	source: z.string().min(1).max(200),
 	type: z.string().min(1).max(200),
-	time: z.iso.datetime({ offset: true }).optional(),
-	twakeorg: z.string().min(1).max(200).optional(),
-	twakeactor: z.email().optional(),
-	twakeactorid: z.uuid().optional(),
+	time: optional(z.iso.datetime({ offset: true })),
+	twakeorg: optional(z.string().min(1).max(200)),
+	twakeactor: optional(z.email()),
+	twakeactorid: optional(z.uuid()),
 	data: z.object({
 		object: z.object({
 			type: z.string().min(1).max(100),
 			id: z.string().min(1).max(200),
-			title: untrustedText(1000),
-			key: z.string().min(1).max(100).optional(),
-			board: z.object({ id: z.string().min(1).max(200), name: untrustedText(200) }).optional(),
-			container: z
-				.object({ kind: z.string().min(1).max(100), id: z.string().min(1).max(200) })
-				.optional(),
-			url: z
-				.url({ protocol: /^https?$/ })
-				.max(2000)
-				.optional()
+			title: optional(untrustedText(1000)),
+			key: optional(z.string().min(1).max(100)),
+			board: optional(z.object({ id: z.string().min(1).max(200), name: untrustedText(200) })),
+			container: optional(
+				z.object({ kind: z.string().min(1).max(100), id: z.string().min(1).max(200) })
+			),
+			url: optional(z.url({ protocol: /^https?$/ }).max(2000))
 		}),
 		// A plain text excerpt of the object, which ADR 006 caps at 280 characters
-		preview: untrustedText(1000).optional(),
+		preview: optional(untrustedText(1000)),
 		// Exactly who the event is for, nobody inferred, each read on its own: one the application
 		// names wrongly takes nobody else's turn away
 		recipients: z.array(z.unknown()).default([])
 	})
 });
+
+// The optional fields of an event, by their path
+const OPTIONAL_FIELDS: readonly (readonly string[])[] = [
+	['time'],
+	['twakeorg'],
+	['twakeactor'],
+	['twakeactorid'],
+	['data', 'object', 'title'],
+	['data', 'object', 'key'],
+	['data', 'object', 'board'],
+	['data', 'object', 'container'],
+	['data', 'object', 'url'],
+	['data', 'preview']
+];
+
+function valueAt(value: unknown, path: readonly string[]): unknown {
+	let at: unknown = value;
+	for (const key of path) {
+		if (typeof at !== 'object' || at === null) return undefined;
+		at = (at as Record<string, unknown>)[key];
+	}
+	return at;
+}
+
+// The optional fields the application sent that were left out, as it got them wrong
+function leftOutFields(message: unknown, event: ActivityEvent): string[] {
+	return OPTIONAL_FIELDS.filter(
+		(path) => valueAt(message, path) !== undefined && valueAt(event, path) === undefined
+	).map((path) => path.join('.'));
+}
 
 type ActivityEvent = z.infer<typeof activityEventSchema>;
 
@@ -91,7 +125,7 @@ function wakeupsOf(event: ActivityEvent): {
 		...(object.url === undefined ? {} : { url: object.url })
 	};
 	const untrusted = {
-		title: object.title,
+		...(object.title === undefined ? {} : { title: object.title }),
 		...(object.board === undefined ? {} : { board_name: object.board.name }),
 		...(preview === undefined ? {} : { preview })
 	};
@@ -177,6 +211,10 @@ export async function startActivityListener(
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
 			const event = parsed.data;
+			const fields = leftOutFields(message, event);
+			if (fields.length > 0) {
+				deps.log.warn({ source: event.source, eventId: event.id, fields }, 'event fields left out');
+			}
 			const { wakeups, skipped, ignored } = wakeupsOf(event);
 			if (ignored > 0) {
 				deps.log.warn({ source: event.source, eventId: event.id, ignored }, 'recipients ignored');

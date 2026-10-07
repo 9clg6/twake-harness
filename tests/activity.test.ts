@@ -412,6 +412,43 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		).toEqual([1]);
 	});
 
+	it('leaves out an optional field the application got wrong, instead of refusing the event', async () => {
+		const event = {
+			...activityEvent({
+				object: {
+					type: 'task',
+					id: TASK_ID,
+					key: 'ROAD-12',
+					title: 'Write the quarterly report',
+					board: { id: BOARD_ID, name: 'Roadmap' },
+					url: 'javascript:alert(document.cookie)'
+				}
+			}),
+			time: 'yesterday at noon'
+		};
+		await publish(event);
+		await answerTo(event);
+		const told = lastUser(turnCalls(r.h.apisix.llm.calls, event.id)[0]?.request);
+		const shown = JSON.parse(FENCED.exec(told)?.[2] ?? '{}') as Record<string, unknown>;
+		expect(shown).not.toHaveProperty('time');
+		expect(shown['object']).toEqual({
+			type: 'task',
+			id: TASK_ID,
+			key: 'ROAD-12',
+			board_id: BOARD_ID
+		});
+		// Named in the logs, never with what the application wrote there
+		expect(
+			workerLogs
+				.lines()
+				.filter((line) => line['msg'] === 'event fields left out' && line['eventId'] === event.id)
+				.map((line) => line['fields'])
+		).toEqual([['time', 'data.object.url']]);
+		const logged = JSON.stringify(workerLogs.lines());
+		expect(logged).not.toContain('yesterday at noon');
+		expect(logged).not.toContain('document.cookie');
+	});
+
 	it('takes and drops an event routed by a type it no longer listens to', async () => {
 		// A type the deployment listened to before keeps its binding: the library removes none
 		const completed = 'com.twake.tasks.task.completed.v1';
