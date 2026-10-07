@@ -950,6 +950,36 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		);
 	});
 
+	it('wakes me for an invitation whose free text it cannot read, and reads none of it', async () => {
+		// A description with an unterminated quote in a parameter and a line that lost its fold, a
+		// location, a comment, an attachment and an HTML description: never read, so none of them
+		// can set the invitation aside
+		const before = (await broker.queue(DEAD_LETTERS, CALENDAR))?.messages ?? 0;
+		await publish(
+			notification({
+				uid: 'uid-free-text',
+				lines: [
+					'SUMMARY:Point',
+					'DTSTART:20261006T150000Z',
+					'DTEND:20261006T160000Z',
+					'DESCRIPTION;ALTREP="cid:agenda:Ordre du jour',
+					'confidentiel, ne pas diffuser',
+					'LOCATION:Salle 42',
+					' Tour Twake',
+					'COMMENT:Merci de confirmer',
+					'ATTACH:https://files.test/agenda.pdf',
+					'X-ALT-DESC;FMTTYPE=text/html:<p>Ordre du jour</p>',
+					'ORGANIZER;CN=Bob:mailto:bob@test.local'
+				]
+			})
+		);
+		const told = await toldOfId(producerId('uid-free-text', 'alice@test.local', '0'));
+		for (const text of ['Ordre', 'confidentiel', 'Salle', 'Twake', 'Merci', 'agenda.pdf']) {
+			expect(told).not.toContain(text);
+		}
+		expect((await broker.queue(DEAD_LETTERS, CALENDAR))?.messages).toBe(before);
+	});
+
 	it('hashes a UID as the calendar wrote it, a bare comma and semicolon and an escape included', async () => {
 		// The calendar producer hashed the UID as it stands in the iCalendar, which the audit's
 		// records are found by: the harness reads it the same, never as the parser unescapes it

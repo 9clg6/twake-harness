@@ -45,6 +45,29 @@ function organizerOf(vevent: ICAL.Component, sender: unknown): string | null {
 	return null;
 }
 
+// The properties of free text the harness never reads: taken out before the iCalendar is parsed,
+// with the lines they go on on, so that one written wrong can neither be read nor set the
+// invitation aside
+const NEVER_READ = /^(DESCRIPTION|LOCATION|COMMENT|ATTACH|X-ALT-DESC)[;:]/i;
+// A line that starts a property, BEGIN and END included
+const PROPERTY = /^[A-Za-z0-9-]+[;:]/;
+
+function withoutFreeText(text: string): string {
+	const kept: string[] = [];
+	let leaving = false;
+	for (const line of text.split(/\r?\n/)) {
+		if (NEVER_READ.test(line)) {
+			leaving = true;
+			continue;
+		}
+		// A line folded onto the one before, or one that lost its fold, goes with its property
+		if (leaving && line.length > 0 && (/^[ \t]/.test(line) || !PROPERTY.test(line))) continue;
+		leaving = false;
+		kept.push(line);
+	}
+	return kept.join('\r\n');
+}
+
 // The lines of an iCalendar, unfolded as the calendar producer read them: a line that goes on on
 // the next one, after a space or a tab, is made whole
 function unfolded(text: string): string[] {
@@ -124,8 +147,9 @@ interface Vevent {
 	readonly written: readonly string[];
 }
 
-function veventOf(text: unknown): Vevent {
-	if (typeof text !== 'string') throw new DeadLetterError('a notification without its iCalendar');
+function veventOf(event: unknown): Vevent {
+	if (typeof event !== 'string') throw new DeadLetterError('a notification without its iCalendar');
+	const text = withoutFreeText(event);
 	let vevents: ICAL.Component[];
 	try {
 		const parsed: unknown = ICAL.parse(text);
