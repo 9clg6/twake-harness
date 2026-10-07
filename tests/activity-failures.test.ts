@@ -1,5 +1,5 @@
 import { PassThrough } from 'node:stream';
-import type { ConfirmChannel } from 'amqplib';
+import { connect, type ConfirmChannel } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
@@ -32,6 +32,9 @@ const PERMISSIONS = {
 const CONFIDENTIAL = 'Salary review: Bob leaves in June';
 // The first delay of the worker's retries, which doubles from there
 const RETRY_DELAY_MS = 50;
+// How long the suite's broker lets a consumer hold a message unacknowledged, by default: three
+// seconds rather than half an hour
+const CONSUMER_TIMEOUT_MS = 3000;
 
 const ALICE = { email: 'alice@test.local', reason: 'assigned' };
 
@@ -134,7 +137,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 	let amqp: TcpProxy;
 	const logs = captureLogs();
 	beforeAll(async () => {
-		broker = await startTestBroker();
+		broker = await startTestBroker({ consumerTimeoutMs: CONSUMER_TIMEOUT_MS });
 		// The exchange the applications publish on, and the instance's user, as the platform makes
 		// them: it may declare and write its own names only, and read activity and its own queues
 		await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
@@ -401,6 +404,55 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect(handled(mark).map(({ eventId, outcome }) => ({ eventId, outcome }))).toEqual([
 			{ eventId: event.id, outcome: 'woken' }
 		]);
+		expectNoContentIn(logs);
+	});
+
+	it("holds an event past the broker's own consumer timeout while the database is down", async () => {
+		// The broker takes a message back from a consumer that holds it past its consumer timeout, as
+		// a queue declared as the harness's are, but without a timeout of its own, shows
+		const control = 'control.activity';
+		await broker.channel.assertQueue(control, {
+			durable: true,
+			arguments: {
+				'x-queue-type': 'quorum',
+				'x-single-active-consumer': true,
+				'x-delivery-limit': 5
+			}
+		});
+		broker.channel.sendToQueue(control, Buffer.from('{}'), { persistent: true });
+		await broker.channel.waitForConfirms();
+		const consumer = await connect(broker.urlFor('guest', 'guest'));
+		consumer.on('error', () => undefined);
+		const holding = await consumer.createChannel();
+		let takenBack = '';
+		holding.on('error', (err: Error) => {
+			takenBack = err.message;
+		});
+		await holding.prefetch(1);
+		await holding.consume(control, () => undefined, { noAck: false });
+		await until('the control taken back', () => takenBack.includes('timed out'));
+		await consumer.close().catch(() => undefined);
+		await broker.channel.deleteQueue(control);
+		// The worker holds an event past it, trying it again, and never has it taken back
+		const mark = logs.lines().length;
+		const event = activityEvent();
+		database.cut();
+		try {
+			await publish(event);
+			await failuresOf(event, 1);
+			await new Promise((resolve) => setTimeout(resolve, 3 * CONSUMER_TIMEOUT_MS));
+			expect(
+				logs
+					.lines()
+					.slice(mark)
+					.filter((line) => ['Channel error', 'Channel closed'].includes(String(line['msg'])))
+			).toEqual([]);
+			expect(await healthOf(worker)).toBe('connected');
+		} finally {
+			database.restore();
+		}
+		await toldOf(event);
+		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(1);
 		expectNoContentIn(logs);
 	});
 

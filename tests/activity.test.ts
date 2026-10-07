@@ -483,7 +483,10 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			'x-dead-letter-strategy': 'at-least-once',
 			'x-overflow': 'reject-publish',
 			'x-single-active-consumer': true,
-			'x-delivery-limit': 5
+			'x-delivery-limit': 5,
+			// Held a day while it is tried again, rather than half an hour, before the broker takes
+			// it back
+			'x-consumer-timeout': 86_400_000
 		});
 		expect(await broker.bindingsOf(DEAD_LETTERS)).toEqual([
 			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }

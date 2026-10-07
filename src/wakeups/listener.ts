@@ -19,6 +19,12 @@ import { wake, type WakeDeps, type Wakeup } from './wake.js';
 // and fixed once the queue is declared
 const DELIVERY_LIMIT = 5;
 
+// How long the listener may hold a message unacknowledged, while it tries it again, before the
+// broker takes it back, which counts as a delivery: a day, rather than the half an hour RabbitMQ
+// 3.13 gives by default, after which five of them would dead-letter an event during an outage of
+// the database of three hours. Set on the queue, since the instance's user may set no policy.
+const CONSUMER_TIMEOUT_MS = 86_400_000;
+
 // The first wait before a message is tried again, doubled after each attempt up to a minute: a
 // transient failure, such as the database being down, is tried again for as long as it lasts
 const RETRY_DELAY_MS = 1000;
@@ -189,7 +195,11 @@ export function listenOnOwnQueue(
 				// The source's service owns its exchange: the library only checks that it is there
 				// before it binds
 				passiveExchanges: [own.exchange],
-				queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT },
+				queueArguments: {
+					'x-single-active-consumer': true,
+					'x-delivery-limit': DELIVERY_LIMIT,
+					'x-consumer-timeout': CONSUMER_TIMEOUT_MS
+				},
 				maxRetries: Infinity,
 				maxRetryDelay: MAX_RETRY_DELAY_MS
 			});

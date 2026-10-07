@@ -82,8 +82,29 @@ async function connectAsPlatform(url: string): Promise<ChannelModel> {
 	return connection;
 }
 
-export async function startTestBroker(): Promise<TestBroker> {
-	const container: StartedRabbitMQContainer = await new RabbitMQContainer(IMAGE).start();
+export interface TestBrokerOptions {
+	// The consumer timeout of the broker, past which it takes a message back from a consumer that
+	// holds it unacknowledged, its default half an hour unless set; set, the broker checks it
+	// every second rather than every minute
+	readonly consumerTimeoutMs?: number;
+}
+
+export async function startTestBroker(options: TestBrokerOptions = {}): Promise<TestBroker> {
+	const image = new RabbitMQContainer(IMAGE);
+	if (options.consumerTimeoutMs !== undefined) {
+		image
+			.withCopyContentToContainer([
+				{
+					content: `consumer_timeout = ${options.consumerTimeoutMs}\n`,
+					target: '/etc/rabbitmq/conf.d/90-consumer-timeout.conf'
+				}
+			])
+			// Not a setting of rabbitmq.conf: the check of the consumer timeout runs on this tick
+			.withEnvironment({
+				RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbit channel_tick_interval 1000'
+			});
+	}
+	const container: StartedRabbitMQContainer = await image.start();
 	let admin: ChannelModel = await connectAsPlatform(container.getAmqpUrl());
 	let channel = await admin.createConfirmChannel();
 	// The platform's own connections to the other vhosts, closed with the broker
