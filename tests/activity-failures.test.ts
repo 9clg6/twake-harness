@@ -242,14 +242,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 
 	// The lines of the attempts at an event that failed, once there are that many
 	async function failuresOf(event: ActivityEvent, count: number): Promise<LogLine[]> {
-		for (let i = 0; i < 240; i += 1) {
-			const failures = logs
-				.lines()
-				.filter((line) => line['msg'] === 'event failed' && line['eventId'] === event.id);
-			if (failures.length >= count) return failures;
-			await new Promise((resolve) => setTimeout(resolve, 250));
-		}
-		throw new Error(`fewer than ${count} failed attempts at ${event.id}`);
+		const failures = (): LogLine[] =>
+			logs.lines().filter((line) => line['msg'] === 'event failed' && line['eventId'] === event.id);
+		await until(`${count} failed attempts at ${event.id}`, () => failures().length >= count);
+		return failures();
 	}
 
 	it('dead-letters at once a message that is no event, logging why and nothing of what it says', async () => {
