@@ -19,7 +19,11 @@ export type IdentityState =
 
 export async function readIdentity(db: Db, owner: string, userId: string): Promise<IdentityState> {
 	const record = await withPrincipal(db, { id: owner }, (tx) => findCrossSigning(tx, owner));
-	if (record === null) return { state: 'not_ready' };
+	// The record is the owner's, whichever assistant it was made for: one made for another
+	// identifier, as before a change of the assistants' prefix, holds that assistant's keys, never
+	// this one's, and a record from before identifiers were kept learns its own at the next
+	// preparation. Either way this assistant is not ready yet.
+	if (record === null || record.userId !== userId) return { state: 'not_ready' };
 	if (record.awaitingRecovery) return { state: 'awaiting_recovery' };
 	if (record.deviceId === null) return { state: 'not_ready' };
 	return {

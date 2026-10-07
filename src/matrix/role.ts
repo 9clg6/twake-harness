@@ -15,6 +15,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
+import { readIdentity } from '../assistants/provisioning.js';
 import {
 	findAssistant,
 	findDialog,
@@ -44,7 +45,6 @@ import {
 	type CrossSigningDeps,
 	type CrossSigningResult
 } from './cross-signing.js';
-import { findCrossSigning } from './cross-signing-repository.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
@@ -928,8 +928,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		// Not ready, as when the homeserver refused a step: thrown, so that the queue tries again a
 		// moment later, rather than leave the assistant unready until its provisioner calls again
-		const record = await withPrincipal(db, { id: owner }, (tx) => findCrossSigning(tx, owner));
-		if (record === null || record.deviceId === null) {
+		if ((await readIdentity(db, owner, assistant.userId)).state !== 'ready') {
 			throw new Error('the assistant identity is not ready yet');
 		}
 		log.info({ owner, userId: assistant.userId }, 'assistant prepared');

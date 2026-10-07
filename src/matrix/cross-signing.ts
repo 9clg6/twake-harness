@@ -171,13 +171,14 @@ async function crossSign(
 		awaitingRecovery = false
 	): Promise<void> {
 		if (
-			current?.masterPublicKey === masterPublicKey &&
+			current?.userId === userId &&
+			current.masterPublicKey === masterPublicKey &&
 			current.deviceId === signedDeviceId &&
 			current.awaitingRecovery === awaitingRecovery
 		) {
 			return;
 		}
-		const next = { owner, masterPublicKey, deviceId: signedDeviceId, awaitingRecovery };
+		const next = { owner, userId, masterPublicKey, deviceId: signedDeviceId, awaitingRecovery };
 		await withPrincipal(db, { id: owner }, (tx) => saveCrossSigning(tx, next));
 		current = next;
 	}
