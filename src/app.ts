@@ -3,6 +3,7 @@ import type { Writable } from 'node:stream';
 import Fastify, {
 	type FastifyBaseLogger,
 	type FastifyInstance,
+	type FastifyReply,
 	type FastifyRequest
 } from 'fastify';
 
@@ -40,7 +41,9 @@ import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
+import { findCrossSigning } from './matrix/cross-signing-repository.js';
 import { listMemory } from './memory/repository.js';
+import { principalOfMatrixUser } from './principals/identity.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
 import { findSession, listSessionIds } from './sessions/repository.js';
@@ -122,6 +125,17 @@ const eventSchema = z.object({
 	event_id: z.string().min(1).max(200),
 	type: z.string().min(1).max(100)
 });
+
+// The timezone ToM sends is accepted and not kept yet: the assistant reads its owner's own
+const provisionSchema = z.object({ timezone: z.string().max(100).optional() });
+const homeSchema = z.object({
+	roomId: z
+		.string()
+		.regex(/^![^:]+:.+$/)
+		.max(255)
+});
+// Seconds a client waits before asking again while the assistant's identity is prepared
+const PROVISIONING_RETRY_AFTER = '2';
 
 const SESSION_ID = /^[0-9a-f]{32}$/;
 
@@ -324,6 +338,90 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		request.log.info({ client, owner, eventId, type }, 'event queued');
 		return reply.code(202).send({ queued: true, duplicate: false });
 	});
+
+	// The service clients named in the settings, ToM for Twake Chat, provision an owner's assistant
+	// and give it the room the owner's client opened. The owner is a Matrix user of our homeserver.
+	async function provisioningOwner(
+		request: FastifyRequest<{ Params: { owner: string } }>,
+		reply: FastifyReply
+	): Promise<string | null> {
+		const auth = await authenticate(request.headers.authorization);
+		if (!auth.ok) {
+			request.log.info({ reason: auth.reason }, 'provisioning refused');
+			await reply.code(401).send({ error: 'invalid token' });
+			return null;
+		}
+		const client = auth.principal.id;
+		if (!config.provisioning.clientIds.includes(client)) {
+			request.log.info({ client, reason: 'not_a_provisioner' }, 'provisioning refused');
+			await reply.code(403).send(FORBIDDEN);
+			return null;
+		}
+		const owner = principalOfMatrixUser(config, request.params.owner);
+		if (owner === null) {
+			await reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+			return null;
+		}
+		return owner;
+	}
+
+	// The owner's assistant with the device their client marks verified: 503 until the matrix role
+	// has made its device and cross-signing identity
+	app.put<{ Params: { owner: string } }>(
+		'/v1/provisioning/assistants/:owner',
+		async (request, reply) => {
+			const owner = await provisioningOwner(request, reply);
+			if (owner === null) return reply;
+			if (!provisionSchema.safeParse(request.body ?? {}).success) {
+				return reply.code(400).send({ error: 'invalid request' });
+			}
+			const provisioned = await assistants.provision(owner);
+			if (!provisioned.ok) {
+				return provisioned.reason === 'not_on_homeserver'
+					? reply.code(422).send(OWNER_NOT_ON_HOMESERVER)
+					: reply.code(502).send({ error: 'assistant provisioning failed' });
+			}
+			const signed = await withPrincipal(db, { id: owner }, (tx) => findCrossSigning(tx, owner));
+			if (signed !== null && signed.deviceId !== null) {
+				return {
+					userId: provisioned.assistant.userId,
+					deviceId: signed.deviceId,
+					masterKey: signed.masterPublicKey
+				};
+			}
+			// One preparation at a time; a failed one is asked again by the next call
+			const preparing = await db.sql`
+				select 1 from jobs
+				where kind = 'prepare' and payload->>'owner' = ${owner} and status in ('queued', 'running')`;
+			if (preparing.length === 0) {
+				await enqueueJob(db, { kind: 'prepare', payload: { owner }, groupKey: `prepare:${owner}` });
+			}
+			request.log.info({ owner, created: provisioned.created }, 'assistant identity not ready');
+			return reply
+				.code(503)
+				.header('retry-after', PROVISIONING_RETRY_AFTER)
+				.send({ error: 'assistant not ready' });
+		}
+	);
+
+	app.put<{ Params: { owner: string } }>(
+		'/v1/provisioning/assistants/:owner/home',
+		async (request, reply) => {
+			const owner = await provisioningOwner(request, reply);
+			if (owner === null) return reply;
+			const parsed = homeSchema.safeParse(request.body);
+			if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+			const result = await assistants.setHome(owner, parsed.data.roomId);
+			switch (result) {
+				case 'no_assistant':
+					return reply.code(404).send({ error: 'no assistant' });
+				case 'not_joined':
+					return reply.code(409).send({ error: 'assistant not in the room yet' });
+				default:
+					return reply.code(204).send();
+			}
+		}
+	);
 
 	// Prometheus exposition: what the autoscaler and the dashboards read
 	app.get('/metrics', async (_request, reply) => {

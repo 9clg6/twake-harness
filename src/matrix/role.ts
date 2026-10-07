@@ -41,6 +41,7 @@ import {
 	type CrossSigningDeps,
 	type CrossSigningResult
 } from './cross-signing.js';
+import { findCrossSigning } from './cross-signing-repository.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
@@ -102,6 +103,7 @@ interface SendJob {
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
+const preparePayload = z.object({ owner: z.string().min(1) });
 // How long a stop waits for the pushes and listeners under way before it goes on regardless
 const STOP_DRAIN_MS = 10_000;
 
@@ -823,9 +825,26 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send', 'recover'],
+		kinds: ['send', 'recover', 'prepare'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
+			// An assistant provisioned without a room: its device and cross-signing identity are made
+			// now, since its owner's client asks for them before it opens the room
+			if (job.kind === 'prepare') {
+				const parsed = preparePayload.safeParse(job.payload);
+				if (!parsed.success) throw new Error('prepare payload is malformed');
+				const { owner } = parsed.data;
+				const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+				if (assistant === null || assistant.deletedAt !== null) return;
+				const intent = appservice.getIntentForUserId(assistant.userId);
+				await ensureEncryption(intent);
+				await onEncryptionReady(intent, owner);
+				const signed = await withPrincipal(db, { id: owner }, (tx) => findCrossSigning(tx, owner));
+				// Tried again by the queue: the route answers 503 until the identity is recorded
+				if (signed === null || signed.deviceId === null)
+					throw new Error('assistant identity not ready');
+				return;
+			}
 			if (job.kind === 'recover') {
 				const parsed = recoverPayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('recover payload is malformed');

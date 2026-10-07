@@ -8,6 +8,8 @@ export interface MatrixAdmin {
 	createDirectRoom(asUserId: string, inviteUserId: string): Promise<string>;
 	sendText(asUserId: string, roomId: string, text: string): Promise<void>;
 	leaveRoom(asUserId: string, roomId: string): Promise<void>;
+	// The members who joined the room, as this user sees it: null when the user is not in it
+	joinedMembers(asUserId: string, roomId: string): Promise<readonly string[] | null>;
 	// The cross-signing keys of an assistant, uploaded as the application service, which may
 	// replace an identity the user already has: the device's own token would need interactive
 	// authentication, which a user without a password cannot give
@@ -164,6 +166,21 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 				asUserId
 			);
 			if (response.status !== 200 && response.status !== 403) fail('leave', response);
+		},
+		async joinedMembers(asUserId, roomId) {
+			const response = await call(
+				'GET',
+				`/rooms/${encodeURIComponent(roomId)}/joined_members`,
+				undefined,
+				options.asToken,
+				asUserId
+			);
+			if (response.status === 403 || response.status === 404) return null;
+			const joined = response.body['joined'];
+			if (response.status !== 200 || typeof joined !== 'object' || joined === null) {
+				fail('joined members', response);
+			}
+			return Object.keys(joined);
 		}
 	};
 }

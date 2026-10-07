@@ -164,17 +164,23 @@ async function crossSign(
 	const serverKey = view.masterPublicKey;
 
 	if (holdsIdentity && serverKey !== null && ours.includes(serverKey)) {
-		if (recorded?.masterPublicKey !== serverKey) {
+		let outcome: CrossSigningOutcome = 'kept';
+		if (!view.deviceSigned) {
+			// Uploading the identity the machine holds again signs this device with it
+			const requests = await step('signing this device', () =>
+				machine.bootstrapCrossSigning(false)
+			);
+			await uploadIdentity(deps.admin, intent, machine, requests);
+			log.info({ owner, userId, deviceId }, 'assistant device cross-signed');
+			outcome = 'signed';
+		}
+		// Recorded once the device is signed: the provisioning route hands this pair to clients
+		if (recorded?.masterPublicKey !== serverKey || recorded.deviceId !== deviceId) {
 			await withPrincipal(db, { id: owner }, (tx) =>
-				saveCrossSigning(tx, { owner, masterPublicKey: serverKey })
+				saveCrossSigning(tx, { owner, masterPublicKey: serverKey, deviceId })
 			);
 		}
-		if (view.deviceSigned) return { outcome: 'kept', masterPublicKey: serverKey };
-		// Uploading the identity the machine holds again signs this device with it
-		const requests = await step('signing this device', () => machine.bootstrapCrossSigning(false));
-		await uploadIdentity(deps.admin, intent, machine, requests);
-		log.info({ owner, userId, deviceId }, 'assistant device cross-signed');
-		return { outcome: 'signed', masterPublicKey: serverKey };
+		return { outcome, masterPublicKey: serverKey };
 	}
 	if (!holdsIdentity && escrowed !== null && serverKey === escrowed.masterPublicKey) {
 		log.warn(
@@ -188,7 +194,9 @@ async function crossSign(
 	);
 	const masterPublicKey = masterKeyOfUpload(requests.uploadSigningKeysReq);
 	await uploadIdentity(deps.admin, intent, machine, requests);
-	await withPrincipal(db, { id: owner }, (tx) => saveCrossSigning(tx, { owner, masterPublicKey }));
+	await withPrincipal(db, { id: owner }, (tx) =>
+		saveCrossSigning(tx, { owner, masterPublicKey, deviceId })
+	);
 	log.info(
 		{ owner, userId, deviceId, replaced: serverKey !== null },
 		'cross-signing identity reset'

@@ -5,7 +5,7 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { assistantUserId } from '../matrix/registration.js';
-import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { matrixLocalpartOfPrincipal, matrixUserIdOfPrincipal } from '../principals/identity.js';
 import {
 	findAssistant,
 	markAssistantDeleted,
@@ -30,8 +30,19 @@ export type CreateResult =
 			readonly reason: 'exists' | 'invalid_name' | 'not_on_homeserver' | 'failed';
 	  };
 
+export type ProvisionResult =
+	| { readonly ok: true; readonly assistant: AssistantView; readonly created: boolean }
+	| { readonly ok: false; readonly reason: 'not_on_homeserver' | 'failed' };
+
+export type SetHomeResult = 'set' | 'no_assistant' | 'not_joined';
+
 export interface AssistantService {
 	create(owner: string, name: string): Promise<CreateResult>;
+	// The owner's assistant, created without a room when there is none: the owner's client opens
+	// the room. Idempotent.
+	provision(owner: string): Promise<ProvisionResult>;
+	// The room the owner's client opened with the assistant becomes its room, once both joined it
+	setHome(owner: string, roomId: string): Promise<SetHomeResult>;
 	find(owner: string): Promise<AssistantView | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
 	remove(owner: string): Promise<boolean>;
@@ -45,6 +56,9 @@ export interface AssistantServiceDeps {
 }
 
 const NAME = /^[^\p{C}]{1,64}$/u;
+
+// The name of an assistant provisioned for a client, which the owner can change later
+const PROVISIONED_NAME = 'Assistant';
 
 export function isValidAssistantName(name: string): boolean {
 	return NAME.test(name.trim()) && name.trim().length > 0;
@@ -141,6 +155,45 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				await undoCreation(owner, userId, roomId, saved);
 				return { ok: false, reason: 'failed' };
 			}
+		},
+		async provision(owner) {
+			const existing = await current(owner);
+			if (existing !== null) return { ok: true, assistant: toView(existing), created: false };
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
+			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
+			const userId = assistantUserId(config, ownerLocalpart);
+			try {
+				await admin.registerUser(`${config.matrix.assistantPrefix}${ownerLocalpart}`);
+				await admin.setDisplayName(userId, PROVISIONED_NAME);
+				await withPrincipal(db, { id: owner }, (tx) =>
+					saveAssistant(tx, { owner, userId, name: PROVISIONED_NAME, roomId: null })
+				);
+			} catch (err: unknown) {
+				log.error({ owner, userId, err }, 'assistant provisioning failed');
+				return { ok: false, reason: 'failed' };
+			}
+			log.info({ owner, userId }, 'assistant provisioned');
+			return {
+				ok: true,
+				assistant: toView({ userId, name: PROVISIONED_NAME, roomId: null }),
+				created: true
+			};
+		},
+		async setHome(owner, roomId) {
+			const record = await current(owner);
+			if (record === null) return 'no_assistant';
+			const ownerUserId = matrixUserIdOfPrincipal(config, owner);
+			const joined = await admin.joinedMembers(record.userId, roomId);
+			// Both in it: the owner's own client asks, but the room must be theirs with the assistant
+			if (joined === null || ownerUserId === null || !joined.includes(ownerUserId)) {
+				return 'not_joined';
+			}
+			await withPrincipal(db, { id: owner }, async (tx) => {
+				await setAssistantRoomId(tx, owner, roomId);
+				await saveAssistantRoom(tx, { roomId, owner, userId: record.userId, welcome: null });
+			});
+			log.info({ owner, userId: record.userId, roomId }, 'assistant home set');
+			return 'set';
 		},
 		async find(owner) {
 			const record = await current(owner);

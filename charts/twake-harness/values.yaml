@@ -75,6 +75,8 @@ config:
   orgAgentMembers: ''
   # The service clients, by token subject, allowed to post events for an owner (comma separated)
   eventsClientIds: ''
+  # Service clients (token subjects) that provision an owner's assistant: ToM for Twake Chat
+  provisioningClientIds: ''
   # The escrow of the assistants' identities in the platform OpenBao, through the openbao route
   # of APISIX, with the pod's Kubernetes identity (matrix role)
   escrowEnabled: false

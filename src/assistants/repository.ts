@@ -81,7 +81,7 @@ export async function saveAssistantRoom(
 		readonly roomId: string;
 		readonly owner: string;
 		readonly userId: string;
-		readonly welcome: string;
+		readonly welcome: string | null;
 	}
 ): Promise<void> {
 	await tx.sql`
