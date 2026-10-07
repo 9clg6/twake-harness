@@ -121,7 +121,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 		r = await startConsentRoom({
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
-			RABBITMQ_PREFIX: PREFIX
+			RABBITMQ_PREFIX: PREFIX,
+			// The suite wakes Alice's assistant more often than an owner may start turns by default
+			ADMISSION_USER_PER_MINUTE: '120'
 		});
 		const direct = new URL(TEST_DATABASE_URL);
 		database = await startTcpProxy(() => ({
