@@ -109,6 +109,8 @@ export async function listenOnOwnQueue(
 				{ attempt: count, retryInMs: waitAfter(count), err: failureOf(err) },
 				'listen failed'
 			);
+			// Connected, the client would stay so until the next attempt opens another one
+			await candidate.close().catch(() => undefined);
 			return false;
 		}
 	}

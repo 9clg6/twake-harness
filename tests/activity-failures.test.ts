@@ -404,6 +404,37 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect((await broker.queue(QUEUE))?.messages).toBe(0);
 	});
 
+	it('starts without the activity exchange, holds no connection while it waits, and listens once it is there', async () => {
+		const channel = await broker.addVhost('late');
+		await broker.addUser('twake-harness-late', HARNESS_PASSWORD, PERMISSIONS);
+		await broker.allow('twake-harness-late', 'late', PERMISSIONS);
+		const lateLogs = captureLogs();
+		const late = await workerOn(
+			broker.urlFor('twake-harness-late', HARNESS_PASSWORD, 'late'),
+			lateLogs.stream
+		);
+		const connections = async (): Promise<number> =>
+			(await broker.connectedUsers()).filter((user) => user === 'twake-harness-late').length;
+		try {
+			expect(await healthOf(late)).toBe('disconnected');
+			await until(
+				'three attempts',
+				() => lateLogs.lines().filter((line) => line['msg'] === 'listen failed').length >= 3
+			);
+			// Each attempt closes its connection once it failed, so that none piles up
+			expect(await connections()).toBeLessThanOrEqual(1);
+			// The platform declares the exchange
+			await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+			await until('listening', async () => (await healthOf(late)) === 'connected');
+			const event = activityEvent();
+			await publishOn(channel, event);
+			await toldOf(event);
+		} finally {
+			await late.stop();
+		}
+		await until('no connection left', async () => (await connections()) === 0);
+	});
+
 	it('starts while the broker is out of reach, tries again and again, and listens once it is back', async () => {
 		const channel = await broker.addVhost('away');
 		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
