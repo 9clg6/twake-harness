@@ -45,11 +45,11 @@ function question(asked: string, howToAnswer: string): string {
 
 const FRENCH_QUESTION = question(
 	"C'est la première fois que j'ai besoin de lire tes données dans notes. Tu m'autorises ? Je commencerais par ceci :",
-	'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+	'Réponds par oui ou non.'
 );
 const ENGLISH_QUESTION = question(
 	'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
-	'Answer with the buttons below, or reply yes or no.'
+	'Answer yes or no.'
 );
 
 describe('my assistant speaks my language', () => {
@@ -81,9 +81,6 @@ describe('my assistant speaks my language', () => {
 		// The model is told, in French, to speak French
 		const system = r.h.apisix.llm.calls.at(-1)?.request.messages[0]?.content ?? '';
 		expect(system).toContain("Parle français avec la personne qui t'écrit.");
-		const question = r.saying("C'est la première fois").at(-1)?.eventId ?? '';
-		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 
 		told = r.saying("D'accord").length;
 		await r.client.sendText(r.room, 'non');
@@ -117,17 +114,15 @@ describe('my assistant speaks my language', () => {
 		await r.nextSaying("C'est la première fois", asked);
 		const question = r.saying("C'est la première fois").at(-1)?.eventId ?? '';
 		const refused = r.saying("D'accord").length;
-		await r.client.react(r.room, question, '❌ NON');
+		await r.client.react(r.room, question, '❌');
 		expect(await r.nextSaying("D'accord", refused)).toBe("D'accord, je ne le fais pas.");
 	});
 
 	it('asks in the language I switched to earlier in the same message', async () => {
 		const seen = r.questions().length;
 		await r.client.sendText(r.room, 'Switch to English and find the budget in my mail');
-		const question = await r.nextQuestion(seen);
+		await r.nextQuestion(seen);
 		expect(r.questions().at(-1)?.body).toBe(ENGLISH_QUESTION);
-		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 	});
 
 	it("leaves everyone else in the deployment's language", async () => {

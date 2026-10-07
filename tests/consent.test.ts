@@ -99,7 +99,7 @@ describe('my assistant asks before it first uses an application', () => {
 			[
 				'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
 				JSON.stringify({ from: 'paul@test.local' }, null, 2),
-				'Answer with the buttons below, or reply yes or no.'
+				'Answer yes or no.'
 			].join('\n\n')
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
@@ -174,7 +174,7 @@ describe('my assistant asks before it first uses an application', () => {
 					null,
 					2
 				),
-				'Answer with the buttons below, or reply yes or no.'
+				'Answer yes or no.'
 			].join('\n\n')
 		);
 		// The harness read the invitation, then stopped at the calendar: no slot read, no model

@@ -95,8 +95,6 @@ export interface Messages {
 			code: DelegationCode,
 			link: string | null
 		): string;
-		// The two buttons under a question: the assistant's own reactions, which a tap repeats
-		readonly buttons: { readonly yes: string; readonly no: string };
 		// The words that answer a question, alone in a message
 		readonly yes: string;
 		readonly no: string;
@@ -142,9 +140,10 @@ function firstUse(asked: string, level: string, covers: string | null, question:
 		: [asked, `${level} ${covers}`, question].join('\n');
 }
 
-// How an owner answers a request, the sentence every request ends with, in each language
-const ENGLISH_HOW_TO_ANSWER = 'Answer with the buttons below, or reply yes or no.';
-const FRENCH_HOW_TO_ANSWER = 'Réponds avec les boutons ci-dessous, ou par oui ou non.';
+// How an owner answers a request, the sentence every request ends with, in each language: in
+// words, as a request carries no buttons
+const ENGLISH_HOW_TO_ANSWER = 'Answer yes or no.';
+const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non.';
 
 const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
@@ -235,7 +234,6 @@ const ENGLISH: Messages = {
 				? `${why}\nShall I try again? ${answer}`
 				: `${why} Give it ${expired ? 'again ' : ''}here: ${link}\nOnce that is done, shall I try again? ${answer}`;
 		},
-		buttons: { yes: '✅ YES', no: '❌ NO' },
 		yes: 'yes',
 		no: 'no',
 		refused: 'All right, I will not do it.',
@@ -365,7 +363,6 @@ const FRENCH: Messages = {
 				? `${why}\nJe réessaie ? ${answer}`
 				: `${why} Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;
 		},
-		buttons: { yes: '✅ OUI', no: '❌ NON' },
 		yes: 'oui',
 		no: 'non',
 		refused: "D'accord, je ne le fais pas.",

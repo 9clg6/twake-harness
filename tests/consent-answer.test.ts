@@ -296,7 +296,8 @@ describe('my answer lets my assistant carry on', () => {
 			);
 			if (greeting === undefined) throw new Error('no greeting');
 			await client.react(room, greeting.eventId, '✅');
-			// A ✅ written in my name without encryption, as a component on the server could
+			// A ✅ sent without encryption, as Twake Chat sends its reactions, or as a component on
+			// the server could write it in my name
 			await h.synapse.request(
 				alice,
 				'PUT',

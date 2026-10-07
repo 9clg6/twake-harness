@@ -218,7 +218,7 @@ function literalModel(request: ChatRequest): ScriptedReply {
 }
 
 // How every request of the harness ends
-const HOW_TO_ANSWER = 'Answer with the buttons below, or reply yes or no.';
+const HOW_TO_ANSWER = 'Answer yes or no.';
 
 const HIGH_RISK_IN_MAIL =
 	'Actions like this one in mail need your yes each time. Shall I do this one, exactly as below?';
@@ -293,8 +293,6 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		expect(request.body).toBe(
 			asked(HIGH_RISK_IN_MAIL, TO_PAUL, 'I am sending Paul the Q4 budget, as you asked.')
 		);
-		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 		// The wait is logged with why and what it is about, never with what the mail says
 		expect(waits().at(-1)).toMatchObject({

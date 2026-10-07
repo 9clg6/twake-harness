@@ -10,15 +10,13 @@ export type AnswerKind = 'reaction' | 'words' | 'api';
 // An owner may answer in any language the harness speaks, whatever language it asked in
 const CATALOGS = LOCALES.map((locale) => getMessages(locale).consent);
 
-const YES_REACTIONS = new Set([ALLOW_REACTION, ...CATALOGS.map((c) => c.buttons.yes)]);
-const NO_REACTIONS = new Set([REFUSE_REACTION, ...CATALOGS.map((c) => c.buttons.no)]);
 const YES_WORDS = new Set(CATALOGS.map((c) => c.yes));
 const NO_WORDS = new Set(CATALOGS.map((c) => c.no));
 
-// A reaction on a question: one of its buttons, or a bare ✅ or ❌
+// A reaction on a question, a bare ✅ or ❌, from a client that encrypts its reactions
 export function reactionAnswer(key: string): Answer | null {
-	if (YES_REACTIONS.has(key)) return 'yes';
-	if (NO_REACTIONS.has(key)) return 'no';
+	if (key === ALLOW_REACTION) return 'yes';
+	if (key === REFUSE_REACTION) return 'no';
 	return null;
 }
 

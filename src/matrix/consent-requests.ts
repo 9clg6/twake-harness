@@ -39,8 +39,6 @@ export interface ConsentRequestsOptions {
 	fetchMessages(owner: string): Promise<Messages>;
 	// How long the owner may answer a request
 	readonly lifetimeMs: number;
-	// Reacts to an event of the room as its assistant, encrypted when the room is
-	react(room: RequestRoom, eventId: string, key: string): Promise<void>;
 	// Where the matrix role counts the answers, and the requests closed unanswered
 	readonly metrics: ConsentMetrics;
 }
@@ -49,10 +47,10 @@ export interface ConsentRequestsOptions {
 // hands over only what it read encrypted from the owner's own device: nothing written in the
 // owner's name on the server side, which cannot encrypt for the room, answers for them.
 export interface ConsentRequests {
-	// A request went out: it supersedes the one still open in the room, and the assistant puts its
-	// two buttons under it, as reactions that the owner's tap repeats
+	// A request went out: it supersedes the one still open in the room. It carries no buttons: Twake
+	// Chat sends the reactions a tap on one would repeat in the clear, which answer nothing.
 	asked(room: RequestRoom, pendingCallId: string, eventId: string): Promise<void>;
-	// The owner put one of the buttons, or a bare ✅ or ❌, on an event of the room
+	// The owner put a bare ✅ or ❌ on an event of the room
 	reacted(
 		room: RequestRoom,
 		requestEventId: string,
@@ -60,8 +58,8 @@ export interface ConsentRequests {
 		reactionEventId: string
 	): Promise<void>;
 	// The owner wrote in the room. An exact yes or no answers the room's request when it is their
-	// next message after it, and starts no turn; anything else leaves the request to its buttons.
-	// Resolves to whether the message was an answer.
+	// next message after it, and starts no turn; anything else leaves the request to a reaction, or
+	// to an answer through the API. Resolves to whether the message was an answer.
 	wrote(room: RequestRoom, eventId: string, text: string): Promise<boolean>;
 }
 
@@ -165,15 +163,6 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 				return;
 			}
 			log.info({ roomId, pendingCallId }, 'question sent');
-			// Best effort: should a button fail, the question is not asked again, and a bare ✅ or ❌,
-			// or a word, still answers it
-			try {
-				const { buttons } = (await fetchMessages(owner)).consent;
-				await options.react(room, eventId, buttons.yes);
-				await options.react(room, eventId, buttons.no);
-			} catch (err: unknown) {
-				log.warn({ roomId, pendingCallId, err }, 'question buttons failed');
-			}
 		},
 		reacted: async (room, requestEventId, says, reactionEventId) => {
 			const { owner } = room;

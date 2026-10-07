@@ -126,8 +126,8 @@ const ALLOW = {
 // what the level covers
 const ALLOW_ALONE = { en: 'Do you allow it?', fr: "Tu m'autorises ?" };
 const HOW_TO_ANSWER = {
-	en: 'Answer with the buttons below, or reply yes or no.',
-	fr: 'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+	en: 'Answer yes or no.',
+	fr: 'Réponds par oui ou non.'
 };
 
 // The calls of the model above: a search for the budget, and the archiving of a newsletter

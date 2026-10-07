@@ -152,7 +152,7 @@ function invitationModel(request: ChatRequest): ScriptedReply {
 }
 
 // How every request of the harness ends
-const HOW_TO_ANSWER = 'Answer with the buttons below, or reply yes or no.';
+const HOW_TO_ANSWER = 'Answer yes or no.';
 
 // A request as Alice's client shows it in plain text: what the model wrote, quoted under the
 // harness's label; the harness's question; the call whole, as the model wrote it; and how to answer
@@ -256,8 +256,6 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 				'Bob invites you to "Budget review" on Friday from 9:00 to 10:00. You are free then.'
 			)
 		);
-		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 		// The harness read the invitation and my availability; the acceptance waits for me, though
 		// I let my assistant write in my calendar
 		expect(r.h.apisix.contracts.calls.map((c) => `${c.method} ${c.path}`)).toEqual([

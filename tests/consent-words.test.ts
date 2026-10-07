@@ -74,7 +74,7 @@ describe('I answer the question in words', () => {
 		expect(await r.callsTo('tasks')).toEqual([{ status: 'refused', arguments: null }]);
 	});
 
-	it('puts two buttons under its question, and a tap on yes allows the call', async () => {
+	it('asks me to answer in words, with no buttons under its question', async () => {
 		r.h.apisix.llm.script = modelUsing('search_notes', { q: 'budget' });
 		const seen = r.questions().length;
 		await r.client.sendText(r.room, 'Search my notes for the budget');
@@ -83,19 +83,18 @@ describe('I answer the question in words', () => {
 			[
 				'This is the first time I need to read your data in notes. Do you allow it? I would start with this:',
 				JSON.stringify({ q: 'budget' }, null, 2),
-				'Answer with the buttons below, or reply yes or no.'
+				'Answer yes or no.'
 			].join('\n\n')
 		);
-		// The assistant's own reactions on its question are the buttons Twake Chat shows
-		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
-		// A tap on a button sends the same reaction from my account
 		const found = r.saying('Found:').length;
-		await r.client.react(r.room, question, '✅ YES');
+		await r.client.sendText(r.room, 'yes');
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/notes/items');
+		// Twake Chat sends a tap on a reaction in the clear, which answers nothing: the assistant put
+		// no reaction under its question, which my client would have read before the answer
+		expect(await r.client.waitForReactions(r.room, question, r.assistantId, 1, 0)).toEqual([]);
 	});
 
-	it('takes anything else I write for a message, after which only a tap answers', async () => {
+	it('takes anything else I write for a message, after which only a reaction answers', async () => {
 		r.h.apisix.llm.script = modelFor({
 			'Look for the party in my photos': { tool: 'search_photos', args: { q: 'party' } }
 		});
@@ -110,9 +109,9 @@ describe('I answer the question in words', () => {
 		await r.client.sendText(r.room, 'yes');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: yes');
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
-		// The question is still open, and its buttons answer it in any language the harness speaks
+		// The question is still open: a ✅ from my client, which encrypts it, answers it
 		const found = r.saying('Found:').length;
-		await r.client.react(r.room, question, '✅ OUI');
+		await r.client.react(r.room, question, '✅');
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/photos/items');
 	});
 
@@ -128,7 +127,7 @@ describe('I answer the question in words', () => {
 		await r.client.sendText(r.room, 'Look in my contacts instead');
 		await r.nextQuestion(seen);
 		const notices = r.saying('A newer request').length;
-		await r.client.react(r.room, older, '✅ YES');
+		await r.client.react(r.room, older, '✅');
 		expect(await r.nextSaying('A newer request', notices)).toBe(
 			'A newer request replaced this one, so I did nothing. Answer the latest one.'
 		);

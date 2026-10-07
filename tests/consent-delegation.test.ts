@@ -23,7 +23,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // The request about a read in an application, named as a first use names it
-const ANSWER = 'Answer with the buttons below, or reply yes or no.';
+const ANSWER = 'Answer yes or no.';
 const NEEDED = (application: string): string =>
 	`To read your data in ${application}, I need your permission to act on your behalf`;
 const MISSING = (application: string): string =>
@@ -32,7 +32,7 @@ const EXPIRED = (application: string): string =>
 	`${NEEDED(application)}, and the one you gave me has expired. Give it again here: ${ALICE_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
 const MISSING_WITHOUT_LINK = `${NEEDED('mail')}, and you have not given it yet.\nShall I try again? ${ANSWER}`;
 const EXPIRED_WITHOUT_LINK = `${NEEDED('mail')}, and the one you gave me has expired.\nShall I try again? ${ANSWER}`;
-const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${ALICE_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
+const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${ALICE_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds par oui ou non.`;
 
 // The harness's requests for that permission, as Alice's client received them
 const ENGLISH_REQUEST = 'To read your data in';
@@ -143,9 +143,6 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		await r.client.sendText(r.room, 'Find the budget in my mail');
 		const request = await nextRequestIn(r, seen);
 		expect(request.body).toBe(MISSING('Twake Mail'));
-		// The same two buttons as any question of the harness
-		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 		await sleep(1000);
 		// The call reached the gateway once, and the model was never asked what to make of it
 		expect(r.h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/mail/items']);
@@ -211,7 +208,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		// Once she gave it, her yes on the new request runs the call
 		broker = null;
 		const found = r.saying('Found:').length;
-		await r.client.react(r.room, second.eventId, '✅ YES');
+		await r.client.react(r.room, second.eventId, '✅');
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/tasks/items');
 		expect(r.h.apisix.contracts.calls).toHaveLength(3);
 	});
@@ -279,8 +276,6 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		await r.client.sendText(r.room, 'Cherche la facture dans mes mails');
 		const request = await nextRequestIn(r, seen, 'Pour lire tes données dans');
 		expect(request.body).toBe(FRENCH_MISSING);
-		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		broker = null;
 		told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'oui');
@@ -316,10 +311,6 @@ describe('my assistant tells me why it cannot act for me, even when the deployme
 			expect(request.body).toBe(expected);
 			expect(shown(request)).not.toContain('http');
 		}
-		const request = requestsIn(r).at(-1);
-		if (request === undefined) throw new Error('no request');
-		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 		// Alice gave her permission another way, and says yes
 		broker = null;
 		const found = r.saying('Found:').length;

@@ -93,11 +93,10 @@ describe('my assistant asks again before it first writes in an application', () 
 	});
 
 	it('asks before its first write in my calendar, though I let it read there, and writes on my ✅', async () => {
-		// I let my assistant read my calendar, once its question shows its buttons
+		// I let my assistant read my calendar
 		let seen = r.questions().length;
 		await r.client.sendText(r.room, 'Am I free on Friday at 9?');
 		const read = await r.nextQuestion(seen);
-		await r.client.waitForReactions(r.room, read, r.assistantId, 2);
 		let found = r.saying('Found:').length;
 		await r.client.react(r.room, read, '✅');
 		await r.nextSaying('Found:', found);
@@ -111,11 +110,9 @@ describe('my assistant asks again before it first writes in an application', () 
 			[
 				'This is the first time I need to change your data in calendar. Do you allow it? I would start with this:',
 				JSON.stringify({ event_id: 'evt-budget' }, null, 2),
-				'Answer with the buttons below, or reply yes or no.'
+				'Answer yes or no.'
 			].join('\n\n')
 		);
-		const buttons = await r.client.waitForReactions(r.room, question, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 		// The wait is logged with what it is about, never with what the call would have sent
 		expect(
@@ -164,15 +161,14 @@ describe('my assistant asks again before it first writes in an application', () 
 		// Writing in my calendar lets it write nowhere else
 		const seen = r.questions().length;
 		await r.client.sendText(r.room, 'Mark the Q4 figures task done');
-		const question = await r.nextQuestion(seen);
+		await r.nextQuestion(seen);
 		expect(r.questions().at(-1)?.body).toBe(
 			[
 				'This is the first time I need to change your data in tasks. Do you allow it? I would start with this:',
 				JSON.stringify({ task_id: 'task-q4', body: { done: true } }, null, 2),
-				'Answer with the buttons below, or reply yes or no.'
+				'Answer yes or no.'
 			].join('\n\n')
 		);
-		await r.client.waitForReactions(r.room, question, r.assistantId, 2);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 		const found = r.saying('Found:').length;
 		await r.client.sendText(r.room, 'yes');
