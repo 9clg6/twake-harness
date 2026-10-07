@@ -262,6 +262,9 @@ jobs:
           kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/retention-worker.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/retention.yaml > /tmp/retention-api.yaml
           if grep -q WAKEUPS_RETENTION_MS /tmp/retention-api.yaml; then exit 1; fi
+          # 0 is rendered, for the harness to refuse it, rather than left out for its default
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.wakeupsRetentionMs=0 > /tmp/retention-zero.yaml
+          grep -A1 WAKEUPS_RETENTION_MS /tmp/retention-zero.yaml | grep -q '"0"'
 
   image:
     needs: [check, test, chart]

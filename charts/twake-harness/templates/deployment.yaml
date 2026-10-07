@@ -189,10 +189,11 @@ spec:
             - name: WAKEUPS_PER_HOUR
               value: {{ . | int64 | quote }}
             {{- end }}
-            {{- /* The worker role purges the wake-ups, whether it listens or not, and reads it as an integer */}}
-            {{- with .Values.config.wakeupsRetentionMs }}
+            {{- /* The worker role purges the wake-ups, whether it listens or not, and reads it as an integer: 0 counts, as for the admission, for the harness to refuse it */}}
+            {{- $retention := .Values.config.wakeupsRetentionMs }}
+            {{- if and (not (kindIs "invalid" $retention)) (ne (toString $retention) "") }}
             - name: WAKEUPS_RETENTION_MS
-              value: {{ . | int64 | quote }}
+              value: {{ $retention | int64 | quote }}
             {{- end }}
             {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
