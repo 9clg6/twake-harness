@@ -48,6 +48,25 @@ describe('an assistant whose matrix role restarts', () => {
 		await h.restartRole();
 	}
 
+	// The to-device messages the homeserver keeps for a device, read as a first sync would, which
+	// makes it drop none. Each read asks with a filter of its own: the homeserver answers a sync it
+	// was just asked from its cache.
+	let inboxReads = 0;
+	async function inboxOf(userId: string, deviceId: string): Promise<number> {
+		inboxReads += 1;
+		const query = new URLSearchParams({
+			user_id: userId,
+			'org.matrix.msc3202.device_id': deviceId,
+			timeout: '0',
+			filter: JSON.stringify({ room: { rooms: [] }, account_data: { limit: inboxReads } })
+		});
+		const res = await fetch(`${h.synapse.url}/_matrix/client/v3/sync?${query.toString()}`, {
+			headers: { authorization: `Bearer ${h.config.matrix.asToken}` }
+		});
+		const body = (await res.json()) as { to_device?: { events?: unknown[] } };
+		return body.to_device?.events?.length ?? 0;
+	}
+
 	beforeAll(async () => {
 		h = await startMatrixHarness({ env: { PROVISIONER_CLIENT_IDS: PROVISIONER } });
 		h.apisix.llm.script = (request: ChatRequest) => ({
@@ -158,5 +177,25 @@ describe('an assistant whose matrix role restarts', () => {
 				60_000
 			)
 		).toBe('echo: behind the queue');
+	});
+
+	it('empties its device inbox at each start of the role', async () => {
+		const { client, assistant } = await meetProvisionedAssistant('lea');
+		for (let i = 0; i < 120; i += 1) {
+			await client.client.sendToDevices('org.example.note', {
+				[assistant.userId]: { [assistant.deviceId]: { n: i } }
+			});
+		}
+		// A full page, more waiting behind it
+		expect(await inboxOf(assistant.userId, assistant.deviceId)).toBe(100);
+
+		// Nothing fails to decrypt meanwhile: the role reads the inbox at its start all the same
+		await h.restartRole();
+		let left = await inboxOf(assistant.userId, assistant.deviceId);
+		for (let i = 0; i < 60 && left > 0; i += 1) {
+			await sleep(500);
+			left = await inboxOf(assistant.userId, assistant.deviceId);
+		}
+		expect(left).toBe(0);
 	});
 });

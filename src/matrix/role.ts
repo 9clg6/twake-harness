@@ -154,8 +154,9 @@ const TO_DEVICE_ONLY_FILTER = JSON.stringify({
 	account_data: { limit: 0 }
 });
 
-// The syncs one read of a device's to-device inbox makes at most, a hundred messages each
-const MAX_INBOX_PAGES = 50;
+// The syncs one read of a device's to-device inbox makes at most, a hundred messages each: a
+// safety net, the inboxes being read at each start of the role
+const MAX_INBOX_PAGES = 1_000;
 
 interface ToDeviceSync {
 	readonly next_batch?: string;
@@ -307,6 +308,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start
 	const inFlight = makeWorkTracker();
+	// Set once the role stops: what Synapse pushes from then on is refused, and inbox reads end
+	let closing = false;
 	const creator = creatorUserId(config);
 	const admin = makeMatrixAdmin({
 		apisixBaseUrl: config.apisix.baseUrl,
@@ -421,11 +424,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// once the role stopped, and its push of to-device messages (MSC2409) can skip a key share when
 	// another one lands at the same instant. It keeps a device's to-device messages, the pushed ones
 	// included, until the device syncs past them, and hands a hundred at most per sync, the oldest
-	// first. After a message of its rooms fails to decrypt, an assistant's device reads them page
-	// after page until none is left. Where a read stopped is kept per device, across restarts, so
-	// that the next one goes on from there.
+	// first. An assistant's device reads them page after page until none is left: once its
+	// encryption is ready at the start of the role, and after a message of its rooms fails to
+	// decrypt. Where a read stopped is kept per device, across restarts, so that the next one goes
+	// on from there.
 	const inboxReads = new Map<string, Promise<number>>();
-	function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
+	function fetchMissedKeyShares(userId: string, roomId: string | null): Promise<number> {
 		// A caller that comes during a read joins it, the read taking what the inbox holds, where
 		// cross-signing's oneAtATime queues its callers: the two stay apart
 		const underWay = inboxReads.get(userId);
@@ -437,7 +441,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return read;
 	}
 
-	async function fetchToDeviceInbox(userId: string, roomId: string): Promise<number> {
+	async function fetchToDeviceInbox(userId: string, roomId: string | null): Promise<number> {
 		const intent = appservice.getIntentForUserId(userId);
 		await ensureEncryption(intent);
 		const client = intent.underlyingClient;
@@ -446,9 +450,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const positionKey = `to_device_since:${client.crypto.clientDeviceId}`;
 		let since: string | null = (await userStorage?.readValue(positionKey)) ?? null;
 		// The members' devices are looked up again too: a first sync carries no device lists
-		const members = await client.getJoinedRoomMembers(roomId);
+		const members = roomId === null ? [] : await client.getJoinedRoomMembers(roomId);
 		let fetched = 0;
 		for (let page = 0; page < MAX_INBOX_PAGES; page += 1) {
+			if (closing) return fetched;
 			const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
 				timeout: 0,
 				filter: TO_DEVICE_ONLY_FILTER,
@@ -1383,7 +1388,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 	// Every assistant holds its encryption state from the start, so the key shares Synapse pushes
-	// while this role was away, or before an assistant speaks, are not lost
+	// before an assistant speaks are not lost, and reads those it kept unpushed while this role was
+	// away before a message of theirs fails to decrypt
 	// The assistants a provisioner asked for, with no room yet, too: their owners' clients check the
 	// identity before they open one, and a store lost since would leave the recorded one stale
 	const assistantsAtStart = [
@@ -1397,7 +1403,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await onEncryptionReady(intent, owner);
 		} catch (err: unknown) {
 			log.warn({ userId, err }, 'encryption setup failed at start');
+			continue;
 		}
+		// In the background: the role listens meanwhile, and a message that fails to decrypt during
+		// the read joins it
+		inFlight.track(
+			fetchMissedKeyShares(userId, null).then(
+				(fetched) => {
+					if (fetched > 0) log.info({ userId, fetched }, 'to-device inbox read at start');
+				},
+				(err: unknown) => {
+					log.warn({ userId, err }, 'to-device inbox not read at start');
+				}
+			)
+		);
 	}
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
 	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts
@@ -1409,7 +1428,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// processing those pushes, its storage queries included, after the role has stopped. Its request
 	// listeners are wrapped here. Once the role stops, a push is refused, and Synapse pushes it again
 	// later; the pushes already accepted are counted, so that the stop waits for them.
-	let closing = false;
 	let pushesInFlight = 0;
 	const server: unknown = Reflect.get(appservice, 'appServer');
 	const appServer = server instanceof Server ? server : null;
