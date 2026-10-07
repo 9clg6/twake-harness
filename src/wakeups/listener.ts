@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { setTimeout as sleep } from 'node:timers/promises';
 import {
 	DeadLetterError,
@@ -101,33 +102,36 @@ export async function listenOnOwnQueue(
 	const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
 	const queue = ownQueueName(deps.config, own.name);
 	const deadLetterExchange = `${deps.config.rabbitmq.prefix}.dlx`;
-	// The event whose failures are not transient, by its source and id, and how many it had: one
-	// at a time, since the listener holds one message at a time
+	// The message whose failures are not transient, by its content, and how many it had: one at a
+	// time, since the listener holds one message at a time, and the same after a redelivery
 	let failing: { readonly key: string; readonly count: number } | null = null;
 
 	const handle = async (
 		message: RabbitMQMessage,
 		properties: RabbitMQMessageProperties
 	): Promise<void> => {
-		const reading = read(message, properties);
-		if (reading.kind === 'foreign') return;
-		const { identity } = reading;
-		if (reading.kind === 'ignored') {
-			logHandled(log, { ...identity, outcome: 'ignored', reason: reading.reason });
-			return;
-		}
-		if (reading.kind === 'malformed') {
-			logHandled(log, { ...identity, outcome: 'dead_lettered', reason: reading.reason });
-			throw new DeadLetterError(reading.reason);
-		}
-		const outcomes: RecipientOutcome[] = [...reading.left];
+		let identity: Identity = {};
+		const outcomes: RecipientOutcome[] = [];
 		try {
+			const reading = read(message, properties);
+			if (reading.kind === 'foreign') return;
+			identity = reading.identity;
+			if (reading.kind === 'ignored') {
+				logHandled(log, { ...identity, outcome: 'ignored', reason: reading.reason });
+				return;
+			}
+			if (reading.kind === 'malformed') {
+				logHandled(log, { ...identity, outcome: 'dead_lettered', reason: reading.reason });
+				throw new DeadLetterError(reading.reason);
+			}
+			outcomes.push(...reading.left);
 			for (const wakeup of reading.wakeups) outcomes.push(await wake(deps, wakeup));
 		} catch (err: unknown) {
+			if (err instanceof DeadLetterError) throw err;
 			const transient = isTransient(err);
 			log.warn({ ...identity, transient, err: failureOf(err) }, 'event failed');
 			if (transient) throw err;
-			const key = JSON.stringify([identity.source, identity.eventId]);
+			const key = createHash('sha256').update(JSON.stringify(message)).digest('base64url');
 			const count = failing?.key === key ? failing.count + 1 : 1;
 			failing = { key, count };
 			if (count < MAX_ATTEMPTS) throw err;
@@ -162,7 +166,11 @@ export async function listenOnOwnQueue(
 				// A message that is no JSON never reaches the handler: the library dead-letters it
 				onMessageDlq: ({ routingKey, reason }) => {
 					if (reason === 'invalid_json') {
-						logHandled(log, { type: routingKey, outcome: 'dead_lettered', reason: 'not JSON' });
+						logHandled(log, {
+							...(routingKey === '' ? {} : { type: routingKey }),
+							outcome: 'dead_lettered',
+							reason: 'not JSON'
+						});
 					}
 				},
 				// The library connects again by itself once the broker is back, and reads the queue
