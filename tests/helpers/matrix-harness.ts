@@ -55,7 +55,8 @@ const MESSAGE_DECISIONS = new Set([
 	'assistant ignored an unencrypted message',
 	'assistant ignored an unverified device',
 	'assistant ignored a copy of earlier words',
-	'assistant command answered'
+	'assistant command answered',
+	'assistant ignored words of an old session'
 ]);
 
 export async function startMatrixHarness(
@@ -163,6 +164,7 @@ export async function startMatrixHarness(
 			'owner device unverified',
 			'assistant ignored an unverified device',
 			'assistant ignored a copy of earlier words',
+			'assistant ignored words of an old session',
 			'owner device check failed'
 		]);
 		const lines = logLines()

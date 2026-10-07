@@ -109,6 +109,23 @@ export async function pinAccepted(
 	return normalize(row);
 }
 
+// Records when the harness first received words of an owner's Megolm session. Resolves to whether
+// that was longer ago than `keptMs`, the time the digests of those words are kept for.
+export async function seeSession(
+	tx: Tx,
+	owner: string,
+	sessionId: string,
+	keptMs: number
+): Promise<boolean> {
+	await tx.sql`
+		insert into owner_megolm_sessions (owner, session_id) values (${owner}, ${sessionId})
+		on conflict (owner, session_id) do nothing`;
+	const rows = await tx.sql<{ old: boolean }[]>`
+		select first_seen_at <= now() - make_interval(secs => ${keptMs / 1000}) as old
+		from owner_megolm_sessions where owner = ${owner} and session_id = ${sessionId}`;
+	return rows[0]?.old ?? false;
+}
+
 // Records that the owner's words with this digest were received under an event, the words received
 // longer ago than `keptMs` forgotten first. Resolves to the event they were first received under
 // when it is another one, and to null for words new to the harness or delivered again under the

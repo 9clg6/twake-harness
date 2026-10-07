@@ -788,4 +788,39 @@ describe('while the harness only reports the sessions it would not act on', () =
 		expect(await r.nextSaying('Heard:', next)).toBe('Heard: And the next');
 		expect(r.saying('Heard: Once only')).toHaveLength(1);
 	});
+
+	it('takes nothing a copy carries once its session is older than what it remembers', async () => {
+		const heard = r.saying('Heard:').length;
+		const earlier = await r.client.sendText(r.room, 'Before the month');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Before the month');
+		// A month later as the harness sees it: what it kept of those words is forgotten, and their
+		// session was first received a month ago
+		await withPrincipal(r.h.db, { id: OWNER }, async (tx) => {
+			await tx.sql`
+				update owner_words_received set received_at = now() - interval '31 days'
+				where owner = ${OWNER}`;
+			await tx.sql`
+				update owner_megolm_sessions set first_seen_at = now() - interval '31 days'
+				where owner = ${OWNER}`;
+		});
+		try {
+			const copy = `$late-copy-${Date.now()}`;
+			expect(await push(r, [{ ...(await encryptedEvent(r, earlier)), event_id: copy }])).toBe(200);
+			expect(await r.h.decisionOn(copy)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'report'
+			});
+		} finally {
+			await withPrincipal(
+				r.h.db,
+				{ id: OWNER },
+				(tx) =>
+					tx.sql`update owner_megolm_sessions set first_seen_at = now() where owner = ${OWNER}`
+			);
+		}
+		const next = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Still here');
+		expect(await r.nextSaying('Heard:', next)).toBe('Heard: Still here');
+		expect(r.saying('Heard: Before the month')).toHaveLength(1);
+	});
 });

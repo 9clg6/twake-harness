@@ -12,6 +12,7 @@ import {
 	pinFirstSeen,
 	receiveWords,
 	recordSeen,
+	seeSession,
 	type DeviceNoticeReason
 } from './owner-cross-signing-repository.js';
 import { readPublishedKeys, senderDevice, type EventSender } from './owner-keys.js';
@@ -22,20 +23,27 @@ const REFUSAL_NOTICE_INTERVAL_MS = 60_000;
 // How long the words an owner sent are remembered, so that a copy of them starts nothing
 const WORDS_KEPT_MS = 30 * 24 * 60 * 60 * 1000;
 
-// What tells a Megolm message from any other, whatever event carries it: its session and its
-// ciphertext, read as bytes
-function digestOf(encrypted: Record<string, unknown> | null): string | null {
+// The Megolm session of encrypted words, and what tells them from any other words, whatever event
+// carries them: a digest of their session and their ciphertext, read as bytes
+function sealOf(
+	encrypted: Record<string, unknown> | null
+): { readonly sessionId: string; readonly digest: string } | null {
 	const content: unknown = encrypted?.['content'];
 	if (typeof content !== 'object' || content === null) return null;
 	const sessionId: unknown = Reflect.get(content, 'session_id');
 	const ciphertext: unknown = Reflect.get(content, 'ciphertext');
 	if (typeof sessionId !== 'string' || typeof ciphertext !== 'string') return null;
-	return createHash('sha256')
+	const digest = createHash('sha256')
 		.update(sessionId)
 		.update('\0')
 		.update(Buffer.from(ciphertext, 'base64'))
 		.digest('hex');
+	return { sessionId, digest };
 }
+
+// Why encrypted words are no new words: a copy of words already received under another event, or
+// words of a session first received longer ago than copies are remembered
+type Staleness = { readonly copyOf: string } | { readonly oldSession: true };
 
 // The owner's words as they reached their assistant encrypted: a message, or a reaction that
 // answers one of the harness's questions
@@ -150,13 +158,16 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		};
 	}
 
-	// The event the same encrypted words first came with, when it is another one than this
-	async function copyOf(words: OwnerWords): Promise<string | null> {
-		const digest = digestOf(words.encrypted);
-		if (digest === null) return null;
-		return withPrincipal(db, { id: words.owner }, (tx) =>
-			receiveWords(tx, words.owner, digest, words.eventId, WORDS_KEPT_MS)
-		);
+	// What makes the encrypted words no new words, null when they are new or cannot be told apart
+	async function stalenessOf(words: OwnerWords): Promise<Staleness | null> {
+		const seal = sealOf(words.encrypted);
+		if (seal === null) return null;
+		const { owner, eventId } = words;
+		return withPrincipal(db, { id: owner }, async (tx): Promise<Staleness | null> => {
+			if (await seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)) return { oldSession: true };
+			const copyOf = await receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS);
+			return copyOf === null ? null : { copyOf };
+		});
 	}
 
 	// Tells the owner in the room, once a minute at most per device when their words were not
@@ -198,12 +209,20 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			let checked: CheckedEvent | null = null;
 			let verdict: DeviceVerdict;
 			try {
-				// The same encrypted words under another event are no new words, whatever the mode
-				const firstEventId = await copyOf(words);
-				if (firstEventId !== null) {
+				// The same encrypted words under another event, or words of a session older than what
+				// the harness remembers, are no new words, whatever the mode
+				const staleness = await stalenessOf(words);
+				if (staleness !== null && 'copyOf' in staleness) {
 					log.info(
-						{ roomId, owner, eventId, via, mode, firstEventId },
+						{ roomId, owner, eventId, via, mode, firstEventId: staleness.copyOf },
 						'assistant ignored a copy of earlier words'
+					);
+					return REFUSED;
+				}
+				if (staleness !== null) {
+					log.info(
+						{ roomId, owner, eventId, via, mode },
+						'assistant ignored words of an old session'
 					);
 					return REFUSED;
 				}
