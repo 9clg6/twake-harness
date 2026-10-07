@@ -2,6 +2,7 @@ import MarkdownIt from 'markdown-it';
 
 import type { DomainLabel } from '../contracts/domains.js';
 import type { Messages } from '../i18n/messages.js';
+import { renderMarkdown } from '../matrix/format.js';
 import type { ConsentLevel, WaitReason } from './consent.js';
 
 // A call the harness froze, as its request to the owner tells of it
@@ -55,6 +56,10 @@ export interface OwnerRequest {
 
 // The most a request quotes of what the model wrote: its words, never what runs
 const SAID_LENGTH = 2_000;
+
+// The most those words may take of the message as HTML once rendered: what their escaped text
+// could, five bytes a character, so that the request stays as large as it was sized to be
+const SAID_HTML_BYTES = SAID_LENGTH * 5;
 
 // The most a call, or the summary shown in its place, may take in the message that shows it, as
 // plain text and as HTML together: with the rest of the request, well within what one Matrix
@@ -187,20 +192,27 @@ function callHtml(call: ShownCall): string {
 	return `<pre><code${language}>${escapeHtml(call.text)}</code></pre>`;
 }
 
-// The request as HTML, laid out by the harness. The model's words are plain text in a quote under
-// the harness's label, never rendered: no heading, table, image or link they hold can stand out
-// against the question or its buttons. The call, or its contract's summary under the harness's
-// label, is code, and only the question and that label are rendered, from the harness's own
-// Markdown.
+// What the model wrote, as HTML in the quote under the harness's label: rendered as its answers
+// are, every tag of it closed within it, so that nothing of it follows the quote and passes for
+// the harness's own words; or its lines as text, should the rendering take more of the message
+// than the quote may
+function saidHtml(text: string): string {
+	const rendered = renderMarkdown(text);
+	return byteLength(rendered) <= SAID_HTML_BYTES
+		? rendered
+		: linesOf(text).map(escapeHtml).join('<br />');
+}
+
+// The request as HTML, laid out by the harness. The model's words render as its answers do, held
+// whole in a quote under the harness's label. The call, or its contract's summary under the
+// harness's label, is code, and only the question and that label are rendered from the harness's
+// own Markdown.
 export function requestHtml(request: OwnerRequest): string {
 	const { said, call, summary } = request;
 	const quoted =
 		said === null
 			? []
-			: [
-					`<p>${escapeHtml(said.label)}</p>`,
-					`<blockquote>${linesOf(said.text).map(escapeHtml).join('<br />')}</blockquote>`
-				];
+			: [`<p>${escapeHtml(said.label)}</p>`, `<blockquote>${saidHtml(said.text)}</blockquote>`];
 	return [
 		...quoted,
 		QUESTION_MARKDOWN.render(request.question).trim(),

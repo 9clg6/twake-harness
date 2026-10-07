@@ -138,13 +138,18 @@ export function makeLaidOutText(body: string, html: string): RichText {
 	};
 }
 
+// The HTML an answer's Markdown renders to, for Matrix clients: its tags all closed within it, so
+// that a container the harness puts it in holds it whole
+export function renderMarkdown(text: string): string {
+	return unwrapSingleParagraph(sanitizeHtml(markdown.render(text), SANITIZE).trim());
+}
+
 // The markdown stays the plain body, for clients that show no HTML and for notifications
 export function makeRichText(text: string): RichText {
-	const html = sanitizeHtml(markdown.render(text), SANITIZE).trim();
 	return {
 		msgtype: 'm.text',
 		body: text,
 		format: 'org.matrix.custom.html',
-		formatted_body: unwrapSingleParagraph(html)
+		formatted_body: renderMarkdown(text)
 	};
 }
