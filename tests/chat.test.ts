@@ -147,18 +147,107 @@ describe('a chat turn with the scripted model', () => {
 		expect(h.apisix.llm.calls.length).toBeLessThanOrEqual(7);
 	});
 
-	it('serializes the turns of one user and lets two users run in parallel', async () => {
-		h.apisix.llm.script = () => ({ content: 'ok', delayMs: 200 });
-		const sameUser = await Promise.all([
-			chat('alice', { message: '1' }),
-			chat('alice', { message: '2' })
-		]);
-		expect(sameUser.every((r) => r.status === 200)).toBe(true);
-		const [a, b] = h.apisix.llm.calls;
-		expect(a !== undefined && b !== undefined && b.startedAt >= a.finishedAt).toBe(true);
-		h.apisix.llm.calls.length = 0;
-		await Promise.all([chat('carol', { message: '1' }), chat('dave', { message: '2' })]);
-		const [c, d] = h.apisix.llm.calls;
-		expect(c !== undefined && d !== undefined && d.startedAt < c.finishedAt).toBe(true);
+	// The calls a held model received, in order of arrival, and the most it held at once
+	interface HeldModelCalls {
+		readonly entered: readonly string[];
+		mostAtOnce(): number;
+		release(index: number): void;
+		releaseAll(): void;
+	}
+
+	// Holds every model call open until the test releases it: overlap and order are then
+	// observed, not inferred from timings
+	function holdModelCalls(): HeldModelCalls {
+		const entered: string[] = [];
+		const releases: (() => void)[] = [];
+		let inside = 0;
+		let most = 0;
+		h.apisix.llm.script = (request) => {
+			entered.push(String(request.messages.at(-1)?.content ?? ''));
+			inside += 1;
+			most = Math.max(most, inside);
+			const released = new Promise<void>((resolve) => releases.push(resolve));
+			return {
+				content: 'ok',
+				hold: released.then(() => {
+					inside -= 1;
+				})
+			};
+		};
+		return {
+			entered,
+			mostAtOnce: () => most,
+			release: (index) => releases[index]?.(),
+			releaseAll: () => {
+				for (const release of releases) release();
+			}
+		};
+	}
+
+	// Waits for a state the harness reaches by itself; the bound only turns a failure into an error
+	async function waitUntil(what: string, check: () => boolean | Promise<boolean>): Promise<void> {
+		for (let i = 0; i < 1000; i += 1) {
+			if (await check()) return;
+			await new Promise((resolve) => setTimeout(resolve, 10));
+		}
+		throw new Error(`${what} did not happen within 10 s`);
+	}
+
+	// The admission gauges of the replica the tests talk to, as the metrics endpoint exposes them
+	async function admissionGauge(gauge: 'inflight' | 'queued'): Promise<number> {
+		const res = await h.app.inject({ method: 'GET', url: '/metrics' });
+		return Number(new RegExp(`^harness_turns_${gauge} (\\d+)$`, 'm').exec(res.body)?.[1]);
+	}
+
+	// Runs a scenario against a held model once the turns of earlier tests have ended, since one
+	// left running would reach this model and skew its counts; nothing stays held afterwards
+	async function withHeldModelCalls(
+		scenario: (model: HeldModelCalls) => Promise<void>
+	): Promise<void> {
+		await waitUntil(
+			'the turns of earlier tests ending',
+			async () => (await admissionGauge('inflight')) === 0
+		);
+		const model = holdModelCalls();
+		try {
+			await scenario(model);
+		} finally {
+			model.releaseAll();
+		}
+	}
+
+	it('serializes the turns of one user', async () => {
+		await withHeldModelCalls(async (model) => {
+			const turns = [chat('alice', { message: '1' }), chat('alice', { message: '2' })];
+			await waitUntil('a first turn reaching the model', () => model.entered.length >= 1);
+			// While that call is held, the user's other turn waits in admission and never reaches it
+			await waitUntil(
+				'the second turn waiting in admission',
+				async () => (await admissionGauge('queued')) === 1
+			);
+			expect(model.entered).toHaveLength(1);
+			model.release(0);
+			await waitUntil('the second turn reaching the model', () => model.entered.length >= 2);
+			model.release(1);
+			const replies = await Promise.all(turns);
+			expect(replies.map((r) => r.status)).toEqual([200, 200]);
+			expect(model.mostAtOnce()).toBe(1);
+		});
+	});
+
+	it('runs the turns of two users at the same time', async () => {
+		await withHeldModelCalls(async (model) => {
+			const turns = [
+				chat('carol', { message: 'from carol' }),
+				chat('dave', { message: 'from dave' })
+			];
+			// No call leaves the model before both are inside it, so the overlap is forced
+			await waitUntil('both turns being inside the model', () => model.entered.length >= 2);
+			expect([...model.entered].sort()).toEqual(['from carol', 'from dave']);
+			expect(model.mostAtOnce()).toBe(2);
+			model.releaseAll();
+			const replies = await Promise.all(turns);
+			expect(replies.map((r) => r.status)).toEqual([200, 200]);
+		});
 	});
 });
