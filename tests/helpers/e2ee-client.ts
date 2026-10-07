@@ -31,6 +31,8 @@ export interface ReadEvent {
 	readonly eventId: string;
 	readonly content: Record<string, unknown>;
 	readonly redacts: string | null;
+	// When the homeserver received it, in milliseconds since the epoch
+	readonly at: number;
 }
 
 export interface DecryptionFailure {
@@ -144,6 +146,7 @@ export async function startE2eeClient(
 				event_id?: string;
 				content?: Record<string, unknown>;
 				redacts?: string;
+				origin_server_ts?: number;
 			}
 		) => {
 			seen.push({
@@ -162,7 +165,8 @@ export async function startE2eeClient(
 				sender: event.sender ?? '',
 				eventId: event.event_id ?? '',
 				content,
-				redacts
+				redacts,
+				at: event.origin_server_ts ?? 0
 			});
 		}
 	);

@@ -167,6 +167,8 @@ export interface OwnerTurnInput {
 	// The call its owner just allowed: the turn runs it as frozen, then goes on from there, with
 	// no new message
 	readonly resume?: ResumeInput;
+	// Told, after each action that does not end the turn, the actions it has done so far
+	readonly actionsDone?: (actions: number) => void;
 }
 
 // How the owner allowed the call a turn resumes, which the consent it grants records: in the chat,
@@ -190,6 +192,8 @@ export type OwnerTurnResult =
 			readonly pendingCallId?: string;
 			// That question in its parts, when the harness laid it out as a request about the call
 			readonly request?: OwnerRequest;
+			// The turn reached its limit of tool calls before it answered: there is more to do
+			readonly atLimit?: true;
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -623,6 +627,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					return { kind: 'ok', sessionId: session.id, answer: notice, model: llm.model };
 				}
 			}
+			// The call its owner allowed is the first action of the turn that goes on from it
+			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
 			try {
 				const turn = await runTurn(
 					{
@@ -659,7 +665,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						message: told.message,
 						context,
 						actionsBefore,
-						limitNotice: (actions) => messages.notices.callLimit(actions)
+						limitNotice: (actions) => messages.notices.callLimit(actions),
+						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone })
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>
@@ -674,7 +681,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					answer: turn.answer,
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
-					...(turn.request === undefined ? {} : { request: turn.request })
+					...(turn.request === undefined ? {} : { request: turn.request }),
+					...(turn.atLimit === true ? { atLimit: true } : {})
 				};
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {

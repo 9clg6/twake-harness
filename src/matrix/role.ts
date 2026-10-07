@@ -70,6 +70,9 @@ export interface MatrixRoleOptions {
 	readonly pollIntervalMs?: number;
 	// How long the SDK may process a push before the role gives it up, PUSH_DEADLINE_MS by default
 	readonly pushDeadlineMs?: number;
+	// How long a status message waits for its turn's answer before it gives up, as long as the
+	// typing by default
+	readonly statusMaxMs?: number;
 }
 
 export interface MatrixRole {
@@ -94,14 +97,23 @@ interface SendJob {
 	// The message the text answers, for the reactions on it: the owner's own, or the assistant's
 	// question their reaction answered
 	readonly replyTo?: string;
-	readonly outcome?: TurnOutcome;
+	readonly outcome?: 'answered' | 'failed';
 	// The text asks the owner about a frozen call: the event sent is remembered for their answer
 	readonly request?: PendingQuestion;
 	// The text as HTML, laid out by the harness itself
 	readonly html?: string;
+	// The turn answered once it reached its limit of tool calls
+	readonly atLimit?: true;
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
+// The actions a turn has done so far, for its status message
+const progressPayload = z.object({
+	asUserId: z.string().min(1),
+	roomId: z.string().min(1),
+	replyTo: z.string().min(1),
+	actions: z.number().int().min(1)
+});
 // How long a stop waits for the pushes and listeners under way before it goes on regardless
 const STOP_DRAIN_MS = 10_000;
 
@@ -137,7 +149,8 @@ function isSendJob(value: unknown): value is SendJob {
 			job['outcome'] === 'answered' ||
 			job['outcome'] === 'failed') &&
 		(job['request'] === undefined || isPendingQuestion(job['request'])) &&
-		(job['html'] === undefined || typeof job['html'] === 'string')
+		(job['html'] === undefined || typeof job['html'] === 'string') &&
+		(job['atLimit'] === undefined || job['atLimit'] === true)
 	);
 }
 
@@ -158,6 +171,12 @@ function annotationOf(event: RoomEvent): { readonly eventId: string; readonly ke
 		typeof key === 'string'
 		? { eventId, key }
 		: null;
+}
+
+// How the turn of a reply ended, as its send job tells it
+function outcomeOf(job: SendJob): TurnOutcome {
+	if (job.outcome === 'failed') return 'failed';
+	return job.atLimit === true ? 'limited' : 'answered';
 }
 
 function turnOf(job: SendJob): TurnRef | null {
@@ -598,7 +617,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
-	// Eyes and typing while a turn works, a check mark once it answered
+	// Eyes, typing and, once it takes a while, a status message while a turn works, a check mark
+	// once it answered
 	const feedback = makeChatFeedback({
 		log,
 		setTyping: async (userId, roomId, typing, timeoutMs) => {
@@ -614,7 +634,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		},
 		redactEvent: async (userId, roomId, eventId) => {
 			await appservice.getIntentForUserId(userId).underlyingClient.redactEvent(roomId, eventId);
-		}
+		},
+		// The organization agent speaks the deployment's language with every member
+		statusTexts: async (turn) => {
+			const room = await assistantRoom(turn.roomId);
+			const toOwner =
+				room === null || room.owner === ORGANIZATION_PRINCIPAL
+					? messages
+					: await fetchMessages(room.owner);
+			return toOwner.status;
+		},
+		statusDelayMs: config.turn.statusDelayMs,
+		...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs })
 	});
 
 	// The harness's requests in the assistants' rooms, and the owners' answers to them
@@ -823,13 +854,24 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send', 'recover'],
+		kinds: ['send', 'recover', 'progress'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (job.kind === 'recover') {
 				const parsed = recoverPayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('recover payload is malformed');
 				await recover(parsed.data.owner);
+				return;
+			}
+			if (job.kind === 'progress') {
+				const parsed = progressPayload.safeParse(job.payload);
+				// Best effort, as the rest of the feedback: a retry would hold the room's next counts back
+				if (!parsed.success) {
+					log.warn({ job: job.id }, 'progress payload is malformed');
+					return;
+				}
+				const { asUserId, roomId, replyTo, actions } = parsed.data;
+				feedback.turnProgressed({ assistantUserId: asUserId, roomId, eventId: replyTo }, actions);
 				return;
 			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
@@ -839,14 +881,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (room !== null) await onEncryptionReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
 			const turn = turnOf(job.payload);
-			if (turn !== null) await feedback.answerReady(turn);
+			const request = job.payload.request;
+			// A question's status, if any, points to it before it goes out; any other reply goes out
+			// after its status, which then closes
+			if (turn !== null) {
+				await feedback.answerReady(turn, request === undefined ? 'answer' : 'question');
+			}
 			const { text, html } = job.payload;
 			const sent = await intent.sendEvent(
 				job.payload.roomId,
 				html === undefined ? makeRichText(text) : makeLaidOutText(text, html)
 			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
-			const request = job.payload.request;
 			if (request !== undefined) {
 				const requestRoom = {
 					roomId: job.payload.roomId,
@@ -857,7 +903,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			if (turn !== null) {
 				feedback
-					.answerSent(turn, job.payload.outcome ?? 'answered')
+					.answerSent(turn, outcomeOf(job.payload))
 					.catch((err: unknown) =>
 						log.warn({ roomId: turn.roomId, err }, 'answer feedback failed')
 					);
