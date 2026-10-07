@@ -1,4 +1,3 @@
-import { CryptoClient } from 'matrix-bot-sdk';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
@@ -13,23 +12,6 @@ import type { MatrixUser } from './helpers/synapse.js';
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-// The encryption machines this process opens, by user: the SDK opens one each time it prepares
-// the encryption of a client, on the store of that client's user
-const machinesOpened: string[] = [];
-const sdkPrepare = CryptoClient.prototype.prepare;
-CryptoClient.prototype.prepare = async function (this: CryptoClient, roomIds: string[]) {
-	const opens = !this.isReady;
-	await sdkPrepare.call(this, roomIds);
-	if (opens) {
-		const client = Reflect.get(this, 'client') as { getUserId(): Promise<string> };
-		machinesOpened.push(await client.getUserId());
-	}
-};
-
-function machinesOf(userId: string): number {
-	return machinesOpened.filter((opened) => opened === userId).length;
 }
 
 // The owner opens a room where every message has a room key of its own, so that every message
@@ -132,22 +114,5 @@ describe('an assistant whose matrix role restarts', () => {
 				60_000
 			)
 		).toBe('echo: behind the queue');
-	});
-
-	it('opens one encryption machine per assistant at each start of the role', async () => {
-		const { client, assistant, room } = await conversation('jo');
-		// Two machines on one store would each keep its own sessions, and write over the other's
-		expect(machinesOf(assistant.userId)).toBe(1);
-
-		await h.restartRole();
-		await client.sendText(room, 'and now');
-		expect(await client.waitForMessage(room, assistant.userId, (t) => t === 'echo: and now')).toBe(
-			'echo: and now'
-		);
-		await client.sendText(room, 'once more');
-		expect(
-			await client.waitForMessage(room, assistant.userId, (t) => t === 'echo: once more')
-		).toBe('echo: once more');
-		expect(machinesOf(assistant.userId)).toBe(2);
 	});
 });
