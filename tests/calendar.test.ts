@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto';
 import { Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { loadConfig } from '../src/config.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
@@ -1088,5 +1089,64 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		}
 		await publish(notification({ uid: 'uid-after-health' }));
 		await answerTo('uid-after-health');
+	});
+});
+
+describe('the settings of Calendar’s fanout', () => {
+	const base = {
+		HARNESS_ROLE: 'worker',
+		DATABASE_URL: 'postgres://x@localhost/x',
+		AUTH_JWKS_URL: 'https://example.test/jwks',
+		AUTH_ISSUER: 'https://example.test/',
+		AUTH_AUDIENCE: 'twake-harness',
+		APISIX_BASE_URL: 'http://apisix.test',
+		APISIX_CONSUMER_KEY: 'k'
+	};
+	const listening = {
+		...base,
+		MATRIX_MAIL_DOMAIN: 'twake.example',
+		CALENDAR_ENABLED: 'true',
+		CALENDAR_AMQP_URL: 'amqp://twake-harness:s3cret-password@rabbitmq.dbs.svc:5672/calendar'
+	};
+
+	// What a refused start says, which goes to the logs
+	function refusal(env: Record<string, string>): string {
+		try {
+			loadConfig(env);
+		} catch (err: unknown) {
+			return err instanceof Error ? err.message : String(err);
+		}
+		throw new Error('the settings were taken');
+	}
+
+	it('listens to nothing unless enabled, then on its own address', () => {
+		expect(loadConfig(base).calendar).toBeNull();
+		expect(loadConfig(listening).calendar).toEqual({
+			amqpUrl: 'amqp://twake-harness:s3cret-password@rabbitmq.dbs.svc:5672/calendar'
+		});
+	});
+
+	it('refuses to start listening without an AMQP address, never saying the one it was given', () => {
+		expect(refusal({ ...listening, CALENDAR_AMQP_URL: '' })).toBe(
+			'invalid configuration: CALENDAR_ENABLED needs CALENDAR_AMQP_URL, an amqp or amqps URL'
+		);
+		const https = refusal({
+			...listening,
+			CALENDAR_AMQP_URL: 'https://twake-harness:s3cret-password@rabbitmq.dbs.svc/calendar'
+		});
+		expect(https).toBe(
+			'invalid configuration: CALENDAR_ENABLED needs CALENDAR_AMQP_URL, an amqp or amqps URL'
+		);
+		expect(https).not.toContain('s3cret');
+	});
+
+	it('refuses to start listening without the mail domain that tells its owners among invitees', () => {
+		const { MATRIX_MAIL_DOMAIN: _domain, ...anywhere } = listening;
+		expect(refusal(anywhere)).toBe(
+			'invalid configuration: CALENDAR_ENABLED needs MATRIX_MAIL_DOMAIN or MATRIX_SERVER_NAME, the mail domain of the owners it wakes'
+		);
+		expect(
+			loadConfig({ ...anywhere, MATRIX_SERVER_NAME: 'twake.example' }).calendar
+		).not.toBeNull();
 	});
 });

@@ -299,6 +299,27 @@ function activitySource(values: {
 	return { amqpUrl: values.ACTIVITY_AMQP_URL, types };
 }
 
+// Calendar's fanout, on the vhost its address names. A notification names its invitee by email,
+// which only the instance's mail domain makes one of its owners.
+function calendarSource(values: {
+	CALENDAR_AMQP_URL: string;
+	MATRIX_MAIL_DOMAIN: string;
+	MATRIX_SERVER_NAME: string;
+}): CalendarSource {
+	// The address holds the password of the instance's user: a refusal never says it
+	if (!isAmqpUrl(values.CALENDAR_AMQP_URL)) {
+		throw new Error(
+			'invalid configuration: CALENDAR_ENABLED needs CALENDAR_AMQP_URL, an amqp or amqps URL'
+		);
+	}
+	if (values.MATRIX_MAIL_DOMAIN === '' && values.MATRIX_SERVER_NAME === '') {
+		throw new Error(
+			'invalid configuration: CALENDAR_ENABLED needs MATRIX_MAIL_DOMAIN or MATRIX_SERVER_NAME, the mail domain of the owners it wakes'
+		);
+	}
+	return { amqpUrl: values.CALENDAR_AMQP_URL };
+}
+
 export function loadConfig(env: Env): Config {
 	const parsed = envSchema.safeParse(env);
 	if (!parsed.success) {
@@ -409,7 +430,7 @@ export function loadConfig(env: Env): Config {
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
-		calendar: values.CALENDAR_ENABLED === 'true' ? { amqpUrl: values.CALENDAR_AMQP_URL } : null,
+		calendar: values.CALENDAR_ENABLED === 'true' ? calendarSource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
