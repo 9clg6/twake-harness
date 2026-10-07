@@ -30,6 +30,9 @@ interface GivenAnswer {
 	readonly says: Answer;
 	readonly kind: AnswerKind;
 	readonly eventId: string;
+	// The message of the room that carries it, which the turn a yes resumes answers: the owner's
+	// own words, or the request their reaction answered, since nothing shows a reaction's reactions
+	readonly message: string;
 }
 
 export interface ConsentRequestsOptions {
@@ -41,6 +44,9 @@ export interface ConsentRequestsOptions {
 	readonly lifetimeMs: number;
 	// Where the matrix role counts the answers, and the requests closed unanswered
 	readonly metrics: ConsentMetrics;
+	// A yes resumed the turn that froze the call: the owner sees their assistant at work on the
+	// message that carries it, as on a message that starts a turn
+	resumeQueued(room: RequestRoom, eventId: string): void;
 }
 
 // The harness's requests in an assistant's room, and its owner's answers to them. The matrix role
@@ -116,11 +122,14 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	): Promise<void> {
 		const { roomId, owner } = room;
 		const { pendingCallId } = request;
-		if (answer.says === 'yes') {
-			// Queued first: should the role stop before the approval, the same answer delivered
-			// again finds the call still open, and its job queued once
-			await enqueueJob(db, resumeJob({ owner, roomId, pendingCallId, through: 'chat' }));
-		}
+		// Queued first: should the role stop before the approval, the same answer delivered again
+		// finds the call still open, and its job queued once
+		const queued =
+			answer.says === 'yes' &&
+			(await enqueueJob(
+				db,
+				resumeJob({ owner, roomId, pendingCallId, through: 'chat', replyTo: answer.message })
+			));
 		const decided = await withPrincipal(db, { id: owner }, (tx) =>
 			decidePendingCall(
 				tx,
@@ -135,6 +144,9 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			'owner answered'
 		);
 		if (decided) metrics.answered(request, answer.says, answer.kind, 'decided');
+		// Only the yes that queued the turn and decided the call shows it at work: the turn's answer
+		// goes to the message its job names
+		if (queued && decided) options.resumeQueued(room, answer.message);
 		if (answer.says === 'no' && decided) {
 			const messages = await fetchMessages(owner);
 			await enqueueJob(
@@ -168,7 +180,12 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			const { owner } = room;
 			const request = await lookUp(owner, (tx) => findRequest(tx, owner, requestEventId));
 			if (request === null) return;
-			await settle(room, request, { says, kind: 'reaction', eventId: reactionEventId });
+			await settle(room, request, {
+				says,
+				kind: 'reaction',
+				eventId: reactionEventId,
+				message: requestEventId
+			});
 		},
 		wrote: async (room, eventId, text) => {
 			const { roomId, owner } = room;
@@ -184,7 +201,7 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			});
 			if (answered) return true;
 			if (says === null || request === null) return false;
-			await settle(room, request, { says, kind: 'words', eventId });
+			await settle(room, request, { says, kind: 'words', eventId, message: eventId });
 			return true;
 		}
 	};

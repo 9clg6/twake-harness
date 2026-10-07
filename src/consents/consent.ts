@@ -41,4 +41,7 @@ export interface ResumeRequest {
 	readonly roomId: string;
 	readonly pendingCallId: string;
 	readonly through: 'chat' | 'api';
+	// The event of the room that carries the owner's yes, which the resumed turn answers as it would
+	// a message: their yes in words, or the request their reaction answered
+	readonly replyTo?: string | undefined;
 }
