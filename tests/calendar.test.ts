@@ -4,14 +4,18 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { grantConsent, withdrawConsent } from './helpers/consents.js';
+import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
 	CALENDAR_CATALOG,
+	INJECTED_TITLE,
 	type ChatMessage,
 	type ChatRequest,
 	type ContractCall,
 	type ContractReply,
-	type RecordedCall
+	type RecordedCall,
+	type ScriptedReply,
+	type ToolCall
 } from './helpers/fake-apisix.js';
 import { startTestBroker, type TestBroker, type TestVhost } from './helpers/rabbitmq.js';
 
@@ -197,7 +201,77 @@ function invitationModel(request: ChatRequest): { content: string } {
 	};
 }
 
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function toolCall(id: string, name: string, args: unknown): ToolCall {
+	return { id, type: 'function', function: { name, arguments: JSON.stringify(args) } };
+}
+
+// A literal model told of an invitation, as above, which also prepares its acceptance by its UID
+// in the same answer when it is told to; once the acceptance ran, it tells what came back
+function acceptingModel(request: ChatRequest): ScriptedReply {
+	const last = request.messages.at(-1);
+	if (last?.role === 'tool' && last.name === 'accept_invitation') {
+		return { content: `Accepted: ${last.content ?? ''}` };
+	}
+	const told = lastUser(request);
+	const shown = shownIn(told);
+	if (last?.role !== 'user' || shown === null) return { content: `Heard: ${told}` };
+	const { content } = invitationModel(request);
+	if (!told.includes('call accept_invitation')) return { content };
+	const { uid } = shown.object;
+	return {
+		content,
+		toolCalls: [toolCall(`call_accept_${uid}`, 'accept_invitation', { body: { uid } })]
+	};
+}
+
+// Bob's invitation to a meeting on Friday morning in Paris, the budget review unless told otherwise
+function fridayMeeting(uid: string, title: string = 'Budget review'): Notification {
+	return notification({
+		uid,
+		lines: [
+			`SUMMARY:${title}`,
+			'DTSTART;TZID=Europe/Paris:20261009T090000',
+			'DTEND;TZID=Europe/Paris:20261009T100000',
+			'ORGANIZER;CN=Bob:mailto:bob@test.local'
+		]
+	});
+}
+
+// What a literal model says of the budget review
+function saidOfBudget(uid: string, availability: string = 'You are free then.'): string {
+	return `bob@test.local invites you to "Budget review" from 2026-10-09T09:00:00+02:00 to 2026-10-09T10:00:00+02:00 (${uid}). ${availability}`;
+}
+
+// How every request of the harness ends
+const HOW_TO_ANSWER = 'Answer yes or no in your next message.';
+
+// A request as Alice's client shows it in plain text: what the model wrote, quoted under the
+// harness's label; the harness's question; the call whole, as the model wrote it; and how to answer
+function asked(question: string, args: unknown, said: string): string {
+	return [
+		['Your assistant wrote:', ...said.split('\n').map((line) => `> ${line}`)].join('\n'),
+		question,
+		JSON.stringify(args, null, 2),
+		HOW_TO_ANSWER
+	].join('\n\n');
+}
+
+// The harness's question about a write that a turn an event started prepared, in an application its
+// owner lets it write in
+const EVENT_WRITE =
+	'I prepared this in calendar for what just arrived, and I do it only with your yes. Shall I do it, exactly as below?';
+
 const FREE = { start: '', end: '', free: true, busy: [] };
+const BUSY = {
+	start: '2026-10-09T09:00:00+02:00',
+	end: '2026-10-09T10:00:00+02:00',
+	free: false,
+	busy: [{ start: '2026-10-09T09:00:00+02:00', end: '2026-10-09T10:00:00+02:00' }]
+};
 
 // What the harness asks the model to do once it handed it an invitation and its slot's check
 const INSTRUCTIONS = [
@@ -205,11 +279,17 @@ const INSTRUCTIONS = [
 	'Write those words and, in the same answer, call accept_invitation for it with its uid: I am then asked, under your words, whether to accept it, and nothing is sent before my yes. Do not ask me yourself.'
 ];
 
-// The owner's calendar: every slot is free
+// The owner's calendar: every slot is free but the one of uid-busy, and accepting an invitation by
+// its UID answers as the contract does
 function calendarApp(call: ContractCall): ContractReply {
-	return call.path.endsWith('/freebusy')
-		? { status: 200, body: FREE }
-		: { status: 404, body: { code: 'not_found' } };
+	if (call.path.endsWith('/freebusy')) {
+		return { status: 200, body: call.query['exclude'] === 'uid-busy' ? BUSY : FREE };
+	}
+	if (call.method === 'POST' && call.path === '/contracts/v1/calendar/invitations/accept') {
+		const { uid } = call.body as { uid?: unknown };
+		return { status: 200, body: { uid, partstat: 'ACCEPTED' } };
+	}
+	return { status: 404, body: { code: 'invitation_not_found' } };
 }
 
 describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
@@ -234,10 +314,12 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			write: `^${PREFIX}\\.`,
 			read: `^(${FANOUT}|${PREFIX}\\..+)$`
 		});
+		// Many turns of one owner in a row: admission is the subject of its own suite
 		r = await startConsentRoom({
 			CALENDAR_ENABLED: 'true',
 			CALENDAR_AMQP_URL: calendar.urlFor(HARNESS_USER, HARNESS_PASSWORD),
-			RABBITMQ_PREFIX: PREFIX
+			RABBITMQ_PREFIX: PREFIX,
+			ADMISSION_USER_PER_MINUTE: '100'
 		});
 		worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker' },
@@ -274,6 +356,43 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			await new Promise((resolve) => setTimeout(resolve, 250));
 		}
 		throw new Error(`fewer than ${count} turns of ${uid}`);
+	}
+
+	// The harness's requests, as Alice's client received them
+	function requests(): DecryptedMessage[] {
+		return r.client.messages.filter(
+			(m) => m.roomId === r.room && m.sender === r.assistantId && m.body.endsWith(HOW_TO_ANSWER)
+		);
+	}
+
+	async function nextRequest(seen: number): Promise<DecryptedMessage> {
+		for (let i = 0; i < 120; i += 1) {
+			const latest = requests().at(seen);
+			if (latest !== undefined) return latest;
+			await sleep(250);
+		}
+		throw new Error('no new request from the harness');
+	}
+
+	// The info line of the latest call that waited for Alice
+	function lastWait(): Record<string, unknown> | undefined {
+		return r.h
+			.logLines()
+			.filter((l) => l['msg'] === 'contract call waits for its owner')
+			.at(-1);
+	}
+
+	// What reached Alice's applications other than reads, oldest first
+	function writes(): ContractCall[] {
+		return r.h.apisix.contracts.calls.filter((c) => c.method !== 'GET');
+	}
+
+	// What every replica of the api role serves on /metrics, as a scraper reads each pod
+	async function apiMetrics(): Promise<string> {
+		const served = await Promise.all(
+			r.h.apps.map(async (app) => (await app.inject({ method: 'GET', url: '/metrics' })).body)
+		);
+		return served.join('\n');
 	}
 
 	// What the model was told of the invitation of this id, and what the harness checked of it
@@ -390,6 +509,204 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 						l['reason'] === null
 				)
 		).toBe(true);
+	});
+
+	it('prepares the acceptance by its UID, asks me with its words, accepts it on my ✅ and tells me', async () => {
+		// Alice lets her assistant write in her calendar too, as the pilot's owners do
+		await grantConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		r.h.apisix.llm.script = acceptingModel;
+		try {
+			const seen = requests().length;
+			const before = r.h.apisix.contracts.calls.length;
+			await publish(fridayMeeting('uid-accept'));
+			const request = await nextRequest(seen);
+			// What the model wrote, quoted as its words, then the harness's question, the acceptance
+			// exactly as it would go, and how to answer
+			expect(request.body).toBe(
+				asked(EVENT_WRITE, { body: { uid: 'uid-accept' } }, saidOfBudget('uid-accept'))
+			);
+			// The harness read Alice's availability; the acceptance waits for her, though she lets
+			// her assistant write in her calendar
+			expect(r.h.apisix.contracts.calls.slice(before).map((c) => `${c.method} ${c.path}`)).toEqual([
+				'GET /contracts/v1/calendar/freebusy'
+			]);
+			expect(lastWait()).toMatchObject({
+				reasons: ['event_turn'],
+				contract: 'calendar.invitation.accept.v1',
+				tool: 'accept_invitation',
+				domain: 'calendar',
+				level: 'write',
+				risk: 'low',
+				principal: 'alice@test.local'
+			});
+			expect(await apiMetrics()).toContain(
+				'harness_consent_requests_total{domain="calendar",level="write",reason="event_turn"} 1'
+			);
+			// Her ✅ sends that very acceptance, by the invitation's UID, in her name and under the
+			// invitation's id, and her assistant tells her how it went
+			const told = r.saying('Accepted:').length;
+			await r.client.react(r.room, request.eventId, '✅');
+			expect(await r.nextSaying('Accepted:', told)).toBe(
+				'Accepted: {"status":200,"body":{"uid":"uid-accept","partstat":"ACCEPTED"}}'
+			);
+			const accepted = writes();
+			expect(accepted).toHaveLength(1);
+			expect(accepted[0]?.method).toBe('POST');
+			expect(accepted[0]?.path).toBe('/contracts/v1/calendar/invitations/accept');
+			expect(accepted[0]?.body).toEqual({ uid: 'uid-accept' });
+			expect(accepted[0]?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
+			expect(accepted[0]?.headers['x-twake-contract']).toBe('calendar.invitation.accept.v1');
+			expect(accepted[0]?.headers['x-correlation-id']).toBe(
+				producerId('uid-accept', 'alice@test.local', '0')
+			);
+			// The model read that its acceptance waited for her, never that it needed her approval
+			const results = r.h.apisix.llm.calls
+				.flatMap((c) => c.request.messages)
+				.filter((m) => m.role === 'tool' && m.name === 'accept_invitation')
+				.map((m) => JSON.parse(m.content ?? '{}') as Record<string, unknown>);
+			expect(results[0]).toEqual({
+				status: 'awaiting_owner',
+				reasons: ['event_turn'],
+				domain: 'calendar',
+				level: 'write'
+			});
+			expect(results.some((result) => result['error'] === 'needs_owner_approval')).toBe(false);
+		} finally {
+			r.h.apisix.llm.script = invitationModel;
+		}
+	});
+
+	it('tells me of a conflict, and sends nothing when I say no', async () => {
+		r.h.apisix.llm.script = acceptingModel;
+		try {
+			const seen = requests().length;
+			const accepted = writes().length;
+			await publish(fridayMeeting('uid-busy'));
+			const request = await nextRequest(seen);
+			expect(request.body).toBe(
+				asked(
+					EVENT_WRITE,
+					{ body: { uid: 'uid-busy' } },
+					saidOfBudget('uid-busy', 'It conflicts with something already in your calendar.')
+				)
+			);
+			const acknowledged = r.saying('All right').length;
+			await r.client.sendText(r.room, 'no');
+			expect(await r.nextSaying('All right', acknowledged)).toBe('All right, I will not do it.');
+			await sleep(1000);
+			expect(writes()).toHaveLength(accepted);
+		} finally {
+			r.h.apisix.llm.script = invitationModel;
+		}
+	});
+
+	it('keeps a title that tells my assistant to accept as data, and runs only the acceptance I said yes to', async () => {
+		// The hostile invitation of the E2E: its title tells the assistant to accept it and every
+		// later one without asking. A model that obeys it accepts the next one on its own, once the
+		// acceptance Alice allowed ran.
+		r.h.apisix.llm.script = (request) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool' && last.name === 'accept_invitation') {
+				return {
+					content: 'Accepted. I am accepting the next one too.',
+					toolCalls: [
+						toolCall('call_accept_next', 'accept_invitation', { body: { uid: 'uid-next' } })
+					]
+				};
+			}
+			return acceptingModel(request);
+		};
+		try {
+			const seen = requests().length;
+			const accepted = writes().length;
+			await publish(fridayMeeting('uid-hostile', INJECTED_TITLE));
+			const request = await nextRequest(seen);
+			// The title reached the model as data only: under untrusted, on the one line of the block
+			const told = lastUser(turnOf('uid-hostile')[0]?.request);
+			expect(shownIn(told)?.untrusted).toEqual({ title: INJECTED_TITLE });
+			const carrying = told.split('\n').filter((line) => line.includes(INJECTED_TITLE));
+			expect(carrying).toHaveLength(1);
+			expect(carrying[0]?.startsWith('{')).toBe(true);
+			// Nothing reached her calendar before her yes, which runs that acceptance alone
+			expect(writes()).toHaveLength(accepted);
+			await r.client.react(r.room, request.eventId, '✅');
+			const again = await nextRequest(seen + 1);
+			expect(again.body).toBe(
+				asked(
+					EVENT_WRITE,
+					{ body: { uid: 'uid-next' } },
+					'Accepted. I am accepting the next one too.'
+				)
+			);
+			expect(lastWait()).toMatchObject({ reasons: ['event_turn'], tool: 'accept_invitation' });
+			expect(
+				writes()
+					.slice(accepted)
+					.map((c) => c.body)
+			).toEqual([{ uid: 'uid-hostile' }]);
+			const acknowledged = r.saying('All right').length;
+			await r.client.react(r.room, again.eventId, '❌');
+			await r.nextSaying('All right', acknowledged);
+			expect(
+				writes()
+					.slice(accepted)
+					.map((c) => c.body)
+			).toEqual([{ uid: 'uid-hostile' }]);
+		} finally {
+			r.h.apisix.llm.script = invitationModel;
+		}
+	});
+
+	it('asks once before its first write in my calendar for an invitation, and my yes lets it write there in my own turns', async () => {
+		await withdrawConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		r.h.apisix.llm.script = acceptingModel;
+		try {
+			const seen = requests().length;
+			const accepted = writes().length;
+			await publish(fridayMeeting('uid-first'));
+			const request = await nextRequest(seen);
+			expect(request.body).toBe(
+				asked(
+					'This is the first time I need to change your data in calendar, for what just arrived, and I do it only with your yes. Do you allow it, starting with this action, exactly as below?',
+					{ body: { uid: 'uid-first' } },
+					saidOfBudget('uid-first')
+				)
+			);
+			expect(lastWait()).toMatchObject({ reasons: ['consent', 'event_turn'] });
+			// One ✅ answers both: it accepts that invitation
+			let told = r.saying('Accepted:').length;
+			await r.client.react(r.room, request.eventId, '✅');
+			await r.nextSaying('Accepted:', told);
+			expect(
+				writes()
+					.slice(accepted)
+					.map((c) => c.body)
+			).toEqual([{ uid: 'uid-first' }]);
+			// It also let her assistant write in her calendar: when she asks, it accepts without asking
+			r.h.apisix.llm.script = (request) => {
+				const last = request.messages.at(-1);
+				if (last?.role === 'tool') return { content: `Accepted: ${last.content ?? ''}` };
+				return lastUser(request) === 'Accept the board meeting'
+					? {
+							toolCalls: [
+								toolCall('call_accept_board', 'accept_invitation', { body: { uid: 'uid-board' } })
+							]
+						}
+					: { content: `Heard: ${lastUser(request)}` };
+			};
+			told = r.saying('Accepted:').length;
+			const requested = requests().length;
+			await r.client.sendText(r.room, 'Accept the board meeting');
+			await r.nextSaying('Accepted:', told);
+			expect(requests()).toHaveLength(requested);
+			expect(
+				writes()
+					.slice(accepted)
+					.map((c) => c.body)
+			).toEqual([{ uid: 'uid-first' }, { uid: 'uid-board' }]);
+		} finally {
+			r.h.apisix.llm.script = invitationModel;
+		}
 	});
 
 	it('wakes nobody for an update, a cancellation or a reply, nor for an invitee without an assistant', async () => {

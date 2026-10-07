@@ -294,9 +294,9 @@ describe('a deployment that speaks French', () => {
 			if (call.path.endsWith('/freebusy')) {
 				return { status: 200, body: { start: '', end: '', free: true, busy: [] } };
 			}
-			const id = call.path.split('/').at(call.method === 'POST' ? -2 : -1) ?? '';
+			const id = call.path.split('/').at(-1) ?? '';
 			return call.method === 'POST'
-				? { status: 200, body: { event_id: id, partstat: 'ACCEPTED' } }
+				? { status: 200, body: { ...(call.body as object), partstat: 'ACCEPTED' } }
 				: {
 						status: 200,
 						body: invitationEvent({
@@ -321,7 +321,10 @@ describe('a deployment that speaks French', () => {
 					{
 						id: `call_accept_${id}`,
 						type: 'function',
-						function: { name: 'accept_invitation', arguments: JSON.stringify({ event_id: id }) }
+						function: {
+							name: 'accept_invitation',
+							arguments: JSON.stringify({ body: { uid: `uid-${id}` } })
+						}
 					}
 				]
 			};
@@ -343,7 +346,7 @@ describe('a deployment that speaks French', () => {
 			[
 				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-first) vendredi de 9 h à 10 h ; tu es libre.",
 				"C'est la première fois que j'ai besoin de modifier tes données dans Twake Calendar, pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord.\nÉcriture : répondre à tes invitations et modifier tes événements\nTu m'autorises, à commencer par cette action, exactement comme ci-dessous ?",
-				JSON.stringify({ event_id: 'evt-fr-first' }, null, 2),
+				JSON.stringify({ body: { uid: 'uid-evt-fr-first' } }, null, 2),
 				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
@@ -357,7 +360,7 @@ describe('a deployment that speaks French', () => {
 			[
 				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-next) vendredi de 9 h à 10 h ; tu es libre.",
 				"J'ai préparé ceci dans Twake Calendar pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord. Je le fais, exactement comme ci-dessous ?",
-				JSON.stringify({ event_id: 'evt-fr-next' }, null, 2),
+				JSON.stringify({ body: { uid: 'uid-evt-fr-next' } }, null, 2),
 				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);

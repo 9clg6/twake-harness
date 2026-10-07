@@ -24,12 +24,13 @@ function sleep(ms: number): Promise<void> {
 
 const INVITED = 'com.twake.calendar.event.invited.v1';
 
-function acceptCall(eventId: string): ToolCall[] {
+// Accepting an invitation by its calendar UID
+function acceptCall(uid: string): ToolCall[] {
 	return [
 		{
 			id: 'call_accept',
 			type: 'function',
-			function: { name: 'accept_invitation', arguments: JSON.stringify({ event_id: eventId }) }
+			function: { name: 'accept_invitation', arguments: JSON.stringify({ body: { uid } }) }
 		}
 	];
 }
@@ -343,7 +344,7 @@ describe('an event wakes my assistant', () => {
 			if (last?.role === 'tool') return { content: `Accepted: ${last.content ?? ''}` };
 			return {
 				content: 'Bob invites you on Friday at 9; you are free.',
-				toolCalls: acceptCall(/\(id ([^)]+)\)/.exec(lastUser(request))?.[1] ?? 'unknown')
+				toolCalls: acceptCall(`uid-${/\(id ([^)]+)\)/.exec(lastUser(request))?.[1] ?? 'unknown'}`)
 			};
 		};
 		const posted = await h.api.post('dispatcher', '/v1/events', { ...EVENT, event_id: 'evt-act' });
@@ -354,7 +355,7 @@ describe('an event wakes my assistant', () => {
 			t.includes('> Bob invites you on Friday at 9')
 		);
 		expect(request).toContain('I prepared this in calendar for what just arrived');
-		expect(request).toContain('"event_id": "evt-act"');
+		expect(request).toContain('"uid": "uid-evt-act"');
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
 		expect(
 			h
@@ -400,7 +401,7 @@ describe('an event wakes my assistant', () => {
 		const reads = h.apisix.contracts.handler;
 		h.apisix.contracts.handler = (call: ContractCall) =>
 			call.method === 'POST'
-				? { status: 200, body: { event_id: 'evt-act', uid: 'uid-evt-act', partstat: 'ACCEPTED' } }
+				? { status: 200, body: { uid: 'uid-evt-act', partstat: 'ACCEPTED' } }
 				: reads(call);
 		// The acceptance the event's turn prepared runs as it was frozen, and the assistant tells
 		// the owner how it went
@@ -414,7 +415,8 @@ describe('an event wakes my assistant', () => {
 		await client.waitForMessage(room, assistantId, (t) => t.includes('"partstat":"ACCEPTED"'));
 		const accept = h.apisix.contracts.calls.filter((c) => c.method === 'POST');
 		expect(accept).toHaveLength(1);
-		expect(accept[0]?.path).toBe('/contracts/v1/calendar/invitations/evt-act/accept');
+		expect(accept[0]?.path).toBe('/contracts/v1/calendar/invitations/accept');
+		expect(accept[0]?.body).toEqual({ uid: 'uid-evt-act' });
 		expect(accept[0]?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
 		expect(accept[0]?.headers['x-twake-contract']).toBe('calendar.invitation.accept.v1');
 		expect(accept[0]?.headers['x-correlation-id']).toBe('evt-act');
