@@ -1026,4 +1026,67 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			not_called: 'availability not checked: no end time'
 		});
 	});
+
+	it('sets aside a notification it cannot use in its dead letter queue', async () => {
+		const before = (await calendar.queue(DEAD_LETTERS))?.messages ?? 0;
+		// As the calendar producer's tests sent them, an iCalendar without VEVENT and a VEVENT
+		// without UID; then an iCalendar that cannot be read, and a notification that is no JSON
+		await publish(notification({ uid: 'no-vevent', event: vcalendar() }));
+		await publish(
+			notification({
+				uid: 'no-uid',
+				event: vcalendar('BEGIN:VEVENT', 'SUMMARY:No UID', 'DTSTART:20261006T150000Z', 'END:VEVENT')
+			})
+		);
+		await publish(notification({ uid: 'unreadable', event: 'not an iCalendar' }));
+		calendar.channel.publish(FANOUT, '', Buffer.from('not json'), { persistent: true });
+		await calendar.channel.waitForConfirms();
+		// Then a new invitation: once Alice is told of it, the queue, read in order, has set aside
+		// every notification before it
+		await publish(notification({ uid: 'uid-after-unusable' }));
+		await answerTo('uid-after-unusable');
+		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(before + 4);
+		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
+	});
+
+	it('reads a quorum queue of its own on Calendar’s vhost, one message at a time, its dead letters apart', async () => {
+		const queue = await calendar.queue(QUEUE);
+		expect(queue?.type).toBe('quorum');
+		// The worker holds one message at a time, which it takes once what it wakes is written
+		expect(await calendar.prefetchOf(QUEUE)).toEqual([1]);
+		// The same guarantees as the activity queue: dead letters into the instance's own exchange
+		// on this vhost, kept until its dead letter queue takes them, and five returns at most
+		expect(queue?.arguments).toMatchObject({
+			'x-dead-letter-exchange': `${PREFIX}.dlx`,
+			'x-dead-letter-strategy': 'at-least-once',
+			'x-overflow': 'reject-publish',
+			'x-single-active-consumer': true,
+			'x-delivery-limit': 5
+		});
+		expect(await calendar.bindingsOf(DEAD_LETTERS)).toEqual([
+			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }
+		]);
+	});
+
+	it('binds its queue to the fanout as a user that cannot declare it, on a connection of its own', async () => {
+		// One connection of the instance's user on Calendar's vhost, besides its activity one
+		expect((await calendar.connectedUsers()).filter((user) => user === HARNESS_USER)).toHaveLength(
+			1
+		);
+		const bindings = await calendar.bindingsOf(QUEUE);
+		expect(bindings.filter((binding) => binding.source === FANOUT)).toHaveLength(1);
+		expect(bindings.filter((binding) => binding.source !== FANOUT)).toEqual([
+			{ source: `${PREFIX}.dlx`, routingKey: QUEUE }
+		]);
+	});
+
+	it('says in its health check that it listens to both sources, from their connections alone', async () => {
+		for (let i = 0; i < 3; i += 1) {
+			const health = await worker.app.inject({ method: 'GET', url: '/health' });
+			expect(health.statusCode).toBe(200);
+			expect(health.json()).toEqual({ status: 'ok', activity: 'connected', calendar: 'connected' });
+		}
+		await publish(notification({ uid: 'uid-after-health' }));
+		await answerTo('uid-after-health');
+	});
 });
