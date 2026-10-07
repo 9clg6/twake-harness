@@ -133,6 +133,21 @@ jobs:
       - run: |
           if helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.ownerDeviceTrust=strict > /dev/null 2> /tmp/strict.err; then exit 1; fi
           grep -q 'config.ownerDeviceTrust must be report or enforce' /tmp/strict.err
+      # CONTRACTS_BASE_PATH and CONTRACTS_OPENAPI_PATH are rendered only when config.contractsBasePath
+      # and config.contractsOpenapiPath are set, and then on every role: each refreshes the catalog
+      # of contracts, and the api role calls them
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/contracts-default-$role.yaml
+            if grep -q CONTRACTS_ /tmp/contracts-default-$role.yaml; then exit 1; fi
+          done
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix/b2b/ --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.contractsBasePath=.. --set config.contractsOpenapiPath=../contracts/openapi.json > /tmp/contracts-$role.yaml
+            grep -A1 CONTRACTS_BASE_PATH /tmp/contracts-$role.yaml | grep -q '"\.\."'
+            grep -A1 CONTRACTS_OPENAPI_PATH /tmp/contracts-$role.yaml | grep -q '"\.\./contracts/openapi\.json"'
+            kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/contracts-$role.yaml
+          done
 
   image:
     needs: [check, test, chart]
