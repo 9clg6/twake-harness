@@ -16,6 +16,7 @@ function sleep(ms: number): Promise<void> {
 
 // The status texts in English, the language of the deployment, which Alice never changed
 const WORKING = '⏳ On it…';
+const ONE_ACTION = '⏳ On it… (1 action done)';
 const ASKING = 'I need your answer to go on: see below.';
 const LATE = 'This is taking longer than expected. If no answer follows, ask me again.';
 const FAILED = 'Something went wrong on my side. Please try again in a moment.';
@@ -77,6 +78,13 @@ describe('a status message while my assistant works on a message', () => {
 
 	function shows(body: string, timeoutMs = 15_000): Promise<boolean> {
 		return eventually(() => feedback.shown().some((m) => m.body === body), timeoutMs);
+	}
+
+	// What a message said, from the first to the last edit
+	function saidBy(message: ShownMessage | undefined): unknown[] {
+		return message === undefined
+			? []
+			: [message.original['body'], ...message.edits.map((e) => e.content['body'])];
 	}
 
 	// The id of the eyes the assistant put on an event, or an empty string when there are none
@@ -156,7 +164,10 @@ describe('a status message while my assistant works on a message', () => {
 		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply => {
 			const last = req.messages.at(-1);
 			return last?.role === 'tool'
-				? { content: `Found: ${last.content ?? ''}`, hold: statusShown(() => request) }
+				? {
+						content: `Found: ${last.content ?? ''}`,
+						hold: eventually(() => saidBy(replyTo(request)).includes(ONE_ACTION), 20_000)
+					}
 				: { toolCalls: call('search_drive', { q: 'budget' }) };
 		};
 		const seen = r.questions().length;
@@ -167,11 +178,29 @@ describe('a status message while my assistant works on a message', () => {
 		// My reaction carries no message of its own: the status replies to the request I answered
 		const answer = 'Found: {"status":200,"body":{"ok":true}}';
 		const shown = await replySaying(request, answer);
-		expect(shown?.original).toMatchObject({ body: WORKING });
+		// The call I allowed is the first action of the turn
+		expect(saidBy(shown)).toContain(ONE_ACTION);
 		expect(shown?.content).toMatchObject({ body: answer, format: 'org.matrix.custom.html' });
 		expect(shownSince(before)).toHaveLength(1);
 		const check = await eventually(() => feedback.reactionsOn(request).find((x) => x.key === '✅'));
 		expect(check).toBeDefined();
+	});
+
+	it('counts in the status the actions the turn has done, as it goes', async () => {
+		let asked = '';
+		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply =>
+			req.messages.at(-1)?.role === 'tool'
+				? {
+						content: 'Done after one action',
+						hold: eventually(() => replyTo(asked)?.body === ONE_ACTION, 20_000)
+					}
+				: { toolCalls: call('consents_list', {}), hold: statusShown(() => asked) };
+		const before = feedback.shown().length;
+		asked = await r.client.sendText(r.room, 'Tell me what you may access, slowly');
+		const shown = await replySaying(asked, 'Done after one action');
+		// Posted before the action, the status counts it in an edit, which the answer replaces
+		expect(saidBy(shown)).toEqual([WORKING, ONE_ACTION, 'Done after one action']);
+		expect(shownSince(before)).toHaveLength(1);
 	});
 
 	it('keeps a question to me a message of its own, its status pointing to it', async () => {

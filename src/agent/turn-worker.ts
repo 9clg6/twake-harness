@@ -64,6 +64,23 @@ export interface SendPayload {
 	readonly html?: string;
 }
 
+// The actions a turn has done so far, which the matrix role shows its owner in the turn's status
+// message
+export interface ProgressPayload {
+	readonly asUserId: string;
+	readonly roomId: string;
+	// The message the turn answers, whose status shows them
+	readonly replyTo: string;
+	readonly actions: number;
+}
+
+// The counts of a turn's actions on their way to the queue
+interface ActionReports {
+	report(actions: number): void;
+	// Resolves once every count reported is queued
+	queued(): Promise<void>;
+}
+
 export interface TurnWorkerOptions {
 	readonly db: Db;
 	readonly agent: AgentService;
@@ -87,6 +104,32 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		const rooms = await db.sql`
 			select 1 from assistant_rooms where room_id = ${roomId} and owner = ${owner}`;
 		return rooms.length === 0 ? null : assistant;
+	}
+
+	// Each count goes to the matrix role in the room's order, best effort, so that the answer, queued
+	// once they all are, comes after them
+	function reportActions(
+		log: FastifyBaseLogger,
+		payload: Omit<ProgressPayload, 'actions'>
+	): ActionReports {
+		const queueing = new Set<Promise<void>>();
+		return {
+			report: (actions) => {
+				const queued = enqueueJob(db, {
+					kind: 'progress',
+					payload: { ...payload, actions } satisfies ProgressPayload,
+					groupKey: `send:${payload.roomId}`
+				}).then(
+					() => undefined,
+					(err: unknown) => log.warn({ actions, err }, 'actions not reported')
+				);
+				queueing.add(queued);
+				void queued.finally(() => queueing.delete(queued));
+			},
+			queued: async () => {
+				await Promise.all([...queueing]);
+			}
+		};
 	}
 
 	// What the assistant sends back for a turn: its answer, or the fixed notice of a refused or
@@ -126,14 +169,20 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return;
 		}
 		const turnLog = log.child({ reqId: `resume:${pendingCallId}`, roomId });
+		const reports =
+			request.replyTo === undefined
+				? null
+				: reportActions(turnLog, { asUserId: assistant.userId, roomId, replyTo: request.replyTo });
 		const result = await agent.runOwnerTurn({
 			principal: { id: owner },
 			target: { kind: 'room', roomId },
 			message: null,
 			log: turnLog,
 			assistantName: assistant.name,
-			resume: { pendingCallId, through }
+			resume: { pendingCallId, through },
+			...(reports === null ? {} : { actionsDone: reports.report })
 		});
+		await reports?.queued();
 		// A call already decided, by an answer delivered twice for instance, runs nothing more
 		if (result.kind === 'missing' || result.kind === 'decided') {
 			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
@@ -181,6 +230,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			}
 			const correlationId = correlationIdOf(parsed.data, origin);
 			const turnLog = log.child({ reqId: correlationId, roomId });
+			// A turn woken by an event posted to the API answers no message of the room
+			const reports = eventId.startsWith('$')
+				? reportActions(turnLog, { asUserId: assistant.userId, roomId, replyTo: eventId })
+				: null;
 			const result = await agent.runOwnerTurn({
 				principal: { id: owner },
 				target: { kind: 'room', roomId },
@@ -189,8 +242,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				correlationId,
 				origin,
 				assistantName: assistant.name,
-				...(parsed.data.event === undefined ? {} : { event: parsed.data.event })
+				...(parsed.data.event === undefined ? {} : { event: parsed.data.event }),
+				...(reports === null ? {} : { actionsDone: reports.report })
 			});
+			await reports?.queued();
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			// Read once the turn is over: the owner may have changed their language in it
 			const { notices } = await fetchOwnerMessages(db, owner, locale);

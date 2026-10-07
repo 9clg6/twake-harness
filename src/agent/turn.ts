@@ -31,6 +31,9 @@ export interface TurnInput {
 	// What the owner reads, in their language, when the model answers the limit of tool calls with
 	// no words for them: given the actions the turn did, what was done and how to have it go on
 	limitNotice(actions: number): string;
+	// Told, after each call that ran, the actions the turn has done so far: its owner sees them as
+	// it goes
+	readonly actionsDone?: (actions: number) => void;
 }
 
 export interface TurnOutput {
@@ -303,6 +306,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					...(outcome.request === undefined ? {} : { request: outcome.request })
 				};
 			}
+			if (tool !== null && args !== null) input.actionsDone?.(actions);
 		}
 		iteration += 1;
 	}

@@ -59,8 +59,9 @@ export interface Messages {
 	// The status message of a turn that takes a while, a reply to the owner's message, which the
 	// answer then replaces
 	readonly status: {
-		// While the turn works
+		// While the turn works, before it did any action, then with the actions it did so far
 		readonly working: string;
+		progress(actions: number): string;
 		// The turn ended on a question to the owner, which follows as a message of its own
 		readonly asking: string;
 		// No answer came in time: whatever comes later follows as a message of its own
@@ -207,6 +208,7 @@ const ENGLISH: Messages = {
 	},
 	status: {
 		working: '⏳ On it…',
+		progress: (actions) => `⏳ On it… (${actions} ${actions === 1 ? 'action' : 'actions'} done)`,
 		asking: 'I need your answer to go on: see below.',
 		late: 'This is taking longer than expected. If no answer follows, ask me again.'
 	},
@@ -344,6 +346,9 @@ const FRENCH: Messages = {
 	},
 	status: {
 		working: "⏳ Je m'en occupe…",
+		// One action, or none, is singular in French
+		progress: (actions) =>
+			`⏳ Je m'en occupe… (${actions} ${actions <= 1 ? 'action faite' : 'actions faites'})`,
 		asking: "J'ai besoin de ta réponse pour continuer : voir ci-dessous.",
 		late: 'Ça prend plus de temps que prévu. Si aucune réponse ne suit, redemande-moi.'
 	},
