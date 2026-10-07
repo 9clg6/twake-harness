@@ -82,6 +82,11 @@ export async function listenOnOwnQueue(
 					if (reason === 'invalid_json') {
 						logHandled(log, { type: routingKey, outcome: 'dead_lettered', reason: 'not JSON' });
 					}
+				},
+				// The library connects again by itself once the broker is back, and reads the queue
+				// again; when that fails, it leaves the client at that, reading nothing
+				onReconnect: ({ subscriptionsFailed }) => {
+					if (subscriptionsFailed > 0) listenAgain(candidate);
 				}
 			}
 		});
@@ -123,7 +128,18 @@ export async function listenOnOwnQueue(
 		}
 	}
 
-	const running = (await attempt(1)) ? Promise.resolve() : retry();
+	// A client that no longer reads the queue is closed, and the listener tries again as at its
+	// start
+	function listenAgain(failed: RabbitMQClient): void {
+		if (stopping.signal.aborted || failed !== client) return;
+		listening = false;
+		running = (async () => {
+			await failed.close().catch(() => undefined);
+			await retry();
+		})();
+	}
+
+	let running = (await attempt(1)) ? Promise.resolve() : retry();
 	return {
 		connected: () => listening && client?.isConnected() === true,
 		close: async () => {

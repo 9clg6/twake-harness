@@ -478,6 +478,35 @@ describe('an event that fails holds back none of those after it, and is never lo
 		}
 	});
 
+	it('tries again when it cannot read its queue again after a reconnection, saying so meanwhile', async () => {
+		const channel = await broker.addVhost('gone');
+		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+		await broker.addUser('twake-harness-gone', HARNESS_PASSWORD, PERMISSIONS);
+		await broker.allow('twake-harness-gone', 'gone', PERMISSIONS);
+		const goneLogs = captureLogs();
+		const gone = await workerOn(
+			broker.urlFor('twake-harness-gone', HARNESS_PASSWORD, 'gone'),
+			goneLogs.stream
+		);
+		try {
+			expect(await healthOf(gone)).toBe('connected');
+			// The exchange goes, then the broker drops the listener's connection
+			await channel.deleteExchange(ACTIVITY);
+			await broker.closeConnectionsOf('twake-harness-gone');
+			await until('disconnected', async () => (await healthOf(gone)) === 'disconnected');
+			await until('tried again', () =>
+				goneLogs.lines().some((line) => line['msg'] === 'listen failed')
+			);
+			await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+			await until('connected again', async () => (await healthOf(gone)) === 'connected');
+			const event = activityEvent();
+			await publishOn(channel, event);
+			await toldOf(event);
+		} finally {
+			await gone.stop();
+		}
+	});
+
 	// Last of the suite, since every connection to the broker drops
 	it('listens again by itself once the broker restarted, its health saying so meanwhile', async () => {
 		expect(await healthOf(worker)).toBe('connected');

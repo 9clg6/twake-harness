@@ -58,6 +58,8 @@ export interface TestBroker {
 	prefetchOf(queue: string, vhost?: string): Promise<number[]>;
 	// The user of each connection open, one entry per connection: on every vhost unless one is named
 	connectedUsers(vhost?: string): Promise<string[]>;
+	// Closes every connection of a user, as the broker does when a node goes down
+	closeConnectionsOf(user: string): Promise<void>;
 	// Publishes as an application does, persistent and under its id, once the broker took it
 	publish(exchange: string, routingKey: string, body: unknown, messageId?: string): Promise<void>;
 	// Moves every message of a queue to another, as an operator replays a dead letter queue once
@@ -197,6 +199,9 @@ export async function startTestBroker(): Promise<TestBroker> {
 			(await connectionsOf())
 				.filter((row) => vhost === undefined || row.vhost === vhost)
 				.map((row) => row.user),
+		closeConnectionsOf: async (user) => {
+			await rabbitmqctl('close_all_user_connections', user, 'closed by the test');
+		},
 		publish: async (exchange, routingKey, body, messageId) => {
 			channel.publish(exchange, routingKey, Buffer.from(JSON.stringify(body)), {
 				persistent: true,
