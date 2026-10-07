@@ -7,6 +7,11 @@ import { wake, type WakeDeps, type Wakeup } from './wake.js';
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
 
+// How many times a message may come back before it is dead-lettered, as one that brings the
+// worker down whenever it is delivered: set, since RabbitMQ 3.13 has no limit and 4.0 one of 20,
+// and fixed once the queue is declared
+const DELIVERY_LIMIT = 5;
+
 const recipientSchema = z.object({
 	uuid: z.uuid().optional(),
 	email: z.email().optional(),
@@ -93,7 +98,8 @@ export interface ActivityListener {
 	close(): Promise<void>;
 }
 
-// Listens to the activity exchange on the instance's own queue, one message at a time, and wakes
+// Listens to the activity exchange on the instance's own quorum queue, one message at a time and
+// with a single active consumer, so that events keep their order whatever the replicas, and wakes
 // the assistant of each recipient of an event; a message is taken once what it wakes is written.
 export async function startActivityListener(
 	deps: WakeDeps,
@@ -119,7 +125,8 @@ export async function startActivityListener(
 		},
 		{
 			bindings: others.map((type) => ({ exchange: ACTIVITY_EXCHANGE, routingKey: type })),
-			deadLetterExchange: `${prefix}.dlx`
+			deadLetterExchange: `${prefix}.dlx`,
+			queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT }
 		}
 	);
 	return { close: () => client.close() };

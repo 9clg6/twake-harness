@@ -145,4 +145,22 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect((await broker.queue(QUEUE))?.messages).toBe(0);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 	});
+
+	it('reads a quorum queue of its own, one consumer at a time, its dead letters apart', async () => {
+		const queue = await broker.queue(QUEUE);
+		expect(queue?.type).toBe('quorum');
+		// A message is dead-lettered into the instance's own exchange, and kept until its dead letter
+		// queue takes it; a message that keeps coming back, as one that brings the worker down, ends
+		// there after five returns, whichever RabbitMQ version runs, since the default changed in 4.0
+		expect(queue?.arguments).toMatchObject({
+			'x-dead-letter-exchange': `${PREFIX}.dlx`,
+			'x-dead-letter-strategy': 'at-least-once',
+			'x-overflow': 'reject-publish',
+			'x-single-active-consumer': true,
+			'x-delivery-limit': 5
+		});
+		expect(await broker.bindingsOf(DEAD_LETTERS)).toEqual([
+			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }
+		]);
+	});
 });
