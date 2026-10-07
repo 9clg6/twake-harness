@@ -176,7 +176,8 @@ export async function startTestBroker(): Promise<TestBroker> {
 			.map((row) => row.prefetch_count);
 	}
 
-	async function connectionsOf(): Promise<{ user: string; vhost: string }[]> {
+	// Every connection open on the broker, by its user and its vhost
+	async function openConnections(): Promise<{ user: string; vhost: string }[]> {
 		return listed<{ user: string; vhost: string }>('list_connections', 'user', 'vhost');
 	}
 
@@ -196,7 +197,7 @@ export async function startTestBroker(): Promise<TestBroker> {
 		waitForMessages: (name, count, vhost = '/') => messagesOn(vhost, name, count),
 		prefetchOf: (queue, vhost = '/') => prefetchOn(vhost, queue),
 		connectedUsers: async (vhost) =>
-			(await connectionsOf())
+			(await openConnections())
 				.filter((row) => vhost === undefined || row.vhost === vhost)
 				.map((row) => row.user),
 		closeConnectionsOf: async (user) => {
