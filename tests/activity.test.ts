@@ -15,7 +15,8 @@ import {
 	silent,
 	startActivityBroker,
 	toldOf,
-	turnCalls
+	turnCalls,
+	type ActivityEvent
 } from './helpers/activity.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
 import type { TestBroker } from './helpers/rabbitmq.js';
@@ -33,12 +34,6 @@ const CAROL_UUID = '5e4d3c2b-1a09-4f8e-9d7c-6b5a49382716';
 const BOARD_ID = '3c4d5e6f-7a8b-4c9d-8e0f-a1b2c3d4e5f6';
 const PROJECT_ID = '9d8c7b6a-5f4e-4d3c-9b2a-0f1e2d3c4b5a';
 const TASK_ID = '1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e';
-
-// What an application publishes: a CloudEvent naming the people it is for in data.recipients
-interface ActivityEvent extends Record<string, unknown> {
-	readonly id: string;
-	readonly type: string;
-}
 
 interface EventOptions {
 	readonly type?: string;

@@ -8,6 +8,7 @@ import {
 	ACTIVITY,
 	HARNESS_PASSWORD,
 	HARNESS_USER,
+	INVITED,
 	lastUser,
 	logSink,
 	PREFIX,
@@ -35,7 +36,6 @@ import type { TestBroker } from './helpers/rabbitmq.js';
 // vhost
 const CALENDAR = 'calendar';
 const FANOUT = 'calendar:event:notificationEmail:send';
-const INVITED = 'com.twake.calendar.event.invited.v1';
 // The instance's own queue on Calendar's vhost, and its dead letters
 const QUEUE = `${PREFIX}.calendar`;
 const DEAD_LETTERS = `${QUEUE}.dlq`;
