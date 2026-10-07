@@ -1,6 +1,7 @@
 import { Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { loadConfig } from '../src/config.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
@@ -342,6 +343,32 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			).toEqual([MENTIONED, ASSIGNED]);
 		} finally {
 			await broker.channel.deleteQueue(queue);
+		}
+	});
+
+	it('starts as before without any RabbitMQ setting, and connects to no broker', async () => {
+		const connections = await broker.connectedUsers();
+		const { config } = r.h;
+		const quiet = await startWorkerRole({
+			config: loadConfig({
+				HARNESS_ROLE: 'worker',
+				DATABASE_URL: config.databaseUrl,
+				AUTH_JWKS_URL: config.auth.jwksUrl.toString(),
+				AUTH_ISSUER: config.auth.issuer,
+				AUTH_AUDIENCE: config.auth.audience,
+				APISIX_BASE_URL: config.apisix.baseUrl.toString(),
+				APISIX_CONSUMER_KEY: config.apisix.consumerKey
+			}),
+			db: r.h.db,
+			logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
+		});
+		try {
+			const health = await quiet.app.inject({ method: 'GET', url: '/health' });
+			expect(health.statusCode).toBe(200);
+			expect(health.json()).toEqual({ status: 'ok' });
+			expect(await broker.connectedUsers()).toEqual(connections);
+		} finally {
+			await quiet.stop();
 		}
 	});
 });
