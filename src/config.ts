@@ -130,6 +130,9 @@ export interface Config {
 		// How many times events from the broker may wake one owner's assistant in a rolling hour,
 		// whatever their source, counted in the database: past it, an event wakes that owner no more
 		readonly perHour: number;
+		// How long the worker role keeps a wake-up, by which an event delivered again wakes nobody
+		// twice: an event replayed after it is a new one
+		readonly retentionMs: number;
 	};
 	// Calendar's fanout of the notifications it sends each invitee, which the worker role listens
 	// to when it is set, for the new invitations
@@ -223,6 +226,8 @@ const envSchema = z.object({
 	WAKEUPS_PER_HOUR: z.coerce.number().int().min(1).default(20),
 	CALENDAR_ENABLED: z.enum(['true', 'false']).default('false'),
 	CALENDAR_AMQP_URL: z.string().default(''),
+	// 30 days; at least an hour, the time between two purges
+	WAKEUPS_RETENTION_MS: z.coerce.number().int().min(3_600_000).default(2_592_000_000),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -421,7 +426,7 @@ export function loadConfig(env: Env): Config {
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
-		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
+		wakeups: { perHour: values.WAKEUPS_PER_HOUR, retentionMs: values.WAKEUPS_RETENTION_MS },
 		calendar: values.CALENDAR_ENABLED === 'true' ? calendarSource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null

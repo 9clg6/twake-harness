@@ -10,6 +10,7 @@ import type { Db } from '../db/client.js';
 import { startActivityListener } from '../wakeups/activity.js';
 import { startCalendarListener } from '../wakeups/calendar.js';
 import type { Listener } from '../wakeups/listener.js';
+import { startWakeupPurge } from '../wakeups/retention.js';
 
 export interface WorkerRoleOptions {
 	readonly config: Config;
@@ -26,10 +27,10 @@ export interface WorkerRole {
 	stop(): Promise<void>;
 }
 
-// The daily curation and the hourly expiry of the requests nobody answered, each starting with a
-// pass at once; the expiries are counted on the metrics the role serves. With the activity
-// exchange or Calendar's fanout configured, the role also listens to it, and connects to the
-// broker for that alone, once for each.
+// The daily curation, the hourly expiry of the requests nobody answered and the hourly purge of
+// the wake-ups past their retention, each starting with a pass at once; the expiries are counted
+// on the metrics the role serves. With the activity exchange or Calendar's fanout configured, the
+// role also listens to it, and connects to the broker for that alone, once for each.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const consentMetrics = makeConsentMetrics();
@@ -66,12 +67,14 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		config.consent.requestLifetimeMs,
 		consentMetrics
 	);
+	const purge = startWakeupPurge(db, app.log, config.wakeups.retentionMs);
 	return {
 		app,
 		stop: async () => {
 			for (const listener of listeners.values()) await listener.close();
 			curation.stop();
 			expiry.stop();
+			purge.stop();
 			await app.close();
 		}
 	};

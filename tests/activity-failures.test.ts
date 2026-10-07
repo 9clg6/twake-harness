@@ -2,6 +2,7 @@ import { PassThrough } from 'node:stream';
 import type { ConfirmChannel } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { loadConfig } from '../src/config.js';
 import { makeDb, type Db } from '../src/db/client.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { TEST_DATABASE_URL } from './helpers/app.js';
@@ -420,6 +421,61 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect((await broker.queue(QUEUE))?.messages).toBe(0);
 	});
 
+	it('forgets the wake-ups past their retention, and keeps the younger ones', async () => {
+		// The time the worker logged an event as woken
+		const wokenAt = async (event: ActivityEvent): Promise<number> => {
+			let line: LogLine | undefined;
+			await until(`${event.id} woken`, () => {
+				line = logs
+					.lines()
+					.find(
+						(each) =>
+							each['msg'] === 'event handled' &&
+							each['eventId'] === event.id &&
+							each['outcome'] === 'woken'
+					);
+				return line !== undefined;
+			});
+			return Number(line?.['time']);
+		};
+		const old = activityEvent();
+		await publish(old);
+		const oldAt = await wokenAt(old);
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		const young = activityEvent();
+		await publish(young);
+		const youngAt = await wokenAt(young);
+		// A retention halfway between their ages, for a worker whose start purges
+		const retentionMs = Date.now() - youngAt + (youngAt - oldAt) / 2;
+		const purgeLogs = captureLogs();
+		const purging = await startWorkerRole({
+			config: {
+				...r.h.config,
+				role: 'worker',
+				activity: null,
+				wakeups: { ...r.h.config.wakeups, retentionMs }
+			},
+			db: r.h.db,
+			logStream: purgeLogs.stream
+		});
+		try {
+			await until('purged', () =>
+				purgeLogs.lines().some((line) => line['msg'] === 'wake-ups purged')
+			);
+		} finally {
+			await purging.stop();
+		}
+		// Delivered again, the old event wakes Alice again, and the young one does not
+		const mark = logs.lines().length;
+		await publish(old);
+		await publish(young);
+		await until('both handled', () => handled(mark).length === 2);
+		expect(handled(mark).map(({ eventId, outcome }) => ({ eventId, outcome }))).toEqual([
+			{ eventId: old.id, outcome: 'woken' },
+			{ eventId: young.id, outcome: 'duplicate' }
+		]);
+	});
+
 	it('starts without the activity exchange, holds no connection while it waits, and listens once it is there', async () => {
 		const channel = await broker.addVhost('late');
 		await broker.addUser('twake-harness-late', HARNESS_PASSWORD, PERMISSIONS);
@@ -570,6 +626,28 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const event = activityEvent();
 		await publish(event);
 		await toldOf(event);
+	});
+});
+
+describe('the retention of the wake-ups', () => {
+	const base = {
+		HARNESS_ROLE: 'worker',
+		DATABASE_URL: 'postgres://x@localhost/x',
+		AUTH_JWKS_URL: 'https://example.test/jwks',
+		AUTH_ISSUER: 'https://example.test/',
+		AUTH_AUDIENCE: 'twake-harness',
+		APISIX_BASE_URL: 'http://apisix.test',
+		APISIX_CONSUMER_KEY: 'k'
+	};
+
+	it('keeps the wake-ups thirty days unless told otherwise, and an hour at least', () => {
+		expect(loadConfig(base).wakeups.retentionMs).toBe(30 * 24 * 3_600_000);
+		expect(loadConfig({ ...base, WAKEUPS_RETENTION_MS: '86400000' }).wakeups.retentionMs).toBe(
+			86_400_000
+		);
+		expect(() => loadConfig({ ...base, WAKEUPS_RETENTION_MS: '60000' })).toThrow(
+			/^invalid configuration: WAKEUPS_RETENTION_MS/
+		);
 	});
 });
 
