@@ -43,6 +43,30 @@ function producerId(...parts: string[]): string {
 	return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
+// A log stream that keeps the lines a role writes, for a test to read them
+interface LogSink {
+	readonly stream: Writable;
+	lines(): Record<string, unknown>[];
+}
+
+function logSink(): LogSink {
+	const chunks: string[] = [];
+	return {
+		stream: new Writable({
+			write: (chunk: Buffer, _encoding, done) => {
+				chunks.push(chunk.toString('utf8'));
+				done();
+			}
+		}),
+		lines: () =>
+			chunks
+				.join('')
+				.split('\n')
+				.filter((line) => line.length > 0)
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+	};
+}
+
 // A notification as Twake Calendar's side service publishes it, one per invitee
 type Notification = Record<string, unknown>;
 
@@ -168,12 +192,12 @@ const CALENDAR_DATA = /^<<<calendar-data ([0-9a-f]{12})\n(.+)\ncalendar-data \1>
 interface ShownInvitation {
 	readonly id: string;
 	readonly object: {
-		readonly uid: string;
 		readonly start: string | null;
 		readonly end: string | null;
 		readonly organizer?: string;
 	};
-	readonly untrusted: { readonly title?: string };
+	// The organizer writes the title, the UID and the zone
+	readonly untrusted: { readonly title?: string; readonly uid: string; readonly timezone?: string };
 }
 
 function shownIn(told: string): ShownInvitation | null {
@@ -202,7 +226,7 @@ function invitationModel(request: ChatRequest): { content: string } {
 	if (shown === null) return { content: `Heard: ${told}` };
 	const { object, untrusted } = shown;
 	return {
-		content: `${object.organizer ?? 'someone'} invites you to "${untrusted.title ?? ''}" from ${object.start ?? '?'} to ${object.end ?? '?'} (${object.uid}). ${availabilityIn(told)}`
+		content: `${object.organizer ?? 'someone'} invites you to "${untrusted.title ?? ''}" from ${object.start ?? '?'} to ${object.end ?? '?'} (${untrusted.uid}). ${availabilityIn(told)}`
 	};
 }
 
@@ -226,7 +250,7 @@ function acceptingModel(request: ChatRequest): ScriptedReply {
 	if (last?.role !== 'user' || shown === null) return { content: `Heard: ${told}` };
 	const { content } = invitationModel(request);
 	if (!told.includes('call accept_invitation')) return { content };
-	const { uid } = shown.object;
+	const { uid } = shown.untrusted;
 	return {
 		content,
 		toolCalls: [toolCall(`call_accept_${uid}`, 'accept_invitation', { body: { uid } })]
@@ -303,6 +327,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 	let calendar: ConfirmChannel;
 	let r: ConsentRoom;
 	let worker: WorkerRole;
+	const workerLogs = logSink();
 	beforeAll(async () => {
 		broker = await startTestBroker();
 		// Calendar's vhost and fanout, as the platform declares them, and the instance's user, as
@@ -333,10 +358,11 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			ADMISSION_USER_PER_MINUTE: '100',
 			BROKER_CONSENT_URL
 		});
+		// At its most verbose, so that every line it could write about an invitation is read
 		worker = await startWorkerRole({
-			config: { ...r.h.config, role: 'worker' },
+			config: { ...r.h.config, role: 'worker', logLevel: 'debug' },
 			db: r.h.db,
-			logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
+			logStream: workerLogs.stream
 		});
 		r.h.apisix.llm.script = invitationModel;
 	}, 240_000);
@@ -455,13 +481,12 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			reason: 'invited',
 			object: {
 				type: 'event',
-				uid: PRODUCER_UID,
 				start: '2026-10-06T17:00:00+02:00',
 				end: '2026-10-06T18:00:00+02:00',
-				timezone: 'Europe/Paris',
 				organizer: 'e2e.organizer@dev.twake.lin-saas.com'
 			},
-			untrusted: { title: PRODUCER_TITLE }
+			// What the organizer wrote: the title, and the UID and the zone too
+			untrusted: { title: PRODUCER_TITLE, uid: PRODUCER_UID, timezone: 'Europe/Paris' }
 		});
 		// Neither the description nor the location is ever read
 		expect(told).not.toContain('budget 2027');
@@ -493,13 +518,15 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			})
 		);
 		const shown = shownIn(lastUser((await turnsOf('uid-lenient', 1))[0]?.request));
-		expect(shown?.untrusted.title).toBe(title.slice(0, 1000));
+		expect(shown?.untrusted).toEqual({
+			title: title.slice(0, 1000),
+			uid: 'uid-lenient',
+			timezone: 'UTC'
+		});
 		expect(shown?.object).toEqual({
 			type: 'event',
-			uid: 'uid-lenient',
 			start: '2026-10-06T15:00:00Z',
 			end: null,
-			timezone: 'UTC',
 			organizer: 'dave@test.local'
 		});
 	});
@@ -680,7 +707,11 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			const request = await nextRequest(seen);
 			// The title reached the model as data only: under untrusted, on the one line of the block
 			const told = lastUser(turnOf('uid-hostile')[0]?.request);
-			expect(shownIn(told)?.untrusted).toEqual({ title: INJECTED_TITLE });
+			expect(shownIn(told)?.untrusted).toEqual({
+				title: INJECTED_TITLE,
+				uid: 'uid-hostile',
+				timezone: 'Europe/Paris'
+			});
 			const carrying = told.split('\n').filter((line) => line.includes(INJECTED_TITLE));
 			expect(carrying).toHaveLength(1);
 			expect(carrying[0]?.startsWith('{')).toBe(true);
@@ -1004,6 +1035,51 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		});
 	});
 
+	it('keeps the UID and the zone the organizer wrote as data, cut, and out of every log line', async () => {
+		// A UID of 300 characters, which the check still leaves out whole, and a zone of 140 that
+		// nobody knows
+		const uid = `uid-long-${'u'.repeat(291)}`;
+		const zone = `Mars/${'Olympus'.repeat(19)}`;
+		await publish(
+			notification({
+				uid,
+				lines: [
+					'SUMMARY:Point',
+					'DTSTART;TZID=Europe/Paris:20261009T090000',
+					'DTEND;TZID=Europe/Paris:20261009T100000',
+					'ORGANIZER;CN=Bob:mailto:bob@test.local'
+				]
+			})
+		);
+		await publish(
+			notification({
+				uid: 'uid-unknown-zone',
+				lines: [
+					'SUMMARY:Point',
+					`DTSTART;TZID=${zone}:20261009T090000`,
+					`DTEND;TZID=${zone}:20261009T100000`,
+					'ORGANIZER;CN=Bob:mailto:bob@test.local'
+				]
+			})
+		);
+		const long = await toldOfId(producerId(uid, 'alice@test.local', '0'));
+		expect(shownIn(long)?.untrusted.uid).toBe(uid.slice(0, 255));
+		expect(
+			r.h.apisix.contracts.calls.filter((c) => c.path === '/contracts/v1/calendar/freebusy').at(-1)
+				?.query['exclude']
+		).toBe(uid);
+		const unknown = await toldOfId(producerId('uid-unknown-zone', 'alice@test.local', '0'));
+		expect(shownIn(unknown)?.untrusted.timezone).toBe(zone.slice(0, 64));
+		expect(checkIn(unknown)).toEqual({
+			tool: 'read_freebusy',
+			not_called: 'availability not checked: unknown time zone'
+		});
+		// No line the worker or the turns wrote holds either
+		const logged = JSON.stringify([...workerLogs.lines(), ...r.h.logLines()]);
+		expect(logged).not.toContain('uid-long-');
+		expect(logged).not.toContain('Olympus');
+	});
+
 	it('hashes a UID as the calendar wrote it, a bare comma and semicolon and an escape included', async () => {
 		// The calendar producer hashed the UID as it stands in the iCalendar, which the audit's
 		// records are found by: the harness reads it the same, never as the parser unescapes it
@@ -1047,21 +1123,18 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		const ofSeries = shownIn(toldOf(turns, producerId('weekly', 'alice@test.local', '0')));
 		expect(ofSeries?.object).toEqual({
 			type: 'event',
-			uid: 'weekly',
 			start: '2026-10-06T17:00:00+02:00',
 			end: null,
-			timezone: 'Europe/Paris',
 			organizer: 'bob@test.local'
 		});
+		expect(ofSeries?.untrusted).toEqual({ uid: 'weekly', timezone: 'Europe/Paris' });
 		const ofOccurrence = shownIn(
 			toldOf(turns, producerId('weekly', 'alice@test.local', '0', '20261013T170000'))
 		);
 		expect(ofOccurrence?.object).toEqual({
 			type: 'event',
-			uid: 'weekly',
 			start: '2026-10-13T18:00:00+02:00',
 			end: null,
-			timezone: 'Europe/Paris',
 			organizer: 'bob@test.local',
 			// In its zone, as its times are: the RECURRENCE-ID as written goes into its id alone
 			occurrence: '2026-10-13T17:00:00+02:00'
@@ -1084,12 +1157,11 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		);
 		expect(shownIn(allDay)?.object).toEqual({
 			type: 'event',
-			uid: 'all-day',
 			start: '2026-10-06',
 			end: '2026-10-08',
-			timezone: null,
 			organizer: 'bob@test.local'
 		});
+		expect(shownIn(allDay)?.untrusted).toEqual({ title: 'Séminaire', uid: 'all-day' });
 		// Its slot runs from midnight to midnight where the deployment is
 		expect(checkIn(allDay)?.['arguments']).toEqual({
 			start: '2026-10-06T00:00:00+00:00',
@@ -1099,12 +1171,11 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		const utc = toldOf(await turnsOf('utc', 1), producerId('utc', 'alice@test.local', '0'));
 		expect(shownIn(utc)?.object).toEqual({
 			type: 'event',
-			uid: 'utc',
 			start: '2026-10-06T15:00:00Z',
 			end: null,
-			timezone: 'UTC',
 			organizer: 'bob@test.local'
 		});
+		expect(shownIn(utc)?.untrusted).toEqual({ title: 'Point', uid: 'utc', timezone: 'UTC' });
 		// No length is guessed for an invitation without an end
 		expect(checkIn(utc)).toEqual({
 			tool: 'read_freebusy',

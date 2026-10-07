@@ -45,7 +45,12 @@ export async function listenOnOwnQueue(
 ): Promise<Listener> {
 	const client = new RabbitMQClient({
 		url: own.url,
-		logger: deps.log.child({ listener: own.name }),
+		// The library's own lines, at info at most: at debug it logs every message it receives
+		// whole, what other people wrote included, which no line of the harness holds
+		logger: deps.log.child(
+			{ listener: own.name },
+			{ level: ['trace', 'debug'].includes(deps.log.level) ? 'info' : deps.log.level }
+		),
 		prefetch: 1
 	});
 	await client.init();

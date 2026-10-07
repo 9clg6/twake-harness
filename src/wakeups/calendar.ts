@@ -19,9 +19,11 @@ const CALENDAR_FANOUT = 'calendar:event:notificationEmail:send';
 // The source the calendar producer gave the invitations it published, which wake-ups are kept by
 const SOURCE = 'twake://calendar';
 
-// The most characters of a title the model is shown: the organizer writes it, at any length, and
-// one longer is cut rather than refused
+// The most characters of the title, the UID and the zone the model is shown: the organizer writes
+// them, at any length, and one longer is cut rather than refused
 const TITLE_MAX = 1000;
+const UID_MAX = 255;
+const ZONE_MAX = 64;
 
 const EMAIL = z.email();
 
@@ -210,9 +212,10 @@ function invitationId(vevent: Vevent, uid: string, recipient: string): string {
 // The wake-up a notification of Calendar brings its invitee, for a new invitation alone: an update,
 // a cancellation or a reply wakes nobody. The fanout carries every tenant's invitations: one for
 // an invitee off the instance's mail domain is taken without effect, and nothing of it is read or
-// kept, even in the dead letters. What the calendar computed (the UID, the times and their zone,
-// the organizer, the occurrence) is shown apart from the title its organizer wrote; the
-// description and the location are never read.
+// kept, even in the dead letters. What the calendar computed (the times, the organizer's address
+// and the occurrence) is shown apart from what the organizer wrote (the title, the UID and the
+// zone, under untrusted); the description and the location are never read. The check takes the
+// UID and the zone whole.
 function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | null {
 	const method = message['method'];
 	if (typeof method !== 'string' || method.toUpperCase() !== 'REQUEST') return null;
@@ -248,15 +251,18 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 				reason: 'invited',
 				object: {
 					type: 'event',
-					uid,
 					start: start.at,
 					end: end.at,
-					timezone: start.timezone,
 					...(organizer === null ? {} : { organizer }),
 					...(occurrence === null ? {} : { occurrence })
 				}
 			},
-			untrusted: typeof title === 'string' ? { title: cut(title, TITLE_MAX) } : {}
+			// The organizer writes the UID and the zone as much as the title
+			untrusted: {
+				...(typeof title === 'string' ? { title: cut(title, TITLE_MAX) } : {}),
+				uid: cut(uid, UID_MAX),
+				...(start.timezone === null ? {} : { timezone: cut(start.timezone, ZONE_MAX) })
+			}
 		},
 		invitation: { uid, start: start.at, end: end.at, timezone: start.timezone }
 	};

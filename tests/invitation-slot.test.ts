@@ -61,7 +61,8 @@ describe("an invitation's slot, for the free/busy check", () => {
 			)
 		).toEqual({
 			ok: false,
-			reason: 'availability not checked: unknown time zone Mars/Olympus_Mons'
+			// The organizer wrote the zone: what the logs and the model read of the check never names it
+			reason: 'availability not checked: unknown time zone'
 		});
 	});
 

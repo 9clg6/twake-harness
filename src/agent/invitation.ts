@@ -65,8 +65,9 @@ function timeOf(
 		return { ok: false, reason: `${NOT_CHECKED}a time without offset and no time zone` };
 	}
 	const time = wallTimeIn(value, timezone);
+	// The organizer wrote the zone: the reason, which the logs and the model read, never names it
 	return time === null
-		? { ok: false, reason: `${NOT_CHECKED}unknown time zone ${timezone}` }
+		? { ok: false, reason: `${NOT_CHECKED}unknown time zone` }
 		: { ok: true, time };
 }
 
