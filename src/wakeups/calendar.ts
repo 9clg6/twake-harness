@@ -3,7 +3,7 @@ import { DeadLetterError, RabbitMQClient } from '@linagora/rabbitmq-client';
 import ICAL from 'ical.js';
 
 import { formatOffset } from '../agent/clock.js';
-import { INVITED_EVENT_TYPE } from '../agent/invitation.js';
+import { INVITED_EVENT_TYPE, wallTimeIn } from '../agent/invitation.js';
 import type { CalendarSource } from '../config.js';
 import { DELIVERY_LIMIT } from './activity.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
@@ -43,7 +43,7 @@ function written(property: ICAL.Property | null): string | null {
 
 // One of an invitation's times, as RFC 3339 with the offset of the zone it names, and that zone;
 // a date for an all-day event; a time in UTC with its Z; and the wall time as written for a time
-// that names no zone
+// that names no zone, or one that neither the calendar nor the runtime knows
 interface When {
 	readonly at: string | null;
 	readonly timezone: string | null;
@@ -63,8 +63,11 @@ function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend'): When {
 		if (typeof tzid !== 'string' || tzid.length === 0) {
 			return { at: time.toString(), timezone: null };
 		}
-		// A zone the calendar does not define leaves the time floating: its wall time, as written
-		if (time.zone === ICAL.Timezone.localTimezone) return { at: time.toString(), timezone: tzid };
+		// A zone the calendar does not define is read as the runtime knows it, an IANA name such as
+		// Europe/Paris; any other leaves the time floating, its wall time as written
+		if (time.zone === ICAL.Timezone.localTimezone) {
+			return { at: wallTimeIn(time.toString(), tzid) ?? time.toString(), timezone: tzid };
+		}
 		// The zone as the calendar defines it, as sabre writes every zone an invitation names
 		return { at: `${time.toString()}${formatOffset(time.utcOffset() / 60)}`, timezone: tzid };
 	} catch {

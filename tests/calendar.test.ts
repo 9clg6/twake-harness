@@ -115,6 +115,8 @@ interface NotificationOptions {
 	readonly lines?: readonly string[];
 	// Whole components to write before the VEVENT, such as a VTIMEZONE
 	readonly before?: readonly string[];
+	// The whole iCalendar instead, for a series and its occurrences
+	readonly event?: string;
 }
 
 // A notification of Calendar for one invitee, as its side service publishes them, Bob's invitation
@@ -125,19 +127,21 @@ function notification(options: NotificationOptions): Notification {
 		senderEmail: options.sender ?? 'bob@test.local',
 		recipientEmail: options.recipient ?? 'alice@test.local',
 		method: options.method ?? 'REQUEST',
-		event: vcalendar(
-			...(options.before ?? []),
-			'BEGIN:VEVENT',
-			`UID:${options.uid}`,
-			...(options.lines ?? [
-				'SUMMARY:Point',
-				'DTSTART:20261006T150000Z',
-				'DTEND:20261006T160000Z',
-				'ORGANIZER;CN=Bob:mailto:bob@test.local'
-			]),
-			'DTSTAMP:20261005T091422Z',
-			'END:VEVENT'
-		),
+		event:
+			options.event ??
+			vcalendar(
+				...(options.before ?? []),
+				'BEGIN:VEVENT',
+				`UID:${options.uid}`,
+				...(options.lines ?? [
+					'SUMMARY:Point',
+					'DTSTART:20261006T150000Z',
+					'DTEND:20261006T160000Z',
+					'ORGANIZER;CN=Bob:mailto:bob@test.local'
+				]),
+				'DTSTAMP:20261005T091422Z',
+				'END:VEVENT'
+			),
 		eventPath: `/calendars/a/b/${options.uid}.ics`,
 		...(isNewEvent === null ? {} : { isNewEvent })
 	};
@@ -257,9 +261,26 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		return r.client.waitForMessage(r.room, r.assistantId, (t) => t.includes(`(${uid})`));
 	}
 
-	// The model calls of the turn an invitation started, in order
+	// The model calls of the turns invitations of this UID started, in order
 	function turnOf(uid: string): RecordedCall[] {
 		return r.h.apisix.llm.calls.filter((call) => lastUser(call.request).includes(`"uid":"${uid}"`));
+	}
+
+	// The same, once there are that many
+	async function turnsOf(uid: string, count: number): Promise<RecordedCall[]> {
+		for (let i = 0; i < 120; i += 1) {
+			const calls = turnOf(uid);
+			if (calls.length >= count) return calls;
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		throw new Error(`fewer than ${count} turns of ${uid}`);
+	}
+
+	// What the model was told of the invitation of this id, and what the harness checked of it
+	function toldOf(calls: readonly RecordedCall[], id: string): string {
+		const told = calls.map((call) => lastUser(call.request)).find((t) => t.includes(`(id ${id})`));
+		if (told === undefined) throw new Error(`no turn of ${id}`);
+		return told;
 	}
 
 	it('tells me of a new invitation from an organizer outside the platform, as the calendar wrote it', async () => {
@@ -305,56 +326,6 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		// The broker holds nothing more of it: taken, and not dead-lettered
 		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
 		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(0);
-	});
-
-	it('wakes nobody for an update, a cancellation or a reply, nor for an invitee without an assistant', async () => {
-		// As the calendar producer's tests sent them: an update, which says nothing of being new, and
-		// one that says it is not; a cancellation; Carol's answer to a meeting Alice organizes; and a
-		// new invitation for someone without an assistant
-		const update = notification({
-			uid: 'uid-update',
-			isNewEvent: null,
-			lines: ['SUMMARY:Point Twake Space', 'DTSTART:20261006T150000Z', 'SEQUENCE:1']
-		});
-		const notNew = notification({ uid: 'uid-not-new', isNewEvent: false });
-		const cancellation = notification({
-			uid: 'uid-cancel',
-			method: 'CANCEL',
-			lines: ['DTSTART:20261006T150000Z', 'STATUS:CANCELLED']
-		});
-		const reply = notification({ uid: 'uid-reply', method: 'REPLY', sender: 'carol@test.local' });
-		const nobody = notification({ uid: 'nobody', recipient: 'nobody@test.local' });
-		// Then a new invitation for Alice, its method in lower case: once she is told of it, the
-		// queue, read in order, has taken every notification before it
-		const next = notification({ uid: 'uid-next', method: 'request' });
-		for (const sent of [update, notNew, cancellation, reply, nobody, next]) await publish(sent);
-		await answerTo('uid-next');
-		for (const uid of ['uid-update', 'uid-not-new', 'uid-cancel', 'uid-reply', 'nobody']) {
-			expect(turnOf(uid)).toHaveLength(0);
-		}
-		// Each was taken all the same, none dead-lettered
-		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
-		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(0);
-	});
-
-	it('names an invitation by the id the calendar producer gave it, and tells me once however often it comes', async () => {
-		// The rule, as the calendar producer's own test pinned it for its fixture and its invitee
-		expect(producerId(PRODUCER_UID, 'mmaudet@dev.twake.lin-saas.com', '0')).toBe(
-			'5af53a92d9887bbcbca2d89df91e1767ae74520a579d89bdac686211ccea20d0'
-		);
-		const twice = notification({ uid: 'uid-twice', lines: ['SUMMARY:Point', 'SEQUENCE:0'] });
-		await publish(twice);
-		await answerTo('uid-twice');
-		// Delivered again, as after a restart or a replay of the dead letters: the next invitation is
-		// the next one Alice is told of
-		await publish(twice);
-		await publish(notification({ uid: 'uid-after-twice' }));
-		await answerTo('uid-after-twice');
-		const turn = turnOf('uid-twice');
-		expect(turn).toHaveLength(1);
-		expect(lastUser(turn[0]?.request)).toContain(
-			`(id ${producerId('uid-twice', 'alice@test.local', '0')})`
-		);
 	});
 
 	it('checks my slot before the model speaks, the invitation left out, then tells me I am free', async () => {
@@ -419,5 +390,152 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 						l['reason'] === null
 				)
 		).toBe(true);
+	});
+
+	it('wakes nobody for an update, a cancellation or a reply, nor for an invitee without an assistant', async () => {
+		// As the calendar producer's tests sent them: an update, which says nothing of being new, and
+		// one that says it is not; a cancellation; Carol's answer to a meeting Alice organizes; and a
+		// new invitation for someone without an assistant
+		const update = notification({
+			uid: 'uid-update',
+			isNewEvent: null,
+			lines: ['SUMMARY:Point Twake Space', 'DTSTART:20261006T150000Z', 'SEQUENCE:1']
+		});
+		const notNew = notification({ uid: 'uid-not-new', isNewEvent: false });
+		const cancellation = notification({
+			uid: 'uid-cancel',
+			method: 'CANCEL',
+			lines: ['DTSTART:20261006T150000Z', 'STATUS:CANCELLED']
+		});
+		const reply = notification({ uid: 'uid-reply', method: 'REPLY', sender: 'carol@test.local' });
+		const nobody = notification({ uid: 'nobody', recipient: 'nobody@test.local' });
+		// Then a new invitation for Alice, its method in lower case: once she is told of it, the
+		// queue, read in order, has taken every notification before it
+		const next = notification({ uid: 'uid-next', method: 'request' });
+		for (const sent of [update, notNew, cancellation, reply, nobody, next]) await publish(sent);
+		await answerTo('uid-next');
+		for (const uid of ['uid-update', 'uid-not-new', 'uid-cancel', 'uid-reply', 'nobody']) {
+			expect(turnOf(uid)).toHaveLength(0);
+		}
+		// Each was taken all the same, none dead-lettered
+		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
+		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(0);
+	});
+
+	it('names an invitation by the id the calendar producer gave it, and tells me once however often it comes', async () => {
+		// The rule, as the calendar producer's own test pinned it for its fixture and its invitee
+		expect(producerId(PRODUCER_UID, 'mmaudet@dev.twake.lin-saas.com', '0')).toBe(
+			'5af53a92d9887bbcbca2d89df91e1767ae74520a579d89bdac686211ccea20d0'
+		);
+		const twice = notification({ uid: 'uid-twice', lines: ['SUMMARY:Point', 'SEQUENCE:0'] });
+		await publish(twice);
+		await answerTo('uid-twice');
+		// Delivered again, as after a restart or a replay of the dead letters: the next invitation is
+		// the next one Alice is told of
+		await publish(twice);
+		await publish(notification({ uid: 'uid-after-twice' }));
+		await answerTo('uid-after-twice');
+		const turn = turnOf('uid-twice');
+		expect(turn).toHaveLength(1);
+		expect(lastUser(turn[0]?.request)).toContain(
+			`(id ${producerId('uid-twice', 'alice@test.local', '0')})`
+		);
+	});
+
+	it('reads a series from its own event, and an invitation to one of its occurrences on its own', async () => {
+		// As the calendar producer's tests sent them, in Europe/Paris, a zone the calendar does not
+		// define: a series whose changed occurrence comes first, and the invitation to that
+		// occurrence alone, with ids its tests pinned for their invitee
+		expect(producerId('weekly', 'mmaudet@dev.twake.lin-saas.com', '0')).toBe(
+			'fb5786bc021af902c53d4e37fc8cc0670c5a7c7a50233ca681d9067e4aef8e3c'
+		);
+		expect(producerId('weekly', 'mmaudet@dev.twake.lin-saas.com', '0', '20261013T170000')).toBe(
+			'a365fcc8eaf29a46ebdc992f49aa6d76fe7688b3e439b1c8a62d23a13026058d'
+		);
+		const occurrence = [
+			'BEGIN:VEVENT',
+			'UID:weekly',
+			'RECURRENCE-ID;TZID=Europe/Paris:20261013T170000',
+			'DTSTART;TZID=Europe/Paris:20261013T180000',
+			'DTSTAMP:20261005T091422Z',
+			'END:VEVENT'
+		];
+		const series = [
+			'BEGIN:VEVENT',
+			'UID:weekly',
+			'RRULE:FREQ=WEEKLY',
+			'DTSTART;TZID=Europe/Paris:20261006T170000',
+			'DTSTAMP:20261005T091422Z',
+			'END:VEVENT'
+		];
+		await publish(notification({ uid: 'weekly', event: vcalendar(...occurrence, ...series) }));
+		await publish(notification({ uid: 'weekly', event: vcalendar(...occurrence) }));
+		// Two invitations, each told once
+		const turns = await turnsOf('weekly', 2);
+		const ofSeries = shownIn(toldOf(turns, producerId('weekly', 'alice@test.local', '0')));
+		expect(ofSeries?.object).toEqual({
+			type: 'event',
+			uid: 'weekly',
+			start: '2026-10-06T17:00:00+02:00',
+			end: null,
+			timezone: 'Europe/Paris',
+			organizer: 'bob@test.local'
+		});
+		const ofOccurrence = shownIn(
+			toldOf(turns, producerId('weekly', 'alice@test.local', '0', '20261013T170000'))
+		);
+		expect(ofOccurrence?.object).toEqual({
+			type: 'event',
+			uid: 'weekly',
+			start: '2026-10-13T18:00:00+02:00',
+			end: null,
+			timezone: 'Europe/Paris',
+			organizer: 'bob@test.local',
+			occurrence: '20261013T170000'
+		});
+	});
+
+	it('reads an all-day invitation and one in UTC as the calendar wrote them', async () => {
+		await publish(
+			notification({
+				uid: 'all-day',
+				lines: ['SUMMARY:Séminaire', 'DTSTART;VALUE=DATE:20261006', 'DTEND;VALUE=DATE:20261008']
+			})
+		);
+		await publish(
+			notification({ uid: 'utc', lines: ['SUMMARY:Point', 'DTSTART:20261006T150000Z'] })
+		);
+		const allDay = toldOf(
+			await turnsOf('all-day', 1),
+			producerId('all-day', 'alice@test.local', '0')
+		);
+		expect(shownIn(allDay)?.object).toEqual({
+			type: 'event',
+			uid: 'all-day',
+			start: '2026-10-06',
+			end: '2026-10-08',
+			timezone: null,
+			organizer: 'bob@test.local'
+		});
+		// Its slot runs from midnight to midnight where the deployment is
+		expect(checkIn(allDay)?.['arguments']).toEqual({
+			start: '2026-10-06T00:00:00+00:00',
+			end: '2026-10-08T00:00:00+00:00',
+			exclude: ['all-day']
+		});
+		const utc = toldOf(await turnsOf('utc', 1), producerId('utc', 'alice@test.local', '0'));
+		expect(shownIn(utc)?.object).toEqual({
+			type: 'event',
+			uid: 'utc',
+			start: '2026-10-06T15:00:00Z',
+			end: null,
+			timezone: 'UTC',
+			organizer: 'bob@test.local'
+		});
+		// No length is guessed for an invitation without an end
+		expect(checkIn(utc)).toEqual({
+			tool: 'read_freebusy',
+			not_called: 'availability not checked: no end time'
+		});
 	});
 });

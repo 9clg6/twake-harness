@@ -80,6 +80,17 @@ function inZone(
 	return `${year}-${month}-${day}T${hour}:${minute}:${second}${formatOffset(settled)}`;
 }
 
+// A wall time, such as 2026-10-13T18:00:00, in a zone the runtime knows, such as Europe/Paris, as
+// RFC 3339 with the zone's offset then; null for a time or a zone it cannot read
+export function wallTimeIn(wall: string, timeZone: string): string | null {
+	const zone = findTimeZone(timeZone);
+	const match = WALL.exec(wall);
+	if (zone === null || match === null) return null;
+	const [, year = '', month = '', day = '', hour = '', minute = '', second = '00'] = match;
+	if (!isCalendarDate(year, month, day)) return null;
+	return inZone([year, month, day], [hour, minute, second], zone);
+}
+
 function timeOf(
 	value: unknown,
 	timezone: unknown,
