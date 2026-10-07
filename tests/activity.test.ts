@@ -97,7 +97,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, {
 			configure: `^${PREFIX}\\.`,
 			write: `^${PREFIX}\\.`,
-			read: `^(${PREFIX}\\..*|${ACTIVITY})$`
+			read: `^(${ACTIVITY}|${PREFIX}\\..+)$`
 		});
 		r = await startConsentRoom({
 			ACTIVITY_ENABLED: 'true',
