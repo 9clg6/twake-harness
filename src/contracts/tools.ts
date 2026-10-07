@@ -12,6 +12,7 @@ import { getMessages, type Locale } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
+import { makeOwnerConsentLink } from './consent-link.js';
 import { labelOf, type DomainDescriptions } from './domains.js';
 import { toolParametersOf, type ContractDefinition } from './openapi.js';
 import {
@@ -320,7 +321,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			application.name,
 			contract.level,
 			code,
-			config.consent.brokerConsentUrl
+			makeOwnerConsentLink(config.consent.brokerConsentUrl, context.principalId)
 		);
 		const pendingCallId = await freeze(values, context, ['delegation'], request, previewDigest);
 		return {

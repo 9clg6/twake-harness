@@ -13,6 +13,8 @@ import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import { BROKER_CONSENT_URL, brokerRefusal, type ContractReply } from './helpers/fake-apisix.js';
 
 const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'photos', 'boards'];
+// The deployment's consent link bound to Alice, the owner it is for, as the broker expects it
+const ALICE_CONSENT_URL = `${BROKER_CONSENT_URL}?owner=alice%40test.local`;
 // A link of its own that a contract, or anything else answering a call, could put in a refusal
 const FAKED_LINK = 'https://phish.example/consent';
 
@@ -25,12 +27,12 @@ const ANSWER = 'Answer with the buttons below, or reply yes or no.';
 const NEEDED = (application: string): string =>
 	`To read your data in ${application}, I need your permission to act on your behalf`;
 const MISSING = (application: string): string =>
-	`${NEEDED(application)}, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
+	`${NEEDED(application)}, and you have not given it yet. Give it here: ${ALICE_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
 const EXPIRED = (application: string): string =>
-	`${NEEDED(application)}, and the one you gave me has expired. Give it again here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
+	`${NEEDED(application)}, and the one you gave me has expired. Give it again here: ${ALICE_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
 const MISSING_WITHOUT_LINK = `${NEEDED('mail')}, and you have not given it yet.\nShall I try again? ${ANSWER}`;
 const EXPIRED_WITHOUT_LINK = `${NEEDED('mail')}, and the one you gave me has expired.\nShall I try again? ${ANSWER}`;
-const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${BROKER_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
+const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${ALICE_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds avec les boutons ci-dessous, ou par oui ou non.`;
 
 // The harness's requests for that permission, as Alice's client received them
 const ENGLISH_REQUEST = 'To read your data in';
@@ -235,7 +237,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		await r.client.sendText(r.room, 'Look for the party in my photos');
 		const request = await nextRequestIn(r, seen);
 		expect(request.body).toBe(MISSING('photos'));
-		expect(request.content['formatted_body']).toContain(`href="${BROKER_CONSENT_URL}"`);
+		expect(request.content['formatted_body']).toContain(`href="${ALICE_CONSENT_URL}"`);
 		expect(shown(request)).not.toContain('phish.example');
 	});
 
