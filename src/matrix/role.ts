@@ -158,6 +158,11 @@ const TO_DEVICE_ONLY_FILTER = JSON.stringify({
 // safety net, the inboxes being read at each start of the role
 const MAX_INBOX_PAGES = 1_000;
 
+// The reads of the assistants' inboxes the start of the role runs at once: on the first start
+// that keeps where a read stopped, every device reads from its oldest message, and each page
+// writes its position through the database pool
+const MAX_START_READS = 4;
+
 // Whether a caller joined a read of an inbox during the page under way
 interface InboxJoins {
 	during: boolean;
@@ -1415,6 +1420,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// away before a message of theirs fails to decrypt
 	// The assistants a provisioner asked for, with no room yet, too: their owners' clients check the
 	// identity before they open one, and a store lost since would leave the recorded one stale
+	const fewAtATime = makeLimiter(MAX_START_READS);
 	const assistantsAtStart = [
 		...(await listActiveAssistants(db)),
 		...(await listProvisionedWithoutRoom(db))
@@ -1431,7 +1437,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// In the background: the role listens meanwhile, and a message that fails to decrypt during
 		// the read joins it
 		inFlight.track(
-			fetchMissedKeyShares(userId, null).then(
+			fewAtATime(() => fetchMissedKeyShares(userId, null)).then(
 				(fetched) => {
 					if (fetched > 0) log.info({ userId, fetched }, 'to-device inbox read at start');
 				},
@@ -1516,4 +1522,22 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 function ensureTrailingSlash(url: URL): URL {
 	return url.pathname.endsWith('/') ? url : new URL(`${url.href}/`);
+}
+
+// Runs what it is handed at most `max` at a time, the others waiting for their turn in order
+function makeLimiter(max: number): <T>(run: () => Promise<T>) => Promise<T> {
+	let running = 0;
+	const waiting: (() => void)[] = [];
+	return async <T>(run: () => Promise<T>): Promise<T> => {
+		if (running < max) running += 1;
+		else await new Promise<void>((resolve) => waiting.push(resolve));
+		try {
+			return await run();
+		} finally {
+			// The turn passes to the next in line, or frees its place
+			const next = waiting.shift();
+			if (next === undefined) running -= 1;
+			else next();
+		}
+	};
 }
