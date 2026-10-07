@@ -40,6 +40,8 @@ interface EventOptions {
 	readonly recipients?: readonly Record<string, unknown>[];
 	// What the event is about, the task ROAD-12 unless told otherwise
 	readonly object?: Record<string, unknown>;
+	// A plain text excerpt of what it is about, which its application may add
+	readonly preview?: string;
 }
 
 const ALICE = { uuid: ALICE_UUID, email: 'alice@test.local', reason: 'assigned' };
@@ -71,7 +73,8 @@ function activityEvent(options: EventOptions = {}): ActivityEvent {
 				container: { kind: 'project', id: PROJECT_ID }
 			},
 			assignee: { id: ALICE_UUID },
-			recipients: options.recipients ?? [ALICE]
+			recipients: options.recipients ?? [ALICE],
+			...(options.preview === undefined ? {} : { preview: options.preview })
 		}
 	};
 }
@@ -390,7 +393,8 @@ describe('an assignment published on the activity exchange wakes the assignee’
 				title: 'Can you look at ROAD-12 before Friday?',
 				url: 'https://chat.test.local/#/room/!team:test.local/$mention:test.local'
 			},
-			recipients: [{ uuid: ALICE_UUID, email: 'alice@test.local', reason: 'mentioned' }]
+			recipients: [{ uuid: ALICE_UUID, email: 'alice@test.local', reason: 'mentioned' }],
+			preview: 'The client wants the figures before the board meets.'
 		});
 		await publish(mention);
 		expect(await answerTo(mention)).toBe(
@@ -412,7 +416,10 @@ describe('an assignment published on the activity exchange wakes the assignee’
 				id: '$mention:test.local',
 				url: 'https://chat.test.local/#/room/!team:test.local/$mention:test.local'
 			},
-			untrusted: { title: 'Can you look at ROAD-12 before Friday?' }
+			untrusted: {
+				title: 'Can you look at ROAD-12 before Friday?',
+				preview: 'The client wants the figures before the board meets.'
+			}
 		});
 	});
 

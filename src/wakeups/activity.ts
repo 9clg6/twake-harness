@@ -45,6 +45,8 @@ const activityEventSchema = z.object({
 				.max(2000)
 				.optional()
 		}),
+		// A plain text excerpt of the object, which ADR 006 caps at 280 characters
+		preview: z.string().max(1000).optional(),
 		// Exactly who the event is for: nobody is inferred
 		recipients: z.array(recipientSchema).max(100).default([])
 	})
@@ -53,10 +55,10 @@ const activityEventSchema = z.object({
 type ActivityEvent = z.infer<typeof activityEventSchema>;
 
 // One wake-up per recipient. What the application computed (its ids, key, link and time, and who
-// acted) is shown apart from what people wrote (the title and the board's name), as the contracts
-// return it under untrusted.
+// acted) is shown apart from what people wrote (the title, the board's name and the preview), as
+// the contracts return it under untrusted.
 function wakeupsOf(event: ActivityEvent): Wakeup[] {
-	const { object } = event.data;
+	const { object, preview } = event.data;
 	const computedObject = {
 		type: object.type,
 		id: object.id,
@@ -67,7 +69,8 @@ function wakeupsOf(event: ActivityEvent): Wakeup[] {
 	};
 	const untrusted = {
 		title: object.title,
-		...(object.board === undefined ? {} : { board_name: object.board.name })
+		...(object.board === undefined ? {} : { board_name: object.board.name }),
+		...(preview === undefined ? {} : { preview })
 	};
 	return event.data.recipients.map((recipient) => ({
 		source: event.source,
