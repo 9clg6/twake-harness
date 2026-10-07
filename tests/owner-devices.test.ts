@@ -107,6 +107,30 @@ async function clearRoom(r: ConsentRoom): Promise<string> {
 	return room;
 }
 
+// The SDK's look-up of who can decrypt an event of Alice's room fails at the homeserver while
+// `run` runs: the assistant then reads the event again, once it fetched its device's inbox, which
+// holds a message for it so that there is something to fetch
+async function readAgain(r: ConsentRoom, run: () => Promise<void>): Promise<void> {
+	const sent = await r.h.synapse.request(
+		r.alice,
+		'PUT',
+		`/_matrix/client/v3/sendToDevice/m.dummy/test-${Date.now()}`,
+		{ messages: { [r.assistantId]: { '*': {} } } }
+	);
+	expect(sent.status).toBe(200);
+	const membersOfRoom = `/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/joined_members`;
+	r.h.apisix.matrixFault = (call) => {
+		const target = new URL(call.path, 'http://synapse');
+		const asUser = target.searchParams.get('user_id') ?? r.h.role.creatorUserId;
+		return target.pathname === membersOfRoom && asUser === r.h.role.creatorUserId ? 500 : null;
+	};
+	try {
+		await run();
+	} finally {
+		r.h.apisix.matrixFault = null;
+	}
+}
+
 // The identity the harness holds for Alice, as it keeps it
 async function heldIdentity(
 	r: ConsentRoom
@@ -138,6 +162,8 @@ const CHANGED_MESSAGE =
 	"I did not act on your last message: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity); until then I act on none of your messages.";
 const UNENCRYPTED_MESSAGE =
 	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
+const NO_IDENTITY_MESSAGE =
+	'I did not act on your last message: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 const CHANGED_REPORT =
@@ -295,6 +321,24 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		);
 	});
 
+	it('acts on nothing when it cannot check my session, and tells me to try again', async () => {
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_cross_signing', async () => {
+			const eventId = await r.client.sendText(r.room, 'Can you check this?');
+			expect(await logged(r, 'owner device check failed', eventId)).toMatchObject({
+				mode: 'enforce',
+				via: 'message'
+			});
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('check this'))).toBe(
+			false
+		);
+	});
+
 	it('acts only on the words of the very event whose session it checked', async () => {
 		// A session I never verified writes one thing, and my verified session another
 		const other = await unverifiedSession(r, sessions);
@@ -364,6 +408,75 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Plain hello'))).toBe(
 			false
 		);
+	});
+
+	it('checks my session the same when it reads my message again after its decryption failed', async () => {
+		await readAgain(r, async () => {
+			const heard = r.saying('Heard:').length;
+			const eventId = await r.client.sendText(r.room, 'Read me again');
+			expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Read me again');
+			await logged(r, 'decryption failed', eventId);
+			expect(await deviceLine(r, eventId)).toMatchObject({
+				msg: 'owner device verified',
+				deviceId: r.client.deviceId
+			});
+		});
+		// A session I never verified, read again the same way, is not acted on: its key reaches the
+		// assistant with its first words, refused as any of its words
+		const other = await unverifiedSession(r, sessions);
+		const first = await other.sendText(r.room, 'First words from elsewhere');
+		expect((await r.h.decisionOn(first))?.['msg']).toBe('assistant ignored an unverified device');
+		await readAgain(r, async () => {
+			const eventId = await other.sendText(r.room, 'Read me again, from elsewhere');
+			await logged(r, 'decryption failed', eventId);
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored an unverified device',
+				deviceId: other.deviceId
+			});
+		});
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('elsewhere'))).toBe(
+			false
+		);
+	});
+
+	it('acts on nothing from an account without any identity, and tells me how to set one up', async () => {
+		const carol = await r.h.synapse.registerUser('carol');
+		const client = await startE2eeClient(r.h.synapse.url, carol, { session: 'unsigned' });
+		sessions.push(client);
+		const created = await r.h.api.post<{ roomId: string }>('carol@test.local', '/v1/assistants', {
+			name: 'Iris'
+		});
+		expect(created.status).toBe(201);
+		const room = created.body.roomId;
+		for (let i = 0; i < 40; i += 1) {
+			const invites = await r.h.synapse.pendingInvites(carol);
+			if (invites.some((inv) => inv.roomId === room)) break;
+			await sleep(250);
+		}
+		await client.joinRoom(room);
+		const assistantId = '@twake-space-assistant-carol:test.local';
+		await client.waitForMessage(room, assistantId, (t) => t.includes('Iris'));
+		expect(await client.masterKey()).toBeNull();
+		const eventId = await client.sendText(room, 'Hello Iris');
+		expect(await r.h.decisionOn(eventId)).toMatchObject({
+			msg: 'assistant ignored an unverified device',
+			deviceId: client.deviceId,
+			signed: false,
+			identity: 'none',
+			matchesPin: false
+		});
+		expect(
+			await client.waitForMessage(room, assistantId, (t) =>
+				t.startsWith('I did not act on your last message: your account has no encryption')
+			)
+		).toBe(NO_IDENTITY_MESSAGE);
+		const held = await withPrincipal(
+			r.h.db,
+			{ id: 'carol@test.local' },
+			(tx) => tx.sql`select 1 from owner_cross_signing where owner = 'carol@test.local'`
+		);
+		expect(held).toHaveLength(0);
 	});
 
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
