@@ -5,6 +5,9 @@ import { connect, type ChannelModel, type ConfirmChannel } from 'amqplib';
 // anonymous pulls from Docker Hub hit its rate limit on the organization's runners
 const IMAGE = process.env['RABBITMQ_IMAGE'] ?? 'mirror.gcr.io/library/rabbitmq:3.13';
 
+// Twice the tick of a quorum queue, on which the broker counts the queue's messages
+const COUNTED_WITHIN_MS = 10_000;
+
 // What a user may do on a vhost, each a regular expression over the names of exchanges and queues
 export interface Permissions {
 	readonly configure: string;
@@ -34,6 +37,11 @@ export interface TestBroker {
 	// What routes to a queue, but the default exchange, which routes to every queue by its name
 	bindingsOf(queue: string): Promise<Binding[]>;
 	queue(name: string): Promise<QueueState | null>;
+	// Resolves once the broker counts that many messages in a queue. It counts those of a quorum
+	// queue on the queue's tick, every five seconds, so a message settled a moment ago may still be
+	// counted; and a dead letter until its dead letter queue takes it, so once a quorum queue is
+	// counted empty, its dead letter queue holds every message dead-lettered from it.
+	waitForMessages(name: string, count: number): Promise<void>;
 	// How many messages each consumer of a queue may hold unacknowledged
 	prefetchOf(queue: string): Promise<number[]>;
 	// The user of each connection open, one entry per connection
@@ -58,6 +66,22 @@ export async function startTestBroker(): Promise<TestBroker> {
 
 	async function listed<T>(...args: string[]): Promise<T[]> {
 		return JSON.parse(await rabbitmqctl(...args, '--formatter', 'json')) as T[];
+	}
+
+	async function stateOf(name: string): Promise<QueueState | null> {
+		const rows = await listed<{
+			name: string;
+			type: string;
+			arguments: [string, string, unknown][];
+			messages: number;
+		}>('list_queues', 'name', 'type', 'arguments', 'messages');
+		const row = rows.find((candidate) => candidate.name === name);
+		if (row === undefined) return null;
+		return {
+			type: row.type,
+			arguments: Object.fromEntries(row.arguments.map(([key, , value]) => [key, value])),
+			messages: row.messages
+		};
 	}
 
 	return {
@@ -86,20 +110,20 @@ export async function startTestBroker(): Promise<TestBroker> {
 				.filter((row) => row.destination_name === queue && row.source_name !== '')
 				.map((row) => ({ source: row.source_name, routingKey: row.routing_key }));
 		},
-		queue: async (name) => {
-			const rows = await listed<{
-				name: string;
-				type: string;
-				arguments: [string, string, unknown][];
-				messages: number;
-			}>('list_queues', 'name', 'type', 'arguments', 'messages');
-			const row = rows.find((candidate) => candidate.name === name);
-			if (row === undefined) return null;
-			return {
-				type: row.type,
-				arguments: Object.fromEntries(row.arguments.map(([key, , value]) => [key, value])),
-				messages: row.messages
-			};
+		queue: stateOf,
+		waitForMessages: async (name, count) => {
+			const deadline = Date.now() + COUNTED_WITHIN_MS;
+			let counted = (await stateOf(name))?.messages;
+			while (counted !== count && Date.now() < deadline) {
+				await new Promise((resolve) => setTimeout(resolve, 250));
+				counted = (await stateOf(name))?.messages;
+			}
+			if (counted === undefined) throw new Error(`the broker has no queue ${name}`);
+			if (counted !== count) {
+				throw new Error(
+					`the broker still counts ${counted} messages in ${name} after ${COUNTED_WITHIN_MS / 1000} s, not ${count}`
+				);
+			}
 		},
 		prefetchOf: async (queue) =>
 			(
