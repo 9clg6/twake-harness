@@ -122,7 +122,7 @@ function identityOf(message: unknown, routingKey: string): Identity {
 }
 
 // Why a message is no event of the activity exchange: the attribute at fault, never its value
-function malformation(message: unknown, error: z.ZodError): string {
+function malformedReason(message: unknown, error: z.ZodError): string {
 	const path = (error.issues[0]?.path ?? []).map(String);
 	if (path.length === 0) return 'not a CloudEvent';
 	return `${valueAt(message, path) === undefined ? 'no' : 'invalid'} ${path.join('.')}`;
@@ -224,36 +224,30 @@ export async function startActivityListener(
 			return {
 				kind: 'malformed',
 				identity: identityOf(message, routingKey),
-				reason: malformation(message, parsed.error)
+				reason: malformedReason(message, parsed.error)
 			};
 		}
 		const event = parsed.data;
+		const identity: Identity = {
+			source: event.source,
+			eventId: event.id,
+			type: event.type,
+			recipients: (event.data.recipients ?? []).length
+		};
 		const fields = leftOutFields(message, event);
-		if (fields.length > 0) {
-			deps.log.warn({ source: event.source, eventId: event.id, fields }, 'event fields left out');
-		}
+		if (fields.length > 0) deps.log.warn({ ...identity, fields }, 'event fields left out');
 		const { wakeups, skipped, ignored } = wakeupsOf(event);
-		if (ignored > 0) {
-			deps.log.warn({ source: event.source, eventId: event.id, ignored }, 'recipients ignored');
-		}
+		if (ignored > 0) deps.log.warn({ ...identity, ignored }, 'recipients ignored');
 		for (const { index, fields } of skipped) {
-			deps.log.warn(
-				{ source: event.source, eventId: event.id, recipient: index, fields },
-				'recipient skipped'
-			);
+			deps.log.warn({ ...identity, recipient: index, fields }, 'recipient skipped');
 		}
 		return {
 			kind: 'wakeups',
-			identity: {
-				source: event.source,
-				eventId: event.id,
-				type: event.type,
-				recipients: (event.data.recipients ?? []).length
-			},
+			identity,
 			wakeups,
 			// Those left out count among the recipients of the event: past the most it reads, as
 			// ignored, and those it cannot read, as invalid
-			left: [
+			leftOut: [
 				...skipped.map((): RecipientOutcome => 'invalid'),
 				...Array.from({ length: ignored }, (): RecipientOutcome => 'ignored')
 			]

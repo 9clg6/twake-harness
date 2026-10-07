@@ -44,7 +44,7 @@ export type Reading =
 			readonly kind: 'wakeups';
 			readonly identity: Identity;
 			readonly wakeups: readonly Wakeup[];
-			readonly left: readonly RecipientOutcome[];
+			readonly leftOut: readonly RecipientOutcome[];
 	  };
 
 // How a source's messages read
@@ -118,7 +118,7 @@ export async function listenOnOwnQueue(
 				logHandled(log, { ...identity, outcome: 'dead_lettered', reason: reading.reason });
 				throw new DeadLetterError(reading.reason);
 			}
-			outcomes.push(...reading.left);
+			outcomes.push(...reading.leftOut);
 			for (const wakeup of reading.wakeups) outcomes.push(await wake(deps, wakeup));
 		} catch (err: unknown) {
 			if (err instanceof DeadLetterError) throw err;

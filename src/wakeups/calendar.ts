@@ -322,7 +322,7 @@ function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 		kind: 'wakeups',
 		identity: { ...identity, eventId: wakeup.id, type: INVITED_EVENT_TYPE },
 		wakeups: [wakeup],
-		left: []
+		leftOut: []
 	};
 }
 
