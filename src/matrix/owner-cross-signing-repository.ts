@@ -4,10 +4,10 @@ import type { Tx } from '../db/client.js';
 // owner accepted through the API
 export type PinnedBy = 'first_use' | 'api';
 
-// The identity published the last time the owner's words came with another one than the one held:
-// its master key, null when none was published
+// The identity that signed the session the owner's words last came from, when it was another one
+// than the one held, and when
 export interface SeenIdentity {
-	readonly masterPublicKey: string | null;
+	readonly masterPublicKey: string;
 	readonly at: Date;
 }
 
@@ -38,7 +38,9 @@ function normalize(row: OwnerCrossSigningRow): OwnerCrossSigning {
 		pinnedBy: row.pinned_by === 'api' ? 'api' : 'first_use',
 		pinnedAt: row.pinned_at,
 		seen:
-			row.seen_at === null ? null : { masterPublicKey: row.seen_master_public_key, at: row.seen_at }
+			row.seen_master_public_key === null || row.seen_at === null
+				? null
+				: { masterPublicKey: row.seen_master_public_key, at: row.seen_at }
 	};
 }
 
@@ -70,12 +72,8 @@ export async function pinFirstSeen(
 	return { ...held, pinnedNow: inserted.length === 1 };
 }
 
-// The owner's words came with another identity than the one held, or with none
-export async function recordSeen(
-	tx: Tx,
-	owner: string,
-	masterPublicKey: string | null
-): Promise<void> {
+// The owner's words came from a session that another identity than the one held signed
+export async function recordSeen(tx: Tx, owner: string, masterPublicKey: string): Promise<void> {
 	await tx.sql`
 		update owner_cross_signing
 		set seen_master_public_key = ${masterPublicKey}, seen_at = now()
