@@ -575,7 +575,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				try {
 					const fetched = await fetchMissedKeyShares(room.userId, roomId);
 					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
-					// Tried again whatever this read found: one it joined may have taken the key share
+				} catch (err: unknown) {
+					// Its pages before the failure may have taken the key share all the same
+					log.warn({ roomId, userId: room.userId, err }, 'missed key shares not all fetched');
+				}
+				// Tried again whatever the read found: one it joined may have taken the key share
+				try {
 					const intent = appservice.getIntentForUserId(room.userId);
 					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
 						new EncryptedRoomEvent(encrypted),

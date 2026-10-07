@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import type { ChatRequest } from './helpers/fake-apisix.js';
+import type { ChatRequest, MatrixCall } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import {
 	PROVISIONER,
@@ -65,6 +65,29 @@ describe('an assistant whose matrix role restarts', () => {
 		});
 		const body = (await res.json()) as { to_device?: { events?: unknown[] } };
 		return body.to_device?.events?.length ?? 0;
+	}
+
+	// A read of the assistant's inbox, as it goes through the gateway
+	function isInboxReadOf(userId: string, call: MatrixCall): boolean {
+		const target = new URL(call.path, 'http://synapse');
+		return (
+			target.pathname === '/_matrix/client/v3/sync' && target.searchParams.get('user_id') === userId
+		);
+	}
+
+	// Resolves once the matrix role logged that the message failed to decrypt
+	async function failedToDecrypt(eventId: string): Promise<boolean> {
+		for (let i = 0; i < 160; i += 1) {
+			if (
+				h
+					.logLines()
+					.some((line) => line['msg'] === 'decryption failed' && line['eventId'] === eventId)
+			) {
+				return true;
+			}
+			await sleep(250);
+		}
+		return false;
 	}
 
 	beforeAll(async () => {
@@ -156,6 +179,46 @@ describe('an assistant whose matrix role restarts', () => {
 				await client.waitForMessage(room, assistant.userId, (t) => t === `echo: ${text}`, 60_000)
 			).toBe(`echo: ${text}`);
 		}
+	});
+
+	it('answers a message whose key share a read took before a later page of it failed', async () => {
+		const { client, assistant, room } = await meetProvisionedAssistant('ned');
+		// The first page of the read at start waits until the message failed to decrypt and joined
+		// the read, then the next page fails at the gateway
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let reads = 0;
+		h.apisix.matrixFault = (call) => {
+			if (!isInboxReadOf(assistant.userId, call)) return null;
+			reads += 1;
+			return reads === 2 ? 502 : null;
+		};
+		h.apisix.matrixHold = (call) =>
+			isInboxReadOf(assistant.userId, call) && reads === 1 ? released : null;
+		try {
+			await h.role.stop();
+			const sent = await client.sendText(room, 'one key, one failed page');
+			await sleep(1500);
+			await h.restartRole();
+			expect(await failedToDecrypt(sent)).toBe(true);
+			release();
+			for (let i = 0; i < 40 && reads < 2; i += 1) await sleep(250);
+		} finally {
+			release();
+			h.apisix.matrixHold = null;
+			h.apisix.matrixFault = null;
+		}
+		expect(reads).toBeGreaterThanOrEqual(2);
+		expect(
+			await client.waitForMessage(
+				room,
+				assistant.userId,
+				(t) => t === 'echo: one key, one failed page',
+				60_000
+			)
+		).toBe('echo: one key, one failed page');
 	});
 
 	it('reads a key share behind more to-device messages than the homeserver hands at once', async () => {
