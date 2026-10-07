@@ -53,7 +53,8 @@ export interface SendPayload {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
-	// The owner's message the text answers, which the matrix role marks as answered
+	// The message the text answers, which the matrix role marks as answered: the owner's own, or,
+	// for a turn their reaction resumed, the assistant's question they reacted to
 	readonly replyTo?: string;
 	readonly outcome?: 'answered' | 'failed';
 	// The text asks the owner about a frozen call: the matrix role remembers the event it sent,
@@ -145,7 +146,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			kind: 'send',
 			payload: {
 				...replyTo(result, assistant, roomId, notices),
-				// The owner's yes in the room, which the matrix role marks as answered, as a message
+				// What carries the owner's yes, which the matrix role marks as answered as it would a
+				// message: their words, or the assistant's own question they reacted to
 				...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
 			},
 			dedupKey: `send:resume:${pendingCallId}`,

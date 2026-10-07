@@ -91,7 +91,8 @@ interface SendJob {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
-	// The owner's message the text answers, for the reactions on it
+	// The message the text answers, for the reactions on it: the owner's own, or the assistant's
+	// question their reaction answered
 	readonly replyTo?: string;
 	readonly outcome?: TurnOutcome;
 	// The text asks the owner about a frozen call: the event sent is remembered for their answer
