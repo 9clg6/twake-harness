@@ -109,14 +109,6 @@ describe('a provisioned assistant', () => {
 		};
 	}
 
-	async function waitForMember(viewer: MatrixUser, roomId: string, userId: string): Promise<void> {
-		for (let i = 0; i < 80; i += 1) {
-			if ((await h.synapse.joinedMembers(viewer, roomId)).includes(userId)) return;
-			await sleep(250);
-		}
-		throw new Error(`${userId} never joined ${roomId}`);
-	}
-
 	async function keysOf(viewer: MatrixUser, userId: string): Promise<KeysQuery> {
 		const res = await h.synapse.request(viewer, 'POST', '/_matrix/client/v3/keys/query', {
 			device_keys: { [userId]: [] }
@@ -211,7 +203,7 @@ describe('a provisioned assistant', () => {
 		// As Twake Chat's « My assistant »: an encrypted direct room, the assistant invited. Synapse
 		// pushes nothing sent before the assistant's join, so the owner writes once it is there.
 		const room = await client.createDirectRoom(mine.userId);
-		await waitForMember(carol, room, mine.userId);
+		await h.synapse.waitForMember(carol, room, mine.userId);
 		await client.sendText(room, 'hello, assistant');
 
 		const answer = await client.waitForMessage(room, mine.userId, (text) => text.includes('echo'));
@@ -341,7 +333,7 @@ describe('a provisioned assistant', () => {
 		let room: string;
 		try {
 			room = await client.createDirectRoom(mine.userId);
-			await waitForMember(kate, room, mine.userId);
+			await h.synapse.waitForMember(kate, room, mine.userId);
 			const early = await client.sendText(room, '!help');
 			// Until the role is done with it: answered, or dropped as a message of a room nobody holds
 			await eventually(() =>
@@ -484,7 +476,7 @@ describe('a provisioned assistant', () => {
 		const mine = await provisionUntilReady(h.api, nina.userId);
 
 		const room = await client.createDirectRoom(mine.userId);
-		await waitForMember(nina, room, mine.userId);
+		await h.synapse.waitForMember(nina, room, mine.userId);
 
 		expect(await announcedCommands(nina, room, mine.userId)).toEqual({
 			commands: [
@@ -534,7 +526,7 @@ describe('a provisioned assistant', () => {
 			power_level_content_override: { events: { 'org.matrix.msc4332.commands': 100 } }
 		});
 		const room = created.body['room_id'] as string;
-		await waitForMember(pam, room, mine.userId);
+		await h.synapse.waitForMember(pam, room, mine.userId);
 		expect(await announcedCommands(pam, room, mine.userId, 8)).toBeNull();
 
 		// The owner lets members announce commands there, then the client names the room
@@ -562,7 +554,7 @@ describe('a provisioned assistant', () => {
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, oscar.userId);
 		const room = await client.createDirectRoom(mine.userId);
-		await waitForMember(oscar, room, mine.userId);
+		await h.synapse.waitForMember(oscar, room, mine.userId);
 
 		// As Twake Chat sends a command the assistant announced
 		await client.sendText(room, '!help');
@@ -583,10 +575,10 @@ describe('a provisioned assistant', () => {
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, dave.userId);
 		const first = await client.createDirectRoom(mine.userId);
-		await waitForMember(dave, first, mine.userId);
+		await h.synapse.waitForMember(dave, first, mine.userId);
 		// The client opens another direct room with it, and names that one
 		const second = await client.createDirectRoom(mine.userId);
-		await waitForMember(dave, second, mine.userId);
+		await h.synapse.waitForMember(dave, second, mine.userId);
 
 		const named = await provisionerPut(`${provisioningPath(dave.userId)}/home`, { roomId: second });
 		expect(named.status).toBe(204);
@@ -655,7 +647,7 @@ describe('a provisioned assistant', () => {
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, sara.userId);
 		const room = await client.createDirectRoom(mine.userId);
-		await waitForMember(sara, room, mine.userId);
+		await h.synapse.waitForMember(sara, room, mine.userId);
 
 		const invited = await h.synapse.request(
 			sara,
@@ -680,7 +672,7 @@ describe('a provisioned assistant', () => {
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, gina.userId);
 		const room = await client.createDirectRoom(mine.userId);
-		await waitForMember(gina, room, mine.userId);
+		await h.synapse.waitForMember(gina, room, mine.userId);
 		const invited = await h.synapse.request(
 			gina,
 			'POST',

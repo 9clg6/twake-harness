@@ -26,6 +26,10 @@ export interface E2eeClientOptions {
 	readonly session?: SessionTrust;
 }
 
+export interface DirectRoomOptions {
+	readonly rotationPeriodMsgs?: number;
+}
+
 export interface DecryptedMessage {
 	readonly roomId: string;
 	readonly eventId: string;
@@ -62,8 +66,9 @@ export interface E2eeClient {
 	// What the client could not read, for diagnosis
 	readonly failures: DecryptionFailure[];
 	joinRoom(roomId: string): Promise<void>;
-	// Opens an encrypted direct message with someone, as Twake Chat does
-	createDirectRoom(userId: string): Promise<string>;
+	// Opens an encrypted direct message with someone, as Twake Chat does; with
+	// `rotationPeriodMsgs`, each side starts a new room key after that many messages
+	createDirectRoom(userId: string, options?: DirectRoomOptions): Promise<string>;
 	// Resolves to the event id of the message sent
 	sendText(roomId: string, text: string): Promise<string>;
 	// Reacts to an event with a key such as ✅, encrypted like any event of an encrypted room;
@@ -380,7 +385,7 @@ export async function startE2eeClient(
 		joinRoom: async (roomId) => {
 			await client.joinRoom(roomId);
 		},
-		createDirectRoom: (userId) =>
+		createDirectRoom: (userId, roomOptions = {}) =>
 			client.createRoom({
 				invite: [userId],
 				is_direct: true,
@@ -389,7 +394,12 @@ export async function startE2eeClient(
 					{
 						type: 'm.room.encryption',
 						state_key: '',
-						content: { algorithm: 'm.megolm.v1.aes-sha2' }
+						content: {
+							algorithm: 'm.megolm.v1.aes-sha2',
+							...(roomOptions.rotationPeriodMsgs === undefined
+								? {}
+								: { rotation_period_msgs: roomOptions.rotationPeriodMsgs })
+						}
 					}
 				]
 			}),
