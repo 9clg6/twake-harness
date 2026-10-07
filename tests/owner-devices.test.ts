@@ -63,6 +63,37 @@ async function withoutTable(
 	}
 }
 
+async function until(check: () => boolean, what: string): Promise<void> {
+	for (let i = 0; i < 120; i += 1) {
+		if (check()) return;
+		await sleep(250);
+	}
+	throw new Error(`${what} never happened`);
+}
+
+// An event of Alice's room as the homeserver holds it, encrypted
+async function encryptedEvent(r: ConsentRoom, eventId: string): Promise<Record<string, unknown>> {
+	const reply = await r.h.synapse.request(
+		r.alice,
+		'GET',
+		`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/event/${encodeURIComponent(eventId)}`
+	);
+	return reply.body;
+}
+
+// Pushes events to the matrix role as the homeserver does, in a transaction of their own
+async function push(r: ConsentRoom, events: Record<string, unknown>[]): Promise<number> {
+	const reply = await fetch(
+		`http://127.0.0.1:${r.h.port}/_matrix/app/v1/transactions/test-${Date.now()}-${Math.random()}`,
+		{
+			method: 'PUT',
+			headers: { authorization: `Bearer ${r.h.hsToken}`, 'content-type': 'application/json' },
+			body: JSON.stringify({ events })
+		}
+	);
+	return reply.status;
+}
+
 // The identity the harness holds for Alice, as it keeps it
 async function heldIdentity(
 	r: ConsentRoom
@@ -245,6 +276,62 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		});
 		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
 		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Archive'))).toBe(
+			false
+		);
+	});
+
+	it('acts only on the words of the very event whose session it checked', async () => {
+		// A session I never verified writes one thing, and my verified session another
+		const other = await unverifiedSession(r, sessions);
+		const fromOther = await other.sendText(r.room, 'Plan my week');
+		expect((await r.h.decisionOn(fromOther))?.['msg']).toBe(
+			'assistant ignored an unverified device'
+		);
+		const heard = r.saying('Heard:').length;
+		const fromMine = await r.client.sendText(r.room, 'Good night');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Good night');
+		// The room settles: the answer is marked done
+		expect(await r.client.waitForReactions(r.room, fromMine, r.assistantId, 2)).toContain('✅');
+		await sleep(1000);
+		const otherEvent = await encryptedEvent(r, fromOther);
+		const myEvent = await encryptedEvent(r, fromMine);
+		const answered = r.saying('Heard:').length;
+		// Both arrive again under one new id: the words acted on are those of the decryption that was
+		// checked
+		const releases: (() => void)[] = [];
+		const membersOfRoom = `/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/joined_members`;
+		r.h.apisix.matrixHold = (call) => {
+			const target = new URL(call.path, 'http://synapse');
+			const asUser = target.searchParams.get('user_id') ?? r.h.role.creatorUserId;
+			if (
+				releases.length >= 2 ||
+				target.pathname !== membersOfRoom ||
+				asUser !== r.h.role.creatorUserId
+			) {
+				return null;
+			}
+			return new Promise<void>((resolve) => releases.push(resolve));
+		};
+		const id = `$same-${Date.now()}`;
+		try {
+			const first = push(r, [{ ...otherEvent, event_id: id }]);
+			await until(() => releases.length === 1, 'the first push held up');
+			const second = push(r, [{ ...myEvent, event_id: id }]);
+			await until(() => releases.length === 2, 'the second push held up');
+			releases[0]?.();
+			expect(await first).toBe(200);
+			releases[1]?.();
+			expect(await second).toBe(200);
+		} finally {
+			r.h.apisix.matrixHold = null;
+			for (const release of releases) release();
+		}
+		// The turn taken under that id carries the words of the session checked
+		expect((await r.h.decisionOn(id))?.['msg']).toBe('turn queued');
+		expect(await r.nextSaying('Heard:', answered)).toBe('Heard: Good night');
+		// Nothing of what the unverified session wrote ever reached the model
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Plan my week'))).toBe(
 			false
 		);
 	});

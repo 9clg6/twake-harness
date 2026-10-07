@@ -51,8 +51,7 @@ import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js'
 import { makeConsentRequests } from './consent-requests.js';
 import { makeLaidOutText, makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
-import { makeOwnerDeviceGate, type OwnerWords } from './owner-devices.js';
-import type { EventSender } from './owner-keys.js';
+import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
 
@@ -701,13 +700,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	});
 
-	// Who encrypted an event, as the assistant's encryption engine reads it when it decrypts the
-	// event again: the SDK keeps that to itself
-	async function senderOf(
+	// An event decrypted again by the assistant's encryption engine, which tells who encrypted it
+	// where the SDK keeps that to itself, with what it says
+	async function decryptChecked(
 		assistantUserId: string,
 		roomId: string,
 		encrypted: Record<string, unknown> | null
-	): Promise<EventSender> {
+	): Promise<CheckedEvent> {
 		if (encrypted === null) throw new Error('the encrypted event was not kept');
 		const intent = appservice.getIntentForUserId(assistantUserId);
 		await ensureEncryption(intent);
@@ -716,14 +715,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			new RoomId(roomId)
 		);
 		const shield = decrypted.shieldState(false);
+		const event: unknown = JSON.parse(decrypted.event);
+		if (typeof event !== 'object' || event === null)
+			throw new Error('the decrypted event is no object');
 		return {
-			userId: decrypted.sender?.toString() ?? null,
-			deviceId: decrypted.senderDevice?.toString() ?? null,
-			curve25519Key: decrypted.senderCurve25519Key ?? null,
-			ed25519Key: decrypted.senderClaimedEd25519Key ?? null,
-			unauthenticated:
-				shield?.code === ShieldStateCode.AuthenticityNotGuaranteed ||
-				shield?.code === ShieldStateCode.MismatchedSender
+			sender: {
+				userId: decrypted.sender?.toString() ?? null,
+				deviceId: decrypted.senderDevice?.toString() ?? null,
+				curve25519Key: decrypted.senderCurve25519Key ?? null,
+				ed25519Key: decrypted.senderClaimedEd25519Key ?? null,
+				unauthenticated:
+					shield?.code === ShieldStateCode.AuthenticityNotGuaranteed ||
+					shield?.code === ShieldStateCode.MismatchedSender
+			},
+			event: event as Record<string, unknown>
 		};
 	}
 
@@ -734,7 +739,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		mode: config.matrix.ownerDeviceTrust,
 		fetchMessages,
-		senderOf,
+		decrypt: decryptChecked,
 		queryKeys: async (assistantUserId, ownerUserId) => {
 			const intent = appservice.getIntentForUserId(assistantUserId);
 			await ensureEncryption(intent);
@@ -781,11 +786,23 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			via: 'answer',
 			encrypted
 		};
-		if (!(await ownerDevices.admit(words))) return;
+		const admission = await ownerDevices.admit(words);
+		if (!admission.admitted) return;
+		// The answer that counts is the one of the very event whose session was checked
+		const checked = admission.event === null ? event : (admission.event as RoomEvent);
+		const checkedAnnotation = checked.sender === sender ? annotationOf(checked) : null;
+		const checkedSays =
+			checked.type === 'm.reaction' && checkedAnnotation !== null
+				? reactionAnswer(checkedAnnotation.key)
+				: null;
+		if (checkedAnnotation === null || checkedSays === null) {
+			log.info({ roomId, owner, eventId }, 'answer ignored: not the event checked');
+			return;
+		}
 		await requests.reacted(
 			{ roomId, owner, assistantUserId: room.userId },
-			annotation.eventId,
-			says,
+			checkedAnnotation.eventId,
+			checkedSays,
 			eventId
 		);
 	}
@@ -876,9 +893,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						via: 'message',
 						encrypted: encrypted.event
 					};
-					if (!(await ownerDevices.admit(words))) return;
+					const admission = await ownerDevices.admit(words);
+					if (!admission.admitted) return;
+					// The words that count are those of the very event whose session was checked
+					const checked = admission.event === null ? raw : (admission.event as RoomEvent);
+					const checkedText =
+						checked.type === 'm.room.message' && checked.sender === sender ? textOf(checked) : null;
+					if (checkedText === null) {
+						log.info({ roomId, owner, eventId }, 'message ignored: not the event checked');
+						return;
+					}
+					message = checkedText;
 					const requestRoom = { roomId, owner, assistantUserId: room.userId };
-					if (await requests.wrote(requestRoom, eventId, text)) return;
+					if (await requests.wrote(requestRoom, eventId, checkedText)) return;
 				}
 			}
 			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt

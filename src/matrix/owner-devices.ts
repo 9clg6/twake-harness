@@ -51,16 +51,31 @@ interface DeviceVerdict {
 	readonly identity: IdentityState;
 }
 
+// An event the assistant's encryption engine decrypted for the check: who encrypted it, and what it
+// says, which are the words that count
+export interface CheckedEvent {
+	readonly sender: EventSender;
+	readonly event: Record<string, unknown>;
+}
+
+// Whether the owner's words count, and then the event to act on: the one the check decrypted, or
+// null when the check could not decrypt it, which only report mode takes all the same
+export type Admission =
+	| { readonly admitted: false }
+	| { readonly admitted: true; readonly event: Record<string, unknown> | null };
+
+const REFUSED: Admission = { admitted: false };
+
 export interface OwnerDeviceGateDeps {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
 	readonly mode: OwnerDeviceTrust;
 	// Decrypts the event again with the assistant's encryption engine, which tells who encrypted it
-	senderOf(
+	decrypt(
 		assistantUserId: string,
 		roomId: string,
 		encrypted: Record<string, unknown> | null
-	): Promise<EventSender>;
+	): Promise<CheckedEvent>;
 	// The homeserver's answer to a keys query for the owner, made as their assistant
 	queryKeys(assistantUserId: string, ownerUserId: string): Promise<unknown>;
 	fetchMessages(owner: string): Promise<Messages>;
@@ -70,15 +85,14 @@ export interface OwnerDeviceGate {
 	// Whether the owner's words count: in enforce mode only when the device that encrypted them is
 	// signed by the identity the harness holds for the owner, in report mode always. Either way the
 	// device is logged without the words, and the owner is told when it falls short.
-	admit(words: OwnerWords): Promise<boolean>;
+	admit(words: OwnerWords): Promise<Admission>;
 }
 
 export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate {
 	const { db, log, mode } = deps;
 
-	async function judge(words: OwnerWords): Promise<DeviceVerdict> {
+	async function judge(words: OwnerWords, sender: EventSender): Promise<DeviceVerdict> {
 		const { owner, ownerUserId } = words;
-		const sender = await deps.senderOf(words.assistantUserId, words.roomId, words.encrypted);
 		const keys = readPublishedKeys(
 			await deps.queryKeys(words.assistantUserId, ownerUserId),
 			ownerUserId
@@ -144,15 +158,18 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 	return {
 		admit: async (words) => {
 			const { roomId, owner, eventId, via } = words;
+			let checked: CheckedEvent | null = null;
 			let verdict: DeviceVerdict;
 			try {
-				verdict = await judge(words);
+				checked = await deps.decrypt(words.assistantUserId, roomId, words.encrypted);
+				verdict = await judge(words, checked.sender);
 			} catch (err: unknown) {
 				log.error({ roomId, owner, eventId, via, mode, err }, 'owner device check failed');
-				if (mode === 'report') return true;
+				if (mode === 'report') return { admitted: true, event: checked?.event ?? null };
 				await tell(words, '*', 'check_failed', (messages) => messages.notices.turnFailed);
-				return false;
+				return REFUSED;
 			}
+			const admitted: Admission = { admitted: true, event: checked.event };
 			const matchesPin = verdict.identity === 'pinned' || verdict.identity === 'first_seen';
 			const fields = {
 				roomId,
@@ -167,7 +184,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			};
 			if (verdict.signed && matchesPin) {
 				log.info(fields, 'owner device verified');
-				return true;
+				return admitted;
 			}
 			const shortfall: DeviceShortfall =
 				verdict.identity === 'changed'
@@ -179,11 +196,11 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			if (mode === 'report') {
 				log.info(fields, 'owner device unverified');
 				await tell(words, verdict.device, reason, (m) => m.ownerDevices.reported(shortfall));
-				return true;
+				return admitted;
 			}
 			log.info(fields, 'assistant ignored an unverified device');
 			await tell(words, verdict.device, reason, (m) => m.ownerDevices.refused(via, shortfall));
-			return false;
+			return REFUSED;
 		}
 	};
 }
