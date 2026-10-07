@@ -1,4 +1,4 @@
-import { fenced } from '../wakeups/wake.js';
+import { fenced } from '../llm/data.js';
 import { findTimeZone, formatOffset, offsetMinutesAt } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
