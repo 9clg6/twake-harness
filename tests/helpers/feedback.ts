@@ -42,8 +42,10 @@ export function inReplyTo(content: Record<string, unknown>): string | null {
 // What the owner sees of their assistant at work in its room: its reactions on an event, whether
 // it is typing, and its messages, edits applied
 export interface RoomFeedback {
+	// A reaction the assistant redacted is gone from what the owner's client shows
 	reactionsOn(eventId: string): Reaction[];
-	isRedacted(eventId: string): boolean;
+	// The events the assistant redacted in the room
+	redactions(): string[];
 	isTyping(): Promise<boolean>;
 	shown(): ShownMessage[];
 }
@@ -62,20 +64,28 @@ let syncs = 0;
 
 export function watchFeedback(options: RoomFeedbackOptions): RoomFeedback {
 	const { synapse, owner, client, room, assistantId } = options;
+	function redactions(): string[] {
+		return client.events.flatMap((e) =>
+			e.roomId === room && e.type === 'm.room.redaction' && e.sender === assistantId
+				? [e.redacts ?? '']
+				: []
+		);
+	}
 	return {
-		reactionsOn: (eventId) =>
-			client.events
+		reactionsOn: (eventId) => {
+			const taken = new Set(redactions());
+			return client.events
 				.filter((e) => e.roomId === room && e.type === 'm.reaction' && e.sender === assistantId)
 				.flatMap((e) => {
 					const relation = e.content['m.relates_to'] as Record<string, unknown> | undefined;
-					return relation?.['rel_type'] === 'm.annotation' && relation['event_id'] === eventId
+					return relation?.['rel_type'] === 'm.annotation' &&
+						relation['event_id'] === eventId &&
+						!taken.has(e.eventId)
 						? [{ eventId: e.eventId, key: String(relation['key']) }]
 						: [];
-				}),
-		isRedacted: (eventId) =>
-			client.events.some(
-				(e) => e.roomId === room && e.type === 'm.room.redaction' && e.redacts === eventId
-			),
+				});
+		},
+		redactions,
 		// Typing notifications are ephemeral: the SDK client drops them, a sync without a token shows
 		// who is typing in the room right now
 		isTyping: async () => {

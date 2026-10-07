@@ -592,11 +592,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
+		// The check mark joins the eyes, which stay
 		const check = await eventually(() => feedback.reactionsOn(request).find((r) => r.key === '✅'));
 		expect(check).toBeDefined();
+		expect(feedback.reactionsOn(request).map((r) => r.key)).toEqual(['👀', '✅']);
+		expect(feedback.redactions()).toEqual([]);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 
@@ -613,11 +613,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await nextAnswer(answered)).toContain('Send the Q4 figures');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
+		// The check mark joins the eyes, which stay
 		const check = await eventually(() => feedback.reactionsOn(yes).find((r) => r.key === '✅'));
 		expect(check).toBeDefined();
+		expect(feedback.reactionsOn(yes).map((r) => r.key)).toEqual(['👀', '✅']);
+		expect(feedback.redactions()).toEqual([]);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 
@@ -635,12 +635,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await eventually(() => failures().length > failed, 30_000)).toBe(true);
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 		await sleep(1000);
-		expect(feedback.reactionsOn(request).filter((r) => r.key === '✅')).toEqual([]);
+		// No check mark joins the eyes, which stay
+		expect(feedback.reactionsOn(request).map((r) => r.key)).toEqual(['👀']);
+		expect(feedback.redactions()).toEqual([]);
 	});
 
 	it('tells me what it did and what remains when my yes takes it past its limit of calls', async () => {

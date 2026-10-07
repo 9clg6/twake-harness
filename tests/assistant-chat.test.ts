@@ -236,11 +236,12 @@ describe('talking to my assistant in Matrix', () => {
 		expect(await typingWhileWorking).toBe(true);
 		await answersAfter(before);
 		expect(lastAnswer().body).toBe('slow echo: take your time');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
+		// The check mark joins the eyes, which stay: a reaction taken back in an encrypted room
+		// leaves an empty event, which some clients show as a message they cannot read
 		const check = await eventually(() => feedback.reactionsOn(asked).find((r) => r.key === '✅'));
 		expect(check).toBeDefined();
+		expect(feedback.reactionsOn(asked).map((r) => r.key)).toEqual(['👀', '✅']);
+		expect(feedback.redactions()).toEqual([]);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 });

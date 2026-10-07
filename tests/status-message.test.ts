@@ -164,11 +164,6 @@ describe('a status message while my assistant works on a message', () => {
 		await r.h.db.sql`delete from jobs where kind = 'progress'`;
 	}
 
-	// The id of the eyes the assistant put on an event, or an empty string when there are none
-	function eyesOn(eventId: string): string {
-		return feedback.reactionsOn(eventId).find((x) => x.key === '👀')?.eventId ?? '';
-	}
-
 	it('posts a status when my message takes a while, closed once the answer went out on its own', async () => {
 		let asked = '';
 		const answer = 'Here is **the** answer';
@@ -206,12 +201,11 @@ describe('a status message while my assistant works on a message', () => {
 		expect(edit['content']).toMatchObject({
 			'm.relates_to': { rel_type: 'm.replace', event_id: status?.eventId }
 		});
-		// The eyes go from my message once it is answered, and the check mark comes
-		const eyes = feedback.reactionsOn(asked).find((x) => x.key === '👀');
-		expect(eyes).toBeDefined();
-		expect(await eventually(() => feedback.isRedacted(eyes?.eventId ?? ''))).toBe(true);
+		// The check mark joins the eyes on my message once it is answered, and the eyes stay
 		const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
 		expect(check).toBeDefined();
+		expect(feedback.reactionsOn(asked).map((x) => x.key)).toEqual(['👀', '✅']);
+		expect(feedback.redactions()).toEqual([]);
 	});
 
 	it('posts no status for a message answered before it was due, however long typing takes to stop', async () => {
@@ -388,9 +382,10 @@ describe('a status message while my assistant works on a message', () => {
 		const notice = shownSince(before)[1];
 		expect(inReplyTo(notice?.original ?? {})).toBeNull();
 		expect(await notified()).toContain(notice?.eventId);
-		// No check mark on a message that was not answered, as before
-		expect(await eventually(() => feedback.isRedacted(eyesOn(asked)), 10_000)).toBe(true);
-		expect(feedback.reactionsOn(asked).filter((x) => x.key === '✅')).toEqual([]);
+		// No check mark on a message that was not answered, as before, and the eyes stay
+		await sleep(1000);
+		expect(feedback.reactionsOn(asked).map((x) => x.key)).toEqual(['👀']);
+		expect(feedback.redactions()).toEqual([]);
 	});
 
 	it('closes the status of a refused turn, its notice following on its own', async () => {
