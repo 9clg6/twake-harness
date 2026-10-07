@@ -59,8 +59,9 @@ export interface Messages {
 	// The status message of a turn that takes a while, a reply to the owner's message, which closes
 	// once the turn has answered
 	readonly status: {
-		// While the turn works
+		// While the turn works, before it did any action, then with the actions it did so far
 		readonly working: string;
+		progress(actions: number): string;
 		// The turn answered, or failed or was refused, its answer or notice a message of its own
 		readonly done: string;
 		readonly notDone: string;
@@ -210,6 +211,7 @@ const ENGLISH: Messages = {
 	},
 	status: {
 		working: '⏳ On it…',
+		progress: (actions) => `⏳ On it… (${actions} ${actions === 1 ? 'action' : 'actions'} done)`,
 		done: '✅ Done',
 		notDone: '❌ Not done',
 		asking: 'I need your answer to go on: see below.',
@@ -349,6 +351,9 @@ const FRENCH: Messages = {
 	},
 	status: {
 		working: "⏳ Je m'en occupe…",
+		// One action, or none, is singular in French
+		progress: (actions) =>
+			`⏳ Je m'en occupe… (${actions} ${actions <= 1 ? 'action faite' : 'actions faites'})`,
 		done: '✅ Terminé',
 		notDone: '❌ Pas abouti',
 		asking: "J'ai besoin de ta réponse pour continuer : voir ci-dessous.",

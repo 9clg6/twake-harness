@@ -1,8 +1,8 @@
-import { afterAll, beforeAll, describe, expect, it } from 'vitest';
+import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { withPrincipal } from '../src/db/client.js';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
+import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix.js';
 import {
 	eventually,
 	inReplyTo,
@@ -17,6 +17,7 @@ function sleep(ms: number): Promise<void> {
 
 // The status texts in English, the language of the deployment, which Alice never changed
 const WORKING = '⏳ On it…';
+const ONE_ACTION = '⏳ On it… (1 action done)';
 const DONE = '✅ Done';
 const NOT_DONE = '❌ Not done';
 const ASKING = 'I need your answer to go on: see below.';
@@ -138,6 +139,28 @@ describe('a status message while my assistant works on a message', () => {
 			`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/event/${encodeURIComponent(eventId)}`
 		);
 		return response.body;
+	}
+
+	// Whether the matrix role logged that the status of a turn could not be posted
+	function statusFailed(eventId: string): boolean {
+		return r.h
+			.logLines()
+			.some((line) => line['msg'] === 'status failed' && line['eventId'] === eventId);
+	}
+
+	// The counts of actions the api role queues, held so that no matrix role takes them, as when it
+	// runs a release that does not know them, or back
+	async function holdCounts(held: boolean): Promise<void> {
+		if (held) {
+			await r.h.db.sql.unsafe(`create function hold_counts() returns trigger language plpgsql as $$
+				begin new.run_after := now() + interval '1 day'; return new; end $$`);
+			await r.h.db.sql.unsafe(`create trigger hold_counts before insert on jobs for each row
+				when (new.kind = 'progress') execute function hold_counts()`);
+			return;
+		}
+		await r.h.db.sql.unsafe('drop trigger if exists hold_counts on jobs');
+		await r.h.db.sql.unsafe('drop function if exists hold_counts()');
+		await r.h.db.sql`delete from jobs where kind = 'progress'`;
 	}
 
 	// The id of the eyes the assistant put on an event, or an empty string when there are none
@@ -270,6 +293,68 @@ describe('a status message while my assistant works on a message', () => {
 		}
 	});
 
+	it('lets go of a status it could not post, without spinning, its answer going out on its own', async () => {
+		let asked = '';
+		let watched: () => void = () => undefined;
+		const watching = new Promise<void>((resolve) => {
+			watched = resolve;
+		});
+		// One action once the status failed, then the answer, once the matrix role was watched
+		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply =>
+			req.messages.at(-1)?.role === 'tool'
+				? { content: 'Answered without a status', hold: watching }
+				: {
+						toolCalls: call('consents_list', {}),
+						hold: eventually(() => statusFailed(asked), 20_000)
+					};
+		// Posting the status, a reply to my message, fails
+		r.h.apisix.matrixFault = (c) =>
+			sendsEvent(c) &&
+			(relationOf(c.body)?.['m.in_reply_to'] as Record<string, unknown> | undefined)?.[
+				'event_id'
+			] === asked
+				? 500
+				: null;
+		try {
+			asked = await r.client.sendText(r.room, 'Work without a status');
+			expect(await eventually(() => statusFailed(asked), 20_000)).toBe(true);
+			// The count of that action reaches the matrix role, which has no status to show it in: it
+			// arms no timer to fire at once, over and over
+			await sleep(1500);
+			const timers = vi.spyOn(globalThis, 'setTimeout');
+			await sleep(1000);
+			const immediate = timers.mock.calls.filter(([, ms]) => (ms ?? 0) <= 1).length;
+			timers.mockRestore();
+			watched();
+			expect(immediate).toBeLessThan(50);
+			expect(await shows('Answered without a status')).toBe(true);
+			expect(replyTo(asked)).toBeUndefined();
+		} finally {
+			watched();
+			r.h.apisix.matrixFault = null;
+		}
+	});
+
+	it('answers my messages when no matrix role takes the counts of actions', async () => {
+		await holdCounts(true);
+		try {
+			r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply =>
+				req.messages.at(-1)?.role === 'tool'
+					? { content: `Answered past the counts: ${req.messages.length}` }
+					: { toolCalls: call('consents_list', {}) };
+			const before = feedback.shown().length;
+			await r.client.sendText(r.room, 'First, with an action');
+			expect(await eventually(() => shownSince(before).length === 1, 20_000)).toBe(true);
+			await r.client.sendText(r.room, 'Second, with an action');
+			expect(await eventually(() => shownSince(before).length === 2, 20_000)).toBe(true);
+			expect(shownSince(before).every((m) => m.body.startsWith('Answered past the counts'))).toBe(
+				true
+			);
+		} finally {
+			await holdCounts(false);
+		}
+	});
+
 	it('posts no status when my message is answered at once', async () => {
 		// A turn that runs a tool, as quickly as the rest
 		r.h.apisix.llm.script = (request: ChatRequest): ScriptedReply =>
@@ -341,7 +426,10 @@ describe('a status message while my assistant works on a message', () => {
 		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply => {
 			const last = req.messages.at(-1);
 			return last?.role === 'tool'
-				? { content: `Found: ${last.content ?? ''}`, hold: statusShown(() => request) }
+				? {
+						content: `Found: ${last.content ?? ''}`,
+						hold: eventually(() => saidBy(replyTo(request)).includes(ONE_ACTION), 20_000)
+					}
 				: { toolCalls: call('search_drive', { q: 'budget' }) };
 		};
 		const seen = r.questions().length;
@@ -351,7 +439,9 @@ describe('a status message while my assistant works on a message', () => {
 		await r.client.react(r.room, request, '✅');
 		// My reaction carries no message of its own: the status replies to the request I answered
 		const status = await replySaying(request, DONE);
-		expect(saidBy(status)).toEqual([WORKING, DONE]);
+		// The call I allowed is the first action of the turn
+		expect(saidBy(status)).toContain(ONE_ACTION);
+		expect(saidBy(status).at(-1)).toBe(DONE);
 		const answer = 'Found: {"status":200,"body":{"ok":true}}';
 		expect(shownSince(before).map((m) => m.body)).toEqual([DONE, answer]);
 		expect(shownSince(before)[1]?.content).toMatchObject({
@@ -360,6 +450,57 @@ describe('a status message while my assistant works on a message', () => {
 		});
 		const check = await eventually(() => feedback.reactionsOn(request).find((x) => x.key === '✅'));
 		expect(check).toBeDefined();
+	});
+
+	it('counts in the status the actions the turn has done, as it goes', async () => {
+		let asked = '';
+		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply =>
+			req.messages.at(-1)?.role === 'tool'
+				? {
+						content: 'Answered after one action',
+						hold: eventually(() => replyTo(asked)?.body === ONE_ACTION, 20_000)
+					}
+				: { toolCalls: call('consents_list', {}), hold: statusShown(() => asked) };
+		const before = feedback.shown().length;
+		asked = await r.client.sendText(r.room, 'Tell me what you may access, slowly');
+		const status = await replySaying(asked, DONE);
+		// Posted before the action, the status counts it in an edit, then closes once the answer is out
+		expect(saidBy(status)).toEqual([WORKING, ONE_ACTION, DONE]);
+		expect(shownSince(before).map((m) => m.body)).toEqual([DONE, 'Answered after one action']);
+	});
+
+	it('updates the status at most once per delay, however fast the actions come', async () => {
+		let asked = '';
+		let made = 0;
+		const action = (): ToolCall[] => [
+			{
+				id: `throttled_${made}`,
+				type: 'function',
+				function: { name: 'consents_list', arguments: '{}' }
+			}
+		];
+		// An action as soon as the status shows, then one every 700 ms, six in all
+		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply => {
+			if (req.messages.at(-1)?.role !== 'tool') {
+				return { toolCalls: action(), hold: statusShown(() => asked) };
+			}
+			made += 1;
+			if (made < 6) return { toolCalls: action(), delayMs: 700 };
+			return {
+				content: 'Answered after six actions',
+				hold: eventually(() => (replyTo(asked)?.edits.length ?? 0) >= 2, 20_000)
+			};
+		};
+		asked = await r.client.sendText(r.room, 'Six quick actions');
+		const status = await replySaying(asked, DONE);
+		const counts = (status?.edits ?? []).slice(0, -1);
+		// Two updates for six actions, each at least the delay after what the status showed before
+		expect(counts.length).toBe(2);
+		const times = [status?.at ?? 0, ...counts.map((e) => e.at)];
+		for (let i = 1; i < times.length; i += 1) {
+			expect((times[i] ?? 0) - (times[i - 1] ?? 0)).toBeGreaterThanOrEqual(STATUS_DELAY_MS - 500);
+		}
+		expect(counts.at(-1)?.content['body']).toBe('⏳ On it… (6 actions done)');
 	});
 
 	it('keeps a question to me a message of its own, its status pointing to it', async () => {

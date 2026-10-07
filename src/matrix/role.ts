@@ -105,6 +105,13 @@ interface SendJob {
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
+// The actions a turn has done so far, for its status message
+const progressPayload = z.object({
+	asUserId: z.string().min(1),
+	roomId: z.string().min(1),
+	replyTo: z.string().min(1),
+	actions: z.number().int().min(1)
+});
 // How long a stop waits for the pushes and listeners under way before it goes on regardless
 const STOP_DRAIN_MS = 10_000;
 
@@ -838,13 +845,24 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send', 'recover'],
+		kinds: ['send', 'recover', 'progress'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (job.kind === 'recover') {
 				const parsed = recoverPayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('recover payload is malformed');
 				await recover(parsed.data.owner);
+				return;
+			}
+			if (job.kind === 'progress') {
+				const parsed = progressPayload.safeParse(job.payload);
+				// Best effort, as the rest of the feedback: a retry would hold the room's next counts back
+				if (!parsed.success) {
+					log.warn({ job: job.id }, 'progress payload is malformed');
+					return;
+				}
+				const { asUserId, roomId, replyTo, actions } = parsed.data;
+				feedback.turnProgressed({ assistantUserId: asUserId, roomId, eventId: replyTo }, actions);
 				return;
 			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');

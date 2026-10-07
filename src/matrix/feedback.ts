@@ -30,7 +30,8 @@ export interface ChatFeedbackOptions {
 	redactEvent(userId: string, roomId: string, eventId: string): Promise<void>;
 	// The texts of a turn's status message, in its owner's language as it is now
 	statusTexts(turn: TurnRef): Promise<Messages['status']>;
-	// How long a turn may go without an answer before its status message shows
+	// How long a turn may go without an answer before its status message shows, and the least time
+	// between two of its updates
 	readonly statusDelayMs: number;
 	readonly statusMaxMs?: number;
 	readonly typingTimeoutMs?: number;
@@ -44,8 +45,12 @@ export interface ChatFeedbackOptions {
 // answered. All of it is best effort: a failure is logged and never holds a turn or an answer back.
 export interface ChatFeedback {
 	turnQueued(turn: TurnRef): Promise<void>;
-	// Right before the reply goes out: the typing stops as it appears. A question's status, if any,
-	// points to it before it goes out; any other reply goes out after its status.
+	// The turn has done this many actions so far: its status shows them, at most one update per
+	// delay
+	turnProgressed(turn: TurnRef, actions: number): void;
+	// Right before the reply goes out: the typing stops as it appears, and the status message the
+	// owner sees, if any, stops counting. A question's status points to it before it goes out; any
+	// other reply goes out after its status.
 	answerReady(turn: TurnRef, reply: TurnReply): Promise<void>;
 	// Once the reply went out: the eyes go, a check mark marks an answered message, and the status
 	// closes on how the turn ended
@@ -87,8 +92,20 @@ interface Status {
 	texts: Messages['status'] | null;
 	// The status's events go out one after the other: clients show the last edit sent
 	chain: Promise<unknown>;
+	// The actions of the turn so far, those the status shows, and when it last changed
+	actions: number;
+	shown: number;
+	shownAt: number;
+	// The next update, once one is due
+	update: NodeJS.Timeout | null;
+	// The reply is on its way: the status no longer counts actions
+	answering: boolean;
 	// Closed for good, by its last words or as it could not be posted: nothing changes it any more
 	closed: boolean;
+}
+
+function workingText(texts: Messages['status'], actions: number): string {
+	return actions === 0 ? texts.working : texts.progress(actions);
 }
 
 interface Ack {
@@ -206,7 +223,9 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 
 	function forget(status: Status): void {
 		if (status.timer !== null) clearTimeout(status.timer);
+		if (status.update !== null) clearTimeout(status.update);
 		status.timer = null;
+		status.update = null;
 		if (statuses.get(status.turn.eventId) === status) statuses.delete(status.turn.eventId);
 	}
 
@@ -232,6 +251,11 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			posted: null,
 			texts: null,
 			chain: Promise.resolve(),
+			actions: 0,
+			shown: 0,
+			shownAt: 0,
+			update: null,
+			answering: false,
 			closed: false
 		};
 		status.timer = setTimeout(() => postStatus(status), options.statusDelayMs);
@@ -251,27 +275,61 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			try {
 				const texts = await options.statusTexts(turn);
 				status.texts = texts;
+				const { actions } = status;
 				const eventId = await options.sendEvent(
 					turn.assistantUserId,
 					turn.roomId,
 					'm.room.message',
 					{
 						msgtype: 'm.text',
-						body: texts.working,
+						body: workingText(texts, actions),
 						// A reply, so the owner sees which of their messages it is about
 						'm.relates_to': { 'm.in_reply_to': { event_id: turn.eventId } }
 					}
 				);
+				status.shown = actions;
+				status.shownAt = Date.now();
 				log.info({ roomId: turn.roomId, eventId: turn.eventId }, 'status posted');
 				return eventId;
 			} catch (err: unknown) {
-				// A status that never showed has nothing to close
+				// A status that never showed has nothing to update nor to close
 				status.closed = true;
 				forget(status);
 				log.warn({ roomId: turn.roomId, eventId: turn.eventId, err }, 'status failed');
 				return null;
 			}
 		});
+		// Actions done while it went out show in its first update
+		void status.posted.then(() => scheduleUpdate(status));
+	}
+
+	// The status shows the actions done so far, at most one update per delay, the latest count
+	// winning
+	function scheduleUpdate(status: Status): void {
+		if (status.posted === null || status.update !== null) return;
+		if (status.answering || status.closed || status.actions === status.shown) return;
+		const wait = Math.max(0, status.shownAt + options.statusDelayMs - Date.now());
+		status.update = setTimeout(() => {
+			void inTurn(status, async () => {
+				const eventId = await status.posted;
+				const { texts, turn, actions } = status;
+				if (eventId === null || texts === null || status.answering || status.closed) return;
+				// Changed meanwhile, by its post: the next update waits its turn
+				if (actions === status.shown || Date.now() < status.shownAt + options.statusDelayMs) {
+					return;
+				}
+				status.shown = actions;
+				status.shownAt = Date.now();
+				try {
+					await replace(status, eventId, texts.progress(actions));
+				} catch (err: unknown) {
+					log.warn({ roomId: turn.roomId, eventId: turn.eventId, err }, 'status update failed');
+				}
+			}).then(() => {
+				status.update = null;
+				scheduleUpdate(status);
+			});
+		}, wait);
 	}
 
 	// The status's last words: nothing changes it after them
@@ -307,6 +365,12 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 	}
 
 	return {
+		turnProgressed: (turn, actions) => {
+			const status = statuses.get(turn.eventId);
+			if (status === undefined || status.answering || status.closed) return;
+			status.actions = Math.max(status.actions, actions);
+			scheduleUpdate(status);
+		},
 		turnQueued: async (turn) => {
 			const now = Date.now();
 			forgetOldAcks(now);
@@ -325,6 +389,9 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			if (status?.posted === null) forget(status);
 			const open = status !== undefined && status.posted !== null && !status.closed;
 			if (open) {
+				status.answering = true;
+				if (status.update !== null) clearTimeout(status.update);
+				status.update = null;
 				// The reply now has the whole bound to go out: the status can no longer give up as it
 				// does, only should the reply never go out
 				if (status.timer !== null) clearTimeout(status.timer);

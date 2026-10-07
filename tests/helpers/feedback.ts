@@ -15,6 +15,8 @@ export interface Reaction {
 export interface Edit {
 	readonly eventId: string;
 	readonly content: Record<string, unknown>;
+	// When the homeserver received it
+	readonly at: number;
 }
 
 // A message of the assistant as the owner's client shows it: the content of its latest edit, in
@@ -23,8 +25,10 @@ export interface ShownMessage {
 	readonly eventId: string;
 	readonly body: string;
 	readonly content: Record<string, unknown>;
-	// The message as it was sent, and its edits in the order they came
+	// The message as it was sent, when the homeserver received it, and its edits in the order they
+	// came
 	readonly original: Record<string, unknown>;
+	readonly at: number;
 	readonly edits: readonly Edit[];
 }
 
@@ -92,7 +96,12 @@ export function watchFeedback(options: RoomFeedbackOptions): RoomFeedback {
 		// A client shows an edit (m.replace) of a message in the message's place, and only from the
 		// message's own sender
 		shown: () => {
-			const messages: { eventId: string; original: Record<string, unknown>; edits: Edit[] }[] = [];
+			const messages: {
+				eventId: string;
+				original: Record<string, unknown>;
+				at: number;
+				edits: Edit[];
+			}[] = [];
 			for (const e of client.events) {
 				if (e.roomId !== room || e.sender !== assistantId || e.type !== 'm.room.message') continue;
 				const relation = e.content['m.relates_to'] as Record<string, unknown> | undefined;
@@ -102,12 +111,13 @@ export function watchFeedback(options: RoomFeedbackOptions): RoomFeedback {
 					if (typeof replacement === 'object' && replacement !== null) {
 						edited?.edits.push({
 							eventId: e.eventId,
-							content: replacement as Record<string, unknown>
+							content: replacement as Record<string, unknown>,
+							at: e.at
 						});
 					}
 					continue;
 				}
-				messages.push({ eventId: e.eventId, original: e.content, edits: [] });
+				messages.push({ eventId: e.eventId, original: e.content, at: e.at, edits: [] });
 			}
 			return messages.map((m) => {
 				const content = m.edits.at(-1)?.content ?? m.original;
