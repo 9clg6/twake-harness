@@ -10,7 +10,7 @@ import {
 	setRequestFn,
 	type MatrixEvent
 } from 'matrix-bot-sdk';
-import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
+import { RoomId, ShieldStateCode, StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
@@ -28,6 +28,7 @@ import {
 import { reactionAnswer } from '../consents/answers.js';
 import type { PendingQuestion } from '../consents/consent.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
+import { findRequest } from '../consents/repository.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
@@ -47,6 +48,7 @@ import {
 	type CrossSigningResult
 } from './cross-signing.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
+import { machineOf } from './crypto-requests.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
@@ -54,6 +56,7 @@ import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js'
 import { makeConsentRequests } from './consent-requests.js';
 import { makeLaidOutText, makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
+import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
 
@@ -94,6 +97,15 @@ interface RoomEvent {
 	readonly event_id?: string;
 	readonly content?: Record<string, unknown>;
 }
+
+// A message that reached an assistant encrypted, with the encrypted event as it arrived, null when
+// it was not kept
+interface Encrypted {
+	readonly event: Record<string, unknown> | null;
+}
+
+// The encrypted events of the pushes under way that the SDK has yet to decrypt, at most
+const MAX_ENCRYPTED_IN_FLIGHT = 1_000;
 
 interface SendJob {
 	readonly asUserId: string;
@@ -183,6 +195,16 @@ function annotationOf(event: RoomEvent): { readonly eventId: string; readonly ke
 function outcomeOf(job: SendJob): TurnOutcome {
 	if (job.outcome === 'failed') return 'failed';
 	return job.atLimit === true ? 'limited' : 'answered';
+}
+
+// An encrypted event without the relation its clear part carries: the engine would otherwise take
+// that relation for the decrypted event's own when the encrypted content names none, and the event
+// an answer is for must be the one the owner's session encrypted
+function withoutClearRelation(encrypted: Record<string, unknown>): Record<string, unknown> {
+	const content: unknown = encrypted['content'];
+	if (typeof content !== 'object' || content === null) return encrypted;
+	const { 'm.relates_to': _relation, ...sealed } = content as Record<string, unknown>;
+	return { ...encrypted, content: sealed };
 }
 
 function turnOf(job: SendJob): TurnRef | null {
@@ -472,11 +494,34 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
+	// The encrypted events of a push as they arrived, until the SDK decrypted them or failed to: the
+	// SDK's decrypted event no longer tells which device encrypted it, and an owner's words count
+	// only once that device is known
+	const encryptedEvents = new Map<string, Record<string, unknown>>();
+	appservice.on('room.encrypted_event', (_roomId: string, event: Record<string, unknown>) => {
+		const eventId = event['event_id'];
+		if (typeof eventId !== 'string') return;
+		if (encryptedEvents.size >= MAX_ENCRYPTED_IN_FLIGHT) {
+			const oldest = encryptedEvents.keys().next();
+			if (oldest.done !== true) encryptedEvents.delete(oldest.value);
+		}
+		encryptedEvents.set(eventId, event);
+	});
+	function takeEncrypted(eventId: string | undefined): Record<string, unknown> | null {
+		if (eventId === undefined) return null;
+		const encrypted = encryptedEvents.get(eventId) ?? null;
+		encryptedEvents.delete(eventId);
+		return encrypted;
+	}
+
 	appservice.on(
 		'room.failed_decryption',
 		guard(
 			'decryption retry',
 			async (roomId: string, event: RoomEvent, err: unknown) => {
+				// What the SDK hands here is the encrypted event itself
+				const encrypted = event as unknown as Record<string, unknown>;
+				takeEncrypted(event.event_id);
 				log.error(
 					{ roomId, sender: event.sender, eventId: event.event_id, err },
 					'decryption failed'
@@ -489,15 +534,17 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					if (fetched === 0) return;
 					const intent = appservice.getIntentForUserId(room.userId);
 					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
-						// What the SDK hands here is the raw event itself
-						new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
+						new EncryptedRoomEvent(encrypted),
 						roomId
 					);
 					// The raw event, as a push hands it: the SDK's wrapper keeps its id under another name,
 					// and the message would lose it, with the dedup of its turn and its reactions
-					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted.raw, true);
+					if (decrypted.type === 'm.room.message') {
+						await onRoomMessage(roomId, decrypted.raw, { event: encrypted });
+					}
 					// An answer whose key came late counts like any other
-					if (decrypted.type === 'm.reaction') await onOwnerAnswer(roomId, decrypted.raw);
+					if (decrypted.type === 'm.reaction')
+						await onOwnerAnswer(roomId, decrypted.raw, encrypted);
 				} catch (retryErr: unknown) {
 					log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
 				}
@@ -820,9 +867,62 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	});
 
+	// An event decrypted again by the assistant's encryption engine, which tells who encrypted it
+	// where the SDK keeps that to itself, with what it says
+	async function decryptChecked(
+		assistantUserId: string,
+		roomId: string,
+		encrypted: Record<string, unknown> | null
+	): Promise<CheckedEvent> {
+		if (encrypted === null) throw new Error('the encrypted event was not kept');
+		const intent = appservice.getIntentForUserId(assistantUserId);
+		await ensureEncryption(intent);
+		const decrypted = await machineOf(intent).decryptRoomEvent(
+			JSON.stringify(withoutClearRelation(encrypted)),
+			new RoomId(roomId)
+		);
+		const shield = decrypted.shieldState(false);
+		const event: unknown = JSON.parse(decrypted.event);
+		if (typeof event !== 'object' || event === null)
+			throw new Error('the decrypted event is no object');
+		return {
+			sender: {
+				userId: decrypted.sender?.toString() ?? null,
+				deviceId: decrypted.senderDevice?.toString() ?? null,
+				curve25519Key: decrypted.senderCurve25519Key ?? null,
+				ed25519Key: decrypted.senderClaimedEd25519Key ?? null,
+				unauthenticated:
+					shield?.code === ShieldStateCode.AuthenticityNotGuaranteed ||
+					shield?.code === ShieldStateCode.MismatchedSender
+			},
+			event: event as Record<string, unknown>
+		};
+	}
+
+	// An owner's words count only from a device their cross-signing identity signed, in enforce
+	// mode; in report mode they count all the same, and the devices that fall short are reported
+	const ownerDevices = makeOwnerDeviceGate({
+		db,
+		log,
+		mode: config.matrix.ownerDeviceTrust,
+		fetchMessages,
+		decrypt: decryptChecked,
+		queryKeys: async (assistantUserId, ownerUserId) => {
+			const intent = appservice.getIntentForUserId(assistantUserId);
+			await ensureEncryption(intent);
+			return intent.underlyingClient.doRequest('POST', '/_matrix/client/v3/keys/query', null, {
+				device_keys: { [ownerUserId]: [] }
+			});
+		}
+	});
+
 	// The owner's answer to a request of the harness: a bare ✅ or ❌ on it. Only an event that
-	// arrived encrypted, from the owner's own device, counts.
-	async function onOwnerAnswer(roomId: string, event: RoomEvent): Promise<void> {
+	// arrived encrypted, from a device of the owner their identity signed, counts.
+	async function onOwnerAnswer(
+		roomId: string,
+		event: RoomEvent,
+		encrypted: Record<string, unknown> | null
+	): Promise<void> {
 		if (event.type !== 'm.reaction') return;
 		const sender = event.sender ?? '';
 		// The assistants' own reactions mark the messages they answered
@@ -833,32 +933,79 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (says === null) return;
 		const room = await assistantRoom(roomId);
 		if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
-		if (principalOfMatrixUser(config, sender) !== room.owner) {
-			log.info({ roomId, sender, owner: room.owner }, 'answer ignored: not the owner');
+		const owner = room.owner;
+		if (principalOfMatrixUser(config, sender) !== owner) {
+			log.info({ roomId, sender, owner }, 'answer ignored: not the owner');
+			return;
+		}
+		// A reaction on anything but one of the harness's questions answers nothing
+		const asked = await withPrincipal(db, { id: owner }, (tx) =>
+			findRequest(tx, owner, annotation.eventId)
+		);
+		if (asked === null) return;
+		const eventId = event.event_id ?? `${roomId}:${Date.now()}`;
+		const words: OwnerWords = {
+			roomId,
+			owner,
+			ownerUserId: sender,
+			assistantUserId: room.userId,
+			eventId,
+			via: 'answer',
+			encrypted
+		};
+		const admission = await ownerDevices.admit(words);
+		if (!admission.admitted) return;
+		// The answer that counts is the one of the very event whose session was checked
+		const checked = admission.event === null ? event : (admission.event as RoomEvent);
+		const checkedAnnotation = checked.sender === sender ? annotationOf(checked) : null;
+		const checkedSays =
+			checked.type === 'm.reaction' && checkedAnnotation !== null
+				? reactionAnswer(checkedAnnotation.key)
+				: null;
+		if (checkedAnnotation === null || checkedSays === null) {
+			log.info({ roomId, owner, eventId }, 'answer ignored: not the event checked');
 			return;
 		}
 		await requests.reacted(
-			{ roomId, owner: room.owner, assistantUserId: room.userId },
-			annotation.eventId,
-			says,
-			event.event_id ?? `${roomId}:${Date.now()}`
+			{ roomId, owner, assistantUserId: room.userId },
+			checkedAnnotation.eventId,
+			checkedSays,
+			eventId
 		);
 	}
 
+	// The text of an owner's encrypted message once its session was checked: the one of the very event
+	// whose session was checked, null when the message does not count
+	async function checkedMessage(words: OwnerWords, raw: RoomEvent): Promise<string | null> {
+		const admission = await ownerDevices.admit(words);
+		if (!admission.admitted) return null;
+		const checked = admission.event === null ? raw : (admission.event as RoomEvent);
+		const checkedText =
+			checked.type === 'm.room.message' && checked.sender === words.ownerUserId
+				? textOf(checked)
+				: null;
+		if (checkedText === null) {
+			const { roomId, owner, eventId } = words;
+			log.info({ roomId, owner, eventId }, 'message ignored: not the event checked');
+		}
+		return checkedText;
+	}
+
 	// The messages that reached an assistant encrypted, between the SDK's decrypted event and the
-	// same event handed on as a room message: only those may answer a question, or start a turn in
-	// an encrypted room
-	const decryptedMessages = new Set<string>();
+	// same event handed on as a room message, with the encrypted event as it arrived: only those may
+	// answer a question, or start a turn in an encrypted room
+	const decryptedMessages = new Map<string, Record<string, unknown> | null>();
 
 	appservice.on(
 		'room.decrypted_event',
 		guard(
 			'owner answer',
 			async (roomId: string, event: RoomEvent) => {
+				const encrypted = takeEncrypted(event.event_id);
 				if (event.type === 'm.room.message' && event.event_id !== undefined) {
-					decryptedMessages.add(event.event_id);
+					decryptedMessages.set(event.event_id, encrypted);
 				}
-				await onOwnerAnswer(roomId, event);
+				await onOwnerAnswer(roomId, event, encrypted);
 			},
 			(roomId: string, event: RoomEvent) => ({
 				roomId,
@@ -872,8 +1019,14 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		'room.message',
 		guard(
 			'room message',
-			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) =>
-				onRoomMessage(roomId, event, decryptedMessages.delete((event as RoomEvent).event_id ?? '')),
+			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) => {
+				const eventId = (event as RoomEvent).event_id ?? '';
+				const encrypted: Encrypted | null = decryptedMessages.has(eventId)
+					? { event: decryptedMessages.get(eventId) ?? null }
+					: null;
+				decryptedMessages.delete(eventId);
+				return onRoomMessage(roomId, event, encrypted);
+			},
 			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) => ({
 				roomId,
 				eventId: (event as RoomEvent).event_id,
@@ -885,7 +1038,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	async function onRoomMessage(
 		roomId: string,
 		event: MatrixEvent<unknown> | RoomEvent,
-		encrypted: boolean
+		encrypted: Encrypted | null
 	): Promise<void> {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
@@ -914,14 +1067,28 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					return;
 				}
 				owner = principal;
-				const requestRoom = { roomId, owner, assistantUserId: room.userId };
-				if (encrypted && (await requests.wrote(requestRoom, eventId, text))) return;
+				if (encrypted !== null) {
+					const words: OwnerWords = {
+						roomId,
+						owner,
+						ownerUserId: sender,
+						assistantUserId: room.userId,
+						eventId,
+						via: 'message',
+						encrypted: encrypted.event
+					};
+					const checkedText = await checkedMessage(words, raw);
+					if (checkedText === null) return;
+					message = checkedText;
+					const requestRoom = { roomId, owner, assistantUserId: room.userId };
+					if (await requests.wrote(requestRoom, eventId, checkedText)) return;
+				}
 			}
 			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt
 			// what they write: a message in their name that came in clear was written on the server
 			// side, and starts nothing. A room whose encryption cannot be read counts as encrypted, so
 			// that a failure of the homeserver lets no such message through.
-			if (!encrypted) {
+			if (encrypted === null) {
 				const encryption = await roomEncryption(room.userId, roomId);
 				if (encryption !== 'clear') {
 					log.info(
@@ -934,6 +1101,23 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						},
 						'assistant ignored an unencrypted message'
 					);
+					return;
+				}
+				// An owner's assistant opens its rooms encrypted: one that reads as clear takes the
+				// owner's words only as long as the deployment only reports
+				const unencrypted: OwnerWords = {
+					roomId,
+					owner,
+					ownerUserId: sender,
+					assistantUserId: room.userId,
+					eventId,
+					via: 'message',
+					encrypted: null
+				};
+				if (
+					owner !== ORGANIZATION_PRINCIPAL &&
+					!(await ownerDevices.admitUnencrypted(unencrypted, 'clear room'))
+				) {
 					return;
 				}
 			}
@@ -973,11 +1157,30 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.info({ roomId, sender }, 'creator ignored a foreign sender');
 			return;
 		}
+		// The creator takes an owner's commands as their assistant takes their words: encrypted, from
+		// a session their identity signed, as long as the deployment enforces it
+		const words: OwnerWords = {
+			roomId,
+			owner,
+			ownerUserId: sender,
+			assistantUserId: creator,
+			eventId: raw.event_id ?? `${roomId}:${Date.now()}`,
+			via: 'message',
+			encrypted: encrypted?.event ?? null
+		};
+		let command = text;
+		if (encrypted === null) {
+			if (!(await ownerDevices.admitUnencrypted(words, 'unencrypted'))) return;
+		} else {
+			const checkedText = await checkedMessage(words, raw);
+			if (checkedText === null) return;
+			command = checkedText;
+		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
 		const toOwner = await fetchMessages(owner);
 		let turn: CreatorTurn;
 		try {
-			turn = await runCreatorTurn({ owner, text, state }, assistants, toOwner);
+			turn = await runCreatorTurn({ owner, text: command, state }, assistants, toOwner);
 		} catch (err: unknown) {
 			// The owner is told, and the dialog starts over: one left waiting for a name would take
 			// their next message for one

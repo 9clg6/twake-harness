@@ -20,6 +20,8 @@ export interface AppserviceRegistration {
 export interface MatrixUser {
 	readonly userId: string;
 	readonly accessToken: string;
+	// What the user signs in with, and confirms a change of their cross-signing identity with
+	readonly password?: string;
 }
 
 export interface MatrixReply {
@@ -187,7 +189,8 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		}
 		return {
 			userId: res.body['user_id'] as string,
-			accessToken: res.body['access_token'] as string
+			accessToken: res.body['access_token'] as string,
+			password: `${localpart}-password`
 		};
 	}
 
@@ -211,7 +214,8 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		}
 		return {
 			userId: res.body['user_id'] as string,
-			accessToken: res.body['access_token'] as string
+			accessToken: res.body['access_token'] as string,
+			password
 		};
 	}
 

@@ -50,7 +50,12 @@ export interface MatrixStartOptions {
 }
 
 // The lines by which the matrix role tells what it made of a message of an assistant's room
-const MESSAGE_DECISIONS = new Set(['turn queued', 'assistant ignored an unencrypted message']);
+const MESSAGE_DECISIONS = new Set([
+	'turn queued',
+	'assistant ignored an unencrypted message',
+	'assistant ignored an unverified device',
+	'assistant ignored a copy of earlier words'
+]);
 
 export async function startMatrixHarness(
 	options: MatrixStartOptions = {}
@@ -152,7 +157,12 @@ export async function startMatrixHarness(
 			'cross-signing identity reset',
 			'assistant device cross-signed',
 			'missed key shares fetched',
-			'decryption retry failed'
+			'decryption retry failed',
+			'owner device verified',
+			'owner device unverified',
+			'assistant ignored an unverified device',
+			'assistant ignored a copy of earlier words',
+			'owner device check failed'
 		]);
 		const lines = logLines()
 			.filter(
