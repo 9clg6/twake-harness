@@ -155,6 +155,19 @@ describe('an event that fails holds back none of those after it, and is never lo
 			.filter((line) => line['msg'] === 'event handled');
 	}
 
+	// A fault every attempt meets, as a bug would be: the database refuses the wake-ups it matches
+	async function refuseWakeups(when: string): Promise<void> {
+		await r.h.db.sql.unsafe(`create or replace function refuse_wakeup() returns trigger
+			language plpgsql as $$ begin raise exception 'wake-up refused'; end $$`);
+		await r.h.db.sql.unsafe(`create trigger refuse_wakeup before insert on wakeups for each row
+			when (${when}) execute function refuse_wakeup()`);
+	}
+
+	// The fault fixed
+	async function allowWakeups(): Promise<void> {
+		await r.h.db.sql.unsafe('drop trigger if exists refuse_wakeup on wakeups');
+	}
+
 	// The lines of the attempts at an event that failed, once there are that many
 	async function failuresOf(event: ActivityEvent, count: number): Promise<LogLine[]> {
 		for (let i = 0; i < 240; i += 1) {
@@ -293,6 +306,31 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		expect(handled(mark).map(({ eventId, outcome }) => ({ eventId, outcome }))).toEqual([
 			{ eventId: event.id, outcome: 'woken' }
+		]);
+	});
+
+	it('dead-letters an event that keeps failing after five attempts, and goes on with the next', async () => {
+		await broker.channel.purgeQueue(DEAD_LETTERS);
+		const mark = logs.lines().length;
+		const failing = activityEvent();
+		const next = activityEvent();
+		await refuseWakeups(`new.event_id = '${failing.id}'`);
+		try {
+			await publish(failing);
+			await publish(next);
+			await toldOf(next);
+		} finally {
+			await allowWakeups();
+		}
+		const failures = await failuresOf(failing, 5);
+		expect(failures.map((line) => line['transient'])).toEqual(Array(5).fill(false));
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(1);
+		expect(turnCalls(r.h.apisix.llm.calls, failing.id)).toHaveLength(0);
+		expect(
+			handled(mark).map(({ eventId, outcome, reason }) => ({ eventId, outcome, reason }))
+		).toEqual([
+			{ eventId: failing.id, outcome: 'dead_lettered', reason: 'failed 5 times' },
+			{ eventId: next.id, outcome: 'woken', reason: undefined }
 		]);
 	});
 });

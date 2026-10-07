@@ -11,6 +11,10 @@ import { wake, type WakeDeps, type Wakeup } from './wake.js';
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
 
+// How many times an event whose failure is not transient is tried before it goes to the dead
+// letter queue, so that the events behind it go on
+const MAX_ATTEMPTS = 5;
+
 // The most recipients of one event the listener reads, in their order: the others are left out
 const MAX_RECIPIENTS = 100;
 
@@ -207,6 +211,9 @@ export async function startActivityListener(
 ): Promise<Listener> {
 	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
 	const log = deps.log.child({ listener: ACTIVITY_EXCHANGE });
+	// The event whose failures are not transient, by its source and id, and how many it had: one
+	// at a time, since the listener holds one message at a time
+	let failing: { readonly key: string; readonly count: number } | null = null;
 	return listenOnOwnQueue(
 		deps,
 		{
@@ -263,9 +270,19 @@ export async function startActivityListener(
 			try {
 				for (const wakeup of wakeups) outcomes.push(await wake(deps, wakeup));
 			} catch (err: unknown) {
-				log.warn({ ...identity, transient: isTransient(err), err: failureOf(err) }, 'event failed');
-				throw err;
+				const transient = isTransient(err);
+				log.warn({ ...identity, transient, err: failureOf(err) }, 'event failed');
+				if (transient) throw err;
+				const key = JSON.stringify([event.source, event.id]);
+				const count = failing?.key === key ? failing.count + 1 : 1;
+				failing = { key, count };
+				if (count < MAX_ATTEMPTS) throw err;
+				failing = null;
+				const reason = `failed ${MAX_ATTEMPTS} times`;
+				logHandled(log, { ...identity, outcome: 'dead_lettered', reason });
+				throw new DeadLetterError(reason, { cause: err });
 			}
+			failing = null;
 			logHandled(log, { ...identity, ...outcomeOf(outcomes) });
 		},
 		options
