@@ -70,6 +70,11 @@ export async function setAssistantLocale(tx: Tx, owner: string, locale: Locale):
 	return result.count === 1;
 }
 
+// The room an assistant wrote its owner in, when it is this one, is no longer its room
+export async function clearAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {
+	await tx.sql`update assistants set room_id = null where owner = ${owner} and room_id = ${roomId}`;
+}
+
 export async function setAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {
 	await tx.sql`update assistants set room_id = ${roomId} where owner = ${owner} and deleted_at is null`;
 }

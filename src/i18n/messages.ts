@@ -59,6 +59,8 @@ export interface Messages {
 		readonly busy: string;
 		readonly recovered: string;
 		readonly noEscrow: string;
+		// Why an assistant leaves a room where others than its owner are: everyone there reads it
+		readonly directRoomsOnly: string;
 		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
 		// owner: the actions it did, and how to have it carry on
 		callLimit(actions: number): string;
@@ -211,6 +213,8 @@ const ENGLISH: Messages = {
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
+		directRoomsOnly:
+			'For now I work only in a private conversation with the person I assist, so I am leaving this room.',
 		callLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`
 	},
@@ -355,6 +359,8 @@ const FRENCH: Messages = {
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant.",
+		directRoomsOnly:
+			"Pour l'instant, je ne travaille que dans une conversation privée avec la personne que j'assiste : je quitte ce salon.",
 		// One action, or none, is singular in French
 		callLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`

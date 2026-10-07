@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
+	clearAssistantRoomId,
 	findAssistant,
 	findDialog,
 	listActiveAssistants,
@@ -591,13 +592,37 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		log.info({ roomId, invited, sender: inviter }, 'invite accepted');
+		const intent = appservice.getIntentForUserId(invited);
 		try {
-			const intent = appservice.getIntentForUserId(invited);
 			// Key shares for this room may arrive with the next transaction: be ready to receive them
 			await ensureEncryption(intent);
 			await intent.joinRoom(roomId);
 		} catch (err: unknown) {
 			log.warn({ roomId, invited, err }, 'join failed');
+			return;
+		}
+		// For now an assistant works in a direct room only, its owner and itself: everyone else in the
+		// room would read what it writes its owner. Its members are read once it is in; a room it cannot
+		// read them in is taken for one with others.
+		let direct = false;
+		try {
+			direct = !(await hasOthers(intent, roomId, [
+				matrixUserIdOfPrincipal(config, owner) ?? '',
+				invited
+			]));
+		} catch (err: unknown) {
+			log.warn({ roomId, invited, err }, 'room members not read');
+		}
+		if (!direct) {
+			log.info(
+				{ roomId, invited, sender: inviter, reason: 'not_direct' },
+				'assistant declined an invite'
+			);
+			try {
+				await intent.leaveRoom(roomId, (await fetchMessages(owner)).notices.directRoomsOnly);
+			} catch (err: unknown) {
+				log.warn({ roomId, invited, err }, 'invite not declined');
+			}
 			return;
 		}
 		await db.sql`
@@ -612,6 +637,47 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			{ roomId, assistantUserId: invited },
 			await fetchMessages(owner)
 		);
+	}
+
+	// Whether anyone but these is in the room, joined or invited
+	async function hasOthers(
+		intent: Intent,
+		roomId: string,
+		allowed: readonly string[]
+	): Promise<boolean> {
+		const members = await intent.underlyingClient.getRoomMembers(roomId, undefined, [
+			'join',
+			'invite'
+		]);
+		return members.some((member) => !allowed.includes(member.membershipFor));
+	}
+
+	// Someone other than its owner came into a room where the assistant answered its owner: it says
+	// why there and leaves, and the room is no longer one of its rooms nor the one it writes its owner
+	// in. Whatever it said there before stays; nothing more reaches the newcomer.
+	async function leaveNoLongerDirect(
+		roomId: string,
+		owner: string,
+		assistantUserId: string
+	): Promise<void> {
+		const removed = await db.sql`delete from assistant_rooms where room_id = ${roomId}`;
+		if (removed.count === 0) return;
+		await withPrincipal(db, { id: owner }, (tx) => clearAssistantRoomId(tx, owner, roomId));
+		log.info({ roomId, owner, userId: assistantUserId }, 'assistant left a room no longer direct');
+		const { notices } = await fetchMessages(owner);
+		const intent = appservice.getIntentForUserId(assistantUserId);
+		try {
+			await ensureEncryption(intent);
+			await refreshMembersDevices(intent, roomId);
+			await intent.sendEvent(roomId, makeRichText(notices.directRoomsOnly));
+		} catch (err: unknown) {
+			log.warn({ roomId, err }, 'leave notice not sent');
+		}
+		try {
+			await intent.leaveRoom(roomId, notices.directRoomsOnly);
+		} catch (err: unknown) {
+			log.warn({ roomId, err }, 'room not left');
+		}
 	}
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
@@ -644,16 +710,33 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 
-	// The owner has joined: their devices are in the room, the greeting can be encrypted for them
+	// Who comes into an assistant's room: anyone but its owner makes it leave, as it answers its owner
+	// in a direct room only for now. The owner has joined: their devices are in the room, the greeting
+	// can be encrypted for them.
 	appservice.on(
 		'room.event',
 		guard(
 			'room event',
 			async (roomId: string, event: RoomEvent) => {
-				if (event.type !== 'm.room.member' || event.content?.['membership'] !== 'join') return;
+				if (event.type !== 'm.room.member') return;
+				const membership = event.content?.['membership'];
+				if (membership !== 'join' && membership !== 'invite') return;
 				const room = await assistantRoom(roomId);
-				if (room === null || room.welcome === null) return;
-				if (event.state_key !== matrixUserIdOfPrincipal(config, room.owner)) return;
+				if (room === null) return;
+				const ownerUserId =
+					room.owner === ORGANIZATION_PRINCIPAL
+						? null
+						: matrixUserIdOfPrincipal(config, room.owner);
+				if (
+					room.owner !== ORGANIZATION_PRINCIPAL &&
+					event.state_key !== ownerUserId &&
+					event.state_key !== room.userId
+				) {
+					await leaveNoLongerDirect(roomId, room.owner, room.userId);
+					return;
+				}
+				if (membership !== 'join' || room.welcome === null) return;
+				if (event.state_key !== ownerUserId) return;
 				const claimed = await db.sql`
 			update assistant_rooms set welcome = null where room_id = ${roomId} and welcome is not null`;
 				if (claimed.count !== 1) return;

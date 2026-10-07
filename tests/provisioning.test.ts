@@ -348,7 +348,85 @@ describe('a provisioned assistant', () => {
 		expect(seen.body.roomId).toBe(second);
 	});
 
-	it('refuses as the room it writes to its owner in a room where others are too', async () => {
+	// The assistant's membership of a room once it is the one expected, with its reason if any
+	async function membershipOf(
+		viewer: MatrixUser,
+		roomId: string,
+		userId: string,
+		expected: string
+	): Promise<Record<string, unknown>> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.member/${encodeURIComponent(userId)}`;
+		let content: Record<string, unknown> = {};
+		for (let i = 0; i < 120; i += 1) {
+			content = (await h.synapse.request(viewer, 'GET', path)).body;
+			if (content['membership'] === expected) return content;
+			await sleep(250);
+		}
+		throw new Error(`${userId} is ${String(content['membership'])} in ${roomId}, not ${expected}`);
+	}
+
+	const DIRECT_ROOMS_ONLY =
+		'For now I work only in a private conversation with the person I assist, so I am leaving this room.';
+
+	it('declines a room where others than its owner are, and says why', async () => {
+		const paul = await h.synapse.registerUser('paul');
+		const quinn = await h.synapse.registerUser('quinn');
+		const mine = await provisionUntilReady(paul.userId);
+		// Paul's room with Quinn, where he brings his assistant
+		const created = await h.synapse.request(paul, 'POST', '/_matrix/client/v3/createRoom', {
+			preset: 'private_chat',
+			invite: [quinn.userId]
+		});
+		const room = created.body['room_id'] as string;
+		await h.synapse.joinRoom(quinn, room);
+		const invited = await h.synapse.request(
+			paul,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
+			{ user_id: mine.userId }
+		);
+		expect(invited.status).toBe(200);
+
+		const left = await membershipOf(paul, room, mine.userId, 'leave');
+		expect(left['reason']).toBe(DIRECT_ROOMS_ONLY);
+		expect(
+			h
+				.logLines()
+				.some(
+					(l) =>
+						l['msg'] === 'assistant declined an invite' &&
+						l['roomId'] === room &&
+						l['reason'] === 'not_direct'
+				)
+		).toBe(true);
+	});
+
+	it('leaves its direct room once someone else comes in, and says why', async () => {
+		const sara = await h.synapse.registerUser('sara');
+		const tom = await h.synapse.registerUser('tom');
+		const client = await startE2eeClient(h.synapse.url, sara);
+		clients.push(client);
+		const mine = await provisionUntilReady(sara.userId);
+		const room = await client.createDirectRoom(mine.userId);
+		await waitForMember(sara, room, mine.userId);
+
+		const invited = await h.synapse.request(
+			sara,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
+			{ user_id: tom.userId }
+		);
+		expect(invited.status).toBe(200);
+
+		const notice = await client.waitForMessage(room, mine.userId, (text) =>
+			text.includes('private conversation')
+		);
+		expect(notice).toBe(DIRECT_ROOMS_ONLY);
+		const left = await membershipOf(sara, room, mine.userId, 'leave');
+		expect(left['reason']).toBe(DIRECT_ROOMS_ONLY);
+	});
+
+	it('refuses as the room it writes to its owner in a room others came into', async () => {
 		const gina = await h.synapse.registerUser('gina');
 		const hank = await h.synapse.registerUser('hank');
 		const client = await startE2eeClient(h.synapse.url, gina);
@@ -365,9 +443,10 @@ describe('a provisioned assistant', () => {
 		expect(invited.status).toBe(200);
 		await h.synapse.joinRoom(hank, room);
 
+		// Refused whether the assistant has already left the room or is about to
 		const named = await provisionerPut(`${assistantPath(gina.userId)}/home`, { roomId: room });
 		expect(named.status).toBe(409);
-		expect(named.body).toEqual({ error: 'not a direct room' });
+		expect(['not a member', 'not a direct room']).toContain(named.body['error']);
 	});
 
 	it('declines a room someone other than its owner invites it to', async () => {
@@ -391,52 +470,6 @@ describe('a provisioned assistant', () => {
 		expect(
 			h.logLines().some((l) => l['msg'] === 'assistant declined an invite' && l['roomId'] === room)
 		).toBe(true);
-	});
-
-	it("declines a room another owner's assistant already answers in", async () => {
-		const ivan = await h.synapse.registerUser('ivan');
-		const judy = await h.synapse.registerUser('judy');
-		const ivanClient = await startE2eeClient(h.synapse.url, ivan);
-		clients.push(ivanClient);
-		const ivans = await provisionUntilReady(ivan.userId);
-		const judys = await provisionUntilReady(judy.userId);
-		const room = await ivanClient.createDirectRoom(ivans.userId);
-		await waitForMember(ivan, room, ivans.userId);
-		const invited = await h.synapse.request(
-			ivan,
-			'POST',
-			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
-			{ user_id: judy.userId }
-		);
-		expect(invited.status).toBe(200);
-		await h.synapse.joinRoom(judy, room);
-
-		// Judy brings her own assistant into Ivan's room: one assistant answers in a room
-		const brought = await h.synapse.request(
-			judy,
-			'POST',
-			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
-			{ user_id: judys.userId }
-		);
-		expect(brought.status).toBe(200);
-		let membership: unknown = 'invite';
-		for (let i = 0; i < 80 && membership === 'invite'; i += 1) {
-			await sleep(250);
-			const state = await h.synapse.request(
-				judy,
-				'GET',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/m.room.member/${encodeURIComponent(judys.userId)}`
-			);
-			membership = state.body['membership'];
-		}
-		expect(membership).toBe('leave');
-
-		// Ivan's assistant still answers him there
-		await ivanClient.sendText(room, 'still mine?');
-		const answer = await ivanClient.waitForMessage(room, ivans.userId, (text) =>
-			text.includes('still mine?')
-		);
-		expect(answer).toContain('echo');
 	});
 
 	it('refuses a room for an owner without assistant, and a room the assistant is not in', async () => {
