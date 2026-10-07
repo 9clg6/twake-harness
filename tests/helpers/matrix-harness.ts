@@ -53,7 +53,8 @@ export interface MatrixStartOptions {
 const MESSAGE_DECISIONS = new Set([
 	'turn queued',
 	'assistant ignored an unencrypted message',
-	'assistant ignored an unverified device'
+	'assistant ignored an unverified device',
+	'assistant ignored a copy of earlier words'
 ]);
 
 export async function startMatrixHarness(
@@ -160,6 +161,7 @@ export async function startMatrixHarness(
 			'owner device verified',
 			'owner device unverified',
 			'assistant ignored an unverified device',
+			'assistant ignored a copy of earlier words',
 			'owner device check failed'
 		]);
 		const lines = logLines()

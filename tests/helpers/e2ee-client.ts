@@ -84,6 +84,8 @@ export interface E2eeClient {
 		count: number,
 		timeoutMs?: number
 	): Promise<string[]>;
+	// The content of a text message as this session would encrypt it for the room, sent nowhere
+	seal(roomId: string, text: string): Promise<Record<string, unknown>>;
 	// The master key of the user's cross-signing identity, as the homeserver publishes it
 	masterKey(): Promise<string | null>;
 	// Replaces the user's identity with a new one, as a reset in Twake Chat does, and signs this
@@ -430,6 +432,11 @@ export async function startE2eeClient(
 			}
 			return keys();
 		},
+		seal: async (roomId, text) =>
+			(await client.crypto.encryptRoomEvent(roomId, 'm.room.message', {
+				msgtype: 'm.text',
+				body: text
+			})) as unknown as Record<string, unknown>,
 		masterKey: () => publishedMasterKey(client, user.userId),
 		resetIdentity: async () => {
 			await setUpIdentity(homeserverUrl, user, client);

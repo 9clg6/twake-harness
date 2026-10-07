@@ -41,3 +41,21 @@ alter table owner_device_notices force row level security;
 create policy owner_device_notices_owner on owner_device_notices
 	using (owner = current_setting('app.principal', true))
 	with check (owner = current_setting('app.principal', true));
+
+-- The encrypted words of each owner the harness received, by a digest of their Megolm session and
+-- ciphertext, with the event that carried them first: the same words under another event are a
+-- copy, and start nothing. Kept for a bounded time.
+create table owner_words_received (
+	owner text not null,
+	digest text not null,
+	event_id text not null,
+	received_at timestamptz not null default now(),
+	primary key (owner, digest)
+);
+
+alter table owner_words_received enable row level security;
+alter table owner_words_received force row level security;
+
+create policy owner_words_received_owner on owner_words_received
+	using (owner = current_setting('app.principal', true))
+	with check (owner = current_setting('app.principal', true));

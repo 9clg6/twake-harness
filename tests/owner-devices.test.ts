@@ -81,6 +81,24 @@ async function encryptedEvent(r: ConsentRoom, eventId: string): Promise<Record<s
 	return reply.body;
 }
 
+// An event of Alice's room as the homeserver would push it, carrying what one of her sessions
+// encrypted
+function sealedEvent(
+	r: ConsentRoom,
+	eventId: string,
+	content: Record<string, unknown>
+): Record<string, unknown> {
+	return {
+		type: 'm.room.encrypted',
+		room_id: r.room,
+		sender: r.alice.userId,
+		event_id: eventId,
+		origin_server_ts: Date.now(),
+		content,
+		unsigned: {}
+	};
+}
+
 // Pushes events to the matrix role as the homeserver does, in a transaction of their own
 async function push(r: ConsentRoom, events: Record<string, unknown>[]): Promise<number> {
 	const reply = await fetch(
@@ -196,11 +214,13 @@ describe('my assistant acts only on what the sessions my identity signed write',
 	const sessions: E2eeClient[] = [];
 	beforeAll(async () => {
 		r = await startConsentRoom({ OWNER_DEVICE_TRUST: 'enforce', ADMISSION_USER_PER_MINUTE: '100' });
-		r.h.apisix.contracts.spec = readCatalog(['mail']);
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		r.h.apisix.contracts.spec = readCatalog(['mail', 'drive', 'notes']);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		r.h.apisix.contracts.handler = (c) => ({ status: 200, body: { found: c.path } });
 		r.h.apisix.llm.script = modelFor({
-			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } }
+			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } },
+			'Find the plan in my drive': { tool: 'search_drive', args: { q: 'plan' } },
+			'Search my notes': { tool: 'search_notes', args: { q: 'notes' } }
 		});
 	}, 240_000);
 	afterAll(async () => {
@@ -352,11 +372,12 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		// The room settles: the answer is marked done
 		expect(await r.client.waitForReactions(r.room, fromMine, r.assistantId, 2)).toContain('✅');
 		await sleep(1000);
-		const otherEvent = await encryptedEvent(r, fromOther);
-		const myEvent = await encryptedEvent(r, fromMine);
+		// Words of each session the homeserver never received, which arrive under one new id: the words
+		// acted on are those of the decryption that was checked
+		const id = `$same-${Date.now()}`;
+		const otherEvent = sealedEvent(r, id, await other.seal(r.room, 'Plan my week now'));
+		const myEvent = sealedEvent(r, id, await r.client.seal(r.room, 'Good night again'));
 		const answered = r.saying('Heard:').length;
-		// Both arrive again under one new id: the words acted on are those of the decryption that was
-		// checked
 		const releases: (() => void)[] = [];
 		const membersOfRoom = `/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/joined_members`;
 		r.h.apisix.matrixHold = (call) => {
@@ -371,11 +392,10 @@ describe('my assistant acts only on what the sessions my identity signed write',
 			}
 			return new Promise<void>((resolve) => releases.push(resolve));
 		};
-		const id = `$same-${Date.now()}`;
 		try {
-			const first = push(r, [{ ...otherEvent, event_id: id }]);
+			const first = push(r, [otherEvent]);
 			await until(() => releases.length === 1, 'the first push held up');
-			const second = push(r, [{ ...myEvent, event_id: id }]);
+			const second = push(r, [myEvent]);
 			await until(() => releases.length === 2, 'the second push held up');
 			releases[0]?.();
 			expect(await first).toBe(200);
@@ -387,7 +407,7 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		}
 		// The turn taken under that id carries the words of the session checked
 		expect((await r.h.decisionOn(id))?.['msg']).toBe('turn queued');
-		expect(await r.nextSaying('Heard:', answered)).toBe('Heard: Good night');
+		expect(await r.nextSaying('Heard:', answered)).toBe('Heard: Good night again');
 		// Nothing of what the unverified session wrote ever reached the model
 		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
 		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Plan my week'))).toBe(
@@ -481,6 +501,34 @@ describe('my assistant acts only on what the sessions my identity signed write',
 			(tx) => tx.sql`select 1 from owner_cross_signing where owner = 'carol@test.local'`
 		);
 		expect(held).toHaveLength(0);
+	});
+
+	it('takes an earlier yes of mine, sent again under another id, for no answer', async () => {
+		// A first question, which my yes answers
+		let seen = r.questions().length;
+		await r.client.sendText(r.room, 'Find the plan in my drive');
+		await r.nextQuestion(seen);
+		const found = r.saying('Found:').length;
+		const yes = await r.client.sendText(r.room, 'oui');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/drive/items');
+		const earlierYes = await encryptedEvent(r, yes);
+		// A second question, which the same yes comes again to, under another id
+		seen = r.questions().length;
+		await r.client.sendText(r.room, 'Search my notes');
+		await r.nextQuestion(seen);
+		const copy = `$copy-${Date.now()}`;
+		expect(await push(r, [{ ...earlierYes, event_id: copy }])).toBe(200);
+		expect(await r.h.decisionOn(copy)).toMatchObject({
+			msg: 'assistant ignored a copy of earlier words',
+			mode: 'enforce',
+			firstEventId: yes
+		});
+		expect((await r.callsTo('notes')).map((c) => c.status)).toEqual(['open']);
+		expect(r.h.apisix.contracts.calls.some((c) => c.path.includes('/notes/'))).toBe(false);
+		// My own answer to it still counts
+		const refused = r.saying('All right').length;
+		await r.client.sendText(r.room, 'non');
+		expect(await r.nextSaying('All right', refused)).toBe('All right, I will not do it.');
 	});
 
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
@@ -659,5 +707,23 @@ describe('while the harness only reports the sessions it would not act on', () =
 			pinned: { master_key: before },
 			published: { master_key: after }
 		});
+	});
+
+	it('starts no second turn from a copy of my message, even while it only reports', async () => {
+		const heard = r.saying('Heard:').length;
+		const once = await r.client.sendText(r.room, 'Once only');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Once only');
+		const copy = `$copy-${Date.now()}`;
+		expect(await push(r, [{ ...(await encryptedEvent(r, once)), event_id: copy }])).toBe(200);
+		expect(await r.h.decisionOn(copy)).toMatchObject({
+			msg: 'assistant ignored a copy of earlier words',
+			mode: 'report',
+			firstEventId: once
+		});
+		// The next message is answered, and that one only once
+		const next = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'And the next');
+		expect(await r.nextSaying('Heard:', next)).toBe('Heard: And the next');
+		expect(r.saying('Heard: Once only')).toHaveLength(1);
 	});
 });

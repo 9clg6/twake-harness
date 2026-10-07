@@ -109,6 +109,32 @@ export async function pinAccepted(
 	return normalize(row);
 }
 
+// Records that the owner's words with this digest were received under an event, the words received
+// longer ago than `keptMs` forgotten first. Resolves to the event they were first received under
+// when it is another one, and to null for words new to the harness or delivered again under the
+// same event.
+export async function receiveWords(
+	tx: Tx,
+	owner: string,
+	digest: string,
+	eventId: string,
+	keptMs: number
+): Promise<string | null> {
+	await tx.sql`
+		delete from owner_words_received
+		where owner = ${owner} and received_at <= now() - make_interval(secs => ${keptMs / 1000})`;
+	const inserted = await tx.sql`
+		insert into owner_words_received (owner, digest, event_id)
+		values (${owner}, ${digest}, ${eventId})
+		on conflict (owner, digest) do nothing
+		returning 1`;
+	if (inserted.length === 1) return null;
+	const rows = await tx.sql<{ event_id: string }[]>`
+		select event_id from owner_words_received where owner = ${owner} and digest = ${digest}`;
+	const first = rows[0]?.event_id ?? null;
+	return first === eventId ? null : first;
+}
+
 // Whether the owner is to be told about a device now: once for good when `againAfterMs` is null,
 // or again once that long has passed since they were last told. Resolves to true for the one
 // caller that is to tell them.

@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { OwnerDeviceTrust } from '../config.js';
@@ -9,6 +10,7 @@ import {
 	clearSeen,
 	findOwnerCrossSigning,
 	pinFirstSeen,
+	receiveWords,
 	recordSeen,
 	type DeviceNoticeReason
 } from './owner-cross-signing-repository.js';
@@ -16,6 +18,24 @@ import { readPublishedKeys, senderDevice, type EventSender } from './owner-keys.
 
 // How often an owner whose words were not taken from a device is told so again
 const REFUSAL_NOTICE_INTERVAL_MS = 60_000;
+
+// How long the words an owner sent are remembered, so that a copy of them starts nothing
+const WORDS_KEPT_MS = 30 * 24 * 60 * 60 * 1000;
+
+// What tells a Megolm message from any other, whatever event carries it: its session and its
+// ciphertext, read as bytes
+function digestOf(encrypted: Record<string, unknown> | null): string | null {
+	const content: unknown = encrypted?.['content'];
+	if (typeof content !== 'object' || content === null) return null;
+	const sessionId: unknown = Reflect.get(content, 'session_id');
+	const ciphertext: unknown = Reflect.get(content, 'ciphertext');
+	if (typeof sessionId !== 'string' || typeof ciphertext !== 'string') return null;
+	return createHash('sha256')
+		.update(sessionId)
+		.update('\0')
+		.update(Buffer.from(ciphertext, 'base64'))
+		.digest('hex');
+}
 
 // The owner's words as they reached their assistant encrypted: a message, or a reaction that
 // answers one of the harness's questions
@@ -126,6 +146,15 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		};
 	}
 
+	// The event the same encrypted words first came with, when it is another one than this
+	async function copyOf(words: OwnerWords): Promise<string | null> {
+		const digest = digestOf(words.encrypted);
+		if (digest === null) return null;
+		return withPrincipal(db, { id: words.owner }, (tx) =>
+			receiveWords(tx, words.owner, digest, words.eventId, WORDS_KEPT_MS)
+		);
+	}
+
 	// Tells the owner in the room, once a minute at most per device when their words were not
 	// taken, and once per device when they were all the same. Whether the owner could be told never
 	// changes whether their words count.
@@ -165,6 +194,15 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			let checked: CheckedEvent | null = null;
 			let verdict: DeviceVerdict;
 			try {
+				// The same encrypted words under another event are no new words, whatever the mode
+				const firstEventId = await copyOf(words);
+				if (firstEventId !== null) {
+					log.info(
+						{ roomId, owner, eventId, via, mode, firstEventId },
+						'assistant ignored a copy of earlier words'
+					);
+					return REFUSED;
+				}
 				checked = await deps.decrypt(words.assistantUserId, roomId, words.encrypted);
 				verdict = await judge(words, checked.sender);
 			} catch (err: unknown) {
