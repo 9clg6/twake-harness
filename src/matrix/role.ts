@@ -43,6 +43,7 @@ import {
 	type CrossSigningDeps,
 	type CrossSigningResult
 } from './cross-signing.js';
+import { findCrossSigning } from './cross-signing-repository.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
@@ -268,7 +269,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const crossSigning: CrossSigningDeps = { db, log, escrowEnabled: escrow !== null, admin };
 	// Once an assistant can encrypt: its device is signed by its own cross-signing identity, which
 	// Twake Chat requires before it sends the room keys, then that identity is escrowed
-	async function onEncryptionReady(intent: Intent, owner: string): Promise<void> {
+	// What the cross-signing came to, null when it failed
+	async function onEncryptionReady(
+		intent: Intent,
+		owner: string
+	): Promise<CrossSigningResult | null> {
 		log.info(
 			{ owner, userId: intent.userId, deviceId: intent.underlyingClient.crypto?.clientDeviceId },
 			'encryption ready'
@@ -278,15 +283,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			signed = await ensureCrossSigning(crossSigning, intent, owner);
 		} catch (err: unknown) {
 			log.error({ owner, userId: intent.userId, err }, 'cross-signing failed');
-			return;
+			return null;
 		}
-		if (escrow === null || signed.outcome === 'awaiting_recovery') return;
-		if (signed.masterPublicKey === null) return;
+		if (escrow === null || signed.outcome === 'awaiting_recovery') return signed;
+		if (signed.masterPublicKey === null) return signed;
 		try {
 			await ensureEscrow(escrow, intent, owner, signed.masterPublicKey);
 		} catch (err: unknown) {
 			log.error({ owner, userId: intent.userId, err }, 'escrow failed');
 		}
+		return signed;
 	}
 	function backupInBackground(userId: string, owner: string): void {
 		if (escrow === null) return;
@@ -910,7 +916,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		const intent = appservice.getIntentForUserId(assistant.userId);
 		await ensureEncryption(intent);
-		await onEncryptionReady(intent, owner);
+		const signed = await onEncryptionReady(intent, owner);
+		// Only the owner's recovery brings an escrowed identity back: preparing again changes nothing
+		if (signed?.outcome === 'awaiting_recovery') {
+			log.info({ owner, userId: assistant.userId }, 'preparation waits for the recovery');
+			return;
+		}
+		// Not ready, as when the homeserver refused a step: thrown, so that the queue tries again a
+		// moment later, rather than leave the assistant unready until its provisioner calls again
+		const record = await withPrincipal(db, { id: owner }, (tx) => findCrossSigning(tx, owner));
+		if (record === null || record.deviceId === null) {
+			throw new Error('the assistant identity is not ready yet');
+		}
 		log.info({ owner, userId: assistant.userId }, 'assistant prepared');
 	}
 

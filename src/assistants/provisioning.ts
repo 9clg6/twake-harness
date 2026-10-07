@@ -23,8 +23,9 @@ export async function readyIdentity(
 }
 
 // Asks the matrix role to make the assistant's device and identity now, rather than when it first
-// speaks: one request at a time per owner. One that failed for good keeps its key, which would
-// refuse every later one: it goes, so that the owner's next call tries again.
+// speaks: one job queued or running per owner, which the queue tries again until the identity is
+// ready. A finished job is deleted, so the next call that finds the assistant unready asks anew; one
+// that failed for good keeps its key, which would refuse every later one: it goes first.
 export async function requestPreparation(db: Db, owner: string): Promise<boolean> {
 	const key = `prepare:${owner}`;
 	await db.sql`delete from jobs where dedup_key = ${key} and status = 'failed'`;

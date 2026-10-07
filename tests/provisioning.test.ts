@@ -171,6 +171,29 @@ describe('a provisioned assistant', () => {
 		expect(again.body).toEqual(mine);
 	});
 
+	it('becomes ready after a failed preparation, without its provisioner calling again', async () => {
+		const kim = await h.synapse.registerUser('kim');
+		// The homeserver refuses the first upload of the assistant's identity
+		let uploads = 0;
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' &&
+			path.startsWith('/_matrix/client/v3/keys/device_signing/upload') &&
+			uploads++ === 0
+				? 500
+				: null;
+		try {
+			const first = await provision(kim.userId);
+			expect(first.status).toBe(503);
+			// The harness tries again by itself: its provisioner asks once more, much later
+			await sleep(12_000);
+			const later = await provision(kim.userId);
+			expect(later.status).toBe(200);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+		expect(uploads).toBeGreaterThan(1);
+	});
+
 	it('joins the direct room its owner opens and invites it to, and answers its owner there', async () => {
 		const carol = await h.synapse.registerUser('carol');
 		const client = await startE2eeClient(h.synapse.url, carol);
