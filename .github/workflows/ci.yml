@@ -93,6 +93,12 @@ jobs:
           printf 'config:\n  turnHistoryMaxChars: 1000000\n' > /tmp/history.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/history.yaml > /tmp/history-rendered.yaml
           grep -A1 TURN_HISTORY_MAX_CHARS /tmp/history-rendered.yaml | grep -q '"1000000"'
+      # TURN_MAX_TOOL_CALLS is rendered only when config.turnMaxToolCalls is set, as an integer
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOOL_CALLS /tmp/default.yaml
+      - run: |
+          printf 'config:\n  turnMaxToolCalls: 20\n' > /tmp/tools.yaml
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/tools.yaml > /tmp/tools-rendered.yaml
+          grep -A1 TURN_MAX_TOOL_CALLS /tmp/tools-rendered.yaml | grep -q '"20"'
       # ADMISSION_* are rendered only when their config.admission* value is set, and as integers:
       # 0 counts, and a large value from a values file comes out whole instead of as 1e+06
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q ADMISSION_ /tmp/default.yaml
