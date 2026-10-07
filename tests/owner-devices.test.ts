@@ -1010,4 +1010,40 @@ describe('while the harness only reports the sessions it would not act on', () =
 		});
 		expect(r.saying('Heard: Fresh words of an old session')).toHaveLength(0);
 	});
+
+	it('holds a room I open with my assistant myself, and its commands, to the same rule', async () => {
+		// As Twake Chat's « My assistant »: an encrypted direct room, the assistant invited, which it
+		// joins and keeps as one of its rooms
+		const room = await r.client.createDirectRoom(r.assistantId);
+		for (let i = 0; i < 120; i += 1) {
+			if ((await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)) break;
+			await sleep(250);
+		}
+		const said = (prefix: string): string[] =>
+			r.client.messages
+				.filter((m) => m.roomId === room && m.sender === r.assistantId && m.body.startsWith(prefix))
+				.map((m) => m.body);
+		const helped = await r.client.sendText(room, '!help');
+		expect((await r.h.decisionOn(helped))?.['msg']).toBe('assistant command answered');
+		await until(() => said('I am your assistant.').length === 1, 'the help answer');
+		// A check that fails before it decrypts: no answer, and I am told to try again
+		await lastToldAMinuteAgo(r);
+		await withoutTable(r, 'owner_words_received', async () => {
+			const eventId = await r.client.sendText(room, '!help');
+			await logged(r, 'owner device check failed', eventId);
+			await until(() => said('Something went wrong on my side').length === 1, 'the notice');
+		});
+		// A session first decrypted a month ago: no answer, and I am told to start a new one
+		await lastToldAMinuteAgo(r);
+		await sessionsAMonthOld(r, async () => {
+			const eventId = await r.client.sendText(room, '!help');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'report'
+			});
+			await until(() => said('I did not act on your last message: your app').length === 1, 'it');
+		});
+		expect(said('I did not act on your last message: your app')).toEqual([OLD_SESSION_MESSAGE]);
+		expect(said('I am your assistant.')).toHaveLength(1);
+	});
 });
