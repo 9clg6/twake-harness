@@ -1063,7 +1063,8 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			end: null,
 			timezone: 'Europe/Paris',
 			organizer: 'bob@test.local',
-			occurrence: '20261013T170000'
+			// In its zone, as its times are: the RECURRENCE-ID as written goes into its id alone
+			occurrence: '2026-10-13T17:00:00+02:00'
 		});
 	});
 

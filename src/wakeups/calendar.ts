@@ -128,7 +128,7 @@ function timeAt(time: ICAL.Time, tzid: unknown): When {
 	return { at: `${time.toString()}${formatOffset(time.utcOffset() / 60)}`, timezone: tzid };
 }
 
-function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend'): When {
+function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend' | 'recurrence-id'): When {
 	const property = vevent.getFirstProperty(name);
 	if (property === null) return NO_TIME;
 	try {
@@ -230,7 +230,8 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 	const organizer = organizerOf(vevent.parsed, message['senderEmail']);
 	const start = whenOf(vevent.parsed, 'dtstart');
 	const end = endOf(vevent.parsed);
-	const occurrence = writtenValue(vevent.written, 'RECURRENCE-ID');
+	// The occurrence an invitation is about, in its zone as its times are
+	const occurrence = whenOf(vevent.parsed, 'recurrence-id').at;
 	const title = vevent.parsed.getFirstPropertyValue('summary');
 	return {
 		source: SOURCE,
