@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { activityEvent, startActivityExchange, type ActivityExchange } from './helpers/activity.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
@@ -16,6 +17,7 @@ interface AssistantView {
 }
 
 describe('creating an assistant, like a Telegram bot', () => {
+	let activity: ActivityExchange;
 	let h: MatrixTestHarness;
 	let alice: MatrixUser;
 	let aliceClient: E2eeClient;
@@ -23,7 +25,9 @@ describe('creating an assistant, like a Telegram bot', () => {
 	let room = '';
 	let replies = 0;
 	beforeAll(async () => {
-		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher' } });
+		activity = await startActivityExchange();
+		h = await startMatrixHarness({ env: activity.settings });
+		await activity.listen(h);
 		alice = await h.synapse.registerUser('alice');
 		aliceClient = await startE2eeClient(h.synapse.url, alice);
 		creatorRoom = await h.synapse.createDirectRoom(alice, h.role.creatorUserId);
@@ -33,6 +37,7 @@ describe('creating an assistant, like a Telegram bot', () => {
 		replies = 1;
 	}, 180_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (aliceClient !== undefined) await aliceClient.stop();
 		if (h !== undefined) await h.close();
 	});
@@ -125,28 +130,19 @@ describe('creating an assistant, like a Telegram bot', () => {
 		expect(elsewhere.body).toEqual({ error: 'owner not on the homeserver' });
 	});
 
-	it('wakes the assistant created from Matrix when the dispatcher posts an event for the email', async () => {
-		const posted = await h.api.post<{ queued: boolean }>('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-matrix-1',
-			type: 'calendar.invitation'
-		});
-		expect(posted.status).toBe(202);
-		expect(posted.body.queued).toBe(true);
+	it('wakes the assistant created from Matrix when an event names its owner by email', async () => {
+		// The localpart alone names nobody's assistant; the event for the email, published after it,
+		// is the next one the assistant tells, the queue being read in order
+		await activity.publish(activityEvent({ id: 'evt-matrix-0', recipient: 'alice' }));
+		await activity.publish(activityEvent({ id: 'evt-matrix-1', recipient: 'alice@test.local' }));
 		const told = await aliceClient.waitForMessage(
 			room,
 			assistantId,
 			(t) => t.includes('evt-matrix-1'),
 			60_000
 		);
-		expect(told).toContain('calendar.invitation');
-		// The localpart alone names nobody's assistant
-		const nobody = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice',
-			event_id: 'evt-matrix-2',
-			type: 'calendar.invitation'
-		});
-		expect(nobody.status).toBe(404);
+		expect(told).toContain('A task has been assigned to me');
+		expect(aliceClient.messages.some((m) => m.body.includes('evt-matrix-0'))).toBe(false);
 	});
 
 	it('deletes the assistant, which leaves the room, and lets the owner start over', async () => {
