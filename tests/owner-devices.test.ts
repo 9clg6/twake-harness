@@ -35,6 +35,34 @@ async function deviceLine(r: ConsentRoom, eventId: string): Promise<Record<strin
 	throw new Error(`nothing logged of the session ${eventId} came from`);
 }
 
+// The line the matrix role logged with a message, once it did
+async function logged(
+	r: ConsentRoom,
+	msg: string,
+	eventId: string
+): Promise<Record<string, unknown>> {
+	for (let i = 0; i < 120; i += 1) {
+		const line = r.h.logLines().find((l) => l['eventId'] === eventId && l['msg'] === msg);
+		if (line !== undefined) return line;
+		await sleep(250);
+	}
+	throw new Error(`nothing logged as ${msg} for ${eventId}`);
+}
+
+// One of the harness's tables is out of reach while `run` runs, as with a database failing on it
+async function withoutTable(
+	r: ConsentRoom,
+	table: string,
+	run: () => Promise<void>
+): Promise<void> {
+	await r.h.db.sql.unsafe(`alter table ${table} rename to ${table}_away`);
+	try {
+		await run();
+	} finally {
+		await r.h.db.sql.unsafe(`alter table ${table}_away rename to ${table}`);
+	}
+}
+
 // The identity the harness holds for Alice, as it keeps it
 async function heldIdentity(
 	r: ConsentRoom
@@ -203,6 +231,24 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect((await r.callsTo('mail')).map((c) => c.status)).toEqual(['approved']);
 	});
 
+	it('acts on nothing from a session I never verified when it cannot tell me so either', async () => {
+		const other = await unverifiedSession(r, sessions);
+		await withoutTable(r, 'owner_device_notices', async () => {
+			const eventId = await other.sendText(r.room, 'Archive my old mail');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored an unverified device',
+				deviceId: other.deviceId
+			});
+			expect(await logged(r, 'owner device notice failed', eventId)).toMatchObject({
+				reason: 'unverified'
+			});
+		});
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Archive'))).toBe(
+			false
+		);
+	});
+
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
@@ -291,6 +337,18 @@ describe('while the harness only reports the sessions it would not act on', () =
 			matchesPin: true
 		});
 		expect(r.saying('This session of yours is not verified')).toHaveLength(1);
+	});
+
+	it('acts on my words all the same when it cannot tell me about my session', async () => {
+		const other = await unverifiedSession(r, sessions);
+		await withoutTable(r, 'owner_device_notices', async () => {
+			const heard = r.saying('Heard:').length;
+			const eventId = await other.sendText(r.room, 'Despite everything');
+			expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Despite everything');
+			expect(await logged(r, 'owner device notice failed', eventId)).toMatchObject({
+				reason: 'unverified'
+			});
+		});
 	});
 
 	it('acts on my words after my identity changed all the same, and tells me how to accept it', async () => {
