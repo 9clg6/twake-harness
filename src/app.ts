@@ -110,15 +110,15 @@ const skillBodySchema = z
 // The identity an owner accepts, given by the master key the harness showed them
 const ownerIdentityBodySchema = z.object({ master_key: z.string().min(1).max(128) }).strict();
 
-// The cross-signing identity an owner's assistant holds for them, and the one their words last
-// came with when it was another, as the owner reads them
+// The cross-signing identity an owner's assistant holds for them, and the one that signed the
+// session their words last came from when it was another, as the owner reads them
 interface OwnerIdentityView {
 	readonly pinned: {
 		readonly master_key: string;
 		readonly pinned_by: string;
 		readonly pinned_at: string;
 	} | null;
-	readonly published: { readonly master_key: string | null; readonly seen_at: string } | null;
+	readonly published: { readonly master_key: string; readonly seen_at: string } | null;
 }
 
 function toOwnerIdentityView(held: OwnerCrossSigning | null): OwnerIdentityView {
@@ -449,9 +449,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				return reply.code(202).send({ queued });
 			});
 
-			// The cross-signing identity the owner's assistant takes their words with, and the one their
-			// words last came with when it was another, such as after they reset theirs: only the
-			// owner, with their own token, makes the assistant hold that one instead
+			// The cross-signing identity the owner's assistant takes their words with, and the one that
+			// signed the session their words last came from when it was another, such as after they
+			// reset theirs: only the owner, with their own token, makes the assistant hold that one
+			// instead
 			scope.get('/assistants/me/owner-identity', async (request, reply) => {
 				const principal = principalOf(request);
 				const record = await loadPrincipal(principal);
@@ -475,8 +476,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					return reply.code(404).send(RESOURCE_UNAVAILABLE);
 				}
 				const masterKey = parsed.data.master_key;
-				// Only the identity the owner's words last came with, as the harness showed it to them,
-				// and only while it is still the latest one seen
+				// Only the identity that signed the session the owner's words last came from, as the
+				// harness showed it to them, and only while it is still the latest one seen
 				const accepted = await withPrincipal(db, principal, async (tx) => {
 					const held = await findOwnerCrossSigning(tx, principal.id);
 					if (held?.seen?.masterPublicKey !== masterKey) return { held, pinned: null };

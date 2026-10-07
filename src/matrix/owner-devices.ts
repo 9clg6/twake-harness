@@ -98,7 +98,8 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			ownerUserId
 		);
 		const found = senderDevice(sender, keys, ownerUserId);
-		// The first identity seen is held; another one is kept aside, for the owner to accept it
+		// The first identity seen is held. Another one is kept aside for the owner to accept, once it
+		// signed the session their words came from
 		const identity = await withPrincipal(db, { id: owner }, async (tx): Promise<IdentityState> => {
 			const held = await findOwnerCrossSigning(tx, owner);
 			if (held === null) {
@@ -111,7 +112,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				if (held.seen !== null) await clearSeen(tx, owner);
 				return 'pinned';
 			}
-			await recordSeen(tx, owner, keys.masterKey);
+			if (found.signed && keys.masterKey !== null) await recordSeen(tx, owner, keys.masterKey);
 			return 'changed';
 		});
 		return {

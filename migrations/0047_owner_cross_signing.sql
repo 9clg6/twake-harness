@@ -7,11 +7,12 @@ create table owner_cross_signing (
 	-- first_use: the harness held the identity it first saw; api: the owner accepted it
 	pinned_by text not null check (pinned_by in ('first_use', 'api')),
 	pinned_at timestamptz not null default now(),
-	-- The identity published the last time the owner's words came with another one than the one
-	-- held, null when none was published then; seen_at is null while their words come with the one
-	-- held. The owner accepts it through the API.
+	-- The identity that signed the session the owner's words last came from, when it was another
+	-- one than the one held, and when: the owner accepts it through the API. Both are null
+	-- otherwise.
 	seen_master_public_key text,
-	seen_at timestamptz
+	seen_at timestamptz,
+	check ((seen_master_public_key is null) = (seen_at is null))
 );
 
 alter table owner_cross_signing enable row level security;

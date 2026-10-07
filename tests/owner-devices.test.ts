@@ -371,6 +371,45 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		await r.client.sendText(r.room, 'Good evening again');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Good evening again');
 	});
+
+	it('offers me to accept only an identity that signed the session my words came from', async () => {
+		const held = await r.client.masterKey();
+		// Another session of mine, signed as Twake Chat signs it, replaces my identity with a new one
+		// that signs it alone
+		const other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'));
+		sessions.push(other);
+		const replaced = await other.resetIdentity();
+		expect(replaced).not.toBe(held);
+		// Words from my first session, which the new identity did not sign, offer nothing to accept
+		const first = await r.client.sendText(r.room, 'From my first session');
+		expect(await r.h.decisionOn(first)).toMatchObject({
+			msg: 'assistant ignored an unverified device',
+			deviceId: r.client.deviceId,
+			signed: false,
+			identity: 'changed'
+		});
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toMatchObject({
+			pinned: { master_key: held },
+			published: null
+		});
+		expect((await r.h.api.put(OWNER, IDENTITY_ROUTE, { master_key: replaced })).status).toBe(409);
+		// Words from the session the new identity signed offer it
+		const second = await other.sendText(r.room, 'From my other session');
+		expect(await r.h.decisionOn(second)).toMatchObject({
+			msg: 'assistant ignored an unverified device',
+			deviceId: other.deviceId,
+			signed: true,
+			identity: 'changed'
+		});
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toMatchObject({
+			pinned: { master_key: held },
+			published: { master_key: replaced }
+		});
+		expect((await r.h.api.put(OWNER, IDENTITY_ROUTE, { master_key: replaced })).status).toBe(200);
+		const heard = r.saying('Heard:').length;
+		await other.sendText(r.room, 'Accepted at last');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Accepted at last');
+	});
 });
 
 describe('while the harness only reports the sessions it would not act on', () => {
