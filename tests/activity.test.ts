@@ -3,7 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
-import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
+import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
+import { grantConsent } from './helpers/consents.js';
 import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
 import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
 
@@ -81,6 +82,33 @@ function lastUser(request: ChatRequest | undefined): string {
 function turnCalls(calls: readonly RecordedCall[], eventId: string): RecordedCall[] {
 	return calls.filter((call) => lastUser(call.request).includes(`(id ${eventId})`));
 }
+
+// Tasks' contracts behind the gateway: searching the owner's tasks, and commenting on one, a write
+const TASKS_CATALOG = {
+	openapi: '3.1.0',
+	paths: {
+		...(readCatalog(['tasks'])['paths'] as Record<string, unknown>),
+		'/contracts/v1/tasks/comments': {
+			post: {
+				operationId: 'comment_task',
+				summary: 'Comments on a task in the name of the user',
+				tags: ['tasks.comment.create.v1'],
+				'x-twake-risk': 'low',
+				requestBody: {
+					content: {
+						'application/json': {
+							schema: {
+								type: 'object',
+								properties: { task_id: { type: 'string' }, text: { type: 'string' } },
+								required: ['task_id', 'text']
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+};
 
 // The event as the model was handed it: the line between the fences of the block
 const FENCED = /^<<<event-data ([0-9a-f]{12})\n(.+)\nevent-data \1>>>$/m;
@@ -301,6 +329,51 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await publish(next);
 		await answerTo(next);
 		expect(turnCalls(r.h.apisix.llm.calls, completed.id)).toHaveLength(0);
+	});
+
+	it('lets the turn read under the event’s id, and prepares a write for my yes alone', async () => {
+		// Alice let her assistant read and write her tasks, and the task's title tells it what to do
+		await grantConsent(r.h.db, 'alice@test.local', 'tasks', 'read');
+		await grantConsent(r.h.db, 'alice@test.local', 'tasks', 'write');
+		r.h.apisix.contracts.spec = TASKS_CATALOG;
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
+		const literal = r.h.apisix.llm.script;
+		r.h.apisix.llm.script = (request: ChatRequest) => {
+			const last = request.messages.at(-1);
+			if (last?.role !== 'tool') return { toolCalls: call('search_tasks', { q: 'ROAD-12' }) };
+			return {
+				content: 'Bob assigned you ROAD-12; I can tell him you take it.',
+				toolCalls: call('comment_task', { body: { task_id: TASK_ID, text: 'I take it' } })
+			};
+		};
+		try {
+			const event = activityEvent();
+			await publish(event);
+			// The harness asks Alice itself, under the model's words, and nothing reaches Tasks
+			const request = await r.client.waitForMessage(r.room, r.assistantId, (t) =>
+				t.includes('> Bob assigned you ROAD-12')
+			);
+			expect(request).toContain('I prepared this in tasks for what just arrived');
+			expect(r.h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
+			// The read went through the gateway in her name, linked to the event by its id alone
+			const search = r.h.apisix.contracts.calls.filter(
+				(c) => c.path === '/contracts/v1/tasks/items'
+			);
+			expect(search).toHaveLength(1);
+			expect(search[0]?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
+			expect(search[0]?.headers['x-correlation-id']).toBe(event.id);
+			// Alice lets it go, so that her next messages in the room are hers
+			const asked = r.client.messages.find((m) => m.roomId === r.room && m.body === request);
+			if (asked === undefined) throw new Error('no request');
+			await r.client.react(r.room, asked.eventId, '❌');
+			await r.client.waitForMessage(
+				r.room,
+				r.assistantId,
+				(t) => t === 'All right, I will not do it.'
+			);
+		} finally {
+			r.h.apisix.llm.script = literal;
+		}
 	});
 
 	it('says in its health check that it listens, from its connection alone', async () => {
