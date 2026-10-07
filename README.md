@@ -53,6 +53,7 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `ADMISSION_GLOBAL_PER_MINUTE`  | turns the whole harness may start per minute, `400` by default                                                                                                  |
 | `TURN_HISTORY_MAX_CHARS`       | characters of past conversation a turn shows the model, `24000` by default: its latest exchanges whole, always the last; the session keeps all                  |
 | `TURN_MAX_TOOL_CALLS`          | tool calls one turn may make, `6` by default; past them nothing runs: the model tells the owner what it did, what remains, and that it goes on if asked         |
+| `TURN_STATUS_DELAY_MS`         | how long a turn may go without answering before the assistant posts a status message, which closes once the turn answered; `3000` by default, at least `1000`   |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 
@@ -77,6 +78,10 @@ The api role is meant to sit behind APISIX only. With `GATEWAY_SHARED_SECRET` se
 ### Jobs between roles
 
 The roles hand work to each other through the `jobs` table: a Matrix message becomes a `turn` for the api role, its answer a `send` for the matrix role. Any replica claims any job (`for update skip locked`), so the api role scales horizontally; the chart ships a horizontal autoscaler for it (`autoscaling.enabled`), never below one replica. A job carries a dedup key, so an event Synapse delivers twice makes one turn, and a group key: the turns of one owner and the answers of one room run one at a time, in the order they were queued, whichever replica takes them. A job still running after its lease (fifteen minutes) is handed back to the queue, as its replica is taken for gone.
+
+### While a turn works
+
+The owner sees their assistant at work on a message, or on the yes that resumes a turn: eyes (👀) on it and the assistant typing, then a check mark (✅) once it is answered. A turn that has not answered after `TURN_STATUS_DELAY_MS` also posts a status message, "⏳ On it…" in the owner's language, as a reply to that message and encrypted like every other. The answer, or the notice of a failed or refused turn, then goes out as a message of its own, as it always did, and the status closes on "✅ Done", or "❌ Not done" after a notice, as an edit (`m.replace`) that Twake Chat marks as edited: Synapse's default push rules notify nobody of an edit (`.m.rule.suppress_edits`), and the owner is to be notified of what came of their message. A turn that ends on a question to its owner keeps the question a message of its own, which they answer in their next message, and the status then tells them to answer below. A status never outlives its turn: with no reply ready five minutes after the message, as long as the typing lasts, or none gone out five minutes after it was ready, or when the matrix role stops, it says that this takes longer than expected, and an answer that comes later goes out as a message of its own.
 
 ### Admission
 
@@ -118,7 +123,7 @@ The model finds past conversations with `session_search`, by words they contain,
 
 ### Language
 
-Each assistant speaks its owner's language: the one the owner chose by asking their assistant, which calls `set_language`, or else the deployment's (`ASSISTANT_LOCALE`). The model is told, in that language, to speak it, and every fixed sentence the harness says to that owner follows it: the consent questions, the acknowledgements and notices of an answer, the busy and failure notices, and the creator's replies. The choice is stored with the assistant, and kept if the owner creates it again. Changing it takes the `settings.write_own` right, which a turn an event started never holds; the organization agent speaks the deployment's language with every member. Answers to the harness's questions are understood in every language it speaks.
+Each assistant speaks its owner's language: the one the owner chose by asking their assistant, which calls `set_language`, or else the deployment's (`ASSISTANT_LOCALE`). The model is told, in that language, to speak it, and every fixed sentence the harness says to that owner follows it: the consent questions, the acknowledgements and notices of an answer, the status of a turn that takes a while, the busy and failure notices, and the creator's replies. The choice is stored with the assistant, and kept if the owner creates it again. Changing it takes the `settings.write_own` right, which a turn an event started never holds; the organization agent speaks the deployment's language with every member. Answers to the harness's questions are understood in every language it speaks.
 
 ### Contracts as tools
 
