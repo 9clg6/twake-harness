@@ -7,13 +7,8 @@ import {
 	startConsentRoom,
 	type ConsentRoom
 } from './helpers/consent-room.js';
-import { startE2eeClient } from './helpers/e2ee-client.js';
 
 const DOMAINS = ['mail', 'drive', 'tasks', 'notes', 'photos', 'wiki', 'contacts', 'boards'];
-
-function sleep(ms: number): Promise<void> {
-	return new Promise((resolve) => setTimeout(resolve, ms));
-}
 
 describe('I answer the question in words', () => {
 	let r: ConsentRoom;
@@ -140,50 +135,24 @@ describe('I answer the question in words', () => {
 		expect(await r.callsTo('wiki')).toEqual([{ status: 'superseded', arguments: null }]);
 	});
 
-	it('ignores a yes from someone else, or sent unencrypted from my account', async () => {
+	// No one else can answer for me: someone else coming into the room makes the assistant leave it
+	it('ignores a yes sent unencrypted from my account', async () => {
 		r.h.apisix.llm.script = modelFor({
 			'Show my boards': { tool: 'search_boards', args: { q: 'all' } }
 		});
-		const bob = await r.h.synapse.registerUser('bob');
-		const bobClient = await startE2eeClient(r.h.synapse.url, bob);
-		try {
-			await r.h.synapse.request(
-				r.alice,
-				'POST',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/invite`,
-				{ user_id: bob.userId }
-			);
-			await bobClient.joinRoom(r.room);
-			const seen = r.questions().length;
-			await r.client.sendText(r.room, 'Show my boards');
-			await r.nextQuestion(seen);
-			// Bob, a member of the room, says yes: the assistant reads him and ignores him
-			await bobClient.sendText(r.room, 'yes');
-			let ignored = false;
-			for (let i = 0; i < 120 && !ignored; i += 1) {
-				ignored = r.h
-					.logLines()
-					.some(
-						(l) => l['msg'] === 'assistant ignored a foreign sender' && l['sender'] === bob.userId
-					);
-				if (!ignored) await sleep(250);
-			}
-			expect(ignored).toBe(true);
-			// A yes written in my name without encryption, as a component on the server could, starts
-			// nothing and answers nothing: the harness only logs it
-			const heard = r.saying('Heard:').length;
-			const plain = await r.h.synapse.sendText(r.alice, r.room, 'yes');
-			expect((await r.h.decisionOn(plain))?.['msg']).toBe(
-				'assistant ignored an unencrypted message'
-			);
-			expect(r.h.apisix.contracts.calls).toHaveLength(0);
-			// Neither counted as my next message: my own yes still answers the question
-			const found = r.saying('Found:').length;
-			await r.client.sendText(r.room, 'yes');
-			expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/boards/items');
-			expect(r.saying('Heard:')).toHaveLength(heard);
-		} finally {
-			await bobClient.stop();
-		}
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'Show my boards');
+		await r.nextQuestion(seen);
+		// A yes written in my name without encryption, as a component on the server could, starts
+		// nothing and answers nothing: the harness only logs it
+		const heard = r.saying('Heard:').length;
+		const plain = await r.h.synapse.sendText(r.alice, r.room, 'yes');
+		expect((await r.h.decisionOn(plain))?.['msg']).toBe('assistant ignored an unencrypted message');
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+		// It did not count as my next message: my own yes still answers the question
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'yes');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/boards/items');
+		expect(r.saying('Heard:')).toHaveLength(heard);
 	});
 });

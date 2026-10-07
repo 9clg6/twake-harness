@@ -274,58 +274,33 @@ describe('my answer lets my assistant carry on', () => {
 		expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ from: 'anna@test.local' }]);
 	});
 
-	it('ignores a ✅ from someone else, on another message, or sent unencrypted from my account', async () => {
-		const bob = await h.synapse.registerUser('bob');
-		const bobClient = await startE2eeClient(h.synapse.url, bob);
-		try {
-			await h.synapse.request(
-				alice,
-				'POST',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
-				{ user_id: bob.userId }
-			);
-			await bobClient.joinRoom(room);
-			h.apisix.llm.script = modelUsing('search_files', { name: 'Q4 plan' });
-			const seen = requests().length;
-			await client.sendText(room, 'Find my Q4 plan');
-			const request = await nextRequest(seen);
-			// Bob, a member of the room, allows it. His first message shares his room key with the
-			// assistant, which reads and ignores him: his ✅ then reaches it decrypted
-			await bobClient.sendText(room, 'hi Jarvis');
-			const loggedFor = async (msg: string): Promise<boolean> => {
-				for (let i = 0; i < 120; i += 1) {
-					if (h.logLines().some((l) => l['msg'] === msg && l['sender'] === bob.userId)) return true;
-					await sleep(250);
-				}
-				return false;
-			};
-			expect(await loggedFor('assistant ignored a foreign sender')).toBe(true);
-			await bobClient.react(room, request, '✅');
-			expect(await loggedFor('answer ignored: not the owner')).toBe(true);
-			// I react to the assistant's greeting instead of its question
-			const greeting = client.messages.find(
-				(m) => m.roomId === room && m.sender === assistantId && m.body.includes('Jarvis')
-			);
-			if (greeting === undefined) throw new Error('no greeting');
-			await client.react(room, greeting.eventId, '✅');
-			// A ✅ sent without encryption, as Twake Chat sends its reactions, or as a component on
-			// the server could write it in my name
-			await h.synapse.request(
-				alice,
-				'PUT',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.reaction/plain-${Date.now()}`,
-				{ 'm.relates_to': { rel_type: 'm.annotation', event_id: request, key: '✅' } }
-			);
-			await sleep(3000);
-			expect(h.apisix.contracts.calls).toHaveLength(0);
-			// The question is still open: my own ✅ on it runs the call
-			const answered = answers().length;
-			await client.react(room, request, '✅');
-			expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
-			expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ name: 'Q4 plan' }]);
-		} finally {
-			await bobClient.stop();
-		}
+	// No one else can answer for me: someone else coming into the room makes the assistant leave it
+	it('ignores a ✅ on another message, or sent unencrypted from my account', async () => {
+		h.apisix.llm.script = modelUsing('search_files', { name: 'Q4 plan' });
+		const seen = requests().length;
+		await client.sendText(room, 'Find my Q4 plan');
+		const request = await nextRequest(seen);
+		// I react to the assistant's greeting instead of its question
+		const greeting = client.messages.find(
+			(m) => m.roomId === room && m.sender === assistantId && m.body.includes('Jarvis')
+		);
+		if (greeting === undefined) throw new Error('no greeting');
+		await client.react(room, greeting.eventId, '✅');
+		// A ✅ sent without encryption, as Twake Chat sends its reactions, or as a component on
+		// the server could write it in my name
+		await h.synapse.request(
+			alice,
+			'PUT',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.reaction/plain-${Date.now()}`,
+			{ 'm.relates_to': { rel_type: 'm.annotation', event_id: request, key: '✅' } }
+		);
+		await sleep(3000);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+		// The question is still open: my own ✅ on it runs the call
+		const answered = answers().length;
+		await client.react(room, request, '✅');
+		expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
+		expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ name: 'Q4 plan' }]);
 	});
 
 	it('runs the call once when I answer twice', async () => {
