@@ -104,6 +104,12 @@ interface Encrypted {
 	readonly event: Record<string, unknown> | null;
 }
 
+// What an owner's message says, as the event whose session was checked says it
+interface CheckedWords {
+	readonly text: string;
+	readonly content: Record<string, unknown> | undefined;
+}
+
 // The encrypted events of the pushes under way that the SDK has yet to decrypt, at most
 const MAX_ENCRYPTED_IN_FLIGHT = 1_000;
 
@@ -974,9 +980,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		);
 	}
 
-	// The text of an owner's encrypted message once its session was checked: the one of the very event
-	// whose session was checked, null when the message does not count
-	async function checkedMessage(words: OwnerWords, raw: RoomEvent): Promise<string | null> {
+	// An owner's encrypted message once its session was checked: the text and content of the very event
+	// whose session was checked, a command it names included, null when the message does not count
+	async function checkedMessage(words: OwnerWords, raw: RoomEvent): Promise<CheckedWords | null> {
 		const admission = await ownerDevices.admit(words);
 		if (!admission.admitted) return null;
 		const checked = admission.event === null ? raw : (admission.event as RoomEvent);
@@ -987,8 +993,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (checkedText === null) {
 			const { roomId, owner, eventId } = words;
 			log.info({ roomId, owner, eventId }, 'message ignored: not the event checked');
+			return null;
 		}
-		return checkedText;
+		return { text: checkedText, content: checked.content };
 	}
 
 	// The messages that reached an assistant encrypted, between the SDK's decrypted event and the
@@ -1051,6 +1058,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			let owner: string;
 			let message = text;
+			// What names a command: the content of the event whose session was checked, once it was
+			let content = raw.content;
 			if (room.owner === ORGANIZATION_PRINCIPAL) {
 				// The organization agent hears the members only, and is told who is writing
 				if (!isOrgMember(config, sender)) {
@@ -1077,11 +1086,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						via: 'message',
 						encrypted: encrypted.event
 					};
-					const checkedText = await checkedMessage(words, raw);
-					if (checkedText === null) return;
-					message = checkedText;
+					const checked = await checkedMessage(words, raw);
+					if (checked === null) return;
+					message = checked.text;
+					content = checked.content;
 					const requestRoom = { roomId, owner, assistantUserId: room.userId };
-					if (await requests.wrote(requestRoom, eventId, checkedText)) return;
+					if (await requests.wrote(requestRoom, eventId, checked.text)) return;
 				}
 			}
 			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt
@@ -1122,8 +1132,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				}
 			}
 			// A command the assistant announced in its owner's rooms is answered by the harness, not
-			// the model; it goes out after what the assistant was already saying in the room
-			if (owner !== ORGANIZATION_PRINCIPAL && commandOf(text, raw.content) === 'help') {
+			// the model; it goes out after what the assistant was already saying in the room. It is
+			// read from the words that count: those of the event whose session was checked
+			if (owner !== ORGANIZATION_PRINCIPAL && commandOf(message, content) === 'help') {
 				const { assistantCommands } = await fetchMessages(owner);
 				await enqueueJob(db, {
 					kind: 'send',
@@ -1172,9 +1183,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (encrypted === null) {
 			if (!(await ownerDevices.admitUnencrypted(words, 'unencrypted'))) return;
 		} else {
-			const checkedText = await checkedMessage(words, raw);
-			if (checkedText === null) return;
-			command = checkedText;
+			const checked = await checkedMessage(words, raw);
+			if (checked === null) return;
+			command = checked.text;
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
 		const toOwner = await fetchMessages(owner);
