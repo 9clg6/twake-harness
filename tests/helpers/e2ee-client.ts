@@ -6,7 +6,12 @@ import {
 	RustSdkCryptoStorageProvider,
 	SimpleFsStorageProvider
 } from 'matrix-bot-sdk';
-import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
+import {
+	RequestType,
+	StoreType,
+	UserId,
+	type OlmMachine
+} from '@matrix-org/matrix-sdk-crypto-nodejs';
 
 import type { MatrixUser } from './synapse.js';
 
@@ -77,6 +82,38 @@ function annotationOf(
 	const eventId: unknown = Reflect.get(relation, 'event_id');
 	const key: unknown = Reflect.get(relation, 'key');
 	return typeof eventId === 'string' && typeof key === 'string' ? { eventId, key } : null;
+}
+
+// What matrix-bot-sdk keeps of its crypto engine to itself
+interface CryptoEngine {
+	readonly machine: OlmMachine;
+	// Held by the client's sync while it hands what it received to the crypto machine
+	readonly lock: { acquire(key: 'sync', run: () => Promise<void>): Promise<void> };
+	addTrackedUsers(userIds: string[]): Promise<void>;
+	runOnly(...types: RequestType[]): Promise<void>;
+}
+
+// matrix-bot-sdk starts tracking the members of a room as the client joins it or reads a membership:
+// holding the lock of its sync, it asks the crypto machine which of their devices it lacks a session
+// with, before their device lists were queried. The machine waits up to 5 s for each such query,
+// which only the sync, blocked on that lock, would send: after a join, the client read nothing for
+// 15 s. The SDK queries the device lists first when it encrypts; this client does so when it starts
+// tracking members too.
+function queryKeysBeforeTracking(client: MatrixClient): void {
+	const crypto = client.crypto;
+	const prepare = crypto.prepare.bind(crypto);
+	crypto.prepare = async (roomIds) => {
+		await prepare(roomIds);
+		const engine = Reflect.get(crypto, 'engine') as CryptoEngine;
+		const track = engine.addTrackedUsers.bind(engine);
+		engine.addTrackedUsers = async (userIds) => {
+			await engine.lock.acquire('sync', async () => {
+				await engine.machine.updateTrackedUsers(userIds.map((userId) => new UserId(userId)));
+				await engine.runOnly(RequestType.KeysQuery);
+			});
+			await track(userIds);
+		};
+	};
 }
 
 // A user's own Matrix client with end-to-end encryption, as Twake Chat would be, talking to
@@ -158,6 +195,7 @@ export async function startE2eeClient(
 			}
 		}
 	);
+	queryKeysBeforeTracking(client);
 	await client.start();
 	return {
 		userId: user.userId,
