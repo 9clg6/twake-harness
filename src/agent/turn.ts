@@ -1,6 +1,12 @@
 import type { FastifyBaseLogger } from 'fastify';
 
-import type { LlmClient, LlmCompletion, LlmMessage, LlmToolDefinition } from '../llm/client.js';
+import type {
+	LlmClient,
+	LlmCompletion,
+	LlmMessage,
+	LlmToolCall,
+	LlmToolDefinition
+} from '../llm/client.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withoutCallMarkup } from './call-markup.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
@@ -122,6 +128,17 @@ function logAnswer(log: FastifyBaseLogger, iteration: number, completion: LlmCom
 	);
 }
 
+// The answers of calls the model made that never run, each telling it why: strict model APIs refuse
+// a history with a call left unanswered
+function skippedAnswers(calls: readonly LlmToolCall[], result: unknown): LlmMessage[] {
+	return calls.map((call): LlmMessage => ({
+		role: 'tool',
+		tool_call_id: call.id,
+		name: call.function.name,
+		content: JSON.stringify(result)
+	}));
+}
+
 function parseArguments(raw: string): unknown {
 	try {
 		return JSON.parse(raw) as unknown;
@@ -228,18 +245,10 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			said.trim().length === 0 ? input.context : { ...input.context, accompanyingText: said };
 		for (const [index, call] of completion.toolCalls.entries()) {
 			if (toolCalls >= deps.maxToolCalls) {
-				// This call and those after it never run, yet each gets its answer: strict model APIs
-				// refuse a history with a call left unanswered
-				const skipped = completion.toolCalls.slice(index);
-				for (const late of skipped) {
-					messages.push({
-						role: 'tool',
-						tool_call_id: late.id,
-						name: late.function.name,
-						content: JSON.stringify(limitReached(deps.maxToolCalls))
-					});
-				}
-				notRun = skipped.length;
+				// This call and those after it never run
+				const late = completion.toolCalls.slice(index);
+				messages.push(...skippedAnswers(late, limitReached(deps.maxToolCalls)));
+				notRun = late.length;
 				break;
 			}
 			toolCalls += 1;
@@ -278,16 +287,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				content: JSON.stringify(outcome.result)
 			});
 			if (outcome.final !== undefined) {
-				// The calls the model made after this one never run, yet each gets its answer: strict
-				// model APIs refuse a history with a call left unanswered
-				for (const skipped of completion.toolCalls.slice(index + 1)) {
-					messages.push({
-						role: 'tool',
-						tool_call_id: skipped.id,
-						name: skipped.function.name,
-						content: JSON.stringify(NOT_RUN)
-					});
-				}
+				// The calls the model made after this one never run
+				messages.push(...skippedAnswers(completion.toolCalls.slice(index + 1), NOT_RUN));
 				// The conversation keeps a request as the model may read it: without what an application
 				// said of the call, which only its owner reads
 				messages.push({
