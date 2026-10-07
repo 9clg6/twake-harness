@@ -16,7 +16,7 @@ export interface WorkerRoleOptions {
 	readonly config: Config;
 	readonly db: Db;
 	readonly logStream?: Writable;
-	// The first wait before the listener tries a message again, a second unless set
+	// The first wait before the listener tries again, a message or to listen, a second unless set
 	readonly retryDelayMs?: number;
 }
 
