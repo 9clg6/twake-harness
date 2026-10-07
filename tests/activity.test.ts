@@ -250,7 +250,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		);
 		expect(told).not.toContain('contracts');
 		// The broker holds nothing more of it: taken, and not dead-lettered
-		expect((await broker.queue(QUEUE))?.messages).toBe(0);
+		await broker.waitForMessages(QUEUE, 0);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 	});
 
@@ -276,7 +276,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(0);
 		}
 		// Each was taken all the same, none dead-lettered
-		expect((await broker.queue(QUEUE))?.messages).toBe(0);
+		await broker.waitForMessages(QUEUE, 0);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 	});
 
@@ -362,6 +362,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		const turns = turnCalls(r.h.apisix.llm.calls, event.id);
 		expect(turns).toHaveLength(1);
 		expect(turns[0]?.request.messages[0]?.content).toContain('"Jarvis"');
+		await broker.waitForMessages(QUEUE, 0);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		// Each skipped recipient is logged by its place and its faulty fields, never its values
 		const skipped = workerLogs
@@ -403,6 +404,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		const crowded = activityEvent({ recipients: [...members, ALICE] });
 		await publishThenNext(crowded);
 		expect(turnCalls(r.h.apisix.llm.calls, crowded.id)).toHaveLength(0);
+		await broker.waitForMessages(QUEUE, 0);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		expect(
 			workerLogs
@@ -460,6 +462,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		};
 		await publishThenNext(event);
 		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(0);
+		await broker.waitForMessages(QUEUE, 0);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		expect(
 			workerLogs
@@ -483,6 +486,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		for (const body of broken) await broker.publish(ACTIVITY, ASSIGNED, body);
 		await publishThenNext();
 		try {
+			await broker.waitForMessages(QUEUE, 0);
 			expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(broken.length);
 			// None of them woke Alice: her only turn is the next event's
 			expect(r.h.apisix.llm.calls).toHaveLength(calls + 1);
@@ -499,7 +503,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			const stale = activityEvent({ type: completed });
 			await publishThenNext(stale);
 			expect(turnCalls(r.h.apisix.llm.calls, stale.id)).toHaveLength(0);
-			expect((await broker.queue(QUEUE))?.messages).toBe(0);
+			await broker.waitForMessages(QUEUE, 0);
 			expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		} finally {
 			await broker.channel.unbindQueue(QUEUE, ACTIVITY, completed);
