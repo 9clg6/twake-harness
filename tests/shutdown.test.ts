@@ -76,6 +76,7 @@ describe('stopping a job worker', () => {
 			pollIntervalMs: 20,
 			handler: async (job) => {
 				handled.push(job.id);
+				return null;
 			}
 		});
 		// The first poll is now waiting on the lock, in the middle of a query

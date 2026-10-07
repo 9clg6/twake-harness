@@ -120,6 +120,13 @@ spec:
             - name: TURN_STATUS_DELAY_MS
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- /* The api role runs the turns, the events' among them */}}
+            {{- if eq .Values.role "api" }}
+            {{- with .Values.config.turnEventMaxDelayMs }}
+            - name: TURN_EVENT_MAX_DELAY_MS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Checked on every role, rendered on the matrix role, the only one that reads owner words */}}
             {{- with .Values.config.ownerDeviceTrust }}
             {{- if not (has . (list "report" "enforce")) }}

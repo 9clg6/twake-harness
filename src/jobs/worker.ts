@@ -5,16 +5,25 @@ import type { Db } from '../db/client.js';
 import {
 	claimJob,
 	completeJob,
+	deferJob,
 	failJob,
+	requeueDeferredJobs,
 	requeueStaleJobs,
 	type Job,
 	type JobKind
 } from './queue.js';
 
+// What a handler asks of a job it could not run yet: to be tried again after a while, out of its
+// group's way meanwhile
+export interface Deferral {
+	readonly retryInMs: number;
+}
+
 export interface JobWorkerOptions {
 	readonly db: Db;
 	readonly kinds: readonly JobKind[];
-	readonly handler: (job: Job) => Promise<void>;
+	// Resolves once the job is done, to null, or to a deferral when it could not run yet
+	readonly handler: (job: Job) => Promise<Deferral | null>;
 	readonly log: FastifyBaseLogger;
 	readonly pollIntervalMs?: number;
 	readonly concurrency?: number;
@@ -29,7 +38,8 @@ export interface JobWorker {
 	stop(): Promise<void>;
 }
 
-// Polls the queue and runs jobs up to a concurrency; a failing job is retried with a backoff.
+// Polls the queue and runs jobs up to a concurrency; a failing job is retried with a backoff, and a
+// deferred one once due.
 export function startJobWorker(options: JobWorkerOptions): JobWorker {
 	const workerId = randomUUID();
 	const interval = options.pollIntervalMs ?? 500;
@@ -44,8 +54,9 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 
 	async function runOne(job: Job): Promise<void> {
 		try {
-			await options.handler(job);
-			await completeJob(options.db, job.id);
+			const deferral = await options.handler(job);
+			if (deferral === null) await completeJob(options.db, job.id);
+			else await deferJob(options.db, job.id, deferral.retryInMs);
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
 			options.log.error({ job: job.id, kind: job.kind, attempts: job.attempts, err }, 'job failed');
@@ -58,6 +69,7 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 		try {
 			const requeued = await requeueStaleJobs(options.db, leaseMs);
 			if (requeued > 0) options.log.warn({ requeued }, 'jobs requeued after their lease');
+			await requeueDeferredJobs(options.db, options.kinds);
 			// Once stopped, nothing new is claimed; a job the poll already holds still runs to its end
 			while (!stopped && running < concurrency) {
 				const job = await claimJob(options.db, options.kinds, workerId);

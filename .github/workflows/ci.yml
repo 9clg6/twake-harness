@@ -197,6 +197,22 @@ jobs:
           done
           grep -A1 WAKEUPS_PER_HOUR /tmp/wakeups-worker.yaml | grep -q '"30"'
           if grep -q WAKEUPS_PER_HOUR /tmp/wakeups-api.yaml /tmp/wakeups-matrix.yaml; then exit 1; fi
+      # TURN_EVENT_MAX_DELAY_MS is rendered on the api role alone, which runs the turns, only when
+      # config.turnEventMaxDelayMs is set, and as an integer, so that a large value from a values file
+      # comes out whole
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/event-delay-default-$role.yaml
+            if grep -q TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-default-$role.yaml; then exit 1; fi
+          done
+      - run: |
+          printf 'config:\n  turnEventMaxDelayMs: 7200000\n' > /tmp/event-delay.yaml
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h -f /tmp/event-delay.yaml > /tmp/event-delay-$role.yaml
+            kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/event-delay-$role.yaml
+          done
+          grep -A1 TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-api.yaml | grep -q '"7200000"'
+          if grep -q TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-worker.yaml /tmp/event-delay-matrix.yaml; then exit 1; fi
 
   image:
     needs: [check, test, chart]

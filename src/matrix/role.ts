@@ -1351,24 +1351,24 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const parsed = recoverPayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('recover payload is malformed');
 				await recover(parsed.data.owner);
-				return;
+				return null;
 			}
 			if (job.kind === 'prepare') {
 				const parsed = preparePayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('prepare payload is malformed');
 				await prepare(parsed.data.owner);
-				return;
+				return null;
 			}
 			if (job.kind === 'progress') {
 				const parsed = progressPayload.safeParse(job.payload);
 				// Best effort, as the rest of the feedback: a retry would hold the room's next counts back
 				if (!parsed.success) {
 					log.warn({ job: job.id }, 'progress payload is malformed');
-					return;
+					return null;
 				}
 				const { asUserId, roomId, replyTo, actions } = parsed.data;
 				feedback.turnProgressed({ assistantUserId: asUserId, roomId, eventId: replyTo }, actions);
-				return;
+				return null;
 			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
 			const intent = appservice.getIntentForUserId(job.payload.asUserId);
@@ -1405,6 +1405,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					);
 			}
 			if (room !== null) backupInBackground(room.userId, room.owner);
+			return null;
 		}
 	});
 

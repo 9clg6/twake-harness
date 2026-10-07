@@ -46,6 +46,13 @@ function assignment(recipients: readonly Record<string, unknown>[] = [ALICE]): A
 	};
 }
 
+// What the assistant says when admission refuses a turn
+const BUSY = 'I am busy right now';
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
 // A literal model: it names the event it was told of, and repeats anything else it hears
 function literal(request: ChatRequest): ScriptedReply {
 	const told = lastUser(request);
@@ -109,6 +116,24 @@ async function startListening(suite: string, env: Record<string, string>): Promi
 	};
 }
 
+// The lines the turn workers logged with this message about the turn of an event, once there are
+// that many
+async function turnLines(
+	l: Listening,
+	msg: string,
+	event: Assignment,
+	count: number
+): Promise<Record<string, unknown>[]> {
+	for (let i = 0; i < 240; i += 1) {
+		const lines = l.r.h
+			.logLines()
+			.filter((line) => line['msg'] === msg && line['reqId'] === event.id);
+		if (lines.length >= count) return lines;
+		await sleep(250);
+	}
+	throw new Error(`fewer than ${count} lines "${msg}" for ${event.id}`);
+}
+
 describe('a burst of assignments', () => {
 	let l: Listening;
 	beforeAll(async () => {
@@ -164,5 +189,125 @@ describe('a burst of assignments', () => {
 		} finally {
 			await worker.stop();
 		}
+	});
+});
+
+describe('an event turn the rate limit refuses', () => {
+	let l: Listening;
+	let worker: WorkerRole;
+	beforeAll(async () => {
+		// One turn a minute
+		l = await startListening('rate', { ADMISSION_USER_PER_MINUTE: '1' });
+		worker = await l.listen();
+	}, 240_000);
+	afterAll(async () => {
+		if (worker !== undefined) await worker.stop();
+		if (l !== undefined) await l.close();
+	});
+
+	it('runs once my rate allows it, tried again within the minute, never telling me I asked too much', async () => {
+		const first = assignment();
+		await l.publish(first);
+		await l.answerTo(first);
+		// My minute is spent: the next two assignments wait for the next one
+		const second = assignment();
+		const third = assignment();
+		await l.publish(second);
+		await l.publish(third);
+		// My own words are refused as before, and I am told so at once, while they wait
+		await l.r.client.sendText(l.r.room, 'And now?');
+		await l.r.client.waitForMessage(l.r.room, l.r.assistantId, (text) => text.startsWith(BUSY));
+		// One is told once my next minute comes, and the other waits for the minute after it
+		const told = await l.r.client.waitForMessage(
+			l.r.room,
+			l.r.assistantId,
+			(text) => text === `Told of ${second.id}` || text === `Told of ${third.id}`,
+			150_000
+		);
+		const waiting = told === `Told of ${second.id}` ? third : second;
+		// Tried again twice as late each time, but never more than a minute later, the window of the
+		// rate
+		const deferred = await turnLines(l, 'event turn deferred', waiting, 6);
+		expect(deferred.slice(0, 6).map((line) => line['retryInMs'])).toEqual([
+			2000, 4000, 8000, 16000, 32000, 60000
+		]);
+		expect(deferred.every((line) => line['reason'] === 'user_rate')).toBe(true);
+		// Told I asked too much for my own words alone
+		expect(l.r.saying(BUSY)).toHaveLength(1);
+	}, 180_000);
+});
+
+describe('event turns queued while the api role is down', () => {
+	let l: Listening;
+	let worker: WorkerRole;
+	beforeAll(async () => {
+		// Three turns a minute, and forty seconds for an event's turn admission refused to start
+		l = await startListening('outage', {
+			ADMISSION_USER_PER_MINUTE: '3',
+			TURN_EVENT_MAX_DELAY_MS: '40000'
+		});
+		worker = await l.listen();
+	}, 240_000);
+	afterAll(async () => {
+		if (worker !== undefined) await worker.stop();
+		if (l !== undefined) await l.close();
+	});
+
+	it('tells me of them once it is back, however long it was down and however over my rate', async () => {
+		// My minute is spent just before the api role goes down
+		const spent = [assignment(), assignment(), assignment()];
+		for (const event of spent) await l.publish(event);
+		for (const event of spent) await l.answerTo(event);
+		await l.r.h.stopTurnWorkers();
+		const queued = [assignment(), assignment(), assignment()];
+		for (const event of queued) await l.publish(event);
+		// The worker role wakes my assistant for them all the same
+		for (let i = 0; i < 120; i += 1) {
+			const woken = l.logs
+				.lines()
+				.filter((line) => line['msg'] === 'event queued')
+				.map((line) => line['eventId']);
+			if (queued.every((event) => woken.includes(event.id))) break;
+			await sleep(250);
+		}
+		// Down for longer than an event's turn may wait once admission refused it
+		await sleep(45_000);
+		l.r.h.startTurnWorkers();
+		for (const event of queued) await l.answerTo(event, 60_000);
+		expect(l.r.h.logLines().filter((line) => line['msg'] === 'event turn abandoned')).toEqual([]);
+		expect(l.r.saying(BUSY)).toHaveLength(0);
+	}, 180_000);
+});
+
+describe('an event turn admission refuses for too long', () => {
+	let l: Listening;
+	let worker: WorkerRole;
+	beforeAll(async () => {
+		// A day of one turn, and three seconds for an event's turn admission refused to start
+		l = await startListening('late', {
+			ADMISSION_USER_DAILY_TOKENS: '1',
+			TURN_EVENT_MAX_DELAY_MS: '3000'
+		});
+		worker = await l.listen();
+	}, 240_000);
+	afterAll(async () => {
+		if (worker !== undefined) await worker.stop();
+		if (l !== undefined) await l.close();
+	});
+
+	it('gives the turn up once too late, and never tells me I asked too much', async () => {
+		const first = assignment();
+		await l.publish(first);
+		await l.answerTo(first);
+		// My day is spent: the next assignment's turn waits, then is given up
+		const second = assignment();
+		await l.publish(second);
+		const [abandoned] = await turnLines(l, 'event turn abandoned', second, 1);
+		expect(abandoned).toMatchObject({ reason: 'user_budget' });
+		// My own words are refused as before: the only ones I am told I asked too much for
+		await l.r.client.sendText(l.r.room, 'And now?');
+		await l.r.client.waitForMessage(l.r.room, l.r.assistantId, (text) => text.startsWith(BUSY));
+		expect(l.r.saying(BUSY)).toHaveLength(1);
+		expect(turnCalls(l.r.h.apisix.llm.calls, second.id)).toHaveLength(0);
 	});
 });

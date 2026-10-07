@@ -50,6 +50,9 @@ export interface Config {
 		// How long a turn of an owner's message may go without an answer before its assistant posts
 		// a status message, which closes once the turn answered
 		readonly statusDelayMs: number;
+		// How long a turn an event woke may wait to start once admission first refused it: it is tried
+		// again until then, and given up past it
+		readonly eventMaxDelayMs: number;
 	};
 	readonly curation: {
 		readonly intervalMs: number;
@@ -171,6 +174,7 @@ const envSchema = z.object({
 	// messages and tool results, and an answer of up to LLM_MAX_TOKENS
 	TURN_HISTORY_MAX_CHARS: z.coerce.number().int().min(1).default(24_000),
 	TURN_STATUS_DELAY_MS: z.coerce.number().int().min(1000).default(3000),
+	TURN_EVENT_MAX_DELAY_MS: z.coerce.number().int().min(1000).default(3_600_000),
 	CURATION_INTERVAL_MS: z.coerce.number().int().min(0).default(86_400_000),
 	ADMISSION_MAX_INFLIGHT: z.coerce.number().int().min(1).default(32),
 	ADMISSION_USER_QUEUE: z.coerce.number().int().min(0).default(2),
@@ -344,7 +348,8 @@ export function loadConfig(env: Env): Config {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
 			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,
-			statusDelayMs: values.TURN_STATUS_DELAY_MS
+			statusDelayMs: values.TURN_STATUS_DELAY_MS,
+			eventMaxDelayMs: values.TURN_EVENT_MAX_DELAY_MS
 		},
 		curation: {
 			intervalMs: values.CURATION_INTERVAL_MS
