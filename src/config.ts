@@ -122,6 +122,11 @@ export interface Config {
 	// The activity exchange, where the applications publish what happens to people as CloudEvents,
 	// which the worker role listens to when it is set
 	readonly activity: ActivitySource | null;
+	readonly wakeups: {
+		// How many times events from the broker may wake one owner's assistant in a rolling hour,
+		// whatever their source, counted in the database: past it, an event wakes that owner no more
+		readonly perHour: number;
+	};
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -207,6 +212,8 @@ const envSchema = z.object({
 	ACTIVITY_ENABLED: z.enum(['true', 'false']).default('false'),
 	ACTIVITY_AMQP_URL: z.string().default(''),
 	ACTIVITY_TYPES: z.string().default(TASK_ASSIGNED_EVENT_TYPE),
+	// As many as the dispatcher allowed before the activity exchange replaced it
+	WAKEUPS_PER_HOUR: z.coerce.number().int().min(1).default(20),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -386,6 +393,7 @@ export function loadConfig(env: Env): Config {
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
+		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},

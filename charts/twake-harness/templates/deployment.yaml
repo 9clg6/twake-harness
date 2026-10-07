@@ -167,6 +167,13 @@ spec:
               value: {{ . | quote }}
             {{- end }}
             {{- end }}
+            {{- /* The worker role wakes the assistants for the events of every source it listens to */}}
+            {{- if eq .Values.role "worker" }}
+            {{- with .Values.config.wakeupsPerHour }}
+            - name: WAKEUPS_PER_HOUR
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
             {{- with .Values.config.matrixServerName }}
             - name: MATRIX_SERVER_NAME

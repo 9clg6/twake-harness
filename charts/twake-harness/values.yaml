@@ -106,6 +106,10 @@ config:
   # own, which its RabbitMQ user may configure and write; empty means the harness default,
   # twake-harness
   rabbitmqPrefix: ''
+  # How many times events from the broker may wake one owner's assistant in a rolling hour,
+  # whatever their source (worker role); past it, an event wakes them no more. Empty means the
+  # harness default, 20
+  wakeupsPerHour: ''
   # The service clients, by token subject, allowed to provision an owner's assistant through the
   # provisioning API, such as the identity server Twake Chat asks (comma separated)
   provisionerClientIds: ''
