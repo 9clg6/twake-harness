@@ -146,6 +146,27 @@ spec:
               value: {{ .Values.config.eventsClientIds | quote }}
             - name: PROVISIONER_CLIENT_IDS
               value: {{ .Values.config.provisionerClientIds | quote }}
+            {{- /* The worker role alone listens to RabbitMQ, and only it gets the broker's address. It wakes the owners by their email on the mail domain, MATRIX_MAIL_DOMAIN or else MATRIX_SERVER_NAME, which every role gets when set */}}
+            {{- if and (eq .Values.role "worker") .Values.config.activityEnabled }}
+            {{- if not (or .Values.config.matrixServerName .Values.config.matrixMailDomain) }}
+            {{- fail "config.matrixServerName or config.matrixMailDomain must be set for the worker role to listen to the activity exchange: it wakes the owners by their email on that mail domain" }}
+            {{- end }}
+            - name: ACTIVITY_ENABLED
+              value: "true"
+            - name: ACTIVITY_AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.activityAmqpUrlSecret | default (include "twake-harness.secretName" .) }}
+                  key: {{ .Values.config.activityAmqpUrlSecretKey }}
+            {{- with .Values.config.activityTypes }}
+            - name: ACTIVITY_TYPES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.rabbitmqPrefix }}
+            - name: RABBITMQ_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
             {{- with .Values.config.matrixServerName }}
             - name: MATRIX_SERVER_NAME

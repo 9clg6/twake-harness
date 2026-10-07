@@ -7,6 +7,7 @@ import { startExpiryScheduler } from '../consents/expiry.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
 import { startCurationScheduler } from '../curation/curation.js';
 import type { Db } from '../db/client.js';
+import { startActivityListener, type ActivityListener } from '../wakeups/activity.js';
 
 export interface WorkerRoleOptions {
 	readonly config: Config;
@@ -22,16 +23,25 @@ export interface WorkerRole {
 }
 
 // The daily curation and the hourly expiry of the requests nobody answered, each starting with a
-// pass at once; the expiries are counted on the metrics the role serves
+// pass at once; the expiries are counted on the metrics the role serves. With the activity
+// exchange configured, the role also listens to it, and connects to the broker for that alone.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const consentMetrics = makeConsentMetrics();
+	let activity: ActivityListener | null = null;
 	const app = await buildApp({
 		config,
 		db,
 		consentMetrics,
+		// Whether it listens, which the check says without failing: a broker down does not restart
+		// the role, as the client connects again by itself
+		health: () =>
+			activity === null ? {} : { activity: activity.connected() ? 'connected' : 'disconnected' },
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
+	if (config.activity !== null) {
+		activity = await startActivityListener({ config, db, log: app.log }, config.activity);
+	}
 	const curation = startCurationScheduler(db, app.log, config.curation.intervalMs);
 	const expiry = startExpiryScheduler(
 		db,
@@ -42,6 +52,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 	return {
 		app,
 		stop: async () => {
+			await activity?.close();
 			curation.stop();
 			expiry.stop();
 			await app.close();
