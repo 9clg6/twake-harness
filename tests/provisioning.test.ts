@@ -233,6 +233,124 @@ describe('a provisioned assistant', () => {
 		expect(answer).toContain('hello, assistant');
 	});
 
+	const WELCOME =
+		'Hello, I am Assistant, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.';
+
+	it('greets its owner in the first direct room they open with it, readable by their device', async () => {
+		const vera = await h.synapse.registerUser('vera');
+		const client = await startE2eeClient(h.synapse.url, vera);
+		clients.push(client);
+		const mine = await provisionUntilReady(vera.userId);
+
+		// As Twake Chat's « My assistant »: the owner opens the room, invites the assistant, and writes
+		// nothing yet
+		const room = await client.createDirectRoom(mine.userId);
+
+		const welcome = await client.waitForMessage(room, mine.userId, (text) =>
+			text.startsWith('Hello')
+		);
+		expect(welcome).toBe(WELCOME);
+	});
+
+	// The rooms where the owner's client read this greeting of their assistant
+	function greetedIn(client: E2eeClient, assistantId: string, greeting: string): string[] {
+		return client.messages
+			.filter((m) => m.sender === assistantId && m.body === greeting)
+			.map((m) => m.roomId);
+	}
+
+	// The help answer goes out after whatever the assistant was already saying in the room
+	async function askForHelp(
+		client: E2eeClient,
+		roomId: string,
+		assistantId: string
+	): Promise<void> {
+		await client.sendText(roomId, '!help');
+		await client.waitForMessage(roomId, assistantId, (text) =>
+			text.startsWith('I am your assistant')
+		);
+	}
+
+	// Someone else comes into a room of the assistant, which then leaves it: the room is no longer
+	// the one it writes its owner in
+	async function bringIn(
+		owner: MatrixUser,
+		someone: MatrixUser,
+		roomId: string,
+		assistantId: string
+	): Promise<void> {
+		const invited = await h.synapse.request(
+			owner,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+			{ user_id: someone.userId }
+		);
+		expect(invited.status).toBe(200);
+		await membershipOf(owner, roomId, assistantId, 'leave');
+	}
+
+	// The owner opens another direct room with the assistant, which the assistant holds as its own
+	async function openAnotherRoom(client: E2eeClient, assistantId: string): Promise<string> {
+		const room = await client.createDirectRoom(assistantId);
+		for (let i = 0; i < 120; i += 1) {
+			const opened = h
+				.logLines()
+				.some((l) => l['msg'] === 'assistant room opened by its owner' && l['roomId'] === room);
+			if (opened) return room;
+			await sleep(250);
+		}
+		throw new Error(`${assistantId} never took ${room} as its room`);
+	}
+
+	it('greets its owner once, whatever comes after: the room named, a restart, another room', async () => {
+		const wendy = await h.synapse.registerUser('wendy');
+		const xavier = await h.synapse.registerUser('xavier');
+		const client = await startE2eeClient(h.synapse.url, wendy);
+		clients.push(client);
+		const mine = await provisionUntilReady(wendy.userId);
+
+		const first = await client.createDirectRoom(mine.userId);
+		await client.waitForMessage(first, mine.userId, (text) => text === WELCOME);
+		const named = await provisionerPut(`${assistantPath(wendy.userId)}/home`, { roomId: first });
+		expect(named.status).toBe(204);
+		await h.restartRole();
+		await askForHelp(client, first, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
+
+		await bringIn(wendy, xavier, first, mine.userId);
+		const second = await openAnotherRoom(client, mine.userId);
+		await askForHelp(client, second, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
+	});
+
+	it('greets the owner who created it in the room it opened only, even once a provisioner asked for it', async () => {
+		const yves = await h.synapse.registerUser('yves');
+		const zoe = await h.synapse.registerUser('zoe');
+		const client = await startE2eeClient(h.synapse.url, yves);
+		clients.push(client);
+		const created = await h.api.post<{ roomId: string; userId: string }>(
+			'yves@test.local',
+			'/v1/assistants',
+			{ name: 'Yuki' }
+		);
+		expect(created.status).toBe(201);
+		const { roomId: opened, userId } = created.body;
+		const greeting =
+			'Hello, I am Yuki, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.';
+		for (let i = 0; i < 40; i += 1) {
+			if ((await h.synapse.pendingInvites(yves)).some((invite) => invite.roomId === opened)) break;
+			await sleep(250);
+		}
+		await client.joinRoom(opened);
+		await client.waitForMessage(opened, userId, (text) => text === greeting);
+
+		expect((await provisionUntilReady(yves.userId)).userId).toBe(userId);
+		await bringIn(yves, zoe, opened, userId);
+		const other = await openAnotherRoom(client, userId);
+		await askForHelp(client, other, userId);
+		expect(greetedIn(client, userId, greeting)).toEqual([opened]);
+	});
+
 	// What Twake Chat offers after « / » for the assistant (MSC4332): a state event per bot, keyed by
 	// the bot's id, its descriptions as MSC1767 text
 	async function announcedCommands(
