@@ -9,6 +9,7 @@ import {
 
 import type { Config } from '../config.js';
 import { isTransient } from '../db/transient.js';
+import { timeLibraryConnections } from './connect-timeout.js';
 import { brokerLogger, failureOf, logHandled, type Handled } from './logs.js';
 import { outcomeOf, type RecipientOutcome } from './outcomes.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
@@ -83,15 +84,16 @@ export function ownQueueName(config: Config, name: string): string {
 // is taken once what it wakes is written. A transient failure is tried again without end and any
 // other five times, before the message goes to the dead letter queue; one that is no event goes
 // there at once. Each message gives one line, event handled, and no line carries what a message
-// says. A broker out of reach or an exchange missing never stops the role: the listener tries
-// again without end, the waits doubling up to a minute, and resolves once its first attempt is
-// over.
-export async function listenOnOwnQueue(
+// says. It listens in the background, so that the role serves its health at once: a broker out of
+// reach, or one that never answers, or an exchange missing never stops the role, and the listener
+// tries again without end, the waits doubling up to a minute.
+export function listenOnOwnQueue(
 	deps: WakeDeps,
 	own: OwnQueue,
 	read: Read,
 	options: { readonly retryDelayMs?: number } = {}
-): Promise<Listener> {
+): Listener {
+	timeLibraryConnections();
 	const log = deps.log.child({ listener: own.name });
 	const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
 	const queue = ownQueueName(deps.config, own.name);
@@ -223,7 +225,9 @@ export async function listenOnOwnQueue(
 		})();
 	}
 
-	let running = (await attempt(1)) ? Promise.resolve() : retry();
+	let running = (async (): Promise<void> => {
+		if (!(await attempt(1))) await retry();
+	})();
 	return {
 		connected: () => listening && client?.isConnected() === true,
 		close: async () => {

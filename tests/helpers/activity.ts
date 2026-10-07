@@ -63,6 +63,18 @@ export async function toldOf(
 	throw new Error(`fewer than ${count} turns of ${eventId}`);
 }
 
+// Resolves to a worker role once each of its listeners reads its queue: it listens in the
+// background, and an event published before its queue is there would reach no queue
+export async function whenListening(role: WorkerRole): Promise<WorkerRole> {
+	for (let i = 0; i < 240; i += 1) {
+		const health = await role.app.inject({ method: 'GET', url: '/health' });
+		const { status: _status, ...listeners } = health.json<Record<string, unknown>>();
+		if (Object.values(listeners).every((state) => state === 'connected')) return role;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	throw new Error('a listener of the worker role never read its queue');
+}
+
 // A log stream that keeps nothing, for a role whose logs a test does not read
 export function silent(): Writable {
 	return new Writable({ write: (_chunk, _encoding, done) => done() });
@@ -127,11 +139,13 @@ export async function startActivityExchange(
 			RABBITMQ_PREFIX: PREFIX
 		},
 		listen: async (h) => {
-			worker = await startWorkerRole({
-				config: { ...h.config, role: 'worker' },
-				db: h.db,
-				logStream: silent()
-			});
+			worker = await whenListening(
+				await startWorkerRole({
+					config: { ...h.config, role: 'worker' },
+					db: h.db,
+					logStream: silent()
+				})
+			);
 		},
 		publish: (event) => broker.publish(ACTIVITY, event.type, event, event.id),
 		close: async () => {

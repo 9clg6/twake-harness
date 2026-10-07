@@ -328,11 +328,11 @@ function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 
 // Listens to Calendar's fanout on the instance's own queue, on Calendar's vhost: a new invitation
 // wakes its invitee's assistant
-export async function startCalendarListener(
+export function startCalendarListener(
 	deps: WakeDeps,
 	source: CalendarSource,
 	options: { readonly retryDelayMs?: number } = {}
-): Promise<Listener> {
+): Listener {
 	return listenOnOwnQueue(
 		deps,
 		// A fanout routes on no key: one binding takes all

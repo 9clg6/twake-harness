@@ -14,7 +14,8 @@ import {
 	PREFIX,
 	startActivityBroker,
 	toldOf,
-	turnCalls
+	turnCalls,
+	whenListening
 } from './helpers/activity.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
@@ -337,11 +338,13 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			BROKER_CONSENT_URL
 		});
 		// At its most verbose, so that every line it could write about an invitation is read
-		worker = await startWorkerRole({
-			config: { ...r.h.config, role: 'worker', logLevel: 'debug' },
-			db: r.h.db,
-			logStream: workerLogs.stream
-		});
+		worker = await whenListening(
+			await startWorkerRole({
+				config: { ...r.h.config, role: 'worker', logLevel: 'debug' },
+				db: r.h.db,
+				logStream: workerLogs.stream
+			})
+		);
 		r.h.apisix.llm.script = invitationModel;
 	}, 240_000);
 	afterAll(async () => {

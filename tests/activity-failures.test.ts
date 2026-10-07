@@ -9,7 +9,7 @@ import { TEST_DATABASE_URL } from './helpers/app.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
 import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
-import { startTcpProxy, type TcpProxy } from './helpers/tcp-proxy.js';
+import { startSilentServer, startTcpProxy, type TcpProxy } from './helpers/tcp-proxy.js';
 
 const ACTIVITY = 'activity';
 const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
@@ -174,6 +174,8 @@ describe('an event that fails holds back none of those after it, and is never lo
 			logStream: logs.stream,
 			retryDelayMs: RETRY_DELAY_MS
 		});
+		// It listens in the background: an event published before its queue is there reaches none
+		await until('listening', async () => (await healthOf(worker)) === 'connected');
 		// A literal model: it says which event it was told of
 		r.h.apisix.llm.script = (request: ChatRequest) => {
 			const id = /\(id ([^)]+)\)/.exec(lastUser(request))?.[1];
@@ -557,7 +559,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const loop = await vhostOf('loop', 'twake-harness-loop');
 		const url = broker.urlFor('twake-harness-loop', HARNESS_PASSWORD, loop.name);
 		// A first life declares the queue, before the event is published
-		await (await workerOn(url, captureLogs().stream)).stop();
+		const first = await workerOn(url, captureLogs().stream);
+		await until('listening', async () => (await healthOf(first)) === 'connected');
+		await first.stop();
 		const event = activityEvent();
 		database.cut();
 		try {
@@ -632,6 +636,32 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expectNoContentIn(awayLogs);
 	});
 
+	it('answers its health at once against a broker that never answers, and keeps trying', async () => {
+		const silent = await startSilentServer();
+		const silentLogs = captureLogs();
+		const startedAt = Date.now();
+		// A connection has half a second to open, rather than the ten seconds of a deployment
+		const role = await workerOn(
+			`amqp://${HARNESS_USER}:${HARNESS_PASSWORD}@127.0.0.1:${silent.port}?connection_timeout=500`,
+			silentLogs.stream
+		);
+		try {
+			expect(Date.now() - startedAt).toBeLessThan(2000);
+			expect(await healthOf(role)).toBe('disconnected');
+			await until(
+				'three attempts',
+				() => silentLogs.lines().filter((line) => line['msg'] === 'listen failed').length >= 3
+			);
+			// Each attempt gave up on its connection, so that none piles up
+			expect(silent.connections()).toBeLessThanOrEqual(1);
+			expect(silentLogs.text()).toContain('connect ETIMEDOUT');
+		} finally {
+			await role.stop();
+			await silent.close();
+		}
+		expectNoContentIn(silentLogs);
+	});
+
 	it('tries again when it cannot read its queue again after a reconnection, saying so meanwhile', async () => {
 		const vhost = await vhostOf('gone', 'twake-harness-gone');
 		const goneLogs = captureLogs();
@@ -640,7 +670,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			goneLogs.stream
 		);
 		try {
-			expect(await healthOf(gone)).toBe('connected');
+			await until('listening', async () => (await healthOf(gone)) === 'connected');
 			// The exchange goes, then the broker drops the listener's connection
 			await vhost.channel.deleteExchange(ACTIVITY);
 			await broker.closeConnectionsOf('twake-harness-gone');

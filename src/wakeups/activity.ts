@@ -202,11 +202,11 @@ function wakeupsOf(event: ActivityEvent): {
 
 // Listens to the activity exchange on the instance's own queue, bound to the types the deployment
 // lists alone, and wakes the assistant of each recipient of an event
-export async function startActivityListener(
+export function startActivityListener(
 	deps: WakeDeps,
 	source: ActivitySource,
 	options: { readonly retryDelayMs?: number } = {}
-): Promise<Listener> {
+): Listener {
 	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
 	const read = (message: RabbitMQMessage, { routingKey }: RabbitMQMessageProperties): Reading => {
 		// A type the deployment no longer lists keeps its binding, since the library removes none:

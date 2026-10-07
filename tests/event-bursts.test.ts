@@ -12,6 +12,7 @@ import {
 	startActivityBroker,
 	toldOf,
 	turnCalls,
+	whenListening,
 	type LogSink
 } from './helpers/activity.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -98,12 +99,14 @@ async function startListening(suite: string, env: Record<string, string>): Promi
 		r,
 		queue: `${prefix}.activity`,
 		logs,
-		listen: () =>
-			startWorkerRole({
-				config: { ...r.h.config, role: 'worker' },
-				db: r.h.db,
-				logStream: logs.stream
-			}),
+		listen: async () =>
+			whenListening(
+				await startWorkerRole({
+					config: { ...r.h.config, role: 'worker' },
+					db: r.h.db,
+					logStream: logs.stream
+				})
+			),
 		publish: (event) => broker.publish(ACTIVITY, event.type, event, event.id),
 		answerTo: (event, timeoutMs) =>
 			r.client.waitForMessage(

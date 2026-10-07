@@ -55,10 +55,10 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 	const listening =
 		options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs };
 	if (config.activity !== null) {
-		listeners.set('activity', await startActivityListener(deps, config.activity, listening));
+		listeners.set('activity', startActivityListener(deps, config.activity, listening));
 	}
 	if (config.calendar !== null) {
-		listeners.set('calendar', await startCalendarListener(deps, config.calendar, listening));
+		listeners.set('calendar', startCalendarListener(deps, config.calendar, listening));
 	}
 	const curation = startCurationScheduler(db, app.log, config.curation.intervalMs);
 	const expiry = startExpiryScheduler(

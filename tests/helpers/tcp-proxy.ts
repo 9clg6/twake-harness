@@ -61,3 +61,34 @@ export async function startTcpProxy(upstream: () => Upstream): Promise<TcpProxy>
 		}
 	};
 }
+
+// A server that takes connections and never says a word, as a broker behind a firewall that
+// drops what it sends back
+export interface SilentServer {
+	readonly port: number;
+	// The connections it holds open now
+	connections(): number;
+	close(): Promise<void>;
+}
+
+export async function startSilentServer(): Promise<SilentServer> {
+	const sockets = new Set<Socket>();
+	const server = createServer((socket) => {
+		sockets.add(socket);
+		socket.on('error', () => undefined);
+		socket.on('close', () => sockets.delete(socket));
+		// Reads what it is sent and drops it: unread, the end of a connection would never come
+		socket.resume();
+	});
+	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+	const address = server.address();
+	if (address === null || typeof address === 'string') throw new Error('the server has no port');
+	return {
+		port: address.port,
+		connections: () => sockets.size,
+		close: async () => {
+			for (const socket of sockets) socket.destroy();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	};
+}
