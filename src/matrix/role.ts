@@ -154,6 +154,9 @@ const TO_DEVICE_ONLY_FILTER = JSON.stringify({
 	account_data: { limit: 0 }
 });
 
+// The syncs a catch-up of a device's to-device messages makes at most, a hundred messages each
+const MAX_CATCH_UP_PAGES = 50;
+
 interface ToDeviceSync {
 	readonly next_batch?: string;
 	readonly to_device?: { events?: unknown[] };
@@ -414,34 +417,68 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		);
 	});
 
-	// Synapse's push of to-device messages (MSC2409) can skip a key share when another to-device
-	// message lands at the same instant, while the device's own inbox still holds it: after a failed
-	// decryption, the assistant's device fetches what the homeserver kept for it and reads again.
-	const syncSince = new Map<string, string>();
+	// Synapse pushes no to-device message while it holds the role for down, as it does for a while
+	// once the role stopped, and its push of to-device messages (MSC2409) can skip a key share when
+	// another one lands at the same instant: after a failed decryption, the assistant's device reads
+	// what the homeserver keeps for it. Synapse keeps a device's to-device messages until the device
+	// syncs past them, the pushed ones included, and hands a hundred at most per sync, the oldest
+	// first: the device reads page after page until none is left, and where it stopped is kept, so
+	// that the next catch-up, in this process or the next, goes on from there. Started again from
+	// the oldest message after a restart, it read the oldest page only, the one Synapse answers from
+	// its cache for two minutes when the previous process asked it the same.
+	const catchUps = new Map<string, Promise<number>>();
 	async function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
+		// One catch-up at a time per assistant: two at once would read the same page
+		const previous = catchUps.get(userId);
+		const current = (async (): Promise<number> => {
+			if (previous !== undefined) await previous.catch(() => undefined);
+			return catchUpToDevice(userId, roomId);
+		})();
+		catchUps.set(userId, current);
+		try {
+			return await current;
+		} finally {
+			if (catchUps.get(userId) === current) catchUps.delete(userId);
+		}
+	}
+
+	async function catchUpToDevice(userId: string, roomId: string): Promise<number> {
 		const intent = appservice.getIntentForUserId(userId);
 		await ensureEncryption(intent);
 		const client = intent.underlyingClient;
-		const since = syncSince.get(userId);
-		const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
-			timeout: 0,
-			filter: TO_DEVICE_ONLY_FILTER,
-			...(since === undefined ? {} : { since })
-		})) as ToDeviceSync;
-		if (typeof sync.next_batch === 'string') syncSince.set(userId, sync.next_batch);
-		const events = sync.to_device?.events ?? [];
+		const userStorage = storage.storageForUser?.(userId);
+		// Kept per device: where one device stopped means nothing to the next one of the assistant
+		const positionKey = `to_device_since:${client.crypto.clientDeviceId}`;
+		let since: string | null = (await userStorage?.readValue(positionKey)) ?? null;
 		// The members' devices are looked up again too: a first sync carries no device lists
 		const members = await client.getJoinedRoomMembers(roomId);
-		await client.crypto.updateSyncData(
-			events as Parameters<typeof client.crypto.updateSyncData>[0],
-			sync.device_one_time_keys_count ?? (await lastCounts(userId)),
-			(sync.device_unused_fallback_key_types ?? (await lastFallbacks(userId))) as Parameters<
-				typeof client.crypto.updateSyncData
-			>[2],
-			[...new Set([...(sync.device_lists?.changed ?? []), ...members])],
-			sync.device_lists?.left ?? []
-		);
-		return events.length;
+		let fetched = 0;
+		for (let page = 0; page < MAX_CATCH_UP_PAGES; page += 1) {
+			const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
+				timeout: 0,
+				filter: TO_DEVICE_ONLY_FILTER,
+				...(since === null ? {} : { since })
+			})) as ToDeviceSync;
+			const events = sync.to_device?.events ?? [];
+			const changed = sync.device_lists?.changed ?? [];
+			await client.crypto.updateSyncData(
+				events as Parameters<typeof client.crypto.updateSyncData>[0],
+				sync.device_one_time_keys_count ?? (await lastCounts(userId)),
+				(sync.device_unused_fallback_key_types ?? (await lastFallbacks(userId))) as Parameters<
+					typeof client.crypto.updateSyncData
+				>[2],
+				page === 0 ? [...new Set([...changed, ...members])] : changed,
+				sync.device_lists?.left ?? []
+			);
+			fetched += events.length;
+			if (typeof sync.next_batch !== 'string') return fetched;
+			since = sync.next_batch;
+			await userStorage?.storeValue(positionKey, since);
+			// A page with nothing left: the sync past every message also let Synapse drop them
+			if (events.length === 0) return fetched;
+		}
+		log.warn({ userId, fetched }, 'to-device catch-up stopped before the end of the inbox');
+		return fetched;
 	}
 
 	// What the SDK last stored of a device's one-time keys, to hand its crypto a change of device
