@@ -1,7 +1,13 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { startTestHarness, type TestHarness } from './helpers/app.js';
-import { echoScript, type ChatRequest } from './helpers/fake-apisix.js';
+import {
+	echoScript,
+	type ChatRequest,
+	type LlmScript,
+	type ScriptedReply,
+	type ToolCall
+} from './helpers/fake-apisix.js';
 
 interface ChatReply {
 	session_id: string;
@@ -295,5 +301,129 @@ describe('a chat turn with the scripted model', () => {
 			const replies = await Promise.all(turns);
 			expect(replies.map((r) => r.status)).toEqual([200, 200]);
 		});
+	});
+});
+
+async function chatIn(
+	h: TestHarness,
+	payload: Record<string, unknown>,
+	requestId: string
+): Promise<{ status: number; body: ChatReply & { error?: string } }> {
+	const res = await h.app.inject({
+		method: 'POST',
+		url: '/v1/chat',
+		headers: {
+			authorization: `Bearer ${await h.issuer.mint({ sub: 'alice' })}`,
+			'x-request-id': requestId
+		},
+		payload
+	});
+	return { status: res.statusCode, body: res.json() };
+}
+
+// A model that makes one call after another for as long as it has tools, so that it goes past the
+// limit of its message, then gives the answer given once it has none
+function pastTheLimit(last: ScriptedReply): LlmScript {
+	return (request, index) =>
+		request.tools === undefined
+			? last
+			: {
+					toolCalls: [
+						{
+							id: `read_${index}`,
+							type: 'function',
+							function: { name: 'consents_list', arguments: '{}' }
+						}
+					]
+				};
+}
+
+// A call the model makes, or writes as text, once it has no tools left
+const LATE_CALL: ToolCall = {
+	id: 'late',
+	type: 'function',
+	function: { name: 'consents_list', arguments: '{}' }
+};
+const LATE_CALL_MARKUP = '<tool_call>\n{"name": "consents_list", "arguments": {}}\n</tool_call>';
+
+describe('the last answer of a turn past its limit of tool calls', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		h = await startTestHarness();
+	});
+	afterAll(async () => {
+		await h.close();
+	});
+	beforeEach(() => {
+		h.apisix.llm.calls.length = 0;
+	});
+
+	it("is the harness's own notice of what was done when the model gives no words", async () => {
+		const notice =
+			'I did 6 actions for your request, then reached my limit for this message. Say “continue” and I will carry on.';
+		const wordless: Record<string, { readonly last: ScriptedReply; readonly reason: string }> = {
+			calls: { last: { toolCalls: [LATE_CALL] }, reason: 'tool_calls' },
+			nothing: { last: { content: '' }, reason: 'empty' },
+			markup: { last: { content: LATE_CALL_MARKUP }, reason: 'markup' },
+			json: { last: { content: '{"name": "consents_list", "arguments": {}}' }, reason: 'markup' },
+			fenced: {
+				last: {
+					content:
+						'```json\n[{"type": "function", "function": {"name": "consents_list", "arguments": "{}"}}]\n```'
+				},
+				reason: 'markup'
+			}
+		};
+		let session = '';
+		for (const [kind, { last, reason }] of Object.entries(wordless)) {
+			h.apisix.llm.script = pastTheLimit(last);
+			const { status, body } = await chatIn(h, { message: 'Read them all' }, `notice-${kind}`);
+			expect({ kind, status, answer: body.answer }).toEqual({ kind, status: 200, answer: notice });
+			const noticed = h
+				.logLines()
+				.find(
+					(line) => line['reqId'] === `notice-${kind}` && line['msg'] === 'tool call limit notice'
+				);
+			expect(noticed).toMatchObject({ level: 30, actions: 6, reason });
+			session = body.session_id;
+		}
+		// The conversation keeps the notice as the assistant's answer, for the model's next turn
+		h.apisix.llm.script = echoScript;
+		const calls = h.apisix.llm.calls.length;
+		await chatIn(h, { session_id: session, message: 'continue' }, 'notice-next');
+		const next = h.apisix.llm.calls[calls]?.request.messages ?? [];
+		expect(next.at(-2)).toMatchObject({ role: 'assistant', content: notice });
+	});
+
+	it('keeps the words the model wrote beside its calls', async () => {
+		const words = 'Six reads done, two remain. Ask me to continue.';
+		for (const last of [
+			{ content: words, toolCalls: [LATE_CALL] },
+			{ content: `${words}\n${LATE_CALL_MARKUP}` }
+		]) {
+			h.apisix.llm.script = pastTheLimit(last);
+			const { status, body } = await chatIn(h, { message: 'Read them all' }, 'notice-words');
+			expect(status).toBe(200);
+			expect(body.answer).toBe(words);
+		}
+	});
+});
+
+describe('the notice of a turn past its limit in a deployment that speaks French', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		h = await startTestHarness({ env: { ASSISTANT_LOCALE: 'fr', TURN_MAX_TOOL_CALLS: '1' } });
+	});
+	afterAll(async () => {
+		await h.close();
+	});
+
+	it('speaks French, and of one action as one', async () => {
+		h.apisix.llm.script = pastTheLimit({ content: LATE_CALL_MARKUP });
+		const { status, body } = await chatIn(h, { message: 'Lis-les toutes' }, 'notice-fr');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(
+			"J'ai fait 1 action pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive."
+		);
 	});
 });

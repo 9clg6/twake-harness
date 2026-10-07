@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { LlmClient, LlmCompletion, LlmMessage, LlmToolDefinition } from '../llm/client.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
+import { withoutCallMarkup } from './call-markup.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	runTool,
@@ -18,6 +19,12 @@ export interface TurnInput {
 	// call its owner allowed
 	readonly message: string | null;
 	readonly context: ToolContext;
+	// The actions the turn did before the model spoke: the call its owner allowed, when it resumes
+	// from one
+	readonly actionsBefore: number;
+	// What the owner reads, in their language, when the model answers the limit of tool calls with
+	// no words for them: given the actions the turn did, what was done and how to have it go on
+	limitNotice(actions: number): string;
 }
 
 export interface TurnOutput {
@@ -170,11 +177,11 @@ function answerOf(completion: LlmCompletion): string {
 
 // One turn: the model answers, possibly through tool calls, within a bounded number of calls. A
 // model that goes past that number is asked once more, without tools, to tell its owner where
-// things stand, so that the turn ends on an answer whatever the model does. Every model call and
-// every tool call is logged at info with its metadata only. The conversation itself (prompt,
-// answer, reasoning, tool arguments and results) goes to debug: messages reach the harness
-// end-to-end encrypted and are decrypted only here, so their text must stay out of the production
-// logs.
+// things stand; should it write no words for them, the harness tells them itself what was done, so
+// that the turn ends on an answer whatever the model writes. Every model call and every tool call
+// is logged at info with its metadata only. The conversation itself (prompt, answer, reasoning,
+// tool arguments and results) goes to debug: messages reach the harness end-to-end encrypted and
+// are decrypted only here, so their text must stay out of the production logs.
 export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOutput> {
 	// What this turn adds to the conversation, which the model always reads whole
 	const messages: LlmMessage[] =
@@ -188,6 +195,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	}
 	const system: LlmMessage = { role: 'system', content: input.systemPrompt };
 	let toolCalls = 0;
+	// The calls that reached their tool, and those of the turn before the model spoke
+	let actions = input.actionsBefore;
 	let tokens = 0;
 	let iteration = 0;
 	// The calls the model made past the limit of the message, which never run
@@ -236,6 +245,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			toolCalls += 1;
 			const tool = deps.tools.find(call.function.name);
 			const args = parseArguments(call.function.arguments);
+			if (tool !== null && args !== null) actions += 1;
 			const started = performance.now();
 			const outcome =
 				tool === null
@@ -306,7 +316,20 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	};
 	const asked = await askModel(deps, iteration, [instructed, ...past, ...messages], []);
 	tokens += asked.tokens;
-	const answer = answerOf(asked.completion);
+	// A model with no tools may still call one, through the API or in its text: those calls are
+	// not for the owner, its words beside them are
+	const written = asked.completion.content ?? '';
+	let answer = withoutCallMarkup(written);
+	if (answer.length === 0) {
+		const reason =
+			written.trim().length > 0
+				? 'markup'
+				: asked.completion.toolCalls.length > 0
+					? 'tool_calls'
+					: 'empty';
+		deps.log.info({ actions, reason }, 'tool call limit notice');
+		answer = input.limitNotice(actions);
+	}
 	messages.push({ role: 'assistant', content: answer });
 	return { answer, messages: [...input.history, ...messages], tokens };
 }

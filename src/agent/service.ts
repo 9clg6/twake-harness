@@ -125,6 +125,8 @@ interface Replayed {
 	readonly messages: LlmMessage[];
 	readonly question: Question | null;
 	readonly notice: string | null;
+	// Whether the call went to its contract: one no longer offered as its owner allowed it did not
+	readonly ran: boolean;
 }
 
 // What a contract answers the call its owner allowed once they saw its preview, when what the call
@@ -407,7 +409,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				? consent.changed
 				: question === null
 					? (outcome.final ?? null)
-					: null
+					: null,
+			ran: outcome.result !== CONTRACT_CHANGED
 		};
 	}
 
@@ -570,9 +573,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// Read at the start of every turn, never kept: a session can span days
 			const moment = describeMoment(clock.now(), config.timeZone, locale);
 			let history: readonly LlmMessage[] = session.messages;
+			// The call its owner allowed counts among the actions of the turn it resumes
+			let actionsBefore = 0;
 			if (approved !== null && input.resume !== undefined) {
 				const { pendingCallId } = input.resume;
 				const replayed = await replay(approved, pendingCallId, context, log, messages.consent);
+				if (replayed.ran) actionsBefore = 1;
 				// A call that waits for its owner again ends the turn on the harness's new question,
 				// which the conversation keeps as the assistant's answer: the owner's next yes tries it
 				// once more, never the model
@@ -651,7 +657,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						}),
 						history,
 						message: told.message,
-						context
+						context,
+						actionsBefore,
+						limitNotice: (actions) => messages.notices.callLimit(actions)
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>

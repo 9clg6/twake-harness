@@ -700,6 +700,40 @@ describe('my answer lets my assistant carry on', () => {
 		);
 		expect(made).toBe(8);
 	});
+
+	it('tells me itself what it did when its last answer past the limit holds no words', async () => {
+		await withdrawConsent(h.db, 'alice@test.local', 'notes', 'read');
+		// As above, but with no tools left, the model writes one more call as text
+		let made = 0;
+		h.apisix.llm.script = (request) => {
+			if (request.tools === undefined) {
+				return {
+					content: `<tool_call>\n{"name": "search_notes", "arguments": {"q": "note ${made + 1}"}}\n</tool_call>`
+				};
+			}
+			made += 1;
+			return {
+				toolCalls: [
+					{
+						id: `again_${made}`,
+						type: 'function',
+						function: { name: 'search_notes', arguments: JSON.stringify({ q: `note ${made}` }) }
+					}
+				]
+			};
+		};
+		const seen = requests().length;
+		await client.sendText(room, 'Read my ten notes again, one at a time');
+		const request = await nextRequest(seen);
+		const failed = failures().length;
+		await client.react(room, request, '✅');
+		// The call I allowed counts with the six my yes let it run
+		expect(await client.waitForMessage(room, assistantId, (t) => t.startsWith('I did '))).toBe(
+			'I did 7 actions for your request, then reached my limit for this message. Say “continue” and I will carry on.'
+		);
+		expect(failures()).toHaveLength(failed);
+		expect(h.apisix.contracts.calls).toHaveLength(7);
+	});
 });
 
 describe('my answer is admitted like any message', () => {
