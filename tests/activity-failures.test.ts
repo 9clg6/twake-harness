@@ -449,7 +449,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		await until('no connection left', async () => (await connections()) === 0);
 	});
 
-	it('starts while the broker is out of reach, tries again and again, and listens once it is back', async () => {
+	it('starts while the broker is out of reach, listens once it is back, and stops while it is gone', async () => {
 		const channel = await broker.addVhost('away');
 		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
 		await broker.addUser('twake-harness-away', HARNESS_PASSWORD, PERMISSIONS);
@@ -461,6 +461,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		url.port = String(proxy.port);
 		const awayLogs = captureLogs();
 		const away = await workerOn(url.toString(), awayLogs.stream);
+		let stopped = false;
 		try {
 			expect(await healthOf(away)).toBe('disconnected');
 			await until(
@@ -472,8 +473,13 @@ describe('an event that fails holds back none of those after it, and is never lo
 			const event = activityEvent();
 			await publishOn(channel, event);
 			await toldOf(event);
-		} finally {
+			// The broker goes again, and the role stops meanwhile, as at a rollout
+			proxy.cut();
+			await until('disconnected', async () => (await healthOf(away)) === 'disconnected');
+			stopped = true;
 			await away.stop();
+		} finally {
+			if (!stopped) await away.stop();
 			await proxy.close();
 		}
 	});

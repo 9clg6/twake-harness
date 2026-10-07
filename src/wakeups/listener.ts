@@ -146,7 +146,9 @@ export async function listenOnOwnQueue(
 			stopping.abort();
 			await running;
 			listening = false;
-			await client?.close();
+			// With the broker gone, the library fails to close the channel it lost, and logs it: the
+			// role stops all the same
+			await client?.close().catch(() => undefined);
 		}
 	};
 }
