@@ -142,11 +142,31 @@ export async function listActiveAssistants(db: Db): Promise<{ owner: string; use
 }
 
 // An assistant a provisioner asked for, in an index without user content: the matrix role
-// prepares it at its start even before it has a room
-export async function saveProvisioned(db: Db, owner: string, userId: string): Promise<void> {
+// prepares it at its start even before it has a room. An assistant the provisioner made owes its
+// owner the greeting until it gives it; one that already existed owes no more than it did.
+export async function saveProvisioned(
+	db: Db | Tx,
+	provisioned: { readonly owner: string; readonly userId: string; readonly owesWelcome: boolean }
+): Promise<void> {
+	const { owner, userId, owesWelcome } = provisioned;
 	await db.sql`
-		insert into assistant_provisioned (owner, user_id) values (${owner}, ${userId})
-		on conflict (owner) do update set user_id = excluded.user_id`;
+		insert into assistant_provisioned (owner, user_id, owes_welcome)
+		values (${owner}, ${userId}, ${owesWelcome})
+		on conflict (owner) do update set
+			user_id = excluded.user_id,
+			owes_welcome = assistant_provisioned.owes_welcome or excluded.owes_welcome`;
+}
+
+// Takes the greeting a provisioned assistant owes its owner: true for the one call that took it
+export async function claimProvisionedWelcome(
+	tx: Tx,
+	owner: string,
+	userId: string
+): Promise<boolean> {
+	const claimed = await tx.sql`
+		update assistant_provisioned set owes_welcome = false
+		where owner = ${owner} and user_id = ${userId} and owes_welcome`;
+	return claimed.count === 1;
 }
 
 // The provisioned assistants that have no room yet, which the rooms index does not list

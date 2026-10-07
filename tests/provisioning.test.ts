@@ -3,29 +3,21 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { runMigrations } from '../src/db/migrate.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
+import { eventually } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
+import { PROVISIONER, provisioningPath, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
-// The service client ToM gets its tokens as, and the owner it provisions for
-const PROVISIONER = 'tom-bots';
+// The owner ToM provisions for
 const OWNER = '@bob:test.local';
-
-function assistantPath(owner: string): string {
-	return `/v1/provisioning/assistants/${encodeURIComponent(owner)}`;
-}
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
-interface MyAssistant {
-	readonly userId: string;
-	readonly deviceId: string;
-	readonly masterKey: string;
 }
 
 interface KeysQuery {
@@ -55,21 +47,25 @@ describe('the provisioning API admits its provisioners only', () => {
 	});
 
 	it("refuses a call without a token, and a token that is not a provisioner's", async () => {
-		const anonymous = await h.app.inject({ method: 'PUT', url: assistantPath(OWNER), payload: {} });
+		const anonymous = await h.app.inject({
+			method: 'PUT',
+			url: provisioningPath(OWNER),
+			payload: {}
+		});
 		expect(anonymous.statusCode).toBe(401);
 
 		// The owner's own token is not a provisioner's either
-		const asOwner = await api.put('bob@test.local', assistantPath(OWNER), {});
+		const asOwner = await api.put('bob@test.local', provisioningPath(OWNER), {});
 		expect(asOwner.status).toBe(403);
 		expect(asOwner.body).toEqual({ error: 'not a provisioner' });
 	});
 
 	it('refuses an owner who is not a user of the homeserver', async () => {
-		const elsewhere = await api.put(PROVISIONER, assistantPath('@bob:elsewhere.example'), {});
+		const elsewhere = await api.put(PROVISIONER, provisioningPath('@bob:elsewhere.example'), {});
 		expect(elsewhere.status).toBe(422);
 		expect(elsewhere.body).toEqual({ error: 'owner not on the homeserver' });
 
-		const notAMatrixId = await api.put(PROVISIONER, assistantPath('bob@test.local'), {});
+		const notAMatrixId = await api.put(PROVISIONER, provisioningPath('bob@test.local'), {});
 		expect(notAMatrixId.status).toBe(422);
 	});
 });
@@ -85,7 +81,7 @@ describe('a provisioned assistant', () => {
 	): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | undefined }> {
 		const res = await h.apps[0]!.inject({
 			method: 'PUT',
-			url: assistantPath(owner),
+			url: provisioningPath(owner),
 			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
 			payload: body
 		});
@@ -111,17 +107,6 @@ describe('a provisioned assistant', () => {
 			status: res.statusCode,
 			body: res.body.length === 0 ? {} : (res.json() as Record<string, unknown>)
 		};
-	}
-
-	// What the owner's client gets once it asks again after a 503, as ToM tells it to
-	async function provisionUntilReady(owner: string): Promise<MyAssistant> {
-		for (let i = 0; i < 120; i += 1) {
-			const res = await provision(owner);
-			if (res.status === 200) return res.body as unknown as MyAssistant;
-			expect(res.status).toBe(503);
-			await sleep(250);
-		}
-		throw new Error('the assistant never became ready');
 	}
 
 	async function waitForMember(viewer: MatrixUser, roomId: string, userId: string): Promise<void> {
@@ -158,7 +143,7 @@ describe('a provisioned assistant', () => {
 		expect(first.body).toEqual({ error: 'not_ready' });
 		expect(first.retryAfter).toBe('5');
 
-		const mine = await provisionUntilReady(bob.userId);
+		const mine = await provisionUntilReady(h.api, bob.userId);
 		expect(mine.userId).toBe('@twake-space-assistant-bob:test.local');
 
 		// What the owner's client compares before it trusts the assistant
@@ -221,7 +206,7 @@ describe('a provisioned assistant', () => {
 		const carol = await h.synapse.registerUser('carol');
 		const client = await startE2eeClient(h.synapse.url, carol);
 		clients.push(client);
-		const mine = await provisionUntilReady(carol.userId);
+		const mine = await provisionUntilReady(h.api, carol.userId);
 
 		// As Twake Chat's « My assistant »: an encrypted direct room, the assistant invited. Synapse
 		// pushes nothing sent before the assistant's join, so the owner writes once it is there.
@@ -231,6 +216,248 @@ describe('a provisioned assistant', () => {
 
 		const answer = await client.waitForMessage(room, mine.userId, (text) => text.includes('echo'));
 		expect(answer).toContain('hello, assistant');
+	});
+
+	const WELCOME =
+		'Hello, I am Assistant, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.';
+
+	it('greets its owner in the first direct room they open with it, readable by their device', async () => {
+		const vera = await h.synapse.registerUser('vera');
+		const client = await startE2eeClient(h.synapse.url, vera);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, vera.userId);
+
+		// As Twake Chat's « My assistant »: the owner opens the room, invites the assistant, and writes
+		// nothing yet
+		const room = await client.createDirectRoom(mine.userId);
+
+		const welcome = await client.waitForMessage(room, mine.userId, (text) =>
+			text.startsWith('Hello')
+		);
+		expect(welcome).toBe(WELCOME);
+		// It went through the homeserver encrypted, as everything in the room
+		const greeting = client.messages.find((m) => m.roomId === room && m.body === WELCOME);
+		const raw = await h.synapse.request(
+			vera,
+			'GET',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/messages?dir=b&limit=50`
+		);
+		const chunk = (raw.body['chunk'] ?? []) as { type: string; event_id: string }[];
+		expect(chunk.find((e) => e.event_id === greeting?.eventId)?.type).toBe('m.room.encrypted');
+		expect(chunk.filter((e) => e.type === 'm.room.message')).toEqual([]);
+	});
+
+	// The rooms where the owner's client read this greeting of their assistant
+	function greetedIn(client: E2eeClient, assistantId: string, greeting: string): string[] {
+		return client.messages
+			.filter((m) => m.sender === assistantId && m.body === greeting)
+			.map((m) => m.roomId);
+	}
+
+	// The help answer goes out after whatever the assistant was already saying in the room
+	async function askForHelp(
+		client: E2eeClient,
+		roomId: string,
+		assistantId: string
+	): Promise<void> {
+		await client.sendText(roomId, '!help');
+		await client.waitForMessage(roomId, assistantId, (text) =>
+			text.startsWith('I am your assistant')
+		);
+	}
+
+	// Someone else comes into a room of the assistant, which then leaves it: the room is no longer
+	// the one it writes its owner in
+	async function bringIn(
+		owner: MatrixUser,
+		someone: MatrixUser,
+		roomId: string,
+		assistantId: string
+	): Promise<void> {
+		const invited = await h.synapse.request(
+			owner,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/invite`,
+			{ user_id: someone.userId }
+		);
+		expect(invited.status).toBe(200);
+		await membershipOf(owner, roomId, assistantId, 'leave');
+	}
+
+	// Resolves once the assistant took the room as one of its rooms, as many times as given
+	async function heldAsItsRoom(roomId: string, times = 1): Promise<void> {
+		const taken = await eventually(
+			() =>
+				h
+					.logLines()
+					.filter(
+						(l) => l['msg'] === 'assistant room opened by its owner' && l['roomId'] === roomId
+					).length >= times,
+			30_000
+		);
+		expect(taken).toBe(true);
+	}
+
+	// The owner opens a direct room with the assistant, which the assistant then holds as its own
+	async function openRoom(client: E2eeClient, assistantId: string): Promise<string> {
+		const room = await client.createDirectRoom(assistantId);
+		await heldAsItsRoom(room);
+		return room;
+	}
+
+	// Holds the owner's assistant row, as a busy database would keep the matrix role waiting on it;
+	// resolves to what releases it
+	async function holdAssistantOf(owner: string): Promise<() => Promise<void>> {
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let held = (): void => undefined;
+		const holding = new Promise<void>((resolve) => {
+			held = resolve;
+		});
+		const transaction = h.db.sql.begin(async (sql) => {
+			await sql`select set_config('app.principal', ${owner}, true)`;
+			await sql`select 1 from assistants where owner = ${owner} for update`;
+			held();
+			await released;
+		});
+		await holding;
+		return async () => {
+			release();
+			await transaction;
+		};
+	}
+
+	it('greets its owner before it answers them, however soon they write', async () => {
+		const kate = await h.synapse.registerUser('kate');
+		const client = await startE2eeClient(h.synapse.url, kate);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, kate.userId);
+
+		// The owner writes the moment the assistant joined, while the database is slow to record the
+		// room as the assistant's
+		const release = await holdAssistantOf('kate@test.local');
+		let room: string;
+		try {
+			room = await client.createDirectRoom(mine.userId);
+			await waitForMember(kate, room, mine.userId);
+			const early = await client.sendText(room, '!help');
+			// Until the role is done with it: answered, or dropped as a message of a room nobody holds
+			await eventually(() =>
+				h
+					.logLines()
+					.some(
+						(l) =>
+							(l['msg'] === 'answer sent' && l['roomId'] === room) ||
+							(l['msg'] === 'room message failed' && l['eventId'] === early)
+					)
+			);
+		} finally {
+			await release();
+		}
+
+		await client.waitForMessage(room, mine.userId, (text) => text === WELCOME);
+		await askForHelp(client, room, mine.userId);
+		const said = client.messages.filter((m) => m.roomId === room && m.sender === mine.userId);
+		expect(said[0]?.body).toBe(WELCOME);
+	});
+
+	it('greets its owner once, whatever comes after: the room named, a restart, another room', async () => {
+		const wendy = await h.synapse.registerUser('wendy');
+		const xavier = await h.synapse.registerUser('xavier');
+		const client = await startE2eeClient(h.synapse.url, wendy);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, wendy.userId);
+
+		const first = await client.createDirectRoom(mine.userId);
+		await client.waitForMessage(first, mine.userId, (text) => text === WELCOME);
+		const named = await provisionerPut(`${provisioningPath(wendy.userId)}/home`, { roomId: first });
+		expect(named.status).toBe(204);
+		await h.restartRole();
+		await askForHelp(client, first, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
+
+		await bringIn(wendy, xavier, first, mine.userId);
+		const second = await openRoom(client, mine.userId);
+		await askForHelp(client, second, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
+	});
+
+	it('greets its owner once, whether they invite it again or leave for another room', async () => {
+		const lena = await h.synapse.registerUser('lena');
+		const omar = await h.synapse.registerUser('omar');
+		const client = await startE2eeClient(h.synapse.url, lena);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, lena.userId);
+		const room = await openRoom(client, mine.userId);
+		await client.waitForMessage(room, mine.userId, (text) => text === WELCOME);
+		const roomPath = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}`;
+
+		// Someone else comes in and the assistant leaves; the owner takes that invitation back, and
+		// invites the assistant again
+		await bringIn(lena, omar, room, mine.userId);
+		const revoked = await h.synapse.request(lena, 'POST', `${roomPath}/kick`, {
+			user_id: omar.userId
+		});
+		expect(revoked.status).toBe(200);
+		const invited = await h.synapse.request(lena, 'POST', `${roomPath}/invite`, {
+			user_id: mine.userId
+		});
+		expect(invited.status).toBe(200);
+		await heldAsItsRoom(room, 2);
+		await askForHelp(client, room, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([room]);
+
+		// The owner leaves the room, and opens another one with it
+		expect((await h.synapse.request(lena, 'POST', `${roomPath}/leave`, {})).status).toBe(200);
+		const other = await openRoom(client, mine.userId);
+		await askForHelp(client, other, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([room]);
+	});
+
+	it('greets its owner anew once they deleted it and their client asked for one again', async () => {
+		const mia = await h.synapse.registerUser('mia');
+		const client = await startE2eeClient(h.synapse.url, mia);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, mia.userId);
+		const first = await openRoom(client, mine.userId);
+		await client.waitForMessage(first, mine.userId, (text) => text === WELCOME);
+
+		expect((await h.api.delete('mia@test.local', '/v1/assistants/me')).status).toBe(204);
+		const again = await provisionUntilReady(h.api, mia.userId);
+		expect(again.userId).toBe(mine.userId);
+		const second = await openRoom(client, again.userId);
+		await client.waitForMessage(second, again.userId, (text) => text === WELCOME);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first, second]);
+	});
+
+	it('greets the owner who created it in the room it opened only, even once a provisioner asked for it', async () => {
+		const yves = await h.synapse.registerUser('yves');
+		const zoe = await h.synapse.registerUser('zoe');
+		const client = await startE2eeClient(h.synapse.url, yves);
+		clients.push(client);
+		const created = await h.api.post<{ roomId: string; userId: string }>(
+			'yves@test.local',
+			'/v1/assistants',
+			{ name: 'Yuki' }
+		);
+		expect(created.status).toBe(201);
+		const { roomId: opened, userId } = created.body;
+		const greeting =
+			'Hello, I am Yuki, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.';
+		const invited = await eventually(async () =>
+			(await h.synapse.pendingInvites(yves)).some((invite) => invite.roomId === opened)
+		);
+		expect(invited).toBe(true);
+		await client.joinRoom(opened);
+		await client.waitForMessage(opened, userId, (text) => text === greeting);
+
+		expect((await provisionUntilReady(h.api, yves.userId)).userId).toBe(userId);
+		await bringIn(yves, zoe, opened, userId);
+		const other = await openRoom(client, userId);
+		await askForHelp(client, other, userId);
+		expect(greetedIn(client, userId, greeting)).toEqual([opened]);
 	});
 
 	// What Twake Chat offers after « / » for the assistant (MSC4332): a state event per bot, keyed by
@@ -254,7 +481,7 @@ describe('a provisioned assistant', () => {
 		const nina = await h.synapse.registerUser('nina');
 		const client = await startE2eeClient(h.synapse.url, nina);
 		clients.push(client);
-		const mine = await provisionUntilReady(nina.userId);
+		const mine = await provisionUntilReady(h.api, nina.userId);
 
 		const room = await client.createDirectRoom(mine.userId);
 		await waitForMember(nina, room, mine.userId);
@@ -296,7 +523,7 @@ describe('a provisioned assistant', () => {
 
 	it('announces its commands in a room the client names, once the room lets it', async () => {
 		const pam = await h.synapse.registerUser('pam');
-		const mine = await provisionUntilReady(pam.userId);
+		const mine = await provisionUntilReady(h.api, pam.userId);
 		const roomsPath = '/_matrix/client/v3/rooms';
 		// A direct room where only its creator may announce commands: the assistant's announcement at
 		// its join is refused
@@ -321,7 +548,7 @@ describe('a provisioned assistant', () => {
 			'org.matrix.msc4332.commands': 0
 		};
 		await h.synapse.request(pam, 'PUT', levelsPath, { ...levels, events });
-		const named = await provisionerPut(`${assistantPath(pam.userId)}/home`, { roomId: room });
+		const named = await provisionerPut(`${provisioningPath(pam.userId)}/home`, { roomId: room });
 		expect(named.status).toBe(204);
 
 		expect(await announcedCommands(pam, room, mine.userId)).toMatchObject({
@@ -333,7 +560,7 @@ describe('a provisioned assistant', () => {
 		const oscar = await h.synapse.registerUser('oscar');
 		const client = await startE2eeClient(h.synapse.url, oscar);
 		clients.push(client);
-		const mine = await provisionUntilReady(oscar.userId);
+		const mine = await provisionUntilReady(h.api, oscar.userId);
 		const room = await client.createDirectRoom(mine.userId);
 		await waitForMember(oscar, room, mine.userId);
 
@@ -354,14 +581,14 @@ describe('a provisioned assistant', () => {
 		const dave = await h.synapse.registerUser('dave');
 		const client = await startE2eeClient(h.synapse.url, dave);
 		clients.push(client);
-		const mine = await provisionUntilReady(dave.userId);
+		const mine = await provisionUntilReady(h.api, dave.userId);
 		const first = await client.createDirectRoom(mine.userId);
 		await waitForMember(dave, first, mine.userId);
 		// The client opens another direct room with it, and names that one
 		const second = await client.createDirectRoom(mine.userId);
 		await waitForMember(dave, second, mine.userId);
 
-		const named = await provisionerPut(`${assistantPath(dave.userId)}/home`, { roomId: second });
+		const named = await provisionerPut(`${provisioningPath(dave.userId)}/home`, { roomId: second });
 		expect(named.status).toBe(204);
 
 		const seen = await h.api.get<{ roomId: string }>('dave@test.local', '/v1/assistants/me');
@@ -391,7 +618,7 @@ describe('a provisioned assistant', () => {
 	it('declines a room where others than its owner are, and says why', async () => {
 		const paul = await h.synapse.registerUser('paul');
 		const quinn = await h.synapse.registerUser('quinn');
-		const mine = await provisionUntilReady(paul.userId);
+		const mine = await provisionUntilReady(h.api, paul.userId);
 		// Paul's room with Quinn, where he brings his assistant
 		const created = await h.synapse.request(paul, 'POST', '/_matrix/client/v3/createRoom', {
 			preset: 'private_chat',
@@ -426,7 +653,7 @@ describe('a provisioned assistant', () => {
 		const tom = await h.synapse.registerUser('tom');
 		const client = await startE2eeClient(h.synapse.url, sara);
 		clients.push(client);
-		const mine = await provisionUntilReady(sara.userId);
+		const mine = await provisionUntilReady(h.api, sara.userId);
 		const room = await client.createDirectRoom(mine.userId);
 		await waitForMember(sara, room, mine.userId);
 
@@ -451,7 +678,7 @@ describe('a provisioned assistant', () => {
 		const hank = await h.synapse.registerUser('hank');
 		const client = await startE2eeClient(h.synapse.url, gina);
 		clients.push(client);
-		const mine = await provisionUntilReady(gina.userId);
+		const mine = await provisionUntilReady(h.api, gina.userId);
 		const room = await client.createDirectRoom(mine.userId);
 		await waitForMember(gina, room, mine.userId);
 		const invited = await h.synapse.request(
@@ -464,7 +691,7 @@ describe('a provisioned assistant', () => {
 		await h.synapse.joinRoom(hank, room);
 
 		// Refused whether the assistant has already left the room or is about to
-		const named = await provisionerPut(`${assistantPath(gina.userId)}/home`, { roomId: room });
+		const named = await provisionerPut(`${provisioningPath(gina.userId)}/home`, { roomId: room });
 		expect(named.status).toBe(409);
 		expect(['not a member', 'not a direct room']).toContain(named.body['error']);
 	});
@@ -472,7 +699,7 @@ describe('a provisioned assistant', () => {
 	it('declines a room someone other than its owner invites it to', async () => {
 		const frank = await h.synapse.registerUser('frank');
 		const mallory = await h.synapse.registerUser('mallory');
-		const mine = await provisionUntilReady(frank.userId);
+		const mine = await provisionUntilReady(h.api, frank.userId);
 
 		const room = await h.synapse.createDirectRoom(mallory, mine.userId);
 
@@ -496,18 +723,36 @@ describe('a provisioned assistant', () => {
 		const erin = await h.synapse.registerUser('erin');
 		const alone = await h.synapse.createDirectRoom(erin, '@nobody:test.local');
 
-		const noAssistant = await provisionerPut(`${assistantPath(erin.userId)}/home`, {
+		const noAssistant = await provisionerPut(`${provisioningPath(erin.userId)}/home`, {
 			roomId: alone
 		});
 		expect(noAssistant.status).toBe(404);
 		expect(noAssistant.body).toEqual({ error: 'no assistant' });
 
-		await provisionUntilReady(erin.userId);
-		const notMember = await provisionerPut(`${assistantPath(erin.userId)}/home`, {
+		await provisionUntilReady(h.api, erin.userId);
+		const notMember = await provisionerPut(`${provisioningPath(erin.userId)}/home`, {
 			roomId: alone
 		});
 		expect(notMember.status).toBe(409);
 		expect(notMember.body).toEqual({ error: 'not a member' });
+	});
+
+	it('owes no greeting when it was provisioned before the greeting was', async () => {
+		const nora = await h.synapse.registerUser('nora');
+		const client = await startE2eeClient(h.synapse.url, nora);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, nora.userId);
+		// The database as it stood before, the assistant provisioned and without a room, brought up to
+		// date. Nothing there tells an assistant that never had a room from one whose rooms were all
+		// left, which would then greet its owner twice.
+		await h.db.sql`alter table assistant_provisioned drop column owes_welcome`;
+		await h.db
+			.sql`delete from schema_migrations where name = '0053_assistant_provisioned_welcome.sql'`;
+		expect((await runMigrations(h.db)).applied).toEqual(['0053_assistant_provisioned_welcome.sql']);
+
+		const room = await openRoom(client, mine.userId);
+		await askForHelp(client, room, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([]);
 	});
 });
 
@@ -519,7 +764,7 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 	): Promise<{ status: number; body: Record<string, unknown> }> {
 		const res = await h.apps[0]!.inject({
 			method: 'PUT',
-			url: assistantPath(owner),
+			url: provisioningPath(owner),
 			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
 			payload: {}
 		});
