@@ -5,7 +5,8 @@ import { z } from 'zod';
 
 import { formatOffset } from '../agent/clock.js';
 import { INVITED_EVENT_TYPE, wallTimeIn } from '../agent/invitation.js';
-import type { CalendarSource } from '../config.js';
+import type { CalendarSource, Config } from '../config.js';
+import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { DELIVERY_LIMIT } from './activity.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
@@ -21,7 +22,7 @@ const SOURCE = 'twake://calendar';
 // one longer is cut rather than refused
 const TITLE_MAX = 1000;
 
-const address = z.email();
+const EMAIL = z.email();
 
 // An address as the calendar compares them: trimmed and in lower case, or null for anything else
 function addressOf(value: unknown): string | null {
@@ -38,7 +39,7 @@ function organizerOf(vevent: ICAL.Component, sender: unknown): string | null {
 	const organizer =
 		typeof written === 'string' ? addressOf(written.trim().replace(/^mailto:/i, '')) : null;
 	for (const candidate of [organizer, addressOf(sender)]) {
-		if (candidate !== null && address.safeParse(candidate).success) return candidate;
+		if (candidate !== null && EMAIL.safeParse(candidate).success) return candidate;
 	}
 	return null;
 }
@@ -96,16 +97,16 @@ function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend'): When {
 // own carries, else the first, which an invitation to one occurrence holds alone
 function veventOf(text: unknown): ICAL.Component {
 	if (typeof text !== 'string') throw new DeadLetterError('a notification without its iCalendar');
-	let parsed: unknown;
+	let vevents: ICAL.Component[];
 	try {
-		parsed = ICAL.parse(text);
+		const parsed: unknown = ICAL.parse(text);
+		const roots = Array.isArray(parsed) && typeof parsed[0] === 'string' ? [parsed] : parsed;
+		vevents = (Array.isArray(roots) ? roots : [])
+			.map((root: unknown) => new ICAL.Component(root as unknown[]))
+			.flatMap((root) => (root.name === 'vevent' ? [root] : root.getAllSubcomponents('vevent')));
 	} catch {
 		throw new DeadLetterError('an iCalendar that cannot be read');
 	}
-	const roots = Array.isArray(parsed) && typeof parsed[0] === 'string' ? [parsed] : parsed;
-	const vevents = (Array.isArray(roots) ? roots : [])
-		.map((root: unknown) => new ICAL.Component(root as unknown[]))
-		.flatMap((root) => (root.name === 'vevent' ? [root] : root.getAllSubcomponents('vevent')));
 	const vevent = vevents.find((candidate) => !candidate.hasProperty('recurrence-id')) ?? vevents[0];
 	if (vevent === undefined) throw new DeadLetterError('an iCalendar without VEVENT');
 	return vevent;
@@ -129,20 +130,22 @@ function invitationId(vevent: ICAL.Component, recipient: string): string {
 }
 
 // The wake-up a notification of Calendar brings its invitee, for a new invitation alone: an update,
-// a cancellation or a reply wakes nobody. What the calendar computed (the UID, the times and their
-// zone, the organizer, the occurrence) is shown apart from the title its organizer wrote; the
+// a cancellation or a reply wakes nobody. The fanout carries every tenant's invitations: one for
+// an invitee off the instance's mail domain is taken without effect, and nothing of it is read or
+// kept, even in the dead letters. What the calendar computed (the UID, the times and their zone,
+// the organizer, the occurrence) is shown apart from the title its organizer wrote; the
 // description and the location are never read.
-function wakeupOf(message: Record<string, unknown>): Wakeup | null {
+function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | null {
 	const method = message['method'];
 	if (typeof method !== 'string' || method.toUpperCase() !== 'REQUEST') return null;
 	if (message['isNewEvent'] !== true) return null;
+	const recipient = addressOf(message['recipientEmail']);
+	if (recipient === null || matrixLocalpartOfPrincipal(config, recipient) === null) return null;
 	const vevent = veventOf(message['event']);
 	const uid = vevent.getFirstPropertyValue('uid');
 	if (typeof uid !== 'string' || uid.length === 0) {
 		throw new DeadLetterError('an invitation without UID');
 	}
-	const recipient = addressOf(message['recipientEmail']);
-	if (recipient === null) return null;
 	const id = invitationId(vevent, recipient);
 	const organizer = organizerOf(vevent, message['senderEmail']);
 	const start = whenOf(vevent, 'dtstart');
@@ -209,7 +212,7 @@ export async function startCalendarListener(
 		queue,
 		queue,
 		async (message) => {
-			const wakeup = wakeupOf(message);
+			const wakeup = wakeupOf(message, deps.config);
 			if (wakeup !== null) await wake(deps, wakeup);
 		},
 		{

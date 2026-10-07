@@ -1050,6 +1050,19 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
 	});
 
+	it('keeps nothing of a notification for someone off the mail domain, even one it cannot use', async () => {
+		// The fanout carries every tenant's invitations: one for another domain's invitee, whose
+		// iCalendar cannot be read, is taken without effect rather than set aside
+		const before = (await calendar.queue(DEAD_LETTERS))?.messages ?? 0;
+		await publish(
+			notification({ uid: 'elsewhere', recipient: 'bob@elsewhere.test', event: 'not an iCalendar' })
+		);
+		await publish(notification({ uid: 'uid-after-elsewhere' }));
+		await answerTo('uid-after-elsewhere');
+		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(before);
+		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
+	});
+
 	it('reads a quorum queue of its own on Calendar’s vhost, one message at a time, its dead letters apart', async () => {
 		const queue = await calendar.queue(QUEUE);
 		expect(queue?.type).toBe('quorum');
