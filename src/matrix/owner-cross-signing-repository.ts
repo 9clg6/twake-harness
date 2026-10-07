@@ -89,6 +89,27 @@ export async function clearSeen(tx: Tx, owner: string): Promise<void> {
 		where owner = ${owner} and seen_at is not null`;
 }
 
+// The identity the owner accepted through the API replaces the one the harness held
+export async function pinAccepted(
+	tx: Tx,
+	owner: string,
+	masterPublicKey: string
+): Promise<OwnerCrossSigning> {
+	const rows = await tx.sql<OwnerCrossSigningRow[]>`
+		insert into owner_cross_signing (owner, master_public_key, pinned_by)
+		values (${owner}, ${masterPublicKey}, 'api')
+		on conflict (owner) do update set
+			master_public_key = excluded.master_public_key,
+			pinned_by = excluded.pinned_by,
+			pinned_at = now(),
+			seen_master_public_key = null,
+			seen_at = null
+		returning owner, master_public_key, pinned_by, pinned_at, seen_master_public_key, seen_at`;
+	const row = rows[0];
+	if (row === undefined) throw new Error('the accepted identity is not stored');
+	return normalize(row);
+}
+
 // Whether the owner is to be told about a device now: once for good when `againAfterMs` is null,
 // or again once that long has passed since they were last told. Resolves to true for the one
 // caller that is to tell them.

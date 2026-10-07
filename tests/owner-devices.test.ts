@@ -11,6 +11,7 @@ import {
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 
 const OWNER = 'alice@test.local';
+const IDENTITY_ROUTE = '/v1/assistants/me/owner-identity';
 
 // What the matrix role logs of the session the owner's words came from
 const DEVICE_LINES = new Set([
@@ -62,11 +63,11 @@ const UNVERIFIED_MESSAGE =
 const UNVERIFIED_ANSWER =
 	'I did not take your answer, so my question still waits: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then answer again.';
 const CHANGED_MESSAGE =
-	'I did not act on your last message: your encryption identity is not the one I know, so I act on none of your messages for now.';
+	"I did not act on your last message: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity); until then I act on none of your messages.";
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 const CHANGED_REPORT =
-	'Your encryption identity is not the one I know. I act on what you write for now.';
+	"Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity) so that I keep doing so.";
 
 describe('the setting of how my sessions are held to my identity', () => {
 	const base = {
@@ -123,6 +124,15 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		const masterKey = await r.client.masterKey();
 		expect(masterKey).not.toBeNull();
 		expect(await heldIdentity(r)).toEqual({ master_public_key: masterKey, pinned_by: 'first_use' });
+		// What I read of it through the API, with my own token
+		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
+		expect(view.status).toBe(200);
+		expect(view.body).toMatchObject({
+			pinned: { master_key: masterKey, pinned_by: 'first_use' },
+			published: null
+		});
+		// Someone without an assistant has nothing there
+		expect((await r.h.api.get('bob@test.local', IDENTITY_ROUTE)).status).toBe(404);
 	});
 
 	it('does not act on a session I never verified, and tells me why and how to verify it', async () => {
@@ -193,7 +203,7 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect((await r.callsTo('mail')).map((c) => c.status)).toEqual(['approved']);
 	});
 
-	it('acts on none of my words once my identity changed, and tells me', async () => {
+	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
 		expect(after).not.toBe(before);
@@ -208,6 +218,25 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		});
 		expect(await r.nextSaying('I did not act on your last message', notices)).toBe(CHANGED_MESSAGE);
 		expect(await heldIdentity(r)).toEqual({ master_public_key: before, pinned_by: 'first_use' });
+		// Through the API, with my own token, I see both, and accept only the one my words came with
+		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
+		expect(view.body).toMatchObject({
+			pinned: { master_key: before, pinned_by: 'first_use' },
+			published: { master_key: after }
+		});
+		const stale = await r.h.api.put(OWNER, IDENTITY_ROUTE, { master_key: before });
+		expect(stale.status).toBe(409);
+		expect((await r.h.api.put(OWNER, IDENTITY_ROUTE, {})).status).toBe(400);
+		const accepted = await r.h.api.put(OWNER, IDENTITY_ROUTE, { master_key: after });
+		expect(accepted.status).toBe(200);
+		expect(accepted.body).toMatchObject({
+			pinned: { master_key: after, pinned_by: 'api' },
+			published: null
+		});
+		// My words count again
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Good evening again');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Good evening again');
 	});
 });
 
@@ -264,7 +293,7 @@ describe('while the harness only reports the sessions it would not act on', () =
 		expect(r.saying('This session of yours is not verified')).toHaveLength(1);
 	});
 
-	it('acts on my words after my identity changed all the same, and tells me so', async () => {
+	it('acts on my words after my identity changed all the same, and tells me how to accept it', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
 		expect(after).not.toBe(before);
@@ -281,5 +310,10 @@ describe('while the harness only reports the sessions it would not act on', () =
 		expect(await r.nextSaying('Your encryption identity is not the one I know', 0)).toBe(
 			CHANGED_REPORT
 		);
+		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
+		expect(view.body).toMatchObject({
+			pinned: { master_key: before },
+			published: { master_key: after }
+		});
 	});
 });
