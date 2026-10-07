@@ -67,7 +67,7 @@ config:
   # The most tool calls one turn may make before it stops. Empty means the harness default, 6
   turnMaxToolCalls: ''
   # How long a turn may go without answering before the assistant posts a status message, which
-  # the answer then replaces, in milliseconds (matrix role); at least 1000. Empty means the
+  # closes once the turn answered, in milliseconds (matrix role); at least 1000. Empty means the
   # harness default, 3000
   turnStatusDelayMs: ''
   # The organization agent, a bot of the harness answering the organization's members, named by

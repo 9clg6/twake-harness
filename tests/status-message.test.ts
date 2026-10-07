@@ -17,6 +17,7 @@ function sleep(ms: number): Promise<void> {
 // The status texts in English, the language of the deployment, which Alice never changed
 const WORKING = '⏳ On it…';
 const ONE_ACTION = '⏳ On it… (1 action done)';
+const DONE = '✅ Done';
 const ASKING = 'I need your answer to go on: see below.';
 const LATE = 'This is taking longer than expected. If no answer follows, ask me again.';
 const FAILED = 'Something went wrong on my side. Please try again in a moment.';
@@ -87,39 +88,58 @@ describe('a status message while my assistant works on a message', () => {
 			: [message.original['body'], ...message.edits.map((e) => e.content['body'])];
 	}
 
+	// The events Synapse notified Alice of, as her phone would be by a push
+	async function notified(): Promise<string[]> {
+		const response = await r.h.synapse.request(
+			r.alice,
+			'GET',
+			'/_matrix/client/v3/notifications?limit=100'
+		);
+		const notifications = response.body['notifications'] as
+			{ readonly event?: { readonly event_id?: string } }[] | undefined;
+		return (notifications ?? []).map((n) => n.event?.event_id ?? '');
+	}
+
 	// The id of the eyes the assistant put on an event, or an empty string when there are none
 	function eyesOn(eventId: string): string {
 		return feedback.reactionsOn(eventId).find((x) => x.key === '👀')?.eventId ?? '';
 	}
 
-	it('posts a status when my message takes a while, then turns it into the answer', async () => {
+	it('posts a status when my message takes a while, closed once the answer went out on its own', async () => {
 		let asked = '';
 		const answer = 'Here is **the** answer';
 		r.h.apisix.llm.script = () => ({ content: answer, hold: statusShown(() => asked) });
 		const before = feedback.shown().length;
 		asked = await r.client.sendText(r.room, 'Take your time');
-		const shown = await replySaying(asked, answer);
-		expect(shown?.original).toMatchObject({ msgtype: 'm.text', body: WORKING });
-		// The answer as it would have gone out on its own, in the status's place
-		expect(shown?.content).toEqual({
+		const status = await replySaying(asked, DONE);
+		expect(saidBy(status)).toEqual([WORKING, DONE]);
+		// The answer follows the status, a message of its own as it would have been without one
+		const [, reply] = shownSince(before);
+		expect(shownSince(before).map((m) => m.body)).toEqual([DONE, answer]);
+		expect(reply?.content).toEqual({
 			msgtype: 'm.text',
 			body: answer,
 			format: 'org.matrix.custom.html',
 			formatted_body: 'Here is <strong>the</strong> answer'
 		});
-		expect(shownSince(before)).toHaveLength(1);
+		expect(reply?.edits).toEqual([]);
+		expect(inReplyTo(reply?.original ?? {})).toBeNull();
+		// Synapse notifies me of the answer, never of an edit
+		const closing = status?.edits.at(-1);
+		const events = await notified();
+		expect(events).toContain(reply?.eventId);
+		expect(events).not.toContain(closing?.eventId);
 		// The homeserver relates the edit to the status, as the relation travels in clear: a client
 		// that loads the room later is told of it
-		const edit = shown?.edits.at(-1);
-		const status = await r.h.synapse.request(
+		const original = await r.h.synapse.request(
 			r.alice,
 			'GET',
-			`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/event/${encodeURIComponent(shown?.eventId ?? '')}`
+			`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/event/${encodeURIComponent(status?.eventId ?? '')}`
 		);
-		const relations = (status.body['unsigned'] as Record<string, unknown> | undefined)?.[
+		const relations = (original.body['unsigned'] as Record<string, unknown> | undefined)?.[
 			'm.relations'
 		] as Record<string, unknown> | undefined;
-		expect(relations?.['m.replace']).toMatchObject({ event_id: edit?.eventId });
+		expect(relations?.['m.replace']).toMatchObject({ event_id: closing?.eventId });
 		// The eyes and the check mark stay on my message
 		const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
 		expect(check).toBeDefined();
@@ -159,7 +179,7 @@ describe('a status message while my assistant works on a message', () => {
 		expect(feedback.reactionsOn(asked).filter((x) => x.key === '✅')).toEqual([]);
 	});
 
-	it('posts a status on the turn my yes resumes, then turns it into its answer', async () => {
+	it('posts a status on the turn my yes resumes, closed once its answer went out', async () => {
 		let request = '';
 		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply => {
 			const last = req.messages.at(-1);
@@ -176,12 +196,16 @@ describe('a status message while my assistant works on a message', () => {
 		const before = feedback.shown().length;
 		await r.client.react(r.room, request, '✅');
 		// My reaction carries no message of its own: the status replies to the request I answered
-		const answer = 'Found: {"status":200,"body":{"ok":true}}';
-		const shown = await replySaying(request, answer);
+		const status = await replySaying(request, DONE);
 		// The call I allowed is the first action of the turn
-		expect(saidBy(shown)).toContain(ONE_ACTION);
-		expect(shown?.content).toMatchObject({ body: answer, format: 'org.matrix.custom.html' });
-		expect(shownSince(before)).toHaveLength(1);
+		expect(saidBy(status)).toContain(ONE_ACTION);
+		expect(saidBy(status).at(-1)).toBe(DONE);
+		const answer = 'Found: {"status":200,"body":{"ok":true}}';
+		expect(shownSince(before).map((m) => m.body)).toEqual([DONE, answer]);
+		expect(shownSince(before)[1]?.content).toMatchObject({
+			body: answer,
+			format: 'org.matrix.custom.html'
+		});
 		const check = await eventually(() => feedback.reactionsOn(request).find((x) => x.key === '✅'));
 		expect(check).toBeDefined();
 	});
@@ -191,16 +215,16 @@ describe('a status message while my assistant works on a message', () => {
 		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply =>
 			req.messages.at(-1)?.role === 'tool'
 				? {
-						content: 'Done after one action',
+						content: 'Answered after one action',
 						hold: eventually(() => replyTo(asked)?.body === ONE_ACTION, 20_000)
 					}
 				: { toolCalls: call('consents_list', {}), hold: statusShown(() => asked) };
 		const before = feedback.shown().length;
 		asked = await r.client.sendText(r.room, 'Tell me what you may access, slowly');
-		const shown = await replySaying(asked, 'Done after one action');
-		// Posted before the action, the status counts it in an edit, which the answer replaces
-		expect(saidBy(shown)).toEqual([WORKING, ONE_ACTION, 'Done after one action']);
-		expect(shownSince(before)).toHaveLength(1);
+		const status = await replySaying(asked, DONE);
+		// Posted before the action, the status counts it in an edit, then closes once the answer is out
+		expect(saidBy(status)).toEqual([WORKING, ONE_ACTION, DONE]);
+		expect(shownSince(before).map((m) => m.body)).toEqual([DONE, 'Answered after one action']);
 	});
 
 	it('keeps a question to me a message of its own, its status pointing to it', async () => {

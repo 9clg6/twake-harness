@@ -13,11 +13,13 @@ export interface TurnRef {
 	readonly eventId: string;
 }
 
-// What a turn sends its owner: an answer, which takes the place of the status message they saw
-// while it worked, or a question about a call, which goes out as a message of its own, the one
-// their answer points to
+// What a turn sends its owner. An answer, and a question about a call, which the owner then answers,
+// go out as messages of their own, so that the owner is notified of them; the notice of a failed or
+// refused turn takes the place of the status message they saw while it worked.
 export type TurnReply =
-	{ readonly kind: 'answer'; readonly content: RichText } | { readonly kind: 'question' };
+	| { readonly kind: 'answer' }
+	| { readonly kind: 'question' }
+	| { readonly kind: 'notice'; readonly content: RichText };
 
 export interface ChatFeedbackOptions {
 	readonly log: FastifyBaseLogger;
@@ -43,20 +45,23 @@ export interface ChatFeedbackOptions {
 
 // What the owner sees while the assistant works on a message, as Hermes showed it: eyes on the
 // message and the assistant typing, then a check mark once the message is answered. A turn that
-// takes a while also posts a status message, a reply to the message, which its answer replaces,
-// so that one message remains. All of it is best effort: a failure is logged and never holds a
-// turn or an answer back, the answer's own replacement of the status aside, which is the answer
-// going out and fails as a message would.
+// takes a while also posts a status message, a reply to the message, which closes once the turn
+// answered. All of it is best effort: a failure is logged and never holds a turn or an answer
+// back, a failed turn's notice aside, which goes out in the status's place and fails as a message
+// would.
 export interface ChatFeedback {
 	turnQueued(turn: TurnRef): Promise<void>;
 	// The turn has done this many actions so far: its status shows them, at most one update per
 	// delay
 	turnProgressed(turn: TurnRef, actions: number): void;
-	// Right before the reply goes out: the typing stops as it appears, and an answer takes the place
-	// of the status message the owner sees, if any. Resolves to the status's event id once replaced,
-	// or to null when the reply is to go out as a message of its own. A replacement that fails
-	// throws, the status staying for the next attempt.
+	// Right before the reply goes out: the typing stops as it appears, and the status message the
+	// owner sees, if any, stops counting. A question's status points to it; a notice takes the
+	// status's place. Resolves to the status's event id once the notice replaced it, or to null when
+	// the reply is to go out as a message of its own. A replacement that fails throws, the status
+	// staying for the next attempt.
 	answerReady(turn: TurnRef, reply: TurnReply): Promise<string | null>;
+	// Once the reply went out: the eyes go, a check mark marks an answered message, and the status
+	// of an answer says it is done
 	answerSent(turn: TurnRef, outcome: TurnOutcome): Promise<void>;
 	// Lets what is already on its way (a check mark, a stopped typing) go out, within a bound. A
 	// status still waiting for its answer gives up: the answer, once the role is back, goes out as a
@@ -77,7 +82,7 @@ const STOP_GRACE_MS = 5_000;
 // marked as an edit, cut short, the new content carrying it whole
 const EDIT_FALLBACK_MAX_CHARS = 1_000;
 
-// What a status message shows: the harness's own words, or the answer as it would have gone out
+// What a status message shows: the harness's own words, or a notice as it would have gone out
 interface StatusContent {
 	readonly msgtype: 'm.text';
 	readonly body: string;
@@ -85,7 +90,7 @@ interface StatusContent {
 	readonly formatted_body?: string;
 }
 
-// The status message of a turn, from the delay before it shows to its replacement
+// The status message of a turn, from the delay before it shows to its last words
 interface Status {
 	readonly turn: TurnRef;
 	readonly queuedAt: number;
@@ -105,7 +110,7 @@ interface Status {
 	update: NodeJS.Timeout | null;
 	// The answer is on its way: the status no longer counts actions
 	answering: boolean;
-	// Replaced by the answer, or given up: nothing changes it any more
+	// Closed for good, by its last words or a failed turn's notice: nothing changes it any more
 	closed: boolean;
 }
 
@@ -340,9 +345,9 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 		}, wait);
 	}
 
-	// No answer came in time, or the role stops: the status says so, and the answer, should it come,
-	// goes out as a message of its own
-	function giveUp(status: Status): Promise<void> {
+	// The status's last words, once its turn answered or no answer came in time: nothing changes it
+	// after them
+	function closeWith(status: Status, closing: 'done' | 'late'): Promise<void> {
 		forget(status);
 		return inTurn(status, async () => {
 			if (status.closed) return;
@@ -351,16 +356,23 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			if (eventId === null || status.texts === null) return;
 			const { turn } = status;
 			try {
-				await replace(status, eventId, { msgtype: 'm.text', body: status.texts.late });
-				log.info({ roomId: turn.roomId, eventId: turn.eventId }, 'status given up');
+				await replace(status, eventId, { msgtype: 'm.text', body: status.texts[closing] });
+				log.info({ roomId: turn.roomId, eventId: turn.eventId, closing }, 'status closed');
 			} catch (err: unknown) {
 				log.warn({ roomId: turn.roomId, eventId: turn.eventId, err }, 'status update failed');
 			}
 		});
 	}
 
-	// The status takes the reply: an answer in its place, or, for a question, which goes out on its
-	// own, the words that point to it
+	// No answer came in time, or the role stops: the status says so, and the answer, should it come,
+	// goes out as a message of its own
+	function giveUp(status: Status): Promise<void> {
+		return closeWith(status, 'late');
+	}
+
+	// The status takes the reply, once it is out itself: a notice in its place, or, for a question,
+	// which goes out on its own, the words that point to it. An answer goes out on its own too, the
+	// status saying it is done once it has.
 	function replyIn(status: Status, reply: TurnReply): Promise<string | null> {
 		return inTurn(status, async () => {
 			if (status.closed) return null;
@@ -371,6 +383,7 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 				forget(status);
 				return null;
 			}
+			if (reply.kind === 'answer') return null;
 			if (reply.kind === 'question') {
 				status.closed = true;
 				forget(status);
@@ -426,6 +439,11 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			return replyIn(status, reply);
 		},
 		answerSent: (turn, outcome) => {
+			// An answer went out on its own: its status, the only one still open by now, says it is done
+			const status = statuses.get(turn.eventId);
+			if (status !== undefined && outcome === 'answered') {
+				void closeWith(status, 'done');
+			}
 			const work = (async (): Promise<void> => {
 				const ack = acks.get(turn.eventId);
 				acks.delete(turn.eventId);

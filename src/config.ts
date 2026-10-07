@@ -34,7 +34,7 @@ export interface Config {
 		// The most characters of past conversation a turn shows the model
 		readonly historyMaxChars: number;
 		// How long a turn of an owner's message may go without an answer before its assistant posts
-		// a status message, which the answer then replaces
+		// a status message, which closes once the turn answered
 		readonly statusDelayMs: number;
 	};
 	readonly curation: {

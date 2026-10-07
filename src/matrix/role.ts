@@ -45,7 +45,7 @@ import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
-import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
+import { makeChatFeedback, type TurnOutcome, type TurnRef, type TurnReply } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
 import { makeLaidOutText, makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
@@ -874,15 +874,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			const turn = turnOf(job.payload);
 			const { text, html, request } = job.payload;
 			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
-			// An answer takes the place of the status message the owner saw while the turn worked, if
-			// any; a question goes out as a message of its own, the one the owner's answer points to
-			const replaced =
-				turn === null
-					? null
-					: await feedback.answerReady(
-							turn,
-							request === undefined ? { kind: 'answer', content } : { kind: 'question' }
-						);
+			// An answer, and a question, which the owner then answers, go out as messages of their own,
+			// so that the owner is notified of them; a failed or refused turn's notice takes the place of
+			// the status message the owner saw while the turn worked, if any
+			const reply: TurnReply =
+				request !== undefined
+					? { kind: 'question' }
+					: job.payload.outcome === 'failed'
+						? { kind: 'notice', content }
+						: { kind: 'answer' };
+			const replaced = turn === null ? null : await feedback.answerReady(turn, reply);
 			const sent = replaced ?? (await intent.sendEvent(job.payload.roomId, content));
 			log.info(
 				{
