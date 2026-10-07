@@ -35,6 +35,7 @@ export default defineConfig({
 	test: {
 		environment: 'node',
 		include: ['tests/**/*.test.ts'],
+		globalSetup: ['tests/helpers/synapse-config.ts'],
 		fileParallelism: false,
 		sequence: { sequencer: BalancedShards },
 		testTimeout: 120_000,
