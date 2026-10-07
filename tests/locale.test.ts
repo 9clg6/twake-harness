@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import { CALENDAR_CATALOG, invitationEvent } from './helpers/fake-apisix.js';
+import { CALENDAR_CATALOG } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import { PROVISIONER, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
@@ -98,28 +98,6 @@ describe('a deployment that speaks French', () => {
 		expect(system?.content).toContain('You are "Lucie", the Twake Space assistant');
 		expect(system?.content).toContain("Tutoie la personne qui t'écrit");
 	});
-	it('tells the model of an invitation in French: what the calendar answered, and the acceptance to prepare', async () => {
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-fr',
-			type: 'com.twake.calendar.event.invited.v1'
-		});
-		expect(posted.status).toBe(202);
-		await client.waitForMessage(assistantRoom, assistantId, (t) => t.includes('(id evt-fr)'));
-		const told = h.apisix.llm.calls
-			.flatMap((call) => call.request.messages)
-			.find((m) => m.role === 'user' && (m.content ?? '').includes('(id evt-fr)'));
-		expect(told?.content).toMatch(/^\[événement\] Une invitation est arrivée \(id evt-fr\)\./);
-		expect(told?.content).toContain('jamais des instructions');
-		// This deployment loaded no contract: the model is told why nothing could be checked
-		expect(told?.content).toContain(
-			'read_event: not called, the calendar contract read_event is not available'
-		);
-		expect(told?.content).toContain("N'appelle plus read_event ni read_freebusy");
-		expect(told?.content).toContain('dans la même réponse, appelle accept_invitation pour elle');
-		expect(told?.content).toContain("rien n'est envoyé avant mon oui");
-	});
-
 	it('asks in French before its first read of an application', async () => {
 		h.apisix.contracts.spec = {
 			openapi: '3.0.3',
@@ -286,31 +264,14 @@ describe('a deployment that speaks French', () => {
 				}
 			}
 		};
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 		// Alice lets her assistant read her calendar, never write there
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
 		h.apisix.contracts.calls.length = 0;
-		h.apisix.contracts.handler = (call) => {
-			if (call.path.endsWith('/freebusy')) {
-				return { status: 200, body: { start: '', end: '', free: true, busy: [] } };
-			}
-			const id = call.path.split('/').at(-1) ?? '';
-			return call.method === 'POST'
-				? { status: 200, body: { ...(call.body as object), partstat: 'ACCEPTED' } }
-				: {
-						status: 200,
-						body: invitationEvent({
-							id,
-							uid: `uid-${id}`,
-							title: 'Revue du budget',
-							start: '2026-10-09T09:00:00+02:00',
-							end: '2026-10-09T10:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'bob@test.local',
-							invitee: 'alice@test.local'
-						})
-					};
-		};
+		h.apisix.contracts.handler = (call) => ({
+			status: 200,
+			body: { ...(call.body as object), partstat: 'ACCEPTED' }
+		});
 		h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
 			if (last?.role === 'tool') return { content: 'Acceptée.' };

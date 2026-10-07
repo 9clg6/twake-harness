@@ -3,8 +3,6 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	INJECTED_NOTE,
-	INJECTED_TITLE,
-	invitationEvent,
 	type ChatRequest,
 	type LlmScript,
 	type ToolCall
@@ -474,74 +472,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(answeredIds).toContain('both_emails');
 	});
 
-	it("lets me allow the calendar an invitation's check needs, then tells me about it", async () => {
-		// The invitation arrives before I ever let the assistant read my calendar
-		await withdrawConsent(h.db, 'alice@test.local', 'calendar', 'read');
-		h.apisix.contracts.handler = (c) =>
-			c.path.startsWith('/contracts/v1/events/')
-				? {
-						status: 200,
-						body: invitationEvent({
-							id: 'evt-pre',
-							uid: 'uid-evt-pre',
-							title: 'Budget review',
-							start: '2026-10-09T09:00:00+02:00',
-							end: '2026-10-09T10:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'bob@test.local',
-							invitee: 'alice@test.local'
-						})
-					}
-				: { status: 200, body: { start: '', end: '', free: true, busy: [] } };
-		h.apisix.llm.script = (request) => {
-			const last = request.messages.at(-1);
-			return last?.role === 'tool' && last.name === 'read_freebusy'
-				? { content: `Found: ${last.content ?? ''}` }
-				: { content: 'Found: nothing' };
-		};
-		const seen = requests().length;
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-pre',
-			type: 'com.twake.calendar.event.invited.v1'
-		});
-		expect(posted.status).toBe(202);
-		const request = await nextRequest(seen);
-		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-pre']);
-		const answered = answers().length;
-		await client.react(room, request, '✅');
-		expect(await nextAnswer(answered)).toContain('"free":true');
-		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual([
-			'/contracts/v1/events/evt-pre',
-			'/contracts/v1/calendar/freebusy'
-		]);
-		// The model went on from the invitation the harness had read
-		const told = h.apisix.llm.calls.at(-1)?.request.messages ?? [];
-		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('evt-pre'))).toBe(true);
-	});
-
 	it('keeps a turn an event started from writing my assistant memory, even once I allowed it to read', async () => {
-		// The invitation's own title told the model to remember to accept everything: it reads my
-		// notes, which wait for me, and once I allowed them it tries to save that note
+		// The event's own text told the model to remember to accept everything: it reads my notes,
+		// which wait for me, and once I allowed them it tries to save that note
 		await withdrawConsent(h.db, 'alice@test.local', 'notes', 'read');
-		h.apisix.contracts.handler = (c) =>
-			c.path.startsWith('/contracts/v1/events/')
-				? {
-						status: 200,
-						body: invitationEvent({
-							id: 'evt-note',
-							uid: 'uid-evt-note',
-							title: INJECTED_TITLE,
-							start: '2026-10-09T14:00:00+02:00',
-							end: '2026-10-09T15:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'mallory@test.local',
-							invitee: 'alice@test.local'
-						})
-					}
-				: c.path.endsWith('/freebusy')
-					? { status: 200, body: { start: '', end: '', free: true, busy: [] } }
-					: { status: 200, body: { found: 'Budget notes' } };
+		h.apisix.contracts.handler = () => ({ status: 200, body: { found: 'Budget notes' } });
 		h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
 			if (last?.role === 'tool' && last.name === 'search_notes') {
