@@ -568,6 +568,13 @@ describe('an event that fails holds back none of those after it, and is never lo
 				'three attempts',
 				() => awayLogs.lines().filter((line) => line['msg'] === 'listen failed').length >= 3
 			);
+			// A broker that is not there yet is a warning while the worker tries again, not an error
+			expect(
+				awayLogs
+					.lines()
+					.filter((line) => Number(line['level']) >= 50)
+					.map((line) => line['msg'])
+			).toEqual([]);
 			proxy.restore();
 			await until('listening', async () => (await healthOf(away)) === 'connected');
 			const event = activityEvent();

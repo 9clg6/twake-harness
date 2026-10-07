@@ -72,12 +72,14 @@ export function failureOf(err: unknown): Record<string, unknown> | string {
 // The fields under which the library logs what a message holds
 const CONTENT_FIELDS: ReadonlySet<string> = new Set(['payload', 'rawContentPreview']);
 
-// The library's own lines about a message, which the listener's line about it says better
+// The library's own lines that the listener's say better: about a message, and about the one
+// connection attempt the listener lets it make each time, which reads as giving up
 const RESTATED: ReadonlySet<string> = new Set([
 	'Message processed successfully',
 	'Handler failed',
 	'Handler dead-lettered the message',
-	'Failed to parse message JSON, sending to DLQ'
+	'Failed to parse message JSON, sending to DLQ',
+	'Connection failed after maximum attempts'
 ]);
 
 type Level = 'debug' | 'info' | 'warn' | 'error';
@@ -94,8 +96,8 @@ function fieldsOf(context: unknown): Record<string, unknown> {
 }
 
 // The logger the RabbitMQ library writes through: its lines keep their context but for what a
-// message holds, which no line carries at any level, and those about a message go to debug,
-// under the listener's own line about it
+// message holds, which no line carries at any level, and those the listener's own lines restate
+// go to debug
 export function brokerLogger(log: FastifyBaseLogger): ILogger {
 	const write =
 		(level: Level) =>
