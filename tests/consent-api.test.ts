@@ -568,7 +568,7 @@ describe("my answer through the API to the broker's request", () => {
 				message: 'Find the budget in my mail'
 			}
 		);
-		const request = `To read your data in mail, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`;
+		const request = `To read your data in mail, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}?owner=alice\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`;
 		expect(turn.body.answer).toBe(request);
 		expect(turn.body.pending_call).toMatchObject({
 			channel: 'api_chat',

@@ -259,7 +259,7 @@ describe('an event wakes my assistant', () => {
 			t.includes(BROKER_CONSENT_URL)
 		);
 		expect(request).toBe(
-			`To read your data in events, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`
+			`To read your data in events, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}?owner=alice%40test.local\nOnce that is done, shall I try again? Answer with the buttons below, or reply yes or no.`
 		);
 		expect(
 			h.apisix.contracts.calls.filter((c) => c.path === '/contracts/v1/events/evt-401')
