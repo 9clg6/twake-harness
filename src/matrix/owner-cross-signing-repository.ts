@@ -21,7 +21,12 @@ export interface OwnerCrossSigning {
 
 // Why the owner is told about one of their devices
 export type DeviceNoticeReason =
-	'unverified' | 'no_identity' | 'identity_changed' | 'check_failed' | 'unencrypted';
+	| 'unverified'
+	| 'no_identity'
+	| 'identity_changed'
+	| 'check_failed'
+	| 'unencrypted'
+	| 'old_session';
 
 interface OwnerCrossSigningRow {
 	owner: string;
@@ -107,6 +112,23 @@ export async function pinAccepted(
 	const row = rows[0];
 	if (row === undefined) throw new Error('the accepted identity is not stored');
 	return normalize(row);
+}
+
+// Records when the check first decrypted words of an owner's Megolm session. Resolves to whether
+// that was longer ago than `keptMs`, the time the digests of those words are kept for.
+export async function seeSession(
+	tx: Tx,
+	owner: string,
+	sessionId: string,
+	keptMs: number
+): Promise<boolean> {
+	await tx.sql`
+		insert into owner_megolm_sessions (owner, session_id) values (${owner}, ${sessionId})
+		on conflict (owner, session_id) do nothing`;
+	const rows = await tx.sql<{ old: boolean }[]>`
+		select first_seen_at <= now() - make_interval(secs => ${keptMs / 1000}) as old
+		from owner_megolm_sessions where owner = ${owner} and session_id = ${sessionId}`;
+	return rows[0]?.old ?? false;
 }
 
 // Records that the owner's words with this digest were received under an event, the words received

@@ -1,3 +1,4 @@
+import { OlmMachine } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
@@ -151,6 +152,76 @@ async function readAgain(r: ConsentRoom, run: () => Promise<void>): Promise<void
 	}
 }
 
+// The assistant's engine decrypts an event once, and fails to decrypt it again while `run` runs:
+// the check, which decrypts it after the SDK did, then fails at its decryption
+async function decryptedOnce(eventId: string, run: () => Promise<void>): Promise<void> {
+	const decrypt = Reflect.get(
+		OlmMachine.prototype,
+		'decryptRoomEvent'
+	) as OlmMachine['decryptRoomEvent'];
+	let decrypted = false;
+	OlmMachine.prototype.decryptRoomEvent = async function (
+		this: OlmMachine,
+		...args: Parameters<OlmMachine['decryptRoomEvent']>
+	) {
+		const event = JSON.parse(args[0]) as { event_id?: unknown };
+		if (event.event_id === eventId && decrypted)
+			throw new Error('the event is not decrypted again');
+		const result = await decrypt.apply(this, args);
+		if (event.event_id === eventId) decrypted = true;
+		return result;
+	};
+	try {
+		await run();
+	} finally {
+		OlmMachine.prototype.decryptRoomEvent = decrypt;
+	}
+}
+
+// When the harness first took words of one of Alice's Megolm sessions for new, null if it never did
+async function firstSeen(r: ConsentRoom, sessionId: string): Promise<Date | null> {
+	const rows = await withPrincipal(
+		r.h.db,
+		{ id: OWNER },
+		(tx) => tx.sql<{ first_seen_at: Date }[]>`
+			select first_seen_at from owner_megolm_sessions
+			where owner = ${OWNER} and session_id = ${sessionId}`
+	);
+	return rows[0]?.first_seen_at ?? null;
+}
+
+// Alice's Megolm sessions as the harness sees them a month after it first decrypted words of them,
+// while `run` runs
+async function sessionsAMonthOld(r: ConsentRoom, run: () => Promise<void>): Promise<void> {
+	await withPrincipal(
+		r.h.db,
+		{ id: OWNER },
+		(tx) => tx.sql`
+			update owner_megolm_sessions set first_seen_at = now() - interval '31 days'
+			where owner = ${OWNER}`
+	);
+	try {
+		await run();
+	} finally {
+		await withPrincipal(
+			r.h.db,
+			{ id: OWNER },
+			(tx) => tx.sql`update owner_megolm_sessions set first_seen_at = now() where owner = ${OWNER}`
+		);
+	}
+}
+
+// Alice was last told about her sessions over a minute ago, as the harness counts it
+async function lastToldAMinuteAgo(r: ConsentRoom): Promise<void> {
+	await withPrincipal(
+		r.h.db,
+		{ id: OWNER },
+		(tx) => tx.sql`
+			update owner_device_notices set notified_at = now() - interval '61 seconds'
+			where owner = ${OWNER}`
+	);
+}
+
 // The identity the harness holds for Alice, as it keeps it
 async function heldIdentity(
 	r: ConsentRoom
@@ -184,6 +255,8 @@ const UNENCRYPTED_MESSAGE =
 	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
 const NO_IDENTITY_MESSAGE =
 	'I did not act on your last message: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then send it again.';
+const OLD_SESSION_MESSAGE =
+	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 const CHANGED_REPORT =
@@ -593,6 +666,28 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/tasks/items');
 	});
 
+	it('takes no words of a session it first saw over a month ago, and tells me to start a new one', async () => {
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Recent words');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Recent words');
+		const notices = r.saying('I did not act on your last message: your app').length;
+		await sessionsAMonthOld(r, async () => {
+			const eventId = await r.client.sendText(r.room, 'Words of an old session');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'enforce',
+				deviceId: r.client.deviceId
+			});
+			expect(await r.nextSaying('I did not act on your last message: your app', notices)).toBe(
+				OLD_SESSION_MESSAGE
+			);
+		});
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('old session'))).toBe(
+			false
+		);
+	});
+
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
@@ -787,5 +882,168 @@ describe('while the harness only reports the sessions it would not act on', () =
 		await r.client.sendText(r.room, 'And the next');
 		expect(await r.nextSaying('Heard:', next)).toBe('Heard: And the next');
 		expect(r.saying('Heard: Once only')).toHaveLength(1);
+	});
+
+	it('takes no copy of my message when it cannot tell copies apart', async () => {
+		const heard = r.saying('Heard:').length;
+		const once = await r.client.sendText(r.room, 'Only this once');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Only this once');
+		const copyOfOnce = await encryptedEvent(r, once);
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_words_received', async () => {
+			const copy = `$copy-${Date.now()}`;
+			expect(await push(r, [{ ...copyOfOnce, event_id: copy }])).toBe(200);
+			expect(await logged(r, 'owner device check failed', copy)).toMatchObject({
+				mode: 'report'
+			});
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		const next = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Back to normal');
+		expect(await r.nextSaying('Heard:', next)).toBe('Heard: Back to normal');
+		expect(r.saying('Heard: Only this once')).toHaveLength(1);
+	});
+
+	it('takes nothing a copy carries once its session is older than what it remembers', async () => {
+		const heard = r.saying('Heard:').length;
+		const earlier = await r.client.sendText(r.room, 'Before the month');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Before the month');
+		// A month later as the harness sees it: what it kept of those words is forgotten, and their
+		// session was first received a month ago
+		await withPrincipal(r.h.db, { id: OWNER }, async (tx) => {
+			await tx.sql`
+				update owner_words_received set received_at = now() - interval '31 days'
+				where owner = ${OWNER}`;
+			await tx.sql`
+				update owner_megolm_sessions set first_seen_at = now() - interval '31 days'
+				where owner = ${OWNER}`;
+		});
+		try {
+			const copy = `$late-copy-${Date.now()}`;
+			expect(await push(r, [{ ...(await encryptedEvent(r, earlier)), event_id: copy }])).toBe(200);
+			expect(await r.h.decisionOn(copy)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'report'
+			});
+		} finally {
+			await withPrincipal(
+				r.h.db,
+				{ id: OWNER },
+				(tx) =>
+					tx.sql`update owner_megolm_sessions set first_seen_at = now() where owner = ${OWNER}`
+			);
+		}
+		const next = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Still here');
+		expect(await r.nextSaying('Heard:', next)).toBe('Heard: Still here');
+		expect(r.saying('Heard: Before the month')).toHaveLength(1);
+	});
+
+	it('takes my words when its check fails only after it decrypted them', async () => {
+		const notices = r.saying('Something went wrong on my side').length;
+		const heard = r.saying('Heard:').length;
+		await withoutTable(r, 'owner_cross_signing', async () => {
+			const eventId = await r.client.sendText(r.room, 'Checked half way');
+			expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Checked half way');
+			await logged(r, 'owner device check failed', eventId);
+		});
+		expect(r.saying('Something went wrong on my side')).toHaveLength(notices);
+	});
+
+	it('tells me again a minute later when it still cannot check my words', async () => {
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_words_received', async () => {
+			await lastToldAMinuteAgo(r);
+			const first = await r.client.sendText(r.room, 'First try');
+			await logged(r, 'owner device check failed', first);
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+			await lastToldAMinuteAgo(r);
+			const second = await r.client.sendText(r.room, 'Second try');
+			await logged(r, 'owner device check failed', second);
+			expect(await r.nextSaying('Something went wrong on my side', notices + 1)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		expect(r.saying('Heard: First try')).toHaveLength(0);
+		expect(r.saying('Heard: Second try')).toHaveLength(0);
+	});
+
+	it('counts a session from the first of its words it could decrypt', async () => {
+		// A session of mine whose first words the check fails to decrypt
+		const other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'));
+		sessions.push(other);
+		const eventId = `$undecrypted-${Date.now()}`;
+		const event = sealedEvent(r, eventId, await other.seal(r.room, 'Words it cannot decrypt'));
+		const sessionId = String(Reflect.get(event['content'] as object, 'session_id'));
+		await decryptedOnce(eventId, async () => {
+			expect(await push(r, [event])).toBe(200);
+			await logged(r, 'owner device check failed', eventId);
+		});
+		expect(await firstSeen(r, sessionId)).toBeNull();
+		expect(r.saying('Heard: Words it cannot decrypt')).toHaveLength(0);
+		// Its next words are the first it takes
+		const heard = r.saying('Heard:').length;
+		await other.sendText(r.room, 'Words it decrypts');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Words it decrypts');
+		expect(await firstSeen(r, sessionId)).not.toBeNull();
+	});
+
+	it('takes no fresh words of a session it first saw over a month ago, and tells me to start a new one', async () => {
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Words of the day');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Words of the day');
+		const notices = r.saying('I did not act on your last message: your app').length;
+		await sessionsAMonthOld(r, async () => {
+			const eventId = await r.client.sendText(r.room, 'Fresh words of an old session');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'report',
+				deviceId: r.client.deviceId
+			});
+			expect(await r.nextSaying('I did not act on your last message: your app', notices)).toBe(
+				OLD_SESSION_MESSAGE
+			);
+		});
+		expect(r.saying('Heard: Fresh words of an old session')).toHaveLength(0);
+	});
+
+	it('holds a room I open with my assistant myself, and its commands, to the same rule', async () => {
+		// As Twake Chat's « My assistant »: an encrypted direct room, the assistant invited, which it
+		// joins and keeps as one of its rooms
+		const room = await r.client.createDirectRoom(r.assistantId);
+		for (let i = 0; i < 120; i += 1) {
+			if ((await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)) break;
+			await sleep(250);
+		}
+		const said = (prefix: string): string[] =>
+			r.client.messages
+				.filter((m) => m.roomId === room && m.sender === r.assistantId && m.body.startsWith(prefix))
+				.map((m) => m.body);
+		const helped = await r.client.sendText(room, '!help');
+		expect((await r.h.decisionOn(helped))?.['msg']).toBe('assistant command answered');
+		await until(() => said('I am your assistant.').length === 1, 'the help answer');
+		// A check that fails before it decrypts: no answer, and I am told to try again
+		await lastToldAMinuteAgo(r);
+		await withoutTable(r, 'owner_words_received', async () => {
+			const eventId = await r.client.sendText(room, '!help');
+			await logged(r, 'owner device check failed', eventId);
+			await until(() => said('Something went wrong on my side').length === 1, 'the notice');
+		});
+		// A session first decrypted a month ago: no answer, and I am told to start a new one
+		await lastToldAMinuteAgo(r);
+		await sessionsAMonthOld(r, async () => {
+			const eventId = await r.client.sendText(room, '!help');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'report'
+			});
+			await until(() => said('I did not act on your last message: your app').length === 1, 'it');
+		});
+		expect(said('I did not act on your last message: your app')).toEqual([OLD_SESSION_MESSAGE]);
+		expect(said('I am your assistant.')).toHaveLength(1);
 	});
 });
