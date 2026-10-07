@@ -41,10 +41,6 @@ function sealOf(
 	return { sessionId, digest };
 }
 
-// Why encrypted words are no new words: a copy of words already received under another event, or
-// words of a session first received longer ago than copies are remembered
-type Staleness = { readonly copyOf: string } | { readonly oldSession: true };
-
 // The owner's words as they reached their assistant encrypted: a message, or a reaction that
 // answers one of the harness's questions
 export interface OwnerWords {
@@ -157,19 +153,6 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		};
 	}
 
-	// What makes the encrypted words no new words, null when they are new: words that cannot be told
-	// apart from others cannot be checked at all
-	async function stalenessOf(words: OwnerWords): Promise<Staleness | null> {
-		const seal = sealOf(words.encrypted);
-		if (seal === null) throw new Error('the encrypted words cannot be told apart');
-		const { owner, eventId } = words;
-		return withPrincipal(db, { id: owner }, async (tx): Promise<Staleness | null> => {
-			if (await seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)) return { oldSession: true };
-			const copyOf = await receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS);
-			return copyOf === null ? null : { copyOf };
-		});
-	}
-
 	// Tells the owner in the room: once a minute at most per device when their words were not
 	// taken, in either mode, so that words refused again are told again; once per device when they
 	// were taken all the same. Whether the owner could be told never changes whether their words
@@ -202,37 +185,48 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 	return {
 		admit: async (words) => {
 			const { roomId, owner, eventId, via } = words;
-			let checked: CheckedEvent | null = null;
+			// The words as the check decrypted them, once it knew them for new words
+			let fresh: CheckedEvent | null = null;
 			let verdict: DeviceVerdict;
 			try {
-				// The same encrypted words under another event, or words of a session older than what
-				// the harness remembers, are no new words, whatever the mode
-				const staleness = await stalenessOf(words);
-				if (staleness !== null && 'copyOf' in staleness) {
+				// Words that cannot be told apart from others cannot be checked at all
+				const seal = sealOf(words.encrypted);
+				if (seal === null) throw new Error('the encrypted words cannot be told apart');
+				// The same encrypted words under another event are no new words, whatever the mode
+				const copyOf = await withPrincipal(db, { id: owner }, (tx) =>
+					receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS)
+				);
+				if (copyOf !== null) {
 					log.info(
-						{ roomId, owner, eventId, via, mode, firstEventId: staleness.copyOf },
+						{ roomId, owner, eventId, via, mode, firstEventId: copyOf },
 						'assistant ignored a copy of earlier words'
 					);
 					return REFUSED;
 				}
-				if (staleness !== null) {
+				const checked = await deps.decrypt(words.assistantUserId, roomId, words.encrypted);
+				// Nor are the words of a session whose first words the check decrypted longer ago than
+				// copies are remembered, whatever the mode: a session counts from there
+				const old = await withPrincipal(db, { id: owner }, (tx) =>
+					seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)
+				);
+				if (old) {
 					log.info(
-						{ roomId, owner, eventId, via, mode },
+						{ roomId, owner, eventId, via, mode, deviceId: checked.sender.deviceId },
 						'assistant ignored words of an old session'
 					);
 					return REFUSED;
 				}
-				checked = await deps.decrypt(words.assistantUserId, roomId, words.encrypted);
+				fresh = checked;
 				verdict = await judge(words, checked.sender);
 			} catch (err: unknown) {
 				log.error({ roomId, owner, eventId, via, mode, err }, 'owner device check failed');
-				// Report mode takes the words only once the check decrypted them, after it knew them
-				// for new words
-				if (mode === 'report' && checked !== null) return { admitted: true, event: checked.event };
+				// Report mode takes the words only once the check decrypted them and knew them for new
+				// words, whatever it found after
+				if (mode === 'report' && fresh !== null) return { admitted: true, event: fresh.event };
 				await tell(words, '*', 'check_failed', false, (messages) => messages.notices.turnFailed);
 				return REFUSED;
 			}
-			const admitted: Admission = { admitted: true, event: checked.event };
+			const admitted: Admission = { admitted: true, event: fresh.event };
 			const matchesPin = verdict.identity === 'pinned' || verdict.identity === 'first_seen';
 			const fields = {
 				roomId,

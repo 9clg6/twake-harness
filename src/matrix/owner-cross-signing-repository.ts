@@ -109,7 +109,7 @@ export async function pinAccepted(
 	return normalize(row);
 }
 
-// Records when the harness first received words of an owner's Megolm session. Resolves to whether
+// Records when the check first decrypted words of an owner's Megolm session. Resolves to whether
 // that was longer ago than `keptMs`, the time the digests of those words are kept for.
 export async function seeSession(
 	tx: Tx,

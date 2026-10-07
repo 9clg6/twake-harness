@@ -1,3 +1,4 @@
+import { OlmMachine } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
@@ -149,6 +150,44 @@ async function readAgain(r: ConsentRoom, run: () => Promise<void>): Promise<void
 	} finally {
 		r.h.apisix.matrixFault = null;
 	}
+}
+
+// The assistant's engine decrypts an event once, and fails to decrypt it again while `run` runs:
+// the check, which decrypts it after the SDK did, then fails at its decryption
+async function decryptedOnce(eventId: string, run: () => Promise<void>): Promise<void> {
+	const decrypt = Reflect.get(
+		OlmMachine.prototype,
+		'decryptRoomEvent'
+	) as OlmMachine['decryptRoomEvent'];
+	let decrypted = false;
+	OlmMachine.prototype.decryptRoomEvent = async function (
+		this: OlmMachine,
+		...args: Parameters<OlmMachine['decryptRoomEvent']>
+	) {
+		const event = JSON.parse(args[0]) as { event_id?: unknown };
+		if (event.event_id === eventId && decrypted)
+			throw new Error('the event is not decrypted again');
+		const result = await decrypt.apply(this, args);
+		if (event.event_id === eventId) decrypted = true;
+		return result;
+	};
+	try {
+		await run();
+	} finally {
+		OlmMachine.prototype.decryptRoomEvent = decrypt;
+	}
+}
+
+// When the harness first took words of one of Alice's Megolm sessions for new, null if it never did
+async function firstSeen(r: ConsentRoom, sessionId: string): Promise<Date | null> {
+	const rows = await withPrincipal(
+		r.h.db,
+		{ id: OWNER },
+		(tx) => tx.sql<{ first_seen_at: Date }[]>`
+			select first_seen_at from owner_megolm_sessions
+			where owner = ${OWNER} and session_id = ${sessionId}`
+	);
+	return rows[0]?.first_seen_at ?? null;
 }
 
 // Alice was last told about her sessions over a minute ago, as the harness counts it
@@ -886,5 +925,25 @@ describe('while the harness only reports the sessions it would not act on', () =
 		});
 		expect(r.saying('Heard: First try')).toHaveLength(0);
 		expect(r.saying('Heard: Second try')).toHaveLength(0);
+	});
+
+	it('counts a session from the first of its words it could decrypt', async () => {
+		// A session of mine whose first words the check fails to decrypt
+		const other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'));
+		sessions.push(other);
+		const eventId = `$undecrypted-${Date.now()}`;
+		const event = sealedEvent(r, eventId, await other.seal(r.room, 'Words it cannot decrypt'));
+		const sessionId = String(Reflect.get(event['content'] as object, 'session_id'));
+		await decryptedOnce(eventId, async () => {
+			expect(await push(r, [event])).toBe(200);
+			await logged(r, 'owner device check failed', eventId);
+		});
+		expect(await firstSeen(r, sessionId)).toBeNull();
+		expect(r.saying('Heard: Words it cannot decrypt')).toHaveLength(0);
+		// Its next words are the first it takes
+		const heard = r.saying('Heard:').length;
+		await other.sendText(r.room, 'Words it decrypts');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Words it decrypts');
+		expect(await firstSeen(r, sessionId)).not.toBeNull();
 	});
 });
