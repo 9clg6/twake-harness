@@ -329,13 +329,20 @@ describe('an assignment published on the activity exchange wakes the assignee’
 	it('binds its queue to the types it listens to only, as a user that cannot declare the exchange', async () => {
 		// The harness's own user cannot declare the activity exchange: it only binds to it
 		expect(await broker.connectedUsers()).toContain(HARNESS_USER);
+		// Bound to the activity exchange by the types it listens to, and by nothing else; and to its
+		// own dead letter exchange by its own name. That second binding works around
+		// @linagora/rabbitmq-client, which binds a queue first to the exchange it is given and keys
+		// the queue's dead letters after that binding: under its own name, the queue keeps the same
+		// key whatever types the deployment lists
 		const bindings = await broker.bindingsOf(QUEUE);
-		expect(
-			bindings
-				.filter((binding) => binding.source === ACTIVITY)
-				.map((binding) => binding.routingKey)
-				.sort()
-		).toEqual([MENTIONED, ASSIGNED]);
+		expect(bindings).toHaveLength(3);
+		expect(bindings).toEqual(
+			expect.arrayContaining([
+				{ source: ACTIVITY, routingKey: ASSIGNED },
+				{ source: ACTIVITY, routingKey: MENTIONED },
+				{ source: `${PREFIX}.dlx`, routingKey: QUEUE }
+			])
+		);
 		// An event of another type never reaches it: the assignment published after it is the next
 		// one the assistant tells
 		const completed = activityEvent({ type: 'com.twake.tasks.task.completed.v1' });
