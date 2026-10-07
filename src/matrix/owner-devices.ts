@@ -90,11 +90,10 @@ export interface CheckedEvent {
 // the creator, which takes encrypted commands only
 export type UnencryptedReason = 'clear room' | 'unencrypted';
 
-// Whether the owner's words count, and then the event to act on: the one the check decrypted, or
-// null when the check could not decrypt it, which only report mode takes all the same
+// Whether the owner's words count, and then the event to act on: the one the check decrypted
 export type Admission =
 	| { readonly admitted: false }
-	| { readonly admitted: true; readonly event: Record<string, unknown> | null };
+	| { readonly admitted: true; readonly event: Record<string, unknown> };
 
 const REFUSED: Admission = { admitted: false };
 
@@ -158,10 +157,11 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		};
 	}
 
-	// What makes the encrypted words no new words, null when they are new or cannot be told apart
+	// What makes the encrypted words no new words, null when they are new: words that cannot be told
+	// apart from others cannot be checked at all
 	async function stalenessOf(words: OwnerWords): Promise<Staleness | null> {
 		const seal = sealOf(words.encrypted);
-		if (seal === null) return null;
+		if (seal === null) throw new Error('the encrypted words cannot be told apart');
 		const { owner, eventId } = words;
 		return withPrincipal(db, { id: owner }, async (tx): Promise<Staleness | null> => {
 			if (await seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)) return { oldSession: true };
@@ -230,7 +230,9 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				verdict = await judge(words, checked.sender);
 			} catch (err: unknown) {
 				log.error({ roomId, owner, eventId, via, mode, err }, 'owner device check failed');
-				if (mode === 'report') return { admitted: true, event: checked?.event ?? null };
+				// Report mode takes the words only once the check decrypted them, after it knew them
+				// for new words
+				if (mode === 'report' && checked !== null) return { admitted: true, event: checked.event };
 				await tell(words, '*', 'check_failed', (messages) => messages.notices.turnFailed);
 				return REFUSED;
 			}

@@ -789,6 +789,28 @@ describe('while the harness only reports the sessions it would not act on', () =
 		expect(r.saying('Heard: Once only')).toHaveLength(1);
 	});
 
+	it('takes no copy of my message when it cannot tell copies apart', async () => {
+		const heard = r.saying('Heard:').length;
+		const once = await r.client.sendText(r.room, 'Only this once');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Only this once');
+		const copyOfOnce = await encryptedEvent(r, once);
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_words_received', async () => {
+			const copy = `$copy-${Date.now()}`;
+			expect(await push(r, [{ ...copyOfOnce, event_id: copy }])).toBe(200);
+			expect(await logged(r, 'owner device check failed', copy)).toMatchObject({
+				mode: 'report'
+			});
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		const next = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Back to normal');
+		expect(await r.nextSaying('Heard:', next)).toBe('Heard: Back to normal');
+		expect(r.saying('Heard: Only this once')).toHaveLength(1);
+	});
+
 	it('takes nothing a copy carries once its session is older than what it remembers', async () => {
 		const heard = r.saying('Heard:').length;
 		const earlier = await r.client.sendText(r.room, 'Before the month');
@@ -822,5 +844,16 @@ describe('while the harness only reports the sessions it would not act on', () =
 		await r.client.sendText(r.room, 'Still here');
 		expect(await r.nextSaying('Heard:', next)).toBe('Heard: Still here');
 		expect(r.saying('Heard: Before the month')).toHaveLength(1);
+	});
+
+	it('takes my words when its check fails only after it decrypted them', async () => {
+		const notices = r.saying('Something went wrong on my side').length;
+		const heard = r.saying('Heard:').length;
+		await withoutTable(r, 'owner_cross_signing', async () => {
+			const eventId = await r.client.sendText(r.room, 'Checked half way');
+			expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Checked half way');
+			await logged(r, 'owner device check failed', eventId);
+		});
+		expect(r.saying('Something went wrong on my side')).toHaveLength(notices);
 	});
 });

@@ -962,7 +962,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const admission = await ownerDevices.admit(words);
 		if (!admission.admitted) return;
 		// The answer that counts is the one of the very event whose session was checked
-		const checked = admission.event === null ? event : (admission.event as RoomEvent);
+		const checked = admission.event as RoomEvent;
 		const checkedAnnotation = checked.sender === sender ? annotationOf(checked) : null;
 		const checkedSays =
 			checked.type === 'm.reaction' && checkedAnnotation !== null
@@ -982,10 +982,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// An owner's encrypted message once its session was checked: the text and content of the very event
 	// whose session was checked, a command it names included, null when the message does not count
-	async function checkedMessage(words: OwnerWords, raw: RoomEvent): Promise<CheckedWords | null> {
+	async function checkedMessage(words: OwnerWords): Promise<CheckedWords | null> {
 		const admission = await ownerDevices.admit(words);
 		if (!admission.admitted) return null;
-		const checked = admission.event === null ? raw : (admission.event as RoomEvent);
+		const checked = admission.event as RoomEvent;
 		const checkedText =
 			checked.type === 'm.room.message' && checked.sender === words.ownerUserId
 				? textOf(checked)
@@ -1086,7 +1086,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						via: 'message',
 						encrypted: encrypted.event
 					};
-					const checked = await checkedMessage(words, raw);
+					const checked = await checkedMessage(words);
 					if (checked === null) return;
 					message = checked.text;
 					content = checked.content;
@@ -1183,7 +1183,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (encrypted === null) {
 			if (!(await ownerDevices.admitUnencrypted(words, 'unencrypted'))) return;
 		} else {
-			const checked = await checkedMessage(words, raw);
+			const checked = await checkedMessage(words);
 			if (checked === null) return;
 			command = checked.text;
 		}

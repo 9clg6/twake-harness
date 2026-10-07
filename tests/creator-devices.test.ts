@@ -291,4 +291,17 @@ describe('while the harness only reports the sessions the creator would not take
 			reason: 'unencrypted'
 		});
 	});
+
+	it('takes no command it cannot check before it decrypts it, and tells me to try again', async () => {
+		const helped = r.saying('I create and manage').length;
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_words_received', async () => {
+			const eventId = await r.client.sendText(r.room, '/help');
+			await logged(r, 'owner device check failed', eventId);
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		expect(r.saying('I create and manage')).toHaveLength(helped);
+	});
 });
