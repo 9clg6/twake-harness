@@ -376,6 +376,25 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect(logged).not.toContain('carol-uuid');
 	});
 
+	it('cuts the over-long text other people wrote instead of refusing the event', async () => {
+		const event = activityEvent({
+			object: {
+				type: 'task',
+				id: TASK_ID,
+				key: 'ROAD-12',
+				title: 'T'.repeat(5000),
+				board: { id: BOARD_ID, name: 'B'.repeat(1000) }
+			},
+			preview: 'P'.repeat(5000)
+		});
+		await publish(event);
+		await answerTo(event);
+		const told = lastUser(turnCalls(r.h.apisix.llm.calls, event.id)[0]?.request);
+		expect(JSON.parse(FENCED.exec(told)?.[2] ?? '{}')).toMatchObject({
+			untrusted: { title: 'T'.repeat(1000), board_name: 'B'.repeat(200), preview: 'P'.repeat(1000) }
+		});
+	});
+
 	it('takes and drops an event routed by a type it no longer listens to', async () => {
 		// A type the deployment listened to before keeps its binding: the library removes none
 		const completed = 'com.twake.tasks.task.completed.v1';

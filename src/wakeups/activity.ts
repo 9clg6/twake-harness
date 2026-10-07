@@ -12,6 +12,12 @@ const ACTIVITY_EXCHANGE = 'activity';
 // and fixed once the queue is declared
 const DELIVERY_LIMIT = 5;
 
+// Text people wrote, cut to its first characters rather than refused, as the contracts cap theirs:
+// it is shown as data anyway
+function untrustedText(max: number) {
+	return z.string().transform((text) => Array.from(text).slice(0, max).join(''));
+}
+
 // Someone an event is for, as its application names them
 const recipientSchema = z.object({
 	uuid: z.uuid().optional(),
@@ -35,9 +41,9 @@ const activityEventSchema = z.object({
 		object: z.object({
 			type: z.string().min(1).max(100),
 			id: z.string().min(1).max(200),
-			title: z.string().max(1000),
+			title: untrustedText(1000),
 			key: z.string().min(1).max(100).optional(),
-			board: z.object({ id: z.string().min(1).max(200), name: z.string().max(200) }).optional(),
+			board: z.object({ id: z.string().min(1).max(200), name: untrustedText(200) }).optional(),
 			container: z
 				.object({ kind: z.string().min(1).max(100), id: z.string().min(1).max(200) })
 				.optional(),
@@ -47,7 +53,7 @@ const activityEventSchema = z.object({
 				.optional()
 		}),
 		// A plain text excerpt of the object, which ADR 006 caps at 280 characters
-		preview: z.string().max(1000).optional(),
+		preview: untrustedText(1000).optional(),
 		// Exactly who the event is for, nobody inferred, each read on its own: one the application
 		// names wrongly takes nobody else's turn away
 		recipients: z.array(z.unknown()).max(100).default([])
