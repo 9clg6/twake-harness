@@ -120,8 +120,10 @@ async function clearRoom(r: ConsentRoom): Promise<string> {
 		if ((await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)) break;
 		await sleep(250);
 	}
+	// The harness records a room its owner invited the assistant to by itself, and may have already
 	await r.h.db.sql`
-		insert into assistant_rooms (room_id, owner, user_id) values (${room}, ${OWNER}, ${r.assistantId})`;
+		insert into assistant_rooms (room_id, owner, user_id) values (${room}, ${OWNER}, ${r.assistantId})
+		on conflict (room_id) do nothing`;
 	return room;
 }
 
