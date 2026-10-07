@@ -1156,7 +1156,7 @@ describe('the settings of Calendar’s fanout', () => {
 	it('refuses to start listening without the mail domain that tells its owners among invitees', () => {
 		const { MATRIX_MAIL_DOMAIN: _domain, ...anywhere } = listening;
 		expect(refusal(anywhere)).toBe(
-			'invalid configuration: CALENDAR_ENABLED needs MATRIX_MAIL_DOMAIN or MATRIX_SERVER_NAME, the mail domain of the owners it wakes'
+			'invalid configuration: CALENDAR_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
 		);
 		expect(
 			loadConfig({ ...anywhere, MATRIX_SERVER_NAME: 'twake.example' }).calendar

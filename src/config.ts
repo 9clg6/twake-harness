@@ -312,9 +312,9 @@ function calendarSource(values: {
 			'invalid configuration: CALENDAR_ENABLED needs CALENDAR_AMQP_URL, an amqp or amqps URL'
 		);
 	}
-	if (values.MATRIX_MAIL_DOMAIN === '' && values.MATRIX_SERVER_NAME === '') {
+	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
 		throw new Error(
-			'invalid configuration: CALENDAR_ENABLED needs MATRIX_MAIL_DOMAIN or MATRIX_SERVER_NAME, the mail domain of the owners it wakes'
+			'invalid configuration: CALENDAR_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
 		);
 	}
 	return { amqpUrl: values.CALENDAR_AMQP_URL };
