@@ -449,6 +449,26 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect(logged).not.toContain('document.cookie');
 	});
 
+	it('wakes nobody for recipients that are no list, and names them in its logs', async () => {
+		const named = activityEvent();
+		const event = {
+			...named,
+			data: {
+				...(named['data'] as Record<string, unknown>),
+				recipients: { email: 'alice@test.local', reason: 'assigned' }
+			}
+		};
+		await publishThenNext(event);
+		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(0);
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+		expect(
+			workerLogs
+				.lines()
+				.filter((line) => line['msg'] === 'event fields left out' && line['eventId'] === event.id)
+				.map((line) => line['fields'])
+		).toEqual([['data.recipients']]);
+	});
+
 	it('sends to its dead letter queue an event without its id, source, type or object', async () => {
 		const without = (key: string): Record<string, unknown> =>
 			Object.fromEntries(Object.entries(activityEvent()).filter(([name]) => name !== key));

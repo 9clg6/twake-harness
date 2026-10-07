@@ -63,7 +63,7 @@ const activityEventSchema = z.object({
 		preview: optional(untrustedText(1000)),
 		// Exactly who the event is for, nobody inferred, each read on its own: one the application
 		// names wrongly takes nobody else's turn away
-		recipients: z.array(z.unknown()).default([])
+		recipients: optional(z.array(z.unknown()))
 	})
 });
 
@@ -78,7 +78,8 @@ const OPTIONAL_FIELDS: readonly (readonly string[])[] = [
 	['data', 'object', 'board'],
 	['data', 'object', 'container'],
 	['data', 'object', 'url'],
-	['data', 'preview']
+	['data', 'preview'],
+	['data', 'recipients']
 ];
 
 function valueAt(value: unknown, path: readonly string[]): unknown {
@@ -131,7 +132,8 @@ function wakeupsOf(event: ActivityEvent): {
 	};
 	const wakeups: Wakeup[] = [];
 	const skipped: SkippedRecipient[] = [];
-	event.data.recipients.slice(0, MAX_RECIPIENTS).forEach((named, index) => {
+	const recipients = event.data.recipients ?? [];
+	recipients.slice(0, MAX_RECIPIENTS).forEach((named, index) => {
 		const parsed = recipientSchema.safeParse(named);
 		if (!parsed.success) {
 			const fields = parsed.error.issues.map((issue) => String(issue.path[0] ?? 'recipient'));
@@ -166,7 +168,7 @@ function wakeupsOf(event: ActivityEvent): {
 	return {
 		wakeups,
 		skipped,
-		ignored: Math.max(0, event.data.recipients.length - MAX_RECIPIENTS)
+		ignored: Math.max(0, recipients.length - MAX_RECIPIENTS)
 	};
 }
 
