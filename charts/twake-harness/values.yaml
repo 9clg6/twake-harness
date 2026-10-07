@@ -85,7 +85,8 @@ config:
   openbaoK8sRole: twake-harness
   # The audience of the projected token the role presents to OpenBao
   openbaoTokenAudience: twake-harness-openbao
-  # The matrix role: the homeserver's name and the application service identity
+  # The homeserver's name, which the matrix role needs and the api role uses to map an owner's
+  # email to their Matrix id when it creates an assistant; then the application service identity
   matrixServerName: ''
   # The mail domain of the homeserver's users, the principal of @alice:<server> being
   # alice@<mail domain>; empty means the server name

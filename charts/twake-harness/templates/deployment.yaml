@@ -121,13 +121,16 @@ spec:
               value: {{ .Values.config.orgAgentMembers | quote }}
             - name: EVENTS_CLIENT_IDS
               value: {{ .Values.config.eventsClientIds | quote }}
-            {{- if eq .Values.role "matrix" }}
+            {{- /* Every role that maps an owner's email to their Matrix id needs the homeserver */}}
+            {{- with .Values.config.matrixServerName }}
             - name: MATRIX_SERVER_NAME
-              value: {{ .Values.config.matrixServerName | quote }}
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.matrixMailDomain }}
             - name: MATRIX_MAIL_DOMAIN
               value: {{ . | quote }}
             {{- end }}
+            {{- if eq .Values.role "matrix" }}
             - name: MATRIX_APPSERVICE_ID
               value: {{ .Values.config.matrixAppserviceId | quote }}
             - name: MATRIX_SENDER_LOCALPART
