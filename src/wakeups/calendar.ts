@@ -37,12 +37,18 @@ function addressOf(value: unknown): string | null {
 // The organizer of an invitation: its ORGANIZER without mailto:, or the sender of the notification
 // when it names none; whichever is an email address, so that nothing else passes for what the
 // calendar computed
-function organizerOf(vevent: ICAL.Component, sender: unknown): string | null {
+function organizerOf(vevent: ICAL.Component, sender: unknown, leftOut: string[]): string | null {
 	const written = vevent.getFirstPropertyValue('organizer');
 	const organizer =
 		typeof written === 'string' ? addressOf(written.trim().replace(/^mailto:/i, '')) : null;
-	for (const candidate of [organizer, addressOf(sender)]) {
-		if (candidate !== null && EMAIL.safeParse(candidate).success) return candidate;
+	const candidates: [string, string | null][] = [
+		['ORGANIZER', organizer],
+		['senderEmail', addressOf(sender)]
+	];
+	for (const [field, candidate] of candidates) {
+		if (candidate === null) continue;
+		if (EMAIL.safeParse(candidate).success) return candidate;
+		leftOut.push(field);
 	}
 	return null;
 }
@@ -130,33 +136,41 @@ function timeAt(time: ICAL.Time, tzid: unknown): When {
 	return { at: `${time.toString()}${formatOffset(time.utcOffset() / 60)}`, timezone: tzid };
 }
 
-function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend' | 'recurrence-id'): When {
+function whenOf(
+	vevent: ICAL.Component,
+	name: 'dtstart' | 'dtend' | 'recurrence-id',
+	leftOut: string[]
+): When {
 	const property = vevent.getFirstProperty(name);
 	if (property === null) return NO_TIME;
 	try {
 		const time = property.getFirstValue();
-		return time instanceof ICAL.Time ? timeAt(time, property.getParameter('tzid')) : NO_TIME;
+		if (time instanceof ICAL.Time) return timeAt(time, property.getParameter('tzid'));
 	} catch {
 		// A time the calendar wrote wrong is no time: the rest of the invitation still counts
-		return NO_TIME;
 	}
+	leftOut.push(name.toUpperCase());
+	return NO_TIME;
 }
 
 // The end of an invitation: its DTEND, or else its start and its DURATION, in the start's zone
-function endOf(vevent: ICAL.Component): When {
-	if (vevent.hasProperty('dtend')) return whenOf(vevent, 'dtend');
+function endOf(vevent: ICAL.Component, leftOut: string[]): When {
+	if (vevent.hasProperty('dtend')) return whenOf(vevent, 'dtend', leftOut);
 	const start = vevent.getFirstProperty('dtstart');
 	if (start === null || !vevent.hasProperty('duration')) return NO_TIME;
 	try {
 		const time = start.getFirstValue();
 		const duration = vevent.getFirstPropertyValue('duration');
-		if (!(time instanceof ICAL.Time) || !(duration instanceof ICAL.Duration)) return NO_TIME;
-		const end = time.clone();
-		end.addDuration(duration);
-		return timeAt(end, start.getParameter('tzid'));
+		if (time instanceof ICAL.Time && duration instanceof ICAL.Duration) {
+			const end = time.clone();
+			end.addDuration(duration);
+			return timeAt(end, start.getParameter('tzid'));
+		}
 	} catch {
-		return NO_TIME;
+		// The start is left out on its own: here the duration alone
 	}
+	leftOut.push('DURATION');
+	return NO_TIME;
 }
 
 // The VEVENT an invitation is about, as the parser reads it and as written: the first that is no
@@ -209,6 +223,13 @@ function invitationId(vevent: Vevent, uid: string, recipient: string): string {
 	return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
+// A new invitation as the harness read it: its wake-up, and the fields the calendar wrote wrong,
+// which were left out, by their names
+interface Read {
+	readonly wakeup: Wakeup;
+	readonly leftOut: readonly string[];
+}
+
 // The wake-up a notification of Calendar brings its invitee, for a new invitation alone: an update,
 // a cancellation or a reply wakes nobody. The fanout carries every tenant's invitations: one for
 // an invitee off the instance's mail domain is taken without effect, and nothing of it is read or
@@ -216,7 +237,7 @@ function invitationId(vevent: Vevent, uid: string, recipient: string): string {
 // and the occurrence) is shown apart from what the organizer wrote (the title, the UID and the
 // zone, under untrusted); the description and the location are never read. The check takes the
 // UID and the zone whole.
-function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | null {
+function wakeupOf(message: Record<string, unknown>, config: Config): Read | null {
 	const method = message['method'];
 	if (typeof method !== 'string' || method.toUpperCase() !== 'REQUEST') return null;
 	if (message['isNewEvent'] !== true) return null;
@@ -230,13 +251,14 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 		throw new DeadLetterError('an invitation without UID');
 	}
 	const id = invitationId(vevent, writtenUid, recipient);
-	const organizer = organizerOf(vevent.parsed, message['senderEmail']);
-	const start = whenOf(vevent.parsed, 'dtstart');
-	const end = endOf(vevent.parsed);
+	const leftOut: string[] = [];
+	const organizer = organizerOf(vevent.parsed, message['senderEmail'], leftOut);
+	const start = whenOf(vevent.parsed, 'dtstart', leftOut);
+	const end = endOf(vevent.parsed, leftOut);
 	// The occurrence an invitation is about, in its zone as its times are
-	const occurrence = whenOf(vevent.parsed, 'recurrence-id').at;
+	const occurrence = whenOf(vevent.parsed, 'recurrence-id', leftOut).at;
 	const title = vevent.parsed.getFirstPropertyValue('summary');
-	return {
+	const wakeup: Wakeup = {
 		source: SOURCE,
 		id,
 		type: INVITED_EVENT_TYPE,
@@ -266,6 +288,7 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 		},
 		invitation: { uid, start: start.at, end: end.at, timezone: start.timezone }
 	};
+	return { wakeup, leftOut };
 }
 
 // Listens to Calendar's fanout on the instance's own queue, on Calendar's vhost: a new invitation
@@ -279,8 +302,17 @@ export async function startCalendarListener(
 		// A fanout routes on no key: one binding takes all
 		{ url: source.amqpUrl, name: 'calendar', exchange: CALENDAR_FANOUT, routingKeys: [''] },
 		async (message) => {
-			const wakeup = wakeupOf(message, deps.config);
-			if (wakeup !== null) await wake(deps, wakeup);
+			const read = wakeupOf(message, deps.config);
+			if (read === null) return;
+			const { wakeup, leftOut } = read;
+			if (leftOut.length > 0) {
+				// As for the activity exchange: the fields' names, never what the calendar wrote there
+				deps.log.warn(
+					{ source: SOURCE, eventId: wakeup.id, fields: leftOut },
+					'event fields left out'
+				);
+			}
+			await wake(deps, wakeup);
 		}
 	);
 }

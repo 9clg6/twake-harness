@@ -529,6 +529,17 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			end: null,
 			organizer: 'dave@test.local'
 		});
+		// Named in the worker's logs, never with what the organizer's client wrote there
+		const id = producerId('uid-lenient', 'alice@test.local', '0');
+		expect(
+			workerLogs
+				.lines()
+				.filter((line) => line['msg'] === 'event fields left out' && line['eventId'] === id)
+				.map((line) => line['fields'])
+		).toEqual([['ORGANIZER', 'DTEND']]);
+		const logged = JSON.stringify(workerLogs.lines());
+		expect(logged).not.toContain('not an address');
+		expect(logged).not.toContain('2026100');
 	});
 
 	it('checks my slot before the model speaks, the invitation left out, then tells me I am free', async () => {
