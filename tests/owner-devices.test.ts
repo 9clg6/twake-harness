@@ -252,8 +252,10 @@ describe('my assistant acts only on what the sessions my identity signed write',
 			pinned: { master_key: masterKey, pinned_by: 'first_use' },
 			published: null
 		});
-		// Someone without an assistant has nothing there
-		expect((await r.h.api.get('bob@test.local', IDENTITY_ROUTE)).status).toBe(404);
+		// Someone the harness never took words from has no identity held
+		const nobody = await r.h.api.get('bob@test.local', IDENTITY_ROUTE);
+		expect(nobody.status).toBe(200);
+		expect(nobody.body).toEqual({ pinned: null, published: null });
 	});
 
 	it('does not act on a session I never verified, and tells me why and how to verify it', async () => {

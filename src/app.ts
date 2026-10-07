@@ -449,17 +449,15 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				return reply.code(202).send({ queued });
 			});
 
-			// The cross-signing identity the owner's assistant takes their words with, and the one that
-			// signed the session their words last came from when it was another, such as after they
-			// reset theirs: only the owner, with their own token, makes the assistant hold that one
-			// instead
+			// The cross-signing identity the owner's assistant and the creator take their words with,
+			// and the one that signed the session their words last came from when it was another, such
+			// as after they reset theirs: only the owner, with their own token, makes the harness hold
+			// that one instead. The creator holds it before any assistant exists, and so does this
+			// route.
 			scope.get('/assistants/me/owner-identity', async (request, reply) => {
 				const principal = principalOf(request);
 				const record = await loadPrincipal(principal);
 				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
-				if ((await assistants.find(principal.id)) === null) {
-					return reply.code(404).send(RESOURCE_UNAVAILABLE);
-				}
 				const held = await withPrincipal(db, principal, (tx) =>
 					findOwnerCrossSigning(tx, principal.id)
 				);
@@ -472,9 +470,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 				const parsed = ownerIdentityBodySchema.safeParse(request.body);
 				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
-				if ((await assistants.find(principal.id)) === null) {
-					return reply.code(404).send(RESOURCE_UNAVAILABLE);
-				}
 				const masterKey = parsed.data.master_key;
 				// Only the identity that signed the session the owner's words last came from, as the
 				// harness showed it to them, and only while it is still the latest one seen
