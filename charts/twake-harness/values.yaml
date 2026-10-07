@@ -66,6 +66,10 @@ config:
   turnHistoryMaxChars: ''
   # The most tool calls one turn may make before it stops. Empty means the harness default, 6
   turnMaxToolCalls: ''
+  # Whether an owner's words count only from a session their cross-signing identity signed
+  # (matrix role): report, the harness default when empty, takes them all the same and logs and
+  # tells the owner what enforce would not take; enforce does not take them
+  ownerDeviceTrust: ''
   # The organization agent, a bot of the harness answering the organization's members, named by
   # their Matrix identifiers (comma separated); its localpart lives in the assistants' namespace
   orgAgentEnabled: false

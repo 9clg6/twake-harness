@@ -114,6 +114,17 @@ jobs:
           grep -A1 ADMISSION_USER_DAILY_TOKENS /tmp/admission.yaml | grep -q '"1000000"'
           grep -A1 ADMISSION_USER_QUEUE /tmp/admission.yaml | grep -q '"0"'
           kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/admission.yaml
+      # OWNER_DEVICE_TRUST is rendered on the matrix role only, when config.ownerDeviceTrust is set,
+      # and only as report or enforce: left out, the harness reports
+      - run: helm template agent-matrix charts/twake-harness --set role=matrix --set persistence.enabled=true --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/matrix-default.yaml && ! grep -q OWNER_DEVICE_TRUST /tmp/matrix-default.yaml
+      - run: |
+          helm template agent-matrix charts/twake-harness --set role=matrix --set persistence.enabled=true --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.ownerDeviceTrust=enforce > /tmp/matrix-enforce.yaml
+          grep -A1 OWNER_DEVICE_TRUST /tmp/matrix-enforce.yaml | grep -q '"enforce"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/matrix-enforce.yaml
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.ownerDeviceTrust=enforce > /tmp/api-enforce.yaml && ! grep -q OWNER_DEVICE_TRUST /tmp/api-enforce.yaml
+      - run: |
+          if helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.ownerDeviceTrust=strict > /dev/null 2> /tmp/strict.err; then exit 1; fi
+          grep -q 'config.ownerDeviceTrust must be report or enforce' /tmp/strict.err
 
   image:
     needs: [check, test, chart]

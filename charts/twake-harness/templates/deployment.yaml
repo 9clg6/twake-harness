@@ -107,6 +107,16 @@ spec:
             - name: TURN_MAX_TOOL_CALLS
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- /* Checked on every role, rendered on the matrix role, the only one that reads owner words */}}
+            {{- with .Values.config.ownerDeviceTrust }}
+            {{- if not (has . (list "report" "enforce")) }}
+            {{- fail "config.ownerDeviceTrust must be report or enforce" }}
+            {{- end }}
+            {{- if eq $.Values.role "matrix" }}
+            - name: OWNER_DEVICE_TRUST
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             - name: ORG_AGENT_ENABLED
               value: {{ .Values.config.orgAgentEnabled | quote }}
             - name: ORG_AGENT_LOCALPART
