@@ -135,3 +135,21 @@ export async function listActiveAssistants(db: Db): Promise<{ owner: string; use
 		select distinct owner, user_id from assistant_rooms`;
 	return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
 }
+
+// An assistant a provisioner asked for, in an index without user content: the matrix role
+// prepares it at its start even before it has a room
+export async function saveProvisioned(db: Db, owner: string, userId: string): Promise<void> {
+	await db.sql`
+		insert into assistant_provisioned (owner, user_id) values (${owner}, ${userId})
+		on conflict (owner) do update set user_id = excluded.user_id`;
+}
+
+// The provisioned assistants that have no room yet, which the rooms index does not list
+export async function listProvisionedWithoutRoom(
+	db: Db
+): Promise<{ owner: string; userId: string }[]> {
+	const rows = await db.sql<{ owner: string; user_id: string }[]>`
+		select p.owner, p.user_id from assistant_provisioned p
+		where not exists (select 1 from assistant_rooms r where r.owner = p.owner)`;
+	return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
+}

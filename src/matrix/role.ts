@@ -19,6 +19,7 @@ import {
 	findAssistant,
 	findDialog,
 	listActiveAssistants,
+	listProvisionedWithoutRoom,
 	saveDialog,
 	setAssistantRoomId
 } from '../assistants/repository.js';
@@ -992,7 +993,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 	// Every assistant holds its encryption state from the start, so the key shares Synapse pushes
 	// while this role was away, or before an assistant speaks, are not lost
-	for (const { owner, userId } of await listActiveAssistants(db)) {
+	// The assistants a provisioner asked for, with no room yet, too: their owners' clients check the
+	// identity before they open one, and a store lost since would leave the recorded one stale
+	const assistantsAtStart = [
+		...(await listActiveAssistants(db)),
+		...(await listProvisionedWithoutRoom(db))
+	];
+	for (const { owner, userId } of assistantsAtStart) {
 		try {
 			const intent = appservice.getIntentForUserId(userId);
 			await ensureEncryption(intent);

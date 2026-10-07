@@ -194,6 +194,26 @@ describe('a provisioned assistant', () => {
 		expect(uploads).toBeGreaterThan(1);
 	});
 
+	it('is prepared again when the role restarts, before it has any room', async () => {
+		const lou = await h.synapse.registerUser('lou');
+		// The homeserver refuses every upload of the identity: the preparation fails for good
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/device_signing/upload')
+				? 500
+				: null;
+		try {
+			expect((await provision(lou.userId)).status).toBe(503);
+			await sleep(12_000);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+		await h.restartRole();
+		// Nobody asks for the assistant meanwhile: the role prepares it at its start
+		await sleep(5_000);
+		const after = await provision(lou.userId);
+		expect(after.status).toBe(200);
+	});
+
 	it('joins the direct room its owner opens and invites it to, and answers its owner there', async () => {
 		const carol = await h.synapse.registerUser('carol');
 		const client = await startE2eeClient(h.synapse.url, carol);

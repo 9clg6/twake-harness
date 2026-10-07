@@ -12,6 +12,7 @@ import {
 	renameAssistant,
 	saveAssistant,
 	saveAssistantRoom,
+	saveProvisioned,
 	setAssistantRoomId,
 	type AssistantRecord
 } from './repository.js';
@@ -151,7 +152,10 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 		},
 		async provision(owner) {
 			const live = await current(owner);
-			if (live !== null) return { ok: true, userId: live.userId };
+			if (live !== null) {
+				await saveProvisioned(db, owner, live.userId);
+				return { ok: true, userId: live.userId };
+			}
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
@@ -164,6 +168,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				const { reclaimed } = await withPrincipal(db, { id: owner }, (tx) =>
 					saveAssistant(tx, { owner, userId, name, roomId: null })
 				);
+				await saveProvisioned(db, owner, userId);
 				log.info({ owner, userId, named, reclaimed }, 'assistant provisioned');
 				return { ok: true, userId };
 			} catch (err: unknown) {
@@ -197,6 +202,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			}
 			await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
 			await db.sql`delete from assistant_rooms where owner = ${owner}`;
+			await db.sql`delete from assistant_provisioned where owner = ${owner}`;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
 		}
