@@ -304,6 +304,8 @@ describe('an assignment published on the activity exchange wakes the assignee’
 	it('reads a quorum queue of its own, one consumer at a time, its dead letters apart', async () => {
 		const queue = await broker.queue(QUEUE);
 		expect(queue?.type).toBe('quorum');
+		// The worker holds one message at a time, which it takes once what it wakes is written
+		expect(await broker.prefetchOf(QUEUE)).toEqual([1]);
 		// A message is dead-lettered into the instance's own exchange, and kept until its dead letter
 		// queue takes it; a message that keeps coming back, as one that brings the worker down, ends
 		// there after five returns, whichever RabbitMQ version runs, since the default changed in 4.0

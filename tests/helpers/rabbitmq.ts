@@ -34,6 +34,8 @@ export interface TestBroker {
 	// What routes to a queue, but the default exchange, which routes to every queue by its name
 	bindingsOf(queue: string): Promise<Binding[]>;
 	queue(name: string): Promise<QueueState | null>;
+	// How many messages each consumer of a queue may hold unacknowledged
+	prefetchOf(queue: string): Promise<number[]>;
 	// The user of each connection open, one entry per connection
 	connectedUsers(): Promise<string[]>;
 	// Publishes as an application does, persistent and under its id, once the broker took it
@@ -99,6 +101,16 @@ export async function startTestBroker(): Promise<TestBroker> {
 				messages: row.messages
 			};
 		},
+		prefetchOf: async (queue) =>
+			(
+				await listed<{ queue_name: string; prefetch_count: number }>(
+					'list_consumers',
+					'queue_name',
+					'prefetch_count'
+				)
+			)
+				.filter((row) => row.queue_name === queue)
+				.map((row) => row.prefetch_count),
 		connectedUsers: async () =>
 			(await listed<{ user: string }>('list_connections', 'user')).map((row) => row.user),
 		publish: async (exchange, routingKey, body, messageId) => {
