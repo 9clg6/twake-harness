@@ -15,6 +15,13 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 const OWNER_DEVICE_TRUST_MODES = ['report', 'enforce'] as const;
 export type OwnerDeviceTrust = (typeof OWNER_DEVICE_TRUST_MODES)[number];
 
+export interface ActivitySource {
+	// The broker, its vhost included
+	readonly amqpUrl: string;
+	// The CloudEvent types that wake an assistant: the only routing keys its queue is bound to
+	readonly types: readonly string[];
+}
+
 export interface Config {
 	readonly role: Role;
 	readonly host: string;
@@ -106,6 +113,14 @@ export interface Config {
 		// The service clients, by their token subject, allowed to provision an owner's assistant
 		readonly clientIds: readonly string[];
 	};
+	readonly rabbitmq: {
+		// What the names of the queues and exchanges this instance declares on the broker start
+		// with: its own, so that no two instances share a queue
+		readonly prefix: string;
+	};
+	// The activity exchange, where the applications publish what happens to people as CloudEvents,
+	// which the worker role listens to when it is set
+	readonly activity: ActivitySource | null;
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -184,6 +199,10 @@ const envSchema = z.object({
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
 	PROVISIONER_CLIENT_IDS: z.string().default(''),
+	RABBITMQ_PREFIX: z.string().default('twake-harness'),
+	ACTIVITY_ENABLED: z.enum(['true', 'false']).default('false'),
+	ACTIVITY_AMQP_URL: z.string().default(''),
+	ACTIVITY_TYPES: z.string().default('com.twake.tasks.task.assigned.v1'),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -318,6 +337,16 @@ export function loadConfig(env: Env): Config {
 				.map((id) => id.trim())
 				.filter((id) => id.length > 0)
 		},
+		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
+		activity:
+			values.ACTIVITY_ENABLED === 'true'
+				? {
+						amqpUrl: values.ACTIVITY_AMQP_URL,
+						types: values.ACTIVITY_TYPES.split(',')
+							.map((type) => type.trim())
+							.filter((type) => type.length > 0)
+					}
+				: null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
