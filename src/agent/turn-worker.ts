@@ -20,9 +20,22 @@ const turnPayload = z.object({
 	text: z.string().min(1),
 	// Who started the turn: the owner's message, or an event a dispatcher posted
 	origin: z.enum(['owner', 'event']).optional(),
-	// The event a dispatcher posted, when the turn is an event's: its id and CloudEvent type, so
-	// that the harness can read and check an invitation before the model speaks
-	event: z.object({ id: z.string().min(1), type: z.string().min(1) }).optional()
+	// The event a dispatcher posted, when the turn is an event's: its id and CloudEvent type, and
+	// for an invitation, what the harness checks before the model speaks
+	event: z
+		.object({
+			id: z.string().min(1),
+			type: z.string().min(1),
+			invitation: z
+				.object({
+					uid: z.string().min(1),
+					start: z.string().nullable(),
+					end: z.string().nullable(),
+					timezone: z.string().nullable()
+				})
+				.optional()
+		})
+		.optional()
 });
 
 export type TurnPayload = z.infer<typeof turnPayload>;

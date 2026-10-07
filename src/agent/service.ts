@@ -31,7 +31,12 @@ import {
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
-import { checkInvitation, isInvitationEvent, type ToolRunner } from './invitation.js';
+import {
+	checkInvitation,
+	isInvitationEvent,
+	type Invitation,
+	type ToolRunner
+} from './invitation.js';
 import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
@@ -162,8 +167,13 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
-	// The event a dispatcher posted, for a turn of origin event: its id and CloudEvent type
-	readonly event?: { readonly id: string; readonly type: string };
+	// The event of a turn of origin event: its id and CloudEvent type, and for an invitation, what
+	// the harness checks before the model speaks
+	readonly event?: {
+		readonly id: string;
+		readonly type: string;
+		readonly invitation?: Invitation | undefined;
+	};
 	// The call its owner just allowed: the turn runs it as frozen, then goes on from there, with
 	// no new message
 	readonly resume?: ResumeInput;
@@ -298,7 +308,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		messages: Messages
 	): Promise<Told> {
 		const event = input.event;
-		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
+		if (
+			input.origin !== 'event' ||
+			event === undefined ||
+			event.invitation !== undefined ||
+			!isInvitationEvent(event.type)
+		) {
 			return { message: input.message, question: null };
 		}
 		let question: Question | null = null;

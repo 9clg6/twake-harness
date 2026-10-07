@@ -19,6 +19,15 @@ export interface InvitationTimes {
 	readonly timezone: unknown;
 }
 
+// What the wake-up of an invitation carries for the harness to check it: its UID, and its times
+// as the calendar wrote them
+export interface Invitation {
+	readonly uid: string;
+	readonly start: string | null;
+	readonly end: string | null;
+	readonly timezone: string | null;
+}
+
 // The period read_freebusy is asked about, or why it is not asked
 export type InvitationSlot =
 	| { readonly ok: true; readonly start: string; readonly end: string }

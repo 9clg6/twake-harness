@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Invitation } from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
@@ -30,6 +31,8 @@ export interface Wakeup {
 		readonly computed: Readonly<Record<string, unknown>>;
 		readonly untrusted: Readonly<Record<string, unknown>>;
 	};
+	// For an invitation, what its turn checks before the model speaks
+	readonly invitation?: Invitation;
 }
 
 export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped';
@@ -50,6 +53,7 @@ function fenced(wakeup: Wakeup): string {
 
 // What the owner's assistant is told, in its owner's language: what arrived, then the event
 function told(wakeup: Wakeup, messages: Messages): string {
+	if (wakeup.invitation !== undefined) return messages.events.invited(wakeup.id, fenced(wakeup));
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
 		? messages.events.taskAssigned(wakeup.id, fenced(wakeup))
 		: messages.events.published(wakeup.type, wakeup.id, fenced(wakeup));
@@ -107,7 +111,11 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 			eventId: key,
 			text: told(wakeup, getMessages(localeOf(assistant, config.locale))),
 			origin: 'event',
-			event: { id: wakeup.id, type: wakeup.type }
+			event: {
+				id: wakeup.id,
+				type: wakeup.type,
+				...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
+			}
 		};
 		await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
 		return 'woken' as const;

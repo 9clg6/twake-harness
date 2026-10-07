@@ -152,6 +152,8 @@ export interface Messages {
 		// deployment listens to
 		taskAssigned(eventId: string, eventData: string): string;
 		published(type: string, eventId: string, eventData: string): string;
+		// A new invitation the harness took from Calendar, handed over fenced as data
+		invited(eventId: string, eventData: string): string;
 	};
 	// What the model is told of the present at the start of every turn, so that it can place
 	// "today" or "this afternoon" and give contracts times with the right offset
@@ -345,6 +347,11 @@ const ENGLISH: Messages = {
 				`[event] A new event of type "${type}" has arrived for me (id ${eventId}). ${EN_EVENT_DATA}`,
 				eventData,
 				'Tell me in a few words, in the language of our conversation, what it is about.'
+			].join('\n'),
+		invited: (eventId, eventData) =>
+			[
+				`[event] An invitation has been sent to me (id ${eventId}). ${EN_EVENT_DATA}`,
+				eventData
 			].join('\n')
 	},
 	now: (words, iso, timeZone) =>
@@ -554,6 +561,11 @@ const FRENCH: Messages = {
 				`[événement] Un nouvel événement de type « ${type} » est arrivé pour moi (id ${eventId}). ${FR_EVENT_DATA}`,
 				eventData,
 				"Dis-moi en quelques mots, dans la langue de notre conversation, de quoi il s'agit."
+			].join('\n'),
+		invited: (eventId, eventData) =>
+			[
+				`[événement] Une invitation m'a été envoyée (id ${eventId}). ${FR_EVENT_DATA}`,
+				eventData
 			].join('\n')
 	},
 	now: (words, iso, timeZone) =>

@@ -10,7 +10,7 @@ const ACTIVITY_EXCHANGE = 'activity';
 // How many times a message may come back before it is dead-lettered, as one that brings the
 // worker down whenever it is delivered: set, since RabbitMQ 3.13 has no limit and 4.0 one of 20,
 // and fixed once the queue is declared
-const DELIVERY_LIMIT = 5;
+export const DELIVERY_LIMIT = 5;
 
 // The most recipients of one event the listener reads, in their order: the others are left out
 const MAX_RECIPIENTS = 100;

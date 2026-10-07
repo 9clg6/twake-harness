@@ -23,6 +23,11 @@ export interface ActivitySource {
 	readonly types: readonly string[];
 }
 
+export interface CalendarSource {
+	// The broker, Calendar's vhost included
+	readonly amqpUrl: string;
+}
+
 export interface Config {
 	readonly role: Role;
 	readonly host: string;
@@ -130,6 +135,9 @@ export interface Config {
 		// whatever their source, counted in the database: past it, an event wakes that owner no more
 		readonly perHour: number;
 	};
+	// Calendar's fanout of the notifications it sends each invitee, which the worker role listens
+	// to when it is set, for the new invitations
+	readonly calendar: CalendarSource | null;
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -218,6 +226,8 @@ const envSchema = z.object({
 	ACTIVITY_TYPES: z.string().default(TASK_ASSIGNED_EVENT_TYPE),
 	// As many as the dispatcher allowed before the activity exchange replaced it
 	WAKEUPS_PER_HOUR: z.coerce.number().int().min(1).default(20),
+	CALENDAR_ENABLED: z.enum(['true', 'false']).default('false'),
+	CALENDAR_AMQP_URL: z.string().default(''),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -399,6 +409,7 @@ export function loadConfig(env: Env): Config {
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
+		calendar: values.CALENDAR_ENABLED === 'true' ? { amqpUrl: values.CALENDAR_AMQP_URL } : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
