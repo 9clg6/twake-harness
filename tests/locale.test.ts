@@ -4,10 +4,8 @@ import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { CALENDAR_CATALOG, invitationEvent } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
+import { PROVISIONER, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
-
-// The service client a provisioner gets its tokens as
-const PROVISIONER = 'tom-bots';
 
 describe('a deployment that speaks French', () => {
 	let h: MatrixTestHarness;
@@ -76,28 +74,15 @@ describe('a deployment that speaks French', () => {
 		);
 	});
 
-	// The assistant a provisioner asks for, once its owner's client may trust it
-	async function provisionUntilReady(owner: string): Promise<string> {
-		for (let i = 0; i < 120; i += 1) {
-			const res = await h.apps[0]!.inject({
-				method: 'PUT',
-				url: `/v1/provisioning/assistants/${encodeURIComponent(owner)}`,
-				headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
-				payload: {}
-			});
-			if (res.statusCode === 200) return (res.json() as { userId: string }).userId;
-			await new Promise((resolve) => setTimeout(resolve, 250));
-		}
-		throw new Error('the assistant never became ready');
-	}
-
 	it('welcomes in French the owner of an assistant a provisioner asked for', async () => {
 		const bruno = await h.synapse.registerUser('bruno');
 		const brunoClient = await startE2eeClient(h.synapse.url, bruno);
 		try {
-			const mine = await provisionUntilReady(bruno.userId);
-			const room = await brunoClient.createDirectRoom(mine);
-			expect(await brunoClient.waitForMessage(room, mine, (t) => t.startsWith('Bonjour'))).toBe(
+			const mine = await provisionUntilReady(h.api, bruno.userId);
+			const room = await brunoClient.createDirectRoom(mine.userId);
+			expect(
+				await brunoClient.waitForMessage(room, mine.userId, (t) => t.startsWith('Bonjour'))
+			).toBe(
 				"Bonjour, je m'appelle Assistant et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir."
 			);
 		} finally {
