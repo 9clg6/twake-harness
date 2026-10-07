@@ -29,7 +29,7 @@ create table owner_device_notices (
 	-- The device's id, or its identity key when the device is not known
 	device text not null,
 	reason text not null check (
-		reason in ('unverified', 'no_identity', 'identity_changed', 'check_failed')
+		reason in ('unverified', 'no_identity', 'identity_changed', 'check_failed', 'unencrypted')
 	),
 	notified_at timestamptz not null default now(),
 	primary key (owner, device, reason)

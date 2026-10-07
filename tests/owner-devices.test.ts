@@ -94,6 +94,19 @@ async function push(r: ConsentRoom, events: Record<string, unknown>[]): Promise<
 	return reply.status;
 }
 
+// A room of Alice's assistant that reads as clear: opened without encryption, and held as one of
+// the assistant's rooms
+async function clearRoom(r: ConsentRoom): Promise<string> {
+	const room = await r.h.synapse.createDirectRoom(r.alice, r.assistantId);
+	for (let i = 0; i < 120; i += 1) {
+		if ((await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)) break;
+		await sleep(250);
+	}
+	await r.h.db.sql`
+		insert into assistant_rooms (room_id, owner, user_id) values (${room}, ${OWNER}, ${r.assistantId})`;
+	return room;
+}
+
 // The identity the harness holds for Alice, as it keeps it
 async function heldIdentity(
 	r: ConsentRoom
@@ -123,6 +136,8 @@ const UNVERIFIED_ANSWER =
 	'I did not take your answer, so my question still waits: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then answer again.';
 const CHANGED_MESSAGE =
 	"I did not act on your last message: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity); until then I act on none of your messages.";
+const UNENCRYPTED_MESSAGE =
+	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 const CHANGED_REPORT =
@@ -332,6 +347,25 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Wipe'))).toBe(false);
 	});
 
+	it('acts on nothing written in clear in a room of mine that reads as clear', async () => {
+		const clear = await clearRoom(r);
+		const sent = await r.h.synapse.sendText(r.alice, clear, 'Plain hello');
+		expect(await r.h.decisionOn(sent)).toMatchObject({
+			msg: 'assistant ignored an unencrypted message',
+			reason: 'clear room',
+			mode: 'enforce'
+		});
+		expect(
+			await r.h.synapse.waitForMessage(r.alice, clear, r.assistantId, (t) =>
+				t.startsWith('I did not act on your last message: it reached me unencrypted')
+			)
+		).toBe(UNENCRYPTED_MESSAGE);
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Plain hello'))).toBe(
+			false
+		);
+	});
+
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
@@ -471,6 +505,19 @@ describe('while the harness only reports the sessions it would not act on', () =
 				reason: 'unverified'
 			});
 		});
+	});
+
+	it('acts on what I write in clear in a room of mine that reads as clear, and logs it', async () => {
+		const clear = await clearRoom(r);
+		const sent = await r.h.synapse.sendText(r.alice, clear, 'Plain hello');
+		expect((await r.h.decisionOn(sent))?.['msg']).toBe('turn queued');
+		expect(await logged(r, 'owner message unencrypted', sent)).toMatchObject({
+			reason: 'clear room',
+			mode: 'report'
+		});
+		expect(
+			await r.h.synapse.waitForMessage(r.alice, clear, r.assistantId, (t) => t.startsWith('Heard:'))
+		).toBe('Heard: Plain hello');
 	});
 
 	it('acts on my words after my identity changed all the same, and tells me how to accept it', async () => {
