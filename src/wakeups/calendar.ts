@@ -114,6 +114,9 @@ function invitationId(vevent: ICAL.Component, recipient: string): string {
 // zone, the organizer, the occurrence) is shown apart from the title its organizer wrote; the
 // description and the location are never read.
 function wakeupOf(message: Record<string, unknown>): Wakeup | null {
+	const method = message['method'];
+	if (typeof method !== 'string' || method.toUpperCase() !== 'REQUEST') return null;
+	if (message['isNewEvent'] !== true) return null;
 	const vevent = veventOf(message['event']);
 	const uid = vevent.getFirstPropertyValue('uid');
 	if (typeof uid !== 'string' || uid.length === 0) {
