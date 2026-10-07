@@ -162,21 +162,32 @@ async function crossSign(
 		: null;
 	const ours = [recorded?.masterPublicKey, escrowed?.masterPublicKey];
 	const serverKey = view.masterPublicKey;
+	// The identity recorded as ours, with the device it signed once it did: a device that is not
+	// signed is recorded as none, since the owner's clients would not trust it
+	let current = recorded;
+	async function record(masterPublicKey: string, signedDeviceId: string | null): Promise<void> {
+		if (current?.masterPublicKey === masterPublicKey && current.deviceId === signedDeviceId) return;
+		const next = { owner, masterPublicKey, deviceId: signedDeviceId };
+		await withPrincipal(db, { id: owner }, (tx) => saveCrossSigning(tx, next));
+		current = next;
+	}
 
 	if (holdsIdentity && serverKey !== null && ours.includes(serverKey)) {
-		if (recorded?.masterPublicKey !== serverKey) {
-			await withPrincipal(db, { id: owner }, (tx) =>
-				saveCrossSigning(tx, { owner, masterPublicKey: serverKey })
-			);
+		if (view.deviceSigned) {
+			await record(serverKey, deviceId);
+			return { outcome: 'kept', masterPublicKey: serverKey };
 		}
-		if (view.deviceSigned) return { outcome: 'kept', masterPublicKey: serverKey };
+		await record(serverKey, null);
 		// Uploading the identity the machine holds again signs this device with it
 		const requests = await step('signing this device', () => machine.bootstrapCrossSigning(false));
 		await uploadIdentity(deps.admin, intent, machine, requests);
+		await record(serverKey, deviceId);
 		log.info({ owner, userId, deviceId }, 'assistant device cross-signed');
 		return { outcome: 'signed', masterPublicKey: serverKey };
 	}
 	if (!holdsIdentity && escrowed !== null && serverKey === escrowed.masterPublicKey) {
+		// No device of this store is signed until the owner's recovery brings the identity back
+		if (current !== null) await record(current.masterPublicKey, null);
 		log.warn(
 			{ owner, userId, deviceId },
 			'cross-signing identity escrowed, waiting for its recovery'
@@ -188,7 +199,7 @@ async function crossSign(
 	);
 	const masterPublicKey = masterKeyOfUpload(requests.uploadSigningKeysReq);
 	await uploadIdentity(deps.admin, intent, machine, requests);
-	await withPrincipal(db, { id: owner }, (tx) => saveCrossSigning(tx, { owner, masterPublicKey }));
+	await record(masterPublicKey, deviceId);
 	log.info(
 		{ owner, userId, deviceId, replaced: serverKey !== null },
 		'cross-signing identity reset'
