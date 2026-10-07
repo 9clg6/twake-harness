@@ -17,9 +17,13 @@ function jsonBody(properties: Record<string, unknown>): Record<string, unknown> 
 	return { content: { 'application/json': { schema: { type: 'object', properties } } } };
 }
 
-// The owner's mail, drive and tasks as the contracts service would publish them: each write says
-// in x-twake-risk whether its owner confirms every call of it, or says nothing. The catalog names
-// Drive and Tasks to their owners, and leaves Mail to its id.
+// The name of an application and what writing covers there, as long as a catalog may give them
+const LONGEST_NAME = `Twake ${'N'.repeat(58)}`;
+const LONGEST_COVERS = `write ${'w'.repeat(194)}`;
+
+// The owner's mail, drive, tasks and notes as the contracts service would publish them: each write
+// says in x-twake-risk whether its owner confirms every call of it, or says nothing. The catalog
+// names Drive, Tasks and Notes to their owners, Notes as long as it may, and leaves Mail to its id.
 const CATALOG = {
 	openapi: '3.0.3',
 	'x-twake-domains': {
@@ -27,9 +31,19 @@ const CATALOG = {
 			name: { en: 'Twake Drive' },
 			write: { en: 'share, rename and move your files' }
 		},
-		tasks: { name: { en: 'Twake Tasks' }, read: { en: 'list and read your tasks' } }
+		tasks: { name: { en: 'Twake Tasks' }, read: { en: 'list and read your tasks' } },
+		notes: { name: { en: LONGEST_NAME }, write: { en: LONGEST_COVERS } }
 	},
 	paths: {
+		'/contracts/v1/notes/pages': {
+			post: {
+				operationId: 'publish_note',
+				summary: 'Publishes a note of the user for everyone to read',
+				tags: ['notes.page.publish.v1'],
+				'x-twake-risk': 'high',
+				requestBody: jsonBody({ text: { type: 'string' } })
+			}
+		},
 		'/contracts/v1/mail/emails': {
 			post: {
 				operationId: 'send_email',
@@ -191,17 +205,63 @@ const REQUESTS: Record<string, Reply> = {
 	}
 };
 
-// A mail to the board whose call, as indented JSON, takes this many bytes
-function reportOfSize(bytes: number): Record<string, unknown> {
-	const empty = { body: { to: ['board@test.local'], subject: 'Report', text: '' } };
-	const text = 'x'.repeat(bytes - JSON.stringify(empty, null, 2).length);
-	return { body: { ...empty.body, text } };
+// The bytes a text takes in the JSON of the event that carries it
+function eventBytes(text: string): number {
+	return Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
 }
 
-// A call takes at most 16 KiB of the message that shows it, as plain text and as HTML together:
-// 8 KiB of JSON that holds nothing HTML escapes
-const LARGEST_REPORT = reportOfSize(8_192);
-const TOO_LARGE_REPORT = reportOfSize(8_193);
+function escapeHtml(text: string): string {
+	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
+// What a call takes of the event that shows it: as plain text, and as code in the HTML
+function shownBytes(args: unknown): number {
+	const json = JSON.stringify(args, null, 2);
+	return (
+		eventBytes(json) +
+		eventBytes(`<pre><code class="language-json">${escapeHtml(json)}</code></pre>`)
+	);
+}
+
+// A call shows at most 16 KiB of the event that carries its request, as plain text and as HTML
+// together
+const CALL_BYTES = 16_384;
+
+// The largest call made of one character repeated that a request shows whole
+function largestOf(char: string, made: (text: string) => unknown): unknown {
+	const step = shownBytes(made(char)) - shownBytes(made(''));
+	return made(char.repeat(Math.floor((CALL_BYTES - shownBytes(made(''))) / step)));
+}
+
+interface Report {
+	readonly body: {
+		readonly to: readonly string[];
+		readonly subject: string;
+		readonly text: string;
+	};
+}
+
+function reportOf(text: string): Report {
+	return { body: { to: ['board@test.local'], subject: 'Report', text } };
+}
+
+// A mail to the board as large as a request shows whole, and the same with one more character
+const LARGEST_REPORT = largestOf('x', reportOf) as Report;
+const TOO_LARGE_REPORT = reportOf(`${LARGEST_REPORT.body.text}x`);
+
+// The most the model's words take of the event: a request quotes 2,000 of their characters, and a
+// control character takes six bytes, escaped as \u0001 by the event's JSON
+const CONTROLS = '\u0001'.repeat(2_000);
+
+// A note made of quotation marks, eight bytes of the event each: escaped in the call's JSON, then
+// again in the event's, in the plain text and in the HTML. As many as 16 KiB of the plain text and
+// the HTML together let a call show before what the event carries counted, and as many as it
+// carries now.
+function noteOf(text: string): unknown {
+	return { body: { text } };
+}
+const NOTE_BEFORE = noteOf('"'.repeat(4_000));
+const LARGEST_NOTE = largestOf('"', noteOf);
 
 // A literal model: for each request of the owner it knows, it says what it is about to do and makes
 // the call; once a call ran, it tells what came back, and it repeats anything else it hears. Told
@@ -248,7 +308,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		// Many turns of one owner in a row: admission is the subject of its own suite
 		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100' });
 		r.h.apisix.contracts.spec = CATALOG;
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(8);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(9);
 		r.h.apisix.llm.script = literalModel;
 	}, 240_000);
 	afterAll(async () => {
@@ -429,8 +489,8 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		const waited = waits().length;
 		const llmCalls = r.h.apisix.llm.calls.length;
 		await r.client.sendText(r.room, 'Send the report to the board');
-		// The model's first report was a byte too large: nothing waited for me, and the model was
-		// told so, then made the largest report a request shows whole
+		// The model's first report was a character too large: nothing waited for me, and the model
+		// was told so, then made the largest report a request shows whole
 		const request = await nextRequest(seen);
 		expect(request.body).toBe(asked(HIGH_RISK_IN_MAIL, LARGEST_REPORT));
 		expect(requests()).toHaveLength(seen + 1);
@@ -449,6 +509,53 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		await r.client.react(r.room, request.eventId, '✅');
 		await r.nextSaying('Done:', done);
 		expect(r.h.apisix.contracts.calls.map((c) => c.body)).toEqual([LARGEST_REPORT['body']]);
+	});
+
+	it('keeps its largest request well within what one encrypted event carries', async () => {
+		// The model writes as much as a request quotes, all control characters, and publishes a note
+		// of quotation marks, first as large as calls could be, then, told it is too large to
+		// confirm, as large as a request shows whole, in an application named as long as may be
+		r.h.apisix.llm.script = (request) => {
+			const told = request.messages.at(-1);
+			const tooLarge =
+				told?.role === 'tool' && (told.content ?? '').includes('too_large_to_confirm');
+			return {
+				content: CONTROLS,
+				toolCalls: call('publish_note', tooLarge ? LARGEST_NOTE : NOTE_BEFORE)
+			};
+		};
+		try {
+			const seen = requests().length;
+			const tooLarge = (): number =>
+				r.h.logLines().filter((l) => l['msg'] === 'contract call too large to ask about').length;
+			const refused = tooLarge();
+			await r.client.sendText(r.room, 'Publish my quotes');
+			const request = await nextRequest(seen);
+			expect(request.body).toBe(
+				asked(
+					[
+						`This is the first time I need to change your data in ${LONGEST_NAME}, and actions like this one need your yes each time.`,
+						`Writing: ${LONGEST_COVERS}`,
+						'Do you allow it, starting with this one, exactly as below?'
+					].join('\n'),
+					LARGEST_NOTE,
+					CONTROLS
+				)
+			);
+			expect(tooLarge()).toBe(refused + 1);
+			// The server keeps the request encrypted, well under the 64 KiB a Matrix event may take:
+			// its envelope there, hashes and signatures, takes a few hundred bytes more
+			const stored = await r.h.synapse.request(
+				r.alice,
+				'GET',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/event/${encodeURIComponent(request.eventId)}`
+			);
+			expect(stored.body['type']).toBe('m.room.encrypted');
+			expect(Buffer.byteLength(JSON.stringify(stored.body), 'utf8')).toBeLessThan(60 * 1024);
+			expect(r.h.apisix.contracts.calls).toHaveLength(0);
+		} finally {
+			r.h.apisix.llm.script = literalModel;
+		}
 	});
 
 	it('asks before a write that declares no risk, or one it does not know, and never before a low write I allowed', async () => {
@@ -487,7 +594,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		expect(warned.map((l) => [l['contract'], l['declared']])).toEqual(
 			warned.map(() => ['mail.email.spam.v1', 'critical'])
 		);
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(8);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(9);
 		expect(unknownRisks()).toHaveLength(warned.length);
 	});
 

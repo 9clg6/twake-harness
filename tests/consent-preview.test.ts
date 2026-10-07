@@ -193,6 +193,25 @@ function escapeHtml(text: string): string {
 	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
+// The bytes a text takes in the JSON of the event that carries it
+function eventBytes(text: string): number {
+	return Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
+}
+
+// What a summary of the mail application takes of the event that shows it: quoted under the
+// harness's label in the plain text, and as code under that label in the HTML
+function summaryBytes(summary: string): number {
+	return (
+		eventBytes(describedByMail(summary)) +
+		eventBytes('<p>mail describes it as:</p>') +
+		eventBytes(`<pre><code>${escapeHtml(summary)}</code></pre>`)
+	);
+}
+
+// The longest summary of x a request shows whole, within the 16 KiB a call may take of the event:
+// each x takes a byte of the plain text and a byte of the HTML
+const LARGEST_SUMMARY = 'x'.repeat(1 + Math.floor((16_384 - summaryBytes('x')) / 2));
+
 describe('my assistant shows me what the application says an action would do before I confirm it', () => {
 	let r: ConsentRoom;
 	// The state of what the mail application acts on, such as the members of the finance list: a
@@ -672,16 +691,16 @@ describe('my assistant shows me what the application says an action would do bef
 
 	it('never asks about a call whose summary it cannot show whole, and shows the largest it can', async () => {
 		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'write');
-		// A summary takes at most 16 KiB of the message, as plain text and as HTML together, as the
-		// call would: 8 KiB of text that holds nothing HTML escapes, and not a byte more
-		let length = 8_193;
+		// A summary takes at most 16 KiB of the event, as plain text and as HTML together, as the call
+		// would: the longest summary of x, and not one x more
+		let summary = `${LARGEST_SUMMARY}x`;
 		r.h.apisix.contracts.handler = (c) =>
 			c.headers['x-twake-preview'] === undefined
 				? mailApp(c)
 				: {
 						status: 200,
 						headers: PREVIEWED,
-						body: { summary: 'x'.repeat(length), digest: digest() }
+						body: { summary, digest: digest() }
 					};
 		const seen = requests().length;
 		const heard = r.saying('Heard:').length;
@@ -690,10 +709,10 @@ describe('my assistant shows me what the application says an action would do bef
 		expect(await r.nextSaying('Heard:', heard)).toContain('too_large_to_confirm');
 		expect(requests()).toHaveLength(seen);
 		expect(previewHeaders()).toEqual([['true', null]]);
-		length = 8_192;
+		summary = LARGEST_SUMMARY;
 		await r.client.sendText(r.room, 'Send Paul the Q4 budget');
 		const request = await nextFrom(isRequest, seen);
-		expect(request.body).toBe(asked(HIGH_RISK_IN_MAIL, describedByMail('x'.repeat(8_192)), SAID));
+		expect(request.body).toBe(asked(HIGH_RISK_IN_MAIL, describedByMail(LARGEST_SUMMARY), SAID));
 	});
 
 	it('asks for my permission at the broker first when it refuses the preview, then shows me the preview', async () => {

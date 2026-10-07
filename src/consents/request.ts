@@ -57,21 +57,25 @@ export interface OwnerRequest {
 // The most a request quotes of what the model wrote: its words, never what runs
 const SAID_LENGTH = 2_000;
 
-// The most those words may take of the message as HTML once rendered: what their escaped text
-// could, five bytes a character, so that the request stays as large as it was sized to be
-const SAID_HTML_BYTES = SAID_LENGTH * 5;
+// The most those words may take of the event as HTML once rendered: what their escaped lines
+// could take, six bytes a character at most, as a line break becomes <br /> and a control
+// character \u0001 in the event's JSON
+const SAID_HTML_BYTES = SAID_LENGTH * 6;
 
-// The most a call, or the summary shown in its place, may take in the message that shows it, as
-// plain text and as HTML together: with the rest of the request, well within what one Matrix
-// event carries
+// The most what a request shows of a call, the call or the summary in its place, may take of the
+// event that carries the request, as plain text and as HTML together, escaped as the event's JSON
+// holds them. With the model's words, 12,000 bytes at most in each, and the rest of the request,
+// the encrypted event stays under 60 KiB, well within the 64 KiB a Matrix event may take.
 export const CALL_BYTES = 16_384;
 
 function escapeHtml(text: string): string {
 	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
-function byteLength(text: string): number {
-	return Buffer.byteLength(text, 'utf8');
+// The bytes a text takes in the event that carries the request, escaped as its JSON holds it: a
+// quotation mark, a backslash or a line break takes two, a control character six
+function eventBytes(text: string): number {
+	return Buffer.byteLength(JSON.stringify(text), 'utf8') - 2;
 }
 
 function linesOf(text: string): string[] {
@@ -130,11 +134,8 @@ function questionFor(
 // cannot see whole
 export function makeOwnerRequest(call: RequestedCall, messages: Messages): OwnerRequest | null {
 	const { consent } = messages;
-	const asked = questionFor(call, consent);
-	const shown = call.summary ?? asked.call?.text ?? '';
-	if (byteLength(shown) + byteLength(escapeHtml(shown)) > CALL_BYTES) return null;
 	const said = Array.from(call.said?.trim() ?? '');
-	return {
+	const request: OwnerRequest = {
 		said:
 			said.length === 0
 				? null
@@ -143,13 +144,15 @@ export function makeOwnerRequest(call: RequestedCall, messages: Messages): Owner
 						text:
 							said.length > SAID_LENGTH ? `${said.slice(0, SAID_LENGTH).join('')}…` : said.join('')
 					},
-		...asked,
+		...questionFor(call, consent),
 		summary:
 			call.summary === null
 				? null
 				: { label: consent.described(call.application.name), text: call.summary },
 		howToAnswer: consent.howToAnswer
 	};
+	const shown = [...shownText(request), ...shownHtml(request)];
+	return shown.reduce((total, part) => total + eventBytes(part), 0) > CALL_BYTES ? null : request;
 }
 
 // A text that is not the harness's, quoted line by line under the harness's label for it, so that
@@ -161,17 +164,21 @@ function quoted(label: string, text: string): string {
 // The request as plain text: the body of its message, and what the API answers. The model's
 // words, and what an application said of the call, are quoted under the harness's labels.
 export function requestText(request: OwnerRequest): string {
-	const { said, call, summary } = request;
+	const { said } = request;
 	return [
 		...(said === null ? [] : [quoted(said.label, said.text)]),
 		request.question,
-		...(summary === null
-			? call === null
-				? []
-				: [call.text]
-			: [quoted(summary.label, summary.text)]),
+		...shownText(request),
 		request.howToAnswer
 	].join('\n\n');
+}
+
+// What the request shows in the call's place, as plain text: what its application said of it,
+// quoted under the harness's label, or else the call, when it shows one
+function shownText(request: Pick<OwnerRequest, 'call' | 'summary'>): string[] {
+	const { call, summary } = request;
+	if (summary !== null) return [quoted(summary.label, summary.text)];
+	return call === null ? [] : [call.text];
 }
 
 // The request as the conversation keeps it, which later turns of the model read: as its owner
@@ -192,23 +199,36 @@ function callHtml(call: ShownCall): string {
 	return `<pre><code${language}>${escapeHtml(call.text)}</code></pre>`;
 }
 
+// The same as HTML: the summary under its label, rendered from the harness's own Markdown, or the
+// call, as code
+function shownHtml(request: Pick<OwnerRequest, 'call' | 'summary'>): string[] {
+	const { call, summary } = request;
+	if (summary !== null) {
+		return [
+			QUESTION_MARKDOWN.render(summary.label).trim(),
+			`<pre><code>${escapeHtml(summary.text)}</code></pre>`
+		];
+	}
+	return call === null ? [] : [callHtml(call)];
+}
+
 // What the model wrote, as HTML in the quote under the harness's label: its Markdown rendered with
 // nothing that acts, every tag of it closed within it, so that nothing of it follows the quote and
 // passes for the harness's own words; or its lines as text, should the rendering take more of the
-// message than the quote may
+// event than its escaped lines could
 function saidHtml(text: string): string {
 	const rendered = renderQuotedMarkdown(text);
-	return byteLength(rendered) <= SAID_HTML_BYTES
+	return eventBytes(rendered) <= SAID_HTML_BYTES
 		? rendered
 		: linesOf(text).map(escapeHtml).join('<br />');
 }
 
 // The request as HTML, laid out by the harness. The model's words render their Markdown, with no
-// link, image or heading, held whole in a quote under the harness's label. The call, or its contract's summary under the
-// harness's label, is code, and only the question and that label are rendered from the harness's
-// own Markdown.
+// link, image or heading, held whole in a quote under the harness's label. The call, or its
+// contract's summary under the harness's label, is code, and only the question and that label are
+// rendered from the harness's own Markdown.
 export function requestHtml(request: OwnerRequest): string {
-	const { said, call, summary } = request;
+	const { said } = request;
 	const quoted =
 		said === null
 			? []
@@ -216,14 +236,7 @@ export function requestHtml(request: OwnerRequest): string {
 	return [
 		...quoted,
 		QUESTION_MARKDOWN.render(request.question).trim(),
-		...(summary === null
-			? call === null
-				? []
-				: [callHtml(call)]
-			: [
-					QUESTION_MARKDOWN.render(summary.label).trim(),
-					`<pre><code>${escapeHtml(summary.text)}</code></pre>`
-				]),
+		...shownHtml(request),
 		`<p>${escapeHtml(request.howToAnswer)}</p>`
 	].join('\n');
 }
