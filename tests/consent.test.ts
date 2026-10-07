@@ -11,9 +11,8 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Three applications as the contracts service names them: mail, which the owner never let the
-// assistant use, calendar, which the pilot's assistants used before consents, and events, the
-// assistant's own feed of workplace events
+// Two applications as the contracts service names them: mail, which the owner never let the
+// assistant use, and calendar, which the pilot's assistants used before consents
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
@@ -36,14 +35,6 @@ const CATALOG = {
 					{ name: 'exclude', in: 'query', required: false, schema: { type: 'string' } }
 				]
 			}
-		},
-		'/contracts/v1/events/{event_id}': {
-			get: {
-				operationId: 'read_event',
-				summary: 'Reads one stored event of the user',
-				tags: ['events.read.v1'],
-				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
-			}
 		}
 	}
 };
@@ -63,7 +54,7 @@ describe('my assistant asks before it first uses an application', () => {
 	beforeAll(async () => {
 		h = await startMatrixHarness();
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -119,20 +110,6 @@ describe('my assistant asks before it first uses an application', () => {
 		expect(h.logLines().some((line) => JSON.stringify(line).includes('paul@test.local'))).toBe(
 			false
 		);
-	});
-
-	it('reads its own feed of events without asking', async () => {
-		h.apisix.contracts.handler = () => ({
-			status: 200,
-			body: { id: 'evt-7', subject: 'Quarterly figures are out' }
-		});
-		h.apisix.llm.script = (request) =>
-			request.messages.at(-1)?.role === 'tool'
-				? { content: 'Your event: Quarterly figures are out' }
-				: { toolCalls: call('read_event', { event_id: 'evt-7' }) };
-		await client.sendText(room, 'What is event evt-7 about?');
-		await client.waitForMessage(room, assistantId, (t) => t.includes('Quarterly figures'));
-		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-7']);
 	});
 
 	it("lets the pilot's assistants read Calendar without asking, as they did before consents", async () => {

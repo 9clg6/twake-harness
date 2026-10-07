@@ -101,7 +101,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		await r.nextSaying('Told:', found);
 	}
 
-	it('tells me what it may access: what I allowed, and its own feed of events', async () => {
+	it('tells me what it may access: what I allowed, and nothing more', async () => {
 		r.h.apisix.llm.script = modelTelling({
 			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } },
 			'What may you access?': { tool: 'consents_list', args: {} }
@@ -109,7 +109,6 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		await allow('Find the budget in my mail');
 		expect(await told('What may you access?')).toEqual({
 			consents: [
-				{ domain: 'events', level: 'read', granted_by: 'built_in', granted_at: null },
 				{ domain: 'mail', level: 'read', granted_by: 'chat', granted_at: expect.any(String) }
 			]
 		});
@@ -370,9 +369,7 @@ describe('a withdrawal holds at once on every replica', () => {
 		});
 		expect(after.body.answer).toContain('This is the first time I need to read your data in mail.');
 		expect(h.apisix.contracts.calls).toHaveLength(1);
-		expect((await two.tool('alice', 'consents_list', {})).body).toEqual({
-			consents: [{ domain: 'events', level: 'read', granted_by: 'built_in', granted_at: null }]
-		});
+		expect((await two.tool('alice', 'consents_list', {})).body).toEqual({ consents: [] });
 		// The withdrawal is logged with what it is about
 		expect(h.logLines().find((l) => l['msg'] === 'consent withdrawn')).toMatchObject({
 			principal: 'alice',

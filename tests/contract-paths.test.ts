@@ -10,18 +10,20 @@ import type { ChatRequest, ToolCall } from './helpers/fake-apisix.js';
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
-		'/contracts/v1/events': {
+		'/contracts/v1/calendar/events': {
 			get: {
-				operationId: 'list_events',
-				tags: ['events.list.v1'],
-				parameters: [{ name: 'status', in: 'query', required: false, schema: { type: 'string' } }]
+				operationId: 'list_calendar_events',
+				tags: ['calendar.event.read.v1'],
+				parameters: [
+					{ name: 'needs_action', in: 'query', required: false, schema: { type: 'string' } }
+				]
 			}
 		},
-		'/contracts/v1/events/{event_id}': {
+		'/contracts/v1/calendar/events/{uid}': {
 			get: {
-				operationId: 'read_event',
-				tags: ['events.read.v1'],
-				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+				operationId: 'read_calendar_event',
+				tags: ['calendar.event.read.v1'],
+				parameters: [{ name: 'uid', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		},
 		'/contracts/v1/calendar/freebusy': {
@@ -38,17 +40,18 @@ const CATALOG = {
 	}
 };
 
-// The same read_event with relative paths, under a server: the other shape OpenAPI allows
+// The same read_calendar_event with relative paths, under a server: the other shape OpenAPI
+// allows
 function servedUnder(url: string): unknown {
 	return {
 		openapi: '3.0.3',
 		servers: [{ url }],
 		paths: {
-			'/v1/events/{event_id}': {
+			'/v1/calendar/events/{uid}': {
 				get: {
-					operationId: 'read_event',
-					tags: ['events.read.v1'],
-					parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+					operationId: 'read_calendar_event',
+					tags: ['calendar.event.read.v1'],
+					parameters: [{ name: 'uid', in: 'path', required: true, schema: { type: 'string' } }]
 				}
 			}
 		}
@@ -94,11 +97,11 @@ describe('contract calls reach the gateway at the paths the catalog gives', () =
 		h.apisix.contracts.handler = () => ({ status: 200, body: { ok: true } });
 	});
 
-	it('calls read_event, list_events and read_freebusy at their absolute paths, never doubled', async () => {
+	it('calls read_calendar_event, list_calendar_events and read_freebusy at their absolute paths, never doubled', async () => {
 		await loadCatalog(h, CATALOG);
 		h.apisix.llm.script = callingAtOnce([
-			call('c1', 'read_event', { event_id: 'evt-7' }),
-			call('c2', 'list_events', { status: 'pending' }),
+			call('c1', 'read_calendar_event', { uid: 'uid-7' }),
+			call('c2', 'list_calendar_events', { needs_action: 'true' }),
 			call('c3', 'read_freebusy', {
 				start: '2026-10-06T14:00:00+02:00',
 				end: '2026-10-06T15:00:00+02:00',
@@ -115,8 +118,8 @@ describe('contract calls reach the gateway at the paths the catalog gives', () =
 			query: x.query
 		}));
 		expect(received).toEqual([
-			{ method: 'GET', path: '/contracts/v1/events/evt-7', query: {} },
-			{ method: 'GET', path: '/contracts/v1/events', query: { status: 'pending' } },
+			{ method: 'GET', path: '/contracts/v1/calendar/events/uid-7', query: {} },
+			{ method: 'GET', path: '/contracts/v1/calendar/events', query: { needs_action: 'true' } },
 			{
 				method: 'GET',
 				path: '/contracts/v1/calendar/freebusy',
@@ -153,20 +156,24 @@ describe('contract calls reach the gateway at the paths the catalog gives', () =
 
 	it('calls under the server path when the catalog gives relative paths', async () => {
 		await loadCatalog(h, servedUnder('/contracts'));
-		h.apisix.llm.script = callingAtOnce([call('c1', 'read_event', { event_id: 'evt-8' })]);
+		h.apisix.llm.script = callingAtOnce([call('c1', 'read_calendar_event', { uid: 'uid-8' })]);
 		const res = await c.post<{ answer: string }>('alice', '/v1/chat', { message: 'read it' });
 		expect(res.body.answer).toBe('statuses 200');
-		expect(h.apisix.contracts.calls.map((x) => x.path)).toEqual(['/contracts/v1/events/evt-8']);
+		expect(h.apisix.contracts.calls.map((x) => x.path)).toEqual([
+			'/contracts/v1/calendar/events/uid-8'
+		]);
 	});
 
 	it('stays on the gateway when the catalog names another host, and says so once', async () => {
 		await loadCatalog(h, servedUnder('https://contracts.example.org/contracts'));
 		await loadCatalog(h, servedUnder('https://contracts.example.org/contracts'));
-		h.apisix.llm.script = callingAtOnce([call('c1', 'read_event', { event_id: 'evt-9' })]);
+		h.apisix.llm.script = callingAtOnce([call('c1', 'read_calendar_event', { uid: 'uid-9' })]);
 		const res = await c.post<{ answer: string }>('alice', '/v1/chat', { message: 'read it' });
 		expect(res.body.answer).toBe('statuses 200');
 		// The call went to the gateway, at the path part of the foreign server
-		expect(h.apisix.contracts.calls.map((x) => x.path)).toEqual(['/contracts/v1/events/evt-9']);
+		expect(h.apisix.contracts.calls.map((x) => x.path)).toEqual([
+			'/contracts/v1/calendar/events/uid-9'
+		]);
 		const warnings = h
 			.logLines()
 			.filter((l) => l['msg'] === 'contracts server is another host, calls stay on the gateway');
@@ -183,6 +190,7 @@ describe('a gateway that mounts the contracts under a prefix of its own', () => 
 		h = await startTestHarness({ env: { CONTRACTS_BASE_PATH: 'gateway-mount' } });
 		c = makeClient(h);
 		h.apisix.contracts.mount = '/gateway-mount';
+		await grantConsent(h.db, 'alice', 'calendar', 'read');
 	});
 	afterAll(async () => {
 		await h.close();
@@ -191,11 +199,11 @@ describe('a gateway that mounts the contracts under a prefix of its own', () => 
 	it('prefixes the catalog paths with CONTRACTS_BASE_PATH', async () => {
 		await loadCatalog(h, CATALOG);
 		h.apisix.contracts.handler = () => ({ status: 200, body: { ok: true } });
-		h.apisix.llm.script = callingAtOnce([call('c1', 'read_event', { event_id: 'evt-10' })]);
+		h.apisix.llm.script = callingAtOnce([call('c1', 'read_calendar_event', { uid: 'uid-10' })]);
 		const res = await c.post<{ answer: string }>('alice', '/v1/chat', { message: 'read it' });
 		expect(res.body.answer).toBe('statuses 200');
 		expect(h.apisix.contracts.calls.map((x) => x.path)).toEqual([
-			'/gateway-mount/contracts/v1/events/evt-10'
+			'/gateway-mount/contracts/v1/calendar/events/uid-10'
 		]);
 	});
 });

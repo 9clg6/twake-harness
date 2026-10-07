@@ -20,7 +20,7 @@ import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import type { Answer } from './consents/answers.js';
 import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
-import { isBuiltInConsent, isConsentLevel, type ResumeRequest } from './consents/consent.js';
+import { isConsentLevel, type ResumeRequest } from './consents/consent.js';
 import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
 import {
 	answerPendingCall,
@@ -166,8 +166,6 @@ const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
 const RECOVERY_NEEDED = { error: 'recovery_needed' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
-// The harness builds the consent in: no owner withdraws it
-const CONSENT_BUILT_IN = { error: 'consent built in' } as const;
 
 // An answer to a call no longer waiting: answered already, expired, or replaced by a newer
 // question in its room
@@ -722,8 +720,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			});
 
 			// The owner's consents, which a settings page lists, grants and withdraws with the owner's
-			// own token. The reading of the assistant's own feed of events is built in: it is listed,
-			// never granted nor withdrawn.
+			// own token
 			scope.get('/consents', async (request, reply) => {
 				const principal = principalOf(request);
 				const record = await loadPrincipal(principal);
@@ -744,13 +741,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					const { domain, level } = request.params;
 					const offered =
 						isConsentLevel(level) &&
-						(isBuiltInConsent(domain, level) ||
-							agent.contracts.contracts.some((c) => c.domain === domain && c.level === level));
+						agent.contracts.contracts.some((c) => c.domain === domain && c.level === level);
 					if (!offered) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const { created, consent } = await withPrincipal(db, principal, async (tx) => {
-						const created =
-							!isBuiltInConsent(domain, level) &&
-							(await grantConsent(tx, principal.id, domain, level, 'api'));
+						const created = await grantConsent(tx, principal.id, domain, level, 'api');
 						const consents = await listConsents(tx, principal.id);
 						return {
 							created,
@@ -775,7 +769,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					}
 					const { domain, level } = request.params;
 					if (!isConsentLevel(level)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
-					if (isBuiltInConsent(domain, level)) return reply.code(409).send(CONSENT_BUILT_IN);
 					// A level the owner never allowed is no consent to withdraw, and changes nothing
 					const withdrawal = await withPrincipal(db, principal, async (tx) => {
 						const allowed = await listConsents(tx, principal.id);

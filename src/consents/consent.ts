@@ -14,16 +14,6 @@ export type WaitReason = 'consent' | 'event_turn' | 'high_risk' | 'delegation';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 
-// The assistant's own feed of workplace events, read without asking: it is how events reach the
-// owner in the first place. It is built into the harness, never a consent an owner gives or
-// withdraws.
-export const FEED_DOMAIN = 'events';
-
-// Whether the harness builds this consent in: every assistant reads its own feed of events
-export function isBuiltInConsent(domain: string, level: ConsentLevel): boolean {
-	return domain === FEED_DOMAIN && level === 'read';
-}
-
 // The reactions by which an owner allows, or refuses, a call the harness asked them about
 export const ALLOW_REACTION = '✅';
 export const REFUSE_REACTION = '❌';

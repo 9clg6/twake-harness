@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
-import { isBuiltInConsent, type WaitReason } from '../consents/consent.js';
+import type { WaitReason } from '../consents/consent.js';
 import { readDelegationCode, type DelegationCode } from '../consents/delegation.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
@@ -191,7 +191,6 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		if (owner === ORGANIZATION_PRINCIPAL) return [];
 		const reasons: WaitReason[] = [];
 		if (
-			!isBuiltInConsent(contract.domain, contract.level) &&
 			!(await withPrincipal(context.db, { id: owner }, (tx) =>
 				hasConsent(tx, owner, contract.domain, contract.level)
 			))
