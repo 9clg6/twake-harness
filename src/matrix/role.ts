@@ -154,8 +154,8 @@ const TO_DEVICE_ONLY_FILTER = JSON.stringify({
 	account_data: { limit: 0 }
 });
 
-// The syncs a catch-up of a device's to-device messages makes at most, a hundred messages each
-const MAX_CATCH_UP_PAGES = 50;
+// The syncs one read of a device's to-device inbox makes at most, a hundred messages each
+const MAX_INBOX_PAGES = 50;
 
 interface ToDeviceSync {
 	readonly next_batch?: string;
@@ -419,30 +419,25 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// Synapse pushes no to-device message while it holds the role for down, as it does for a while
 	// once the role stopped, and its push of to-device messages (MSC2409) can skip a key share when
-	// another one lands at the same instant: after a failed decryption, the assistant's device reads
-	// what the homeserver keeps for it. Synapse keeps a device's to-device messages until the device
-	// syncs past them, the pushed ones included, and hands a hundred at most per sync, the oldest
-	// first: the device reads page after page until none is left, and where it stopped is kept, so
-	// that the next catch-up, in this process or the next, goes on from there. Started again from
-	// the oldest message after a restart, it read the oldest page only, the one Synapse answers from
-	// its cache for two minutes when the previous process asked it the same.
-	const catchUps = new Map<string, Promise<number>>();
-	async function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
-		// One catch-up at a time per assistant: two at once would read the same page
-		const previous = catchUps.get(userId);
-		const current = (async (): Promise<number> => {
-			if (previous !== undefined) await previous.catch(() => undefined);
-			return catchUpToDevice(userId, roomId);
-		})();
-		catchUps.set(userId, current);
-		try {
-			return await current;
-		} finally {
-			if (catchUps.get(userId) === current) catchUps.delete(userId);
-		}
+	// another one lands at the same instant. It keeps a device's to-device messages, the pushed ones
+	// included, until the device syncs past them, and hands a hundred at most per sync, the oldest
+	// first. After a message of its rooms fails to decrypt, an assistant's device reads them page
+	// after page until none is left. Where a read stopped is kept per device, across restarts, so
+	// that the next one goes on from there.
+	const inboxReads = new Map<string, Promise<number>>();
+	function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
+		// A caller that comes during a read joins it, the read taking what the inbox holds, where
+		// cross-signing's oneAtATime queues its callers: the two stay apart
+		const underWay = inboxReads.get(userId);
+		if (underWay !== undefined) return underWay;
+		const read = fetchToDeviceInbox(userId, roomId).finally(() => {
+			if (inboxReads.get(userId) === read) inboxReads.delete(userId);
+		});
+		inboxReads.set(userId, read);
+		return read;
 	}
 
-	async function catchUpToDevice(userId: string, roomId: string): Promise<number> {
+	async function fetchToDeviceInbox(userId: string, roomId: string): Promise<number> {
 		const intent = appservice.getIntentForUserId(userId);
 		await ensureEncryption(intent);
 		const client = intent.underlyingClient;
@@ -453,7 +448,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// The members' devices are looked up again too: a first sync carries no device lists
 		const members = await client.getJoinedRoomMembers(roomId);
 		let fetched = 0;
-		for (let page = 0; page < MAX_CATCH_UP_PAGES; page += 1) {
+		for (let page = 0; page < MAX_INBOX_PAGES; page += 1) {
 			const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
 				timeout: 0,
 				filter: TO_DEVICE_ONLY_FILTER,
@@ -477,7 +472,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			// A page with nothing left: the sync past every message also let Synapse drop them
 			if (events.length === 0) return fetched;
 		}
-		log.warn({ userId, fetched }, 'to-device catch-up stopped before the end of the inbox');
+		log.warn({ userId, fetched }, 'to-device inbox read stopped before its end');
 		return fetched;
 	}
 
@@ -575,7 +570,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				try {
 					const fetched = await fetchMissedKeyShares(room.userId, roomId);
 					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
-					if (fetched === 0) return;
+					// Tried again whatever this read found: one it joined may have taken the key share
 					const intent = appservice.getIntentForUserId(room.userId);
 					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
 						new EncryptedRoomEvent(encrypted),
