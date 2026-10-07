@@ -55,6 +55,7 @@ function chain(
 	links: {
 		readonly selfSigningSignedBy?: Signer;
 		readonly deviceSignedBy?: Signer;
+		readonly deviceCrossSignedBy?: Signer;
 		readonly masterKeyId?: string;
 	} = {}
 ): Chain {
@@ -92,7 +93,7 @@ function chain(
 			links.deviceSignedBy ?? device,
 			`ed25519:${DEVICE}`
 		),
-		selfSigning,
+		links.deviceCrossSignedBy ?? selfSigning,
 		`ed25519:${selfSigning.publicKey}`
 	);
 	return {
@@ -139,6 +140,14 @@ describe("the keys of an owner's sessions as the homeserver publishes them", () 
 		expect(senderDevice(sender(alice), keys, USER).signed).toBe(false);
 	});
 
+	it('does not take a device the self-signing key did not sign', () => {
+		const alice = chain({ deviceCrossSignedBy: signer() });
+		const keys = readPublishedKeys(alice.reply, USER);
+		expect(keys.masterKey).toBe(alice.master.publicKey);
+		expect(keys.devices.map((d) => d.deviceId)).toEqual([DEVICE]);
+		expect(senderDevice(sender(alice), keys, USER)).toEqual({ deviceId: DEVICE, signed: false });
+	});
+
 	it('does not take a device whose own signature does not hold', () => {
 		const alice = chain({ deviceSignedBy: signer() });
 		const keys = readPublishedKeys(alice.reply, USER);
@@ -168,6 +177,15 @@ describe("the keys of an owner's sessions as the homeserver publishes them", () 
 		const keys = readPublishedKeys(reply, USER);
 		expect(keys.devices).toEqual([]);
 		expect(senderDevice(sender(alice, { curve25519Key: swapped }), keys, USER).signed).toBe(false);
+	});
+
+	it('does not take a room key that came from another identity key than the device published', () => {
+		const alice = chain();
+		const keys = readPublishedKeys(alice.reply, USER);
+		// The device the engine names, with its signing key, but not the key the room key came from
+		expect(
+			senderDevice(sender(alice, { curve25519Key: unpadded(randomBytes(32)) }), keys, USER)
+		).toEqual({ deviceId: DEVICE, signed: false });
 	});
 
 	it('does not take a room key that came under another signing key than the published one', () => {
