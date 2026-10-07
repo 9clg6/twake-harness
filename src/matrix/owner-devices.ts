@@ -170,25 +170,21 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		});
 	}
 
-	// Tells the owner in the room, once a minute at most per device when their words were not
-	// taken, and once per device when they were all the same. Whether the owner could be told never
-	// changes whether their words count.
+	// Tells the owner in the room: once a minute at most per device when their words were not
+	// taken, in either mode, so that words refused again are told again; once per device when they
+	// were taken all the same. Whether the owner could be told never changes whether their words
+	// count.
 	async function tell(
 		words: OwnerWords,
 		device: string,
 		reason: DeviceNoticeReason,
+		taken: boolean,
 		text: (messages: Messages) => string
 	): Promise<void> {
 		const { owner, roomId, eventId } = words;
 		try {
 			const claimed = await withPrincipal(db, { id: owner }, (tx) =>
-				claimDeviceNotice(
-					tx,
-					owner,
-					device,
-					reason,
-					mode === 'enforce' ? REFUSAL_NOTICE_INTERVAL_MS : null
-				)
+				claimDeviceNotice(tx, owner, device, reason, taken ? null : REFUSAL_NOTICE_INTERVAL_MS)
 			);
 			if (!claimed) return;
 			const messages = await deps.fetchMessages(owner);
@@ -233,7 +229,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Report mode takes the words only once the check decrypted them, after it knew them
 				// for new words
 				if (mode === 'report' && checked !== null) return { admitted: true, event: checked.event };
-				await tell(words, '*', 'check_failed', (messages) => messages.notices.turnFailed);
+				await tell(words, '*', 'check_failed', false, (messages) => messages.notices.turnFailed);
 				return REFUSED;
 			}
 			const admitted: Admission = { admitted: true, event: checked.event };
@@ -262,11 +258,13 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			const reason = SHORTFALLS[shortfall];
 			if (mode === 'report') {
 				log.info(fields, 'owner device unverified');
-				await tell(words, verdict.device, reason, (m) => m.ownerDevices.reported(shortfall));
+				await tell(words, verdict.device, reason, true, (m) => m.ownerDevices.reported(shortfall));
 				return admitted;
 			}
 			log.info(fields, 'assistant ignored an unverified device');
-			await tell(words, verdict.device, reason, (m) => m.ownerDevices.refused(via, shortfall));
+			await tell(words, verdict.device, reason, false, (m) =>
+				m.ownerDevices.refused(via, shortfall)
+			);
 			return REFUSED;
 		},
 		admitUnencrypted: async (words, reason) => {
@@ -277,7 +275,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				return true;
 			}
 			log.info(fields, 'assistant ignored an unencrypted message');
-			await tell(words, '*', 'unencrypted', (m) => m.ownerDevices.unencrypted);
+			await tell(words, '*', 'unencrypted', false, (m) => m.ownerDevices.unencrypted);
 			return false;
 		}
 	};

@@ -151,6 +151,17 @@ async function readAgain(r: ConsentRoom, run: () => Promise<void>): Promise<void
 	}
 }
 
+// Alice was last told about her sessions over a minute ago, as the harness counts it
+async function lastToldAMinuteAgo(r: ConsentRoom): Promise<void> {
+	await withPrincipal(
+		r.h.db,
+		{ id: OWNER },
+		(tx) => tx.sql`
+			update owner_device_notices set notified_at = now() - interval '61 seconds'
+			where owner = ${OWNER}`
+	);
+}
+
 // The identity the harness holds for Alice, as it keeps it
 async function heldIdentity(
 	r: ConsentRoom
@@ -855,5 +866,25 @@ describe('while the harness only reports the sessions it would not act on', () =
 			await logged(r, 'owner device check failed', eventId);
 		});
 		expect(r.saying('Something went wrong on my side')).toHaveLength(notices);
+	});
+
+	it('tells me again a minute later when it still cannot check my words', async () => {
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_words_received', async () => {
+			await lastToldAMinuteAgo(r);
+			const first = await r.client.sendText(r.room, 'First try');
+			await logged(r, 'owner device check failed', first);
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+			await lastToldAMinuteAgo(r);
+			const second = await r.client.sendText(r.room, 'Second try');
+			await logged(r, 'owner device check failed', second);
+			expect(await r.nextSaying('Something went wrong on my side', notices + 1)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		expect(r.saying('Heard: First try')).toHaveLength(0);
+		expect(r.saying('Heard: Second try')).toHaveLength(0);
 	});
 });
