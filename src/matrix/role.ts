@@ -864,6 +864,28 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 
+	// In an encrypted room, the devices of the owner, or of the organization's members, encrypt what
+	// they write: words in their name that came in clear were written on the server side, and neither
+	// start a turn nor name a command to the creator. A room whose encryption cannot be read counts as
+	// encrypted, so that a failure of the homeserver lets no such words through. Whether words that
+	// came in clear are ignored on that account, which is logged with their metadata only.
+	async function ignoredInClear(words: OwnerWords): Promise<boolean> {
+		const { roomId, ownerUserId: sender, owner, eventId } = words;
+		const encryption = await roomEncryption(words.assistantUserId, roomId);
+		if (encryption === 'clear') return false;
+		log.info(
+			{
+				roomId,
+				sender,
+				owner,
+				eventId,
+				reason: encryption === 'encrypted' ? 'encrypted room' : 'encryption state unreadable'
+			},
+			'assistant ignored an unencrypted message'
+		);
+		return true;
+	}
+
 	// Who comes into an assistant's room: anyone but its owner makes it leave, as it answers its owner
 	// in a direct room only for now. The owner has joined: their devices are in the room, the greeting
 	// can be encrypted for them.
@@ -1173,27 +1195,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					if (await requests.wrote(requestRoom, eventId, checked.text)) return;
 				}
 			}
-			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt
-			// what they write: a message in their name that came in clear was written on the server
-			// side, and starts nothing. A room whose encryption cannot be read counts as encrypted, so
-			// that a failure of the homeserver lets no such message through.
 			if (encrypted === null) {
-				const encryption = await roomEncryption(room.userId, roomId);
-				if (encryption !== 'clear') {
-					log.info(
-						{
-							roomId,
-							sender,
-							owner,
-							eventId: raw.event_id,
-							reason: encryption === 'encrypted' ? 'encrypted room' : 'encryption state unreadable'
-						},
-						'assistant ignored an unencrypted message'
-					);
-					return;
-				}
-				// An owner's assistant opens its rooms encrypted: one that reads as clear takes the
-				// owner's words only as long as the deployment only reports
 				const unencrypted: OwnerWords = {
 					roomId,
 					owner,
@@ -1203,6 +1205,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					via: 'message',
 					encrypted: null
 				};
+				if (await ignoredInClear(unencrypted)) return;
+				// An owner's assistant opens its rooms encrypted: one that reads as clear takes the
+				// owner's words only as long as the deployment only reports
 				if (
 					owner !== ORGANIZATION_PRINCIPAL &&
 					!(await ownerDevices.admitUnencrypted(unencrypted, 'clear room'))
@@ -1247,8 +1252,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.info({ roomId, sender }, 'creator ignored a foreign sender');
 			return;
 		}
-		// The creator takes an owner's commands as their assistant takes their words: encrypted, from
-		// a session their identity signed, as long as the deployment enforces it
+		// The creator takes an owner's commands as their assistant takes their words: never in clear in
+		// an encrypted room, and only encrypted, from a session their identity signed, as long as the
+		// deployment enforces it
 		const words: OwnerWords = {
 			roomId,
 			owner,
@@ -1260,6 +1266,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		};
 		let command = text;
 		if (encrypted === null) {
+			if (await ignoredInClear(words)) return;
 			if (!(await ownerDevices.admitUnencrypted(words, 'unencrypted'))) return;
 		} else {
 			const checked = await checkedMessage(words);
