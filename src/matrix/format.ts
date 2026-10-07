@@ -131,6 +131,33 @@ function unwrapSingleParagraph(html: string): string {
 	return inner !== undefined && !inner.includes('<p>') ? inner : html;
 }
 
+// The model's words as the harness quotes them in its own requests: their Markdown, without their
+// HTML nor anything that acts. Twake Chat opens a link on a touch without asking, and the model may
+// repeat what a received mail told it to write: a link shows its text alone, an address or an
+// e-mail address stays text, and a heading is a paragraph. An image shows its description, as the
+// client would fetch it, telling the server it comes from when its owner read the request.
+const quotedMarkdown = new MarkdownIt({ html: false, linkify: false, breaks: true });
+quotedMarkdown.renderer.rules.link_open = () => '';
+quotedMarkdown.renderer.rules.link_close = () => '';
+quotedMarkdown.renderer.rules.image = (tokens, idx, options, env, renderer) =>
+	quotedMarkdown.utils.escapeHtml(
+		renderer.renderInlineAsText(tokens[idx]?.children ?? [], options, env)
+	);
+quotedMarkdown.renderer.rules.heading_open = () => '<p>';
+quotedMarkdown.renderer.rules.heading_close = () => '</p>\n';
+
+// The filter of the quote: an answer's, without links, images or headings, whose text stays
+const QUOTED_SANITIZE: sanitizeHtml.IOptions = {
+	...SANITIZE,
+	allowedTags: ALLOWED_TAGS.filter((tag) => tag !== 'a' && tag !== 'img' && !/^h[1-6]$/.test(tag))
+};
+
+// The HTML the model's words take in a request of the harness: every tag of it closed within it,
+// so that the quote the harness puts it in holds it whole
+export function renderQuotedMarkdown(text: string): string {
+	return unwrapSingleParagraph(sanitizeHtml(quotedMarkdown.render(text), QUOTED_SANITIZE).trim());
+}
+
 // A text the harness laid out itself, as plain text and as HTML, such as its request about a call:
 // its HTML goes through the same filter as an answer's
 export function makeLaidOutText(body: string, html: string): RichText {
@@ -142,9 +169,8 @@ export function makeLaidOutText(body: string, html: string): RichText {
 	};
 }
 
-// The HTML an answer's Markdown renders to, for Matrix clients: its tags all closed within it, so
-// that a container the harness puts it in holds it whole
-export function renderMarkdown(text: string): string {
+// The HTML an answer's Markdown renders to, for Matrix clients
+function renderMarkdown(text: string): string {
 	return unwrapSingleParagraph(sanitizeHtml(markdown.render(text), SANITIZE).trim());
 }
 

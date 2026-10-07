@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 
 import type { DomainLabel } from '../contracts/domains.js';
 import type { Messages } from '../i18n/messages.js';
-import { renderMarkdown } from '../matrix/format.js';
+import { renderQuotedMarkdown } from '../matrix/format.js';
 import type { ConsentLevel, WaitReason } from './consent.js';
 
 // A call the harness froze, as its request to the owner tells of it
@@ -192,19 +192,19 @@ function callHtml(call: ShownCall): string {
 	return `<pre><code${language}>${escapeHtml(call.text)}</code></pre>`;
 }
 
-// What the model wrote, as HTML in the quote under the harness's label: rendered as its answers
-// are, every tag of it closed within it, so that nothing of it follows the quote and passes for
-// the harness's own words; or its lines as text, should the rendering take more of the message
-// than the quote may
+// What the model wrote, as HTML in the quote under the harness's label: its Markdown rendered with
+// nothing that acts, every tag of it closed within it, so that nothing of it follows the quote and
+// passes for the harness's own words; or its lines as text, should the rendering take more of the
+// message than the quote may
 function saidHtml(text: string): string {
-	const rendered = renderMarkdown(text);
+	const rendered = renderQuotedMarkdown(text);
 	return byteLength(rendered) <= SAID_HTML_BYTES
 		? rendered
 		: linesOf(text).map(escapeHtml).join('<br />');
 }
 
-// The request as HTML, laid out by the harness. The model's words render as its answers do, held
-// whole in a quote under the harness's label. The call, or its contract's summary under the
+// The request as HTML, laid out by the harness. The model's words render their Markdown, with no
+// link, image or heading, held whole in a quote under the harness's label. The call, or its contract's summary under the
 // harness's label, is code, and only the question and that label are rendered from the harness's
 // own Markdown.
 export function requestHtml(request: OwnerRequest): string {
