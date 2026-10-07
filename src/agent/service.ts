@@ -32,6 +32,7 @@ import { makeAdmission, type Admission, type RefusalReason } from './admission.j
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
+	checkAvailability,
 	checkInvitation,
 	isInvitationEvent,
 	type Invitation,
@@ -308,12 +309,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		messages: Messages
 	): Promise<Told> {
 		const event = input.event;
-		if (
-			input.origin !== 'event' ||
-			event === undefined ||
-			event.invitation !== undefined ||
-			!isInvitationEvent(event.type)
-		) {
+		if (input.origin !== 'event' || event === undefined) {
+			return { message: input.message, question: null };
+		}
+		const invitation = event.invitation;
+		if (invitation === undefined && !isInvitationEvent(event.type)) {
 			return { message: input.message, question: null };
 		}
 		let question: Question | null = null;
@@ -324,6 +324,20 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question ??= questionOf(outcome);
 			return outcome;
 		};
+		// The invitation's wake-up carries its UID and its times: what it told stays as it is,
+		// followed by what the calendar answered of its slot
+		if (invitation !== undefined) {
+			const check = await checkAvailability(run, invitation, { timeZone: config.timeZone });
+			log.info(
+				{ freeBusyStatus: check.freeBusyStatus, reason: check.reason },
+				'invitation checked'
+			);
+			const availability = messages.events.availability(check.data);
+			return {
+				message: input.message === null ? availability : `${input.message}\n${availability}`,
+				question
+			};
+		}
 		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
 		log.info(
 			{

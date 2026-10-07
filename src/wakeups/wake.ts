@@ -43,20 +43,24 @@ export interface WakeDeps {
 	readonly log: FastifyBaseLogger;
 }
 
-// The event as the model is handed it: one line of JSON, so that nothing a third party wrote can
-// start a line of its own, between fences of a random nonce it cannot close
-function fenced(wakeup: Wakeup): string {
+// Data as the model is handed it: one line of JSON, so that nothing a third party wrote can start
+// a line of its own, between fences of a random nonce it cannot close
+export function fenced(label: string, data: unknown): string {
 	const nonce = randomBytes(6).toString('hex');
-	const data = JSON.stringify({ ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
-	return [`<<<event-data ${nonce}`, data, `event-data ${nonce}>>>`].join('\n');
+	return [`<<<${label} ${nonce}`, JSON.stringify(data), `${label} ${nonce}>>>`].join('\n');
+}
+
+// The event as the model is handed it: what its source computed, apart from what people wrote
+function eventData(wakeup: Wakeup): string {
+	return fenced('event-data', { ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
 }
 
 // What the owner's assistant is told, in its owner's language: what arrived, then the event
 function told(wakeup: Wakeup, messages: Messages): string {
-	if (wakeup.invitation !== undefined) return messages.events.invited(wakeup.id, fenced(wakeup));
+	if (wakeup.invitation !== undefined) return messages.events.invited(wakeup.id, eventData(wakeup));
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
-		? messages.events.taskAssigned(wakeup.id, fenced(wakeup))
-		: messages.events.published(wakeup.type, wakeup.id, fenced(wakeup));
+		? messages.events.taskAssigned(wakeup.id, eventData(wakeup))
+		: messages.events.published(wakeup.type, wakeup.id, eventData(wakeup));
 }
 
 function same(a: string | null, b: string | null): boolean {

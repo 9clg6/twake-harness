@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
 
+import { fenced } from '../wakeups/wake.js';
 import { findTimeZone, formatOffset, offsetMinutesAt } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
@@ -268,4 +269,56 @@ export async function checkInvitation(
 		freeBusyStatus,
 		isSuccess(freeBusyStatus) ? null : 'availability not checked: the free/busy read failed'
 	);
+}
+
+// What the calendar answered of an invitation's slot, as the model reads it
+const CALENDAR_DATA = 'calendar-data';
+
+export interface AvailabilityCheck {
+	// What the calendar answered, fenced as data, for the message the model reads
+	readonly data: string;
+	// For the logs, never the content: how the read ended, and why the slot went unchecked
+	readonly freeBusyStatus: number | null;
+	readonly reason: string | null;
+}
+
+// Before the model speaks about an invitation, the harness checks its owner's availability over its
+// slot itself, from the times its wake-up carries, through the same contract and in the same
+// context as the model would: whether the owner is free is the heart of the proposal, so it does
+// not depend on the model choosing to call a tool. What came back is handed to the model as data,
+// an error too; a read that waits for its owner, such as one the platform's broker refused, leaves
+// the owner to the harness's own question.
+export async function checkAvailability(
+	run: ToolRunner,
+	invitation: Invitation,
+	options: { readonly timeZone: string }
+): Promise<AvailabilityCheck> {
+	const unchecked = (reason: string): AvailabilityCheck => ({
+		data: fenced(CALENDAR_DATA, { tool: READ_FREEBUSY, not_called: reason }),
+		freeBusyStatus: null,
+		reason
+	});
+	const slot = invitationSlot(invitation, options.timeZone);
+	if (!slot.ok) return unchecked(slot.reason);
+	// The invitation is already in the owner's calendar: left out, it does not count against itself
+	const args = { start: slot.start, end: slot.end, exclude: [invitation.uid] };
+	let outcome: ToolOutcome | null;
+	try {
+		outcome = await run(READ_FREEBUSY, args);
+	} catch (err: unknown) {
+		// A read that throws becomes data too: the turn goes on and the model says it could not check
+		const message = err instanceof Error ? err.message : String(err);
+		outcome = { result: { error: `the call failed: ${message}` } };
+	}
+	if (outcome === null) {
+		return unchecked(
+			'availability not checked: the calendar contract read_freebusy is not available'
+		);
+	}
+	const freeBusyStatus = statusOf(outcome);
+	return {
+		data: fenced(CALENDAR_DATA, { tool: READ_FREEBUSY, arguments: args, result: outcome.result }),
+		freeBusyStatus,
+		reason: isSuccess(freeBusyStatus) ? null : 'availability not checked: the free/busy read failed'
+	};
 }
