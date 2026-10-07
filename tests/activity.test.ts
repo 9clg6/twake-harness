@@ -372,3 +372,69 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		}
 	});
 });
+
+describe('the settings of the activity exchange', () => {
+	const base = {
+		HARNESS_ROLE: 'worker',
+		DATABASE_URL: 'postgres://x@localhost/x',
+		AUTH_JWKS_URL: 'https://example.test/jwks',
+		AUTH_ISSUER: 'https://example.test/',
+		AUTH_AUDIENCE: 'twake-harness',
+		APISIX_BASE_URL: 'http://apisix.test',
+		APISIX_CONSUMER_KEY: 'k'
+	};
+	const listening = {
+		...base,
+		ACTIVITY_ENABLED: 'true',
+		ACTIVITY_AMQP_URL: 'amqp://twake-harness:s3cret-password@rabbitmq.dbs.svc:5672/'
+	};
+
+	// What a refused start says, which goes to the logs
+	function refusal(env: Record<string, string>): string {
+		try {
+			loadConfig(env);
+		} catch (err: unknown) {
+			return err instanceof Error ? err.message : String(err);
+		}
+		throw new Error('the settings were taken');
+	}
+
+	it('listens to nothing unless enabled, then to the Tasks assignments, as twake-harness', () => {
+		expect(loadConfig(base).activity).toBeNull();
+		expect(loadConfig(listening).activity?.types).toEqual([ASSIGNED]);
+		expect(loadConfig(listening).rabbitmq.prefix).toBe('twake-harness');
+	});
+
+	it('refuses to start listening without an AMQP address, never saying the one it was given', () => {
+		expect(refusal({ ...listening, ACTIVITY_AMQP_URL: '' })).toBe(
+			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
+		);
+		const https = refusal({
+			...listening,
+			ACTIVITY_AMQP_URL: 'https://twake-harness:s3cret-password@rabbitmq.dbs.svc/'
+		});
+		expect(https).toBe(
+			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
+		);
+		expect(https).not.toContain('s3cret');
+	});
+
+	it('refuses a pattern among the types it listens to, and an empty list of them', () => {
+		for (const pattern of ['#', 'com.twake.tasks.#', 'com.twake.*.task.assigned.v1']) {
+			expect(refusal({ ...listening, ACTIVITY_TYPES: `${ASSIGNED},${pattern}` })).toBe(
+				`invalid configuration: ACTIVITY_TYPES lists the CloudEvent types that wake an assistant, never a pattern such as ${JSON.stringify(pattern)}`
+			);
+		}
+		expect(refusal({ ...listening, ACTIVITY_TYPES: ' , ' })).toBe(
+			'invalid configuration: ACTIVITY_TYPES lists no CloudEvent type'
+		);
+	});
+
+	it('refuses a prefix that is not a plain name', () => {
+		for (const prefix of ['', 'twake harness', 'twake-harness.#']) {
+			expect(refusal({ ...listening, RABBITMQ_PREFIX: prefix })).toMatch(
+				/^invalid configuration: RABBITMQ_PREFIX/
+			);
+		}
+	});
+});

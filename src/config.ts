@@ -199,7 +199,10 @@ const envSchema = z.object({
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
 	PROVISIONER_CLIENT_IDS: z.string().default(''),
-	RABBITMQ_PREFIX: z.string().default('twake-harness'),
+	RABBITMQ_PREFIX: z
+		.string()
+		.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'a plain name, such as twake-harness-b2b')
+		.default('twake-harness'),
 	ACTIVITY_ENABLED: z.enum(['true', 'false']).default('false'),
 	ACTIVITY_AMQP_URL: z.string().default(''),
 	ACTIVITY_TYPES: z.string().default('com.twake.tasks.task.assigned.v1'),
@@ -223,6 +226,37 @@ export type Env = Record<string, string | undefined>;
 
 function isHttpsUrl(value: string): boolean {
 	return URL.canParse(value) && new URL(value).protocol === 'https:';
+}
+
+function isAmqpUrl(value: string): boolean {
+	return URL.canParse(value) && ['amqp:', 'amqps:'].includes(new URL(value).protocol);
+}
+
+// The routing keys a queue is bound to on the activity exchange: CloudEvent types, each exactly,
+// since a word * or # of a topic binding would let in events of other types, or every event
+function activitySource(values: { ACTIVITY_AMQP_URL: string; ACTIVITY_TYPES: string }): {
+	amqpUrl: string;
+	types: string[];
+} {
+	// The address holds the password of the instance's user: a refusal never says it
+	if (!isAmqpUrl(values.ACTIVITY_AMQP_URL)) {
+		throw new Error(
+			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
+		);
+	}
+	const types = values.ACTIVITY_TYPES.split(',')
+		.map((type) => type.trim())
+		.filter((type) => type.length > 0);
+	if (types.length === 0) {
+		throw new Error('invalid configuration: ACTIVITY_TYPES lists no CloudEvent type');
+	}
+	const pattern = types.find((type) => type.split('.').some((word) => /[*#]/.test(word)));
+	if (pattern !== undefined) {
+		throw new Error(
+			`invalid configuration: ACTIVITY_TYPES lists the CloudEvent types that wake an assistant, never a pattern such as ${JSON.stringify(pattern)}`
+		);
+	}
+	return { amqpUrl: values.ACTIVITY_AMQP_URL, types };
 }
 
 export function loadConfig(env: Env): Config {
@@ -338,15 +372,7 @@ export function loadConfig(env: Env): Config {
 				.filter((id) => id.length > 0)
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
-		activity:
-			values.ACTIVITY_ENABLED === 'true'
-				? {
-						amqpUrl: values.ACTIVITY_AMQP_URL,
-						types: values.ACTIVITY_TYPES.split(',')
-							.map((type) => type.trim())
-							.filter((type) => type.length > 0)
-					}
-				: null,
+		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
