@@ -92,7 +92,8 @@ interface SendJob {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
-	// The owner's message the text answers, for the reactions on it
+	// The message the text answers, for the reactions on it: the owner's own, or the assistant's
+	// question their reaction answered
 	readonly replyTo?: string;
 	readonly outcome?: TurnOutcome;
 	// The text asks the owner about a frozen call: the event sent is remembered for their answer
@@ -683,7 +684,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		fetchMessages,
 		lifetimeMs: config.consent.requestLifetimeMs,
-		metrics: consentMetrics
+		metrics: consentMetrics,
+		resumeQueued: (room, eventId) => {
+			const { roomId, assistantUserId } = room;
+			feedback
+				.turnQueued({ assistantUserId, roomId, eventId })
+				.catch((err: unknown) => log.warn({ roomId, eventId, err }, 'turn feedback failed'));
+		}
 	});
 
 	// The owner's answer to a request of the harness: a bare ✅ or ❌ on it. Only an event that

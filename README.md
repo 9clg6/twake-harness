@@ -53,7 +53,7 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `ADMISSION_USER_DAILY_TOKENS`  | tokens one user may spend per day, `200000` by default                                                                                                          |
 | `ADMISSION_GLOBAL_PER_MINUTE`  | turns the whole harness may start per minute, `400` by default                                                                                                  |
 | `TURN_HISTORY_MAX_CHARS`       | characters of past conversation a turn shows the model, `24000` by default: its latest exchanges whole, always the last; the session keeps all                  |
-| `TURN_MAX_TOOL_CALLS`          | tool calls one turn may make before it stops, `6` by default                                                                                                    |
+| `TURN_MAX_TOOL_CALLS`          | tool calls one turn may make, `6` by default; past them nothing runs: the model tells the owner what it did, what remains, and that it goes on if asked         |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 

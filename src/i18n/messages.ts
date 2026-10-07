@@ -54,6 +54,9 @@ export interface Messages {
 		readonly busy: string;
 		readonly recovered: string;
 		readonly noEscrow: string;
+		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
+		// owner: the actions it did, and how to have it carry on
+		callLimit(actions: number): string;
 	};
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
@@ -191,7 +194,9 @@ const ENGLISH: Messages = {
 		busy: 'I am busy right now and cannot take this message. Please send it again in a moment.',
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
-		noEscrow: 'I found no escrow to recover from; my identity is new from here on.'
+		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
+		callLimit: (actions) =>
+			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`
 	},
 	consent: {
 		firstRead: (application, covers, shown) =>
@@ -321,7 +326,10 @@ const FRENCH: Messages = {
 		recovered:
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:
-			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant."
+			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant.",
+		// One action, or none, is singular in French
+		callLimit: (actions) =>
+			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`
 	},
 	consent: {
 		firstRead: (application, covers, shown) =>

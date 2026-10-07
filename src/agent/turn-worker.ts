@@ -45,14 +45,16 @@ const resumePayload = z.object({
 	roomId: z.string().min(1),
 	pendingCallId: z.string().min(1),
 	// A job queued before answers came through the API was answered in the chat
-	through: z.enum(['chat', 'api']).default('chat')
+	through: z.enum(['chat', 'api']).default('chat'),
+	replyTo: z.string().min(1).optional()
 }) satisfies z.ZodType<ResumeRequest>;
 
 export interface SendPayload {
 	readonly asUserId: string;
 	readonly roomId: string;
 	readonly text: string;
-	// The owner's message the text answers, which the matrix role marks as answered
+	// The message the text answers, which the matrix role marks as answered: the owner's own, or,
+	// for a turn their reaction resumed, the assistant's question they reacted to
 	readonly replyTo?: string;
 	readonly outcome?: 'answered' | 'failed';
 	// The text asks the owner about a frozen call: the matrix role remembers the event it sent,
@@ -142,7 +144,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		const { notices } = await fetchOwnerMessages(db, owner, locale);
 		await enqueueJob(db, {
 			kind: 'send',
-			payload: replyTo(result, assistant, roomId, notices),
+			payload: {
+				...replyTo(result, assistant, roomId, notices),
+				// What carries the owner's yes, which the matrix role marks as answered as it would a
+				// message: their words, or the assistant's own question they reacted to
+				...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
+			},
 			dedupKey: `send:resume:${pendingCallId}`,
 			groupKey: `send:${roomId}`
 		});
