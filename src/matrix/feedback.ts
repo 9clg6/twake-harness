@@ -28,7 +28,6 @@ export interface ChatFeedbackOptions {
 		type: string,
 		content: Record<string, unknown>
 	): Promise<string>;
-	redactEvent(userId: string, roomId: string, eventId: string): Promise<void>;
 	// The texts of a turn's status message, in its owner's language as it is now
 	statusTexts(turn: TurnRef): Promise<Messages['status']>;
 	// How long a turn may go without an answer before its status message shows, and the least time
@@ -41,9 +40,11 @@ export interface ChatFeedbackOptions {
 }
 
 // What the owner sees while the assistant works on a message, as Hermes showed it: eyes on the
-// message and the assistant typing, then a check mark once the message is answered. A turn that
-// takes a while also posts a status message, a reply to the message, which closes once the turn
-// answered. All of it is best effort: a failure is logged and never holds a turn or an answer back.
+// message and the assistant typing, then a check mark once the message is answered. The eyes stay:
+// in an encrypted room, the homeserver keeps a redacted reaction as an empty encrypted event, which
+// some clients show as a message they cannot read. A turn that takes a while also posts a status
+// message, a reply to the message, which closes once the turn answered. All of it is best effort:
+// a failure is logged and never holds a turn or an answer back.
 export interface ChatFeedback {
 	turnQueued(turn: TurnRef): Promise<void>;
 	// The turn has done this many actions so far: its status shows them, at most one update per
@@ -53,7 +54,7 @@ export interface ChatFeedback {
 	// owner sees, if any, stops counting. A question's status points to it before it goes out; any
 	// other reply goes out after its status.
 	answerReady(turn: TurnRef, reply: TurnReply): Promise<void>;
-	// Once the reply went out: the eyes go, a check mark marks an answered message, and the status
+	// Once the reply went out: a check mark joins the eyes on an answered message, and the status
 	// closes on how the turn ended
 	answerSent(turn: TurnRef, outcome: TurnOutcome): Promise<void>;
 	// Lets what is already on its way (a check mark, a stopped typing) go out, within a bound. A
@@ -62,7 +63,7 @@ export interface ChatFeedback {
 	stop(): Promise<void>;
 }
 
-const WORKING = '👀';
+const SEEN = '👀';
 const ANSWERED = '✅';
 const DEFAULT_TYPING_TIMEOUT_MS = 30_000;
 const DEFAULT_TYPING_REFRESH_MS = 20_000;
@@ -111,8 +112,8 @@ function workingText(texts: Messages['status'], actions: number): string {
 }
 
 interface Ack {
-	// Resolves to the id of the eyes reaction, or null when it could not be sent
-	readonly reaction: Promise<string | null>;
+	// Settles once the eyes went out, or could not: the check mark goes out after them
+	readonly eyesSent: Promise<void>;
 	readonly at: number;
 }
 
@@ -139,8 +140,9 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 	const typingMaxMs = options.typingMaxMs ?? DEFAULT_TYPING_MAX_MS;
 	// A turn that died never answers: its status gives up when its typing would stop
 	const statusMaxMs = options.statusMaxMs ?? DEFAULT_TYPING_MAX_MS;
-	// The matrix role runs as a single replica, so this memory is the only one. A restart between a
-	// turn and its answer forgets the eyes: they stay on that message, next to the check mark.
+	// A turn can answer before its eyes went out, when sending them is slow: its check mark waits for
+	// them, so a client never shows it first. The matrix role runs as a single replica, so this
+	// memory is the only one.
 	const acks = new Map<string, Ack>();
 	const sessions = new Map<string, TypingSession>();
 	// The typing calls of a room go out one after the other, so a late "typing" never lands after
@@ -198,14 +200,13 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 		void queueTyping(turn, true);
 	}
 
-	async function react(turn: TurnRef, key: string): Promise<string | null> {
+	async function react(turn: TurnRef, key: string): Promise<void> {
 		try {
-			return await options.sendEvent(turn.assistantUserId, turn.roomId, 'm.reaction', {
+			await options.sendEvent(turn.assistantUserId, turn.roomId, 'm.reaction', {
 				'm.relates_to': { rel_type: 'm.annotation', event_id: turn.eventId, key }
 			});
 		} catch (err: unknown) {
 			log.warn({ roomId: turn.roomId, eventId: turn.eventId, key, err }, 'reaction failed');
-			return null;
 		}
 	}
 
@@ -379,10 +380,10 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			// All are registered before anything is awaited: a fast answer finds them in place
 			startTyping(turn);
 			scheduleStatus(turn, now);
-			const reaction = react(turn, WORKING);
-			track(reaction);
-			acks.set(turn.eventId, { reaction, at: now });
-			await reaction;
+			const eyesSent = react(turn, SEEN);
+			track(eyesSent);
+			acks.set(turn.eventId, { eyesSent, at: now });
+			await eyesSent;
 		},
 		answerReady: async (turn, reply) => {
 			// Settled before anything is awaited: an answer ready before its status was due never shows
@@ -419,17 +420,7 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			const work = (async (): Promise<void> => {
 				const ack = acks.get(turn.eventId);
 				acks.delete(turn.eventId);
-				const eyes = ack === undefined ? null : await ack.reaction;
-				if (eyes !== null) {
-					try {
-						await options.redactEvent(turn.assistantUserId, turn.roomId, eyes);
-					} catch (err: unknown) {
-						log.warn(
-							{ roomId: turn.roomId, eventId: turn.eventId, err },
-							'reaction redaction failed'
-						);
-					}
-				}
+				if (ack !== undefined) await ack.eyesSent;
 				if (outcome !== 'failed') await react(turn, ANSWERED);
 			})();
 			track(work);

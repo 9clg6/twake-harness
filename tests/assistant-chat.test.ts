@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
-import { eventually, watchFeedback } from './helpers/feedback.js';
+import { eventually, expectAnswered, watchFeedback } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
@@ -236,11 +236,7 @@ describe('talking to my assistant in Matrix', () => {
 		expect(await typingWhileWorking).toBe(true);
 		await answersAfter(before);
 		expect(lastAnswer().body).toBe('slow echo: take your time');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
-		const check = await eventually(() => feedback.reactionsOn(asked).find((r) => r.key === '✅'));
-		expect(check).toBeDefined();
+		await expectAnswered(feedback, asked);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 });

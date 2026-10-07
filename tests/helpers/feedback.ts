@@ -1,3 +1,5 @@
+import { expect } from 'vitest';
+
 import type { E2eeClient } from './e2ee-client.js';
 import type { MatrixUser, TestSynapse } from './synapse.js';
 
@@ -43,7 +45,7 @@ export function inReplyTo(content: Record<string, unknown>): string | null {
 // it is typing, and its messages, edits applied
 export interface RoomFeedback {
 	reactionsOn(eventId: string): Reaction[];
-	isRedacted(eventId: string): boolean;
+	redactedEventIds(): string[];
 	isTyping(): Promise<boolean>;
 	shown(): ShownMessage[];
 }
@@ -72,9 +74,11 @@ export function watchFeedback(options: RoomFeedbackOptions): RoomFeedback {
 						? [{ eventId: e.eventId, key: String(relation['key']) }]
 						: [];
 				}),
-		isRedacted: (eventId) =>
-			client.events.some(
-				(e) => e.roomId === room && e.type === 'm.room.redaction' && e.redacts === eventId
+		redactedEventIds: () =>
+			client.events.flatMap((e) =>
+				e.roomId === room && e.type === 'm.room.redaction' && e.sender === assistantId
+					? [e.redacts ?? '']
+					: []
 			),
 		// Typing notifications are ephemeral: the SDK client drops them, a sync without a token shows
 		// who is typing in the room right now
@@ -135,4 +139,21 @@ export async function eventually<T>(read: () => T | Promise<T>, timeoutMs = 15_0
 		await sleep(200);
 	}
 	return read();
+}
+
+// An answered message keeps the eyes the assistant put on it, the check mark after them: in an
+// encrypted room, the homeserver keeps a redacted reaction as an empty encrypted event, which some
+// clients show as a message they cannot read
+export async function expectAnswered(feedback: RoomFeedback, eventId: string): Promise<void> {
+	await eventually(() => feedback.reactionsOn(eventId).some((r) => r.key === '✅'));
+	expect(feedback.reactionsOn(eventId).map((r) => r.key)).toEqual(['👀', '✅']);
+	expect(feedback.redactedEventIds()).toEqual([]);
+}
+
+// A message whose turn failed or was refused keeps its eyes and gets no check mark, once what would
+// come late has had a second to show
+export async function expectSeenOnly(feedback: RoomFeedback, eventId: string): Promise<void> {
+	await sleep(1000);
+	expect(feedback.reactionsOn(eventId).map((r) => r.key)).toEqual(['👀']);
+	expect(feedback.redactedEventIds()).toEqual([]);
 }

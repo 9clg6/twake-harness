@@ -859,9 +859,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await refreshMembersDevices(intent, roomId);
 			return intent.underlyingClient.sendEvent(roomId, type, content);
 		},
-		redactEvent: async (userId, roomId, eventId) => {
-			await appservice.getIntentForUserId(userId).underlyingClient.redactEvent(roomId, eventId);
-		},
 		// The organization agent speaks the deployment's language with every member
 		statusTexts: async (turn) => {
 			const room = await assistantRoom(turn.roomId);
