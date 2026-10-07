@@ -127,7 +127,7 @@ With `ORG_AGENT_ENABLED`, the matrix role runs one more bot, the organization ag
 
 ### Events
 
-Events reach the assistants from RabbitMQ alone, which the worker role listens to: the `activity` exchange, where the applications publish their CloudEvents, and Calendar's fanout of the invitations it sends (see below). Each event comes with its turn, in the room of the owner it is for: the model is handed what the event says, and never reads it again through the contracts. The harness takes no event over HTTP: `POST /v1/events`, through which a dispatcher posted events, is gone, and a deployment that still sets `EVENTS_CLIENT_IDS`, the service clients it took them from, starts as before and ignores it.
+Events reach the assistants from RabbitMQ alone, which the worker role listens to: the `activity` exchange, where the applications publish their CloudEvents, and Calendar's fanout of the invitations it sends (see below). Each event comes with its turn, in the room of the owner it is for: the model is handed what the event says, and never reads it again through the contracts. The harness takes no event over HTTP: `POST /v1/events`, through which a dispatcher posted events, is gone, and a deployment that still sets `EVENTS_CLIENT_IDS`, the service clients it took them from, starts as before and ignores it. The chart no longer renders it, and a release that still sets `config.eventsClientIds` renders as before.
 
 ### The activity exchange
 
