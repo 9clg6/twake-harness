@@ -107,6 +107,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 	// The worker reaches its database through a proxy the tests take down and bring back, and the
 	// broker through another, which follows the broker when a restart moves it
 	let database: TcpProxy;
+	let databaseUrl: string;
 	let workerDb: Db;
 	let amqp: TcpProxy;
 	const logs = captureLogs();
@@ -121,15 +122,16 @@ describe('an event that fails holds back none of those after it, and is never lo
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
 			RABBITMQ_PREFIX: PREFIX
 		});
-		const databaseUrl = new URL(TEST_DATABASE_URL);
+		const direct = new URL(TEST_DATABASE_URL);
 		database = await startTcpProxy(() => ({
-			host: databaseUrl.hostname,
-			port: Number(databaseUrl.port || '5432')
+			host: direct.hostname,
+			port: Number(direct.port || '5432')
 		}));
 		const proxied = new URL(TEST_DATABASE_URL);
 		proxied.hostname = '127.0.0.1';
 		proxied.port = String(database.port);
-		workerDb = makeDb(proxied.toString());
+		databaseUrl = proxied.toString();
+		workerDb = makeDb(databaseUrl);
 		amqp = await startTcpProxy(() => broker.address());
 		const amqpUrl = new URL(broker.urlFor(HARNESS_USER, HARNESS_PASSWORD));
 		amqpUrl.hostname = '127.0.0.1';
@@ -201,10 +203,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 	}
 
 	// A worker of its own, on a vhost of its own, as the instance's user there
-	function workerOn(amqpUrl: string, logStream: PassThrough): Promise<WorkerRole> {
+	function workerOn(amqpUrl: string, logStream: PassThrough, db: Db = r.h.db): Promise<WorkerRole> {
 		return startWorkerRole({
 			config: { ...r.h.config, role: 'worker', activity: { amqpUrl, types: [ASSIGNED] } },
-			db: r.h.db,
+			db,
 			logStream,
 			retryDelayMs: RETRY_DELAY_MS
 		});
@@ -447,6 +449,48 @@ describe('an event that fails holds back none of those after it, and is never lo
 			await late.stop();
 		}
 		await until('no connection left', async () => (await connections()) === 0);
+	});
+
+	it('dead-letters an event that brings the worker down whenever it holds it, once past five returns', async () => {
+		const channel = await broker.addVhost('loop');
+		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+		await broker.addUser('twake-harness-loop', HARNESS_PASSWORD, PERMISSIONS);
+		await broker.allow('twake-harness-loop', 'loop', PERMISSIONS);
+		const url = broker.urlFor('twake-harness-loop', HARNESS_PASSWORD, 'loop');
+		// A first life declares the queue, before the event is published
+		await (await workerOn(url, captureLogs().stream)).stop();
+		const event = activityEvent();
+		database.cut();
+		try {
+			await publishOn(channel, event);
+			// Each life of the worker takes the event, tries it, and goes down still holding it. Each
+			// has a pool of its own, as a new process would: the driver waits longer and longer
+			// before it connects again where a connection failed.
+			for (let life = 1; life <= 6; life += 1) {
+				const lifeLogs = captureLogs();
+				const lifeDb = makeDb(databaseUrl);
+				const role = await workerOn(url, lifeLogs.stream, lifeDb);
+				try {
+					await until(`life ${life} holding the event`, () =>
+						lifeLogs
+							.lines()
+							.some((line) => line['msg'] === 'event failed' && line['eventId'] === event.id)
+					);
+				} finally {
+					await role.stop();
+					await lifeDb.close();
+				}
+			}
+			// Kept in its queue until its dead letter queue took it
+			await until(
+				'the event dead-lettered',
+				async () =>
+					(await broker.queue(DEAD_LETTERS, 'loop'))?.messages === 1 &&
+					(await broker.queue(QUEUE, 'loop'))?.messages === 0
+			);
+		} finally {
+			database.restore();
+		}
 	});
 
 	it('starts while the broker is out of reach, listens once it is back, and stops while it is gone', async () => {
