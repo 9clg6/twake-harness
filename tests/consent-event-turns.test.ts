@@ -152,7 +152,7 @@ function invitationModel(request: ChatRequest): ScriptedReply {
 }
 
 // How every request of the harness ends
-const HOW_TO_ANSWER = 'Answer yes or no.';
+const HOW_TO_ANSWER = 'Answer yes or no in your next message.';
 
 // A request as Alice's client shows it in plain text: what the model wrote, quoted under the
 // harness's label; the harness's question; the call whole, as the model wrote it; and how to answer

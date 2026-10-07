@@ -110,7 +110,7 @@ describe('my assistant asks again before it first writes in an application', () 
 			[
 				'This is the first time I need to change your data in calendar. Do you allow it? I would start with this:',
 				JSON.stringify({ event_id: 'evt-budget' }, null, 2),
-				'Answer yes or no.'
+				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
@@ -166,7 +166,7 @@ describe('my assistant asks again before it first writes in an application', () 
 			[
 				'This is the first time I need to change your data in tasks. Do you allow it? I would start with this:',
 				JSON.stringify({ task_id: 'task-q4', body: { done: true } }, null, 2),
-				'Answer yes or no.'
+				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);

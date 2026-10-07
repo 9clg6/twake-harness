@@ -23,7 +23,7 @@ function sleep(ms: number): Promise<void> {
 }
 
 // The request about a read in an application, named as a first use names it
-const ANSWER = 'Answer yes or no.';
+const ANSWER = 'Answer yes or no in your next message.';
 const NEEDED = (application: string): string =>
 	`To read your data in ${application}, I need your permission to act on your behalf`;
 const MISSING = (application: string): string =>
@@ -32,7 +32,7 @@ const EXPIRED = (application: string): string =>
 	`${NEEDED(application)}, and the one you gave me has expired. Give it again here: ${ALICE_CONSENT_URL}\nOnce that is done, shall I try again? ${ANSWER}`;
 const MISSING_WITHOUT_LINK = `${NEEDED('mail')}, and you have not given it yet.\nShall I try again? ${ANSWER}`;
 const EXPIRED_WITHOUT_LINK = `${NEEDED('mail')}, and the one you gave me has expired.\nShall I try again? ${ANSWER}`;
-const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${ALICE_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds par oui ou non.`;
+const FRENCH_MISSING = `Pour lire tes données dans Twake Mail, j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée. Donne-la ici : ${ALICE_CONSENT_URL}\nUne fois que c'est fait, je réessaie ? Réponds par oui ou non dans ton prochain message.`;
 
 // The harness's requests for that permission, as Alice's client received them
 const ENGLISH_REQUEST = 'To read your data in';

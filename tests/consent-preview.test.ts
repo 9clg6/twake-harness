@@ -149,8 +149,8 @@ const ARCHIVE_SUMMARY = 'Archive “Newsletter #42” from news@test.local, rece
 const PREVIEWED = { 'x-twake-preview': 'true' } as const;
 
 // How every request of the harness ends, in each language
-const HOW_TO_ANSWER = 'Answer yes or no.';
-const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non.';
+const HOW_TO_ANSWER = 'Answer yes or no in your next message.';
+const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non dans ton prochain message.';
 
 const HIGH_RISK_IN_MAIL =
 	'Actions like this one in mail need your yes each time. Shall I do this one, exactly as below?';

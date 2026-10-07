@@ -226,7 +226,7 @@ function literalModel(request: ChatRequest): ScriptedReply {
 }
 
 // How every request of the harness ends
-const HOW_TO_ANSWER = 'Answer yes or no.';
+const HOW_TO_ANSWER = 'Answer yes or no in your next message.';
 
 const HIGH_RISK_IN_MAIL =
 	'Actions like this one in mail need your yes each time. Shall I do this one, exactly as below?';

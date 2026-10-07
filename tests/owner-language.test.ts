@@ -45,11 +45,11 @@ function question(asked: string, howToAnswer: string): string {
 
 const FRENCH_QUESTION = question(
 	"C'est la première fois que j'ai besoin de lire tes données dans notes. Tu m'autorises ? Je commencerais par ceci :",
-	'Réponds par oui ou non.'
+	'Réponds par oui ou non dans ton prochain message.'
 );
 const ENGLISH_QUESTION = question(
 	'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
-	'Answer yes or no.'
+	'Answer yes or no in your next message.'
 );
 
 describe('my assistant speaks my language', () => {

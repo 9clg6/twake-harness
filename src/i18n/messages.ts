@@ -141,9 +141,9 @@ function firstUse(asked: string, level: string, covers: string | null, question:
 }
 
 // How an owner answers a request, the sentence every request ends with, in each language: in
-// words, as a request carries no buttons
-const ENGLISH_HOW_TO_ANSWER = 'Answer yes or no.';
-const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non.';
+// words, as a request carries no buttons, and in their next message, the only one that answers it
+const ENGLISH_HOW_TO_ANSWER = 'Answer yes or no in your next message.';
+const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non dans ton prochain message.';
 
 const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },

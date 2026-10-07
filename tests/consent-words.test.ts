@@ -83,7 +83,7 @@ describe('I answer the question in words', () => {
 			[
 				'This is the first time I need to read your data in notes. Do you allow it? I would start with this:',
 				JSON.stringify({ q: 'budget' }, null, 2),
-				'Answer yes or no.'
+				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
 		const found = r.saying('Found:').length;

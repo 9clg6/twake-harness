@@ -32,7 +32,11 @@ function question(domain: string): string {
 // The whole request, as the room and the chat through the API show it: the question, the call as
 // frozen, and how to answer
 function requestFor(domain: string, args: unknown): string {
-	return [question(domain), JSON.stringify(args, null, 2), 'Answer yes or no.'].join('\n\n');
+	return [
+		question(domain),
+		JSON.stringify(args, null, 2),
+		'Answer yes or no in your next message.'
+	].join('\n\n');
 }
 
 function call(name: string, args: unknown): ToolCall[] {
@@ -564,7 +568,7 @@ describe("my answer through the API to the broker's request", () => {
 				message: 'Find the budget in my mail'
 			}
 		);
-		const request = `To read your data in mail, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}?owner=alice\nOnce that is done, shall I try again? Answer yes or no.`;
+		const request = `To read your data in mail, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}?owner=alice\nOnce that is done, shall I try again? Answer yes or no in your next message.`;
 		expect(turn.body.answer).toBe(request);
 		expect(turn.body.pending_call).toMatchObject({
 			channel: 'api_chat',
