@@ -9,6 +9,11 @@ import type { WakeDeps } from './wake.js';
 // and fixed once the queue is declared
 const DELIVERY_LIMIT = 5;
 
+// The first wait before a message is tried again, doubled after each attempt up to a minute: a
+// transient failure, such as the database being down, is tried again for as long as it lasts
+const RETRY_DELAY_MS = 1000;
+const MAX_RETRY_DELAY_MS = 60_000;
+
 // A queue of the instance's own, which it declares and reads, bound to the exchange of a source
 // another service owns
 export interface OwnQueue {
@@ -42,7 +47,8 @@ export function ownQueueName(config: Config, name: string): string {
 export async function listenOnOwnQueue(
 	deps: WakeDeps,
 	own: OwnQueue,
-	handle: RabbitMQMessageHandler
+	handle: RabbitMQMessageHandler,
+	options: { readonly retryDelayMs?: number } = {}
 ): Promise<Listener> {
 	const log = deps.log.child({ listener: own.name });
 	const client = new RabbitMQClient({
@@ -51,6 +57,7 @@ export async function listenOnOwnQueue(
 		// level, the body of every message it receives at debug included
 		logger: brokerLogger(log),
 		prefetch: 1,
+		retryDelay: options.retryDelayMs ?? RETRY_DELAY_MS,
 		hooks: {
 			// A message that is no JSON never reaches the handler: the library dead-letters it
 			onMessageDlq: ({ routingKey, reason }) => {
@@ -73,7 +80,9 @@ export async function listenOnOwnQueue(
 		// The source's service owns its exchange: the library only checks that it is there before
 		// it binds
 		passiveExchanges: [own.exchange],
-		queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT }
+		queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT },
+		maxRetries: Infinity,
+		maxRetryDelay: MAX_RETRY_DELAY_MS
 	});
 	return { connected: () => client.isConnected(), close: () => client.close() };
 }

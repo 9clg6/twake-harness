@@ -1,10 +1,13 @@
 import { PassThrough } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { makeDb, type Db } from '../src/db/client.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
+import { TEST_DATABASE_URL } from './helpers/app.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
 import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
+import { startTcpProxy, type TcpProxy } from './helpers/tcp-proxy.js';
 
 const ACTIVITY = 'activity';
 const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
@@ -18,6 +21,8 @@ const HARNESS_USER = 'twake-harness-test';
 const HARNESS_PASSWORD = 'harness-test-password';
 // What people wrote, which no log line may carry
 const CONFIDENTIAL = 'Salary review: Bob leaves in June';
+// The first delay of the worker's retries, which doubles from there
+const RETRY_DELAY_MS = 50;
 
 const ALICE = { email: 'alice@test.local', reason: 'assigned' };
 
@@ -84,6 +89,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 	let broker: TestBroker;
 	let r: ConsentRoom;
 	let worker: WorkerRole;
+	// The worker reaches its database through a proxy the tests take down and bring back
+	let database: TcpProxy;
+	let workerDb: Db;
 	const logs = captureLogs();
 	beforeAll(async () => {
 		broker = await startTestBroker();
@@ -100,11 +108,21 @@ describe('an event that fails holds back none of those after it, and is never lo
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
 			RABBITMQ_PREFIX: PREFIX
 		});
+		const databaseUrl = new URL(TEST_DATABASE_URL);
+		database = await startTcpProxy(() => ({
+			host: databaseUrl.hostname,
+			port: Number(databaseUrl.port || '5432')
+		}));
+		const proxied = new URL(TEST_DATABASE_URL);
+		proxied.hostname = '127.0.0.1';
+		proxied.port = String(database.port);
+		workerDb = makeDb(proxied.toString());
 		// Every line the worker writes, down to its debug lines, is read for content
 		worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker', logLevel: 'debug' },
-			db: r.h.db,
-			logStream: logs.stream
+			db: workerDb,
+			logStream: logs.stream,
+			retryDelayMs: RETRY_DELAY_MS
 		});
 		// A literal model: it says which event it was told of
 		r.h.apisix.llm.script = (request: ChatRequest) => {
@@ -114,6 +132,8 @@ describe('an event that fails holds back none of those after it, and is never lo
 	}, 240_000);
 	afterAll(async () => {
 		if (worker !== undefined) await worker.stop();
+		if (workerDb !== undefined) await workerDb.close();
+		if (database !== undefined) await database.close();
 		if (r !== undefined) await r.close();
 		if (broker !== undefined) await broker.stop();
 	});
@@ -133,6 +153,18 @@ describe('an event that fails holds back none of those after it, and is never lo
 			.lines()
 			.slice(since)
 			.filter((line) => line['msg'] === 'event handled');
+	}
+
+	// The lines of the attempts at an event that failed, once there are that many
+	async function failuresOf(event: ActivityEvent, count: number): Promise<LogLine[]> {
+		for (let i = 0; i < 240; i += 1) {
+			const failures = logs
+				.lines()
+				.filter((line) => line['msg'] === 'event failed' && line['eventId'] === event.id);
+			if (failures.length >= count) return failures;
+			await new Promise((resolve) => setTimeout(resolve, 250));
+		}
+		throw new Error(`fewer than ${count} failed attempts at ${event.id}`);
 	}
 
 	it('dead-letters at once a message that is no event, logging why and nothing of what it says', async () => {
@@ -232,5 +264,35 @@ describe('an event that fails holds back none of those after it, and is never lo
 			{ eventId: next.id, recipients: 1, outcome: 'woken', outcomes: { woken: 1 } }
 		]);
 		expect(logs.text()).not.toContain('Salary review');
+	});
+
+	it('tries an event again while the database is down, ever further apart, then wakes me once', async () => {
+		await broker.channel.purgeQueue(DEAD_LETTERS);
+		const mark = logs.lines().length;
+		const event = activityEvent();
+		database.cut();
+		try {
+			await publish(event);
+			// Tried more than the five times a lasting failure gets, never dead-lettered, and held
+			const failures = await failuresOf(event, 7);
+			expect(failures.map((line) => line['transient'])).toEqual(Array(7).fill(true));
+			expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+			expect((await broker.queue(QUEUE))?.messages).toBe(1);
+			// Each wait twice as long as the one before it
+			const times = failures.map((line) => Number(line['time']));
+			for (let i = 1; i < times.length; i += 1) {
+				expect((times[i] ?? 0) - (times[i - 1] ?? 0)).toBeGreaterThanOrEqual(
+					RETRY_DELAY_MS * 2 ** (i - 1) - 2
+				);
+			}
+		} finally {
+			database.restore();
+		}
+		await toldOf(event);
+		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(1);
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+		expect(handled(mark).map(({ eventId, outcome }) => ({ eventId, outcome }))).toEqual([
+			{ eventId: event.id, outcome: 'woken' }
+		]);
 	});
 });

@@ -295,7 +295,8 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Read | null
 // wakes its invitee's assistant
 export async function startCalendarListener(
 	deps: WakeDeps,
-	source: CalendarSource
+	source: CalendarSource,
+	options: { readonly retryDelayMs?: number } = {}
 ): Promise<Listener> {
 	return listenOnOwnQueue(
 		deps,
@@ -313,6 +314,7 @@ export async function startCalendarListener(
 				);
 			}
 			await wake(deps, wakeup);
-		}
+		},
+		options
 	);
 }

@@ -15,6 +15,8 @@ export interface WorkerRoleOptions {
 	readonly config: Config;
 	readonly db: Db;
 	readonly logStream?: Writable;
+	// The first wait before the listener tries a message again, a second unless set
+	readonly retryDelayMs?: number;
 }
 
 export interface WorkerRole {
@@ -49,11 +51,13 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
 	const deps = { config, db, log: app.log };
+	const listening =
+		options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs };
 	if (config.activity !== null) {
-		listeners.set('activity', await startActivityListener(deps, config.activity));
+		listeners.set('activity', await startActivityListener(deps, config.activity, listening));
 	}
 	if (config.calendar !== null) {
-		listeners.set('calendar', await startCalendarListener(deps, config.calendar));
+		listeners.set('calendar', await startCalendarListener(deps, config.calendar, listening));
 	}
 	const curation = startCurationScheduler(db, app.log, config.curation.intervalMs);
 	const expiry = startExpiryScheduler(

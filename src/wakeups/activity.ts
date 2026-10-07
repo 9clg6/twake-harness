@@ -2,9 +2,10 @@ import { DeadLetterError } from '@linagora/rabbitmq-client';
 import { z } from 'zod';
 
 import type { ActivitySource } from '../config.js';
+import { isTransient } from '../db/transient.js';
 import { cut } from '../llm/data.js';
 import { listenOnOwnQueue, ownQueueName, type Listener } from './listener.js';
-import { logHandled, outcomeOf, type Handled, type RecipientOutcome } from './logs.js';
+import { failureOf, logHandled, outcomeOf, type Handled, type RecipientOutcome } from './logs.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
@@ -201,7 +202,8 @@ function wakeupsOf(event: ActivityEvent): {
 // lists alone, and wakes the assistant of each recipient of an event
 export async function startActivityListener(
 	deps: WakeDeps,
-	source: ActivitySource
+	source: ActivitySource,
+	options: { readonly retryDelayMs?: number } = {}
 ): Promise<Listener> {
 	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
 	const log = deps.log.child({ listener: ACTIVITY_EXCHANGE });
@@ -252,14 +254,20 @@ export async function startActivityListener(
 				...skipped.map((): RecipientOutcome => 'invalid'),
 				...Array.from({ length: ignored }, (): RecipientOutcome => 'ignored')
 			];
-			for (const wakeup of wakeups) outcomes.push(await wake(deps, wakeup));
-			logHandled(log, {
+			const identity = {
 				source: event.source,
 				eventId: event.id,
 				type: event.type,
-				recipients: (event.data.recipients ?? []).length,
-				...outcomeOf(outcomes)
-			});
-		}
+				recipients: (event.data.recipients ?? []).length
+			};
+			try {
+				for (const wakeup of wakeups) outcomes.push(await wake(deps, wakeup));
+			} catch (err: unknown) {
+				log.warn({ ...identity, transient: isTransient(err), err: failureOf(err) }, 'event failed');
+				throw err;
+			}
+			logHandled(log, { ...identity, ...outcomeOf(outcomes) });
+		},
+		options
 	);
 }
