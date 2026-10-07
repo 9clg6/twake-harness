@@ -78,6 +78,12 @@ export interface Listener {
 	close(): Promise<void>;
 }
 
+// How many times a message came back to the queue, as the broker counts it on its redeliveries
+function deliveriesOf(properties: RabbitMQMessageProperties): number {
+	const count = properties.headers['x-delivery-count'];
+	return typeof count === 'number' ? count : 0;
+}
+
 // The full name of a queue of the instance's own: its prefix keeps any two instances apart
 export function ownQueueName(config: Config, name: string): string {
 	return `${config.rabbitmq.prefix}.${name}`;
@@ -125,6 +131,13 @@ export function listenOnOwnQueue(
 			if (reading.kind === 'malformed') {
 				logHandled(log, { ...identity, outcome: 'dead_lettered', reason: reading.reason });
 				throw new DeadLetterError(reading.reason);
+			}
+			// Back as many times as the queue allows, as a message that brought the worker down
+			// whenever it held it: tried once more, it would go to the dead letter queue the next time
+			// the worker goes down, with no line to say so
+			if (deliveriesOf(properties) >= DELIVERY_LIMIT) {
+				logHandled(log, { ...identity, outcome: 'dead_lettered', reason: 'delivery_limit' });
+				throw new DeadLetterError('delivery_limit');
 			}
 			outcomes.push(...reading.leftOut);
 			for (const wakeup of reading.wakeups) outcomes.push(await wake(deps, wakeup));

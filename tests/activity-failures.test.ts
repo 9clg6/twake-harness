@@ -9,6 +9,7 @@ import { TEST_DATABASE_URL } from './helpers/app.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
 import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
+import { freePort, spawnWorker, type WorkerProcess } from './helpers/process.js';
 import { startSilentServer, startTcpProxy, type TcpProxy } from './helpers/tcp-proxy.js';
 
 const ACTIVITY = 'activity';
@@ -263,6 +264,51 @@ describe('an event that fails holds back none of those after it, and is never lo
 			messageId: event.id
 		});
 		await vhost.channel.waitForConfirms();
+	}
+
+	// A worker role of its own process, started as a deployment starts it, which the test may kill
+	async function startWorkerProcess(amqpUrl: string): Promise<WorkerProcess> {
+		const { config } = r.h;
+		return spawnWorker({
+			HARNESS_ROLE: 'worker',
+			HOST: '127.0.0.1',
+			PORT: String(await freePort()),
+			DATABASE_URL: TEST_DATABASE_URL,
+			AUTH_JWKS_URL: config.auth.jwksUrl.toString(),
+			AUTH_ISSUER: config.auth.issuer,
+			AUTH_AUDIENCE: config.auth.audience,
+			APISIX_BASE_URL: config.apisix.baseUrl.toString(),
+			APISIX_CONSUMER_KEY: config.apisix.consumerKey,
+			MATRIX_SERVER_NAME: config.matrix.serverName,
+			ACTIVITY_ENABLED: 'true',
+			ACTIVITY_AMQP_URL: amqpUrl,
+			RABBITMQ_PREFIX: PREFIX,
+			LOG_LEVEL: 'debug'
+		});
+	}
+
+	// The database makes every wake-up wait, until released, as a handler that never ends would
+	async function lockWakeups(): Promise<{ release(): Promise<void> }> {
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let taken = (): void => undefined;
+		const locked = new Promise<void>((resolve) => {
+			taken = resolve;
+		});
+		const holding = r.h.db.sql.begin(async (tx) => {
+			await tx`lock table wakeups in share mode`;
+			taken();
+			await released;
+		});
+		await locked;
+		return {
+			release: async () => {
+				release();
+				await holding;
+			}
+		};
 	}
 
 	// The lines of the attempts at an event that failed, once there are that many
@@ -607,7 +653,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expectNoContentIn(lateLogs);
 	});
 
-	it('dead-letters an event that brings the worker down whenever it holds it, once past five returns', async () => {
+	it('dead-letters, saying so, an event that brings the worker down whenever it holds it', async () => {
 		const loop = await vhostOf('loop', 'twake-harness-loop');
 		const url = broker.urlFor('twake-harness-loop', HARNESS_PASSWORD, loop.name);
 		// A first life declares the queue, before the event is published
@@ -615,37 +661,45 @@ describe('an event that fails holds back none of those after it, and is never lo
 		await until('listening', async () => (await healthOf(first)) === 'connected');
 		await first.stop();
 		const event = activityEvent();
-		database.cut();
+		await publishOn(loop, event);
+		const lives: WorkerProcess[] = [];
+		const lock = await lockWakeups();
 		try {
-			await publishOn(loop, event);
-			// Each life of the worker takes the event, tries it, and goes down still holding it. Each
-			// has a pool of its own, as a new process would: the driver waits longer and longer
-			// before it connects again where a connection failed.
-			for (let life = 1; life <= 6; life += 1) {
-				const lifeLogs = captureLogs();
-				const lifeDb = makeDb(databaseUrl);
-				const role = await workerOn(url, lifeLogs.stream, lifeDb);
-				try {
-					await until(`life ${life} holding the event`, () =>
-						lifeLogs
-							.lines()
-							.some((line) => line['msg'] === 'event failed' && line['eventId'] === event.id)
-					);
-				} finally {
-					await role.stop();
-					await lifeDb.close();
-				}
+			// Each life of the worker, a process of its own, takes the event and is killed holding it
+			for (let life = 1; life <= 5; life += 1) {
+				const process = await startWorkerProcess(url);
+				lives.push(process);
+				await until(`life ${life} holding the event`, () =>
+					process.lines().some((line) => line['msg'] === 'Message received, processing')
+				);
+				await process.kill('SIGKILL');
 			}
-			// Kept in its queue until its dead letter queue took it
-			await until(
-				'the event dead-lettered',
-				async () =>
-					(await broker.queue(DEAD_LETTERS, loop.name))?.messages === 1 &&
-					(await broker.queue(QUEUE, loop.name))?.messages === 0
-			);
+			// At the last delivery its queue allows, the next life dead-letters it, and says so
+			const last = await startWorkerProcess(url);
+			lives.push(last);
+			try {
+				await until('the event handled', () =>
+					last.lines().some((line) => line['msg'] === 'event handled')
+				);
+				expect(
+					last
+						.lines()
+						.filter((line) => line['msg'] === 'event handled')
+						.map(({ eventId, outcome, reason }) => ({ eventId, outcome, reason }))
+				).toEqual([{ eventId: event.id, outcome: 'dead_lettered', reason: 'delivery_limit' }]);
+				await until(
+					'the event dead-lettered',
+					async () =>
+						(await broker.queue(DEAD_LETTERS, loop.name))?.messages === 1 &&
+						(await broker.queue(QUEUE, loop.name))?.messages === 0
+				);
+			} finally {
+				await last.kill('SIGTERM');
+			}
 		} finally {
-			database.restore();
+			await lock.release();
 		}
+		for (const life of lives) expect(life.text()).not.toContain(CONTENT);
 	});
 
 	it('starts while the broker is out of reach, listens once it is back, and stops while it is gone', async () => {
