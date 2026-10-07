@@ -68,6 +68,18 @@ describe('the provisioning API admits its provisioners only', () => {
 		const notAMatrixId = await api.put(PROVISIONER, provisioningPath('bob@test.local'), {});
 		expect(notAMatrixId.status).toBe(422);
 	});
+
+	it("asks for the recovery of an owner's assistant for a provisioner only", async () => {
+		const recover = `${provisioningPath(OWNER)}/recover`;
+		expect((await api.post('bob@test.local', recover, {})).status).toBe(403);
+		expect(
+			(await api.post(PROVISIONER, `${provisioningPath('@bob:elsewhere.example')}/recover`, {}))
+				.status
+		).toBe(422);
+		const none = await api.post(PROVISIONER, recover, {});
+		expect(none.status).toBe(404);
+		expect(none.body).toEqual({ error: 'no assistant' });
+	});
 });
 
 describe('a provisioned assistant', () => {
@@ -813,8 +825,14 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 		// Asking again changes nothing: only the owner's recovery brings the identity back
 		expect((await provision(rita.userId)).status).toBe(409);
 
-		const asked = await h.api.post('rita@test.local', '/v1/assistants/me/recover', {});
-		expect(asked.status).toBe(202);
+		// The provisioner asks for it on the owner's behalf, as the owner would
+		const asked = await h.apps[0]!.inject({
+			method: 'POST',
+			url: `${provisioningPath(rita.userId)}/recover`,
+			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
+			payload: {}
+		});
+		expect(asked.statusCode).toBe(202);
 		const after = await provisionUntil(rita.userId, 200);
 		expect(after['masterKey']).toBe(before['masterKey']);
 		expect(after['deviceId']).not.toBe(before['deviceId']);
