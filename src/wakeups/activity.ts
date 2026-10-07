@@ -95,6 +95,10 @@ function wakeupsOf(event: ActivityEvent): Wakeup[] {
 }
 
 export interface ActivityListener {
+	// Whether it holds its connection to the broker, as the client knows it without asking the
+	// broker: the library's own probe declares a queue of the broker's naming, which the
+	// instance's user may not do, and the refusal closes the channel the listener reads on
+	connected(): boolean;
 	close(): Promise<void>;
 }
 
@@ -137,5 +141,5 @@ export async function startActivityListener(
 			queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT }
 		}
 	);
-	return { close: () => client.close() };
+	return { connected: () => client.isConnected(), close: () => client.close() };
 }

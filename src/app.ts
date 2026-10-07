@@ -85,6 +85,9 @@ export interface AppOptions {
 	// The consent counters its metrics serve, which the role brings when it counts some of its
 	// own, such as the worker role's expiries; new ones otherwise
 	readonly consentMetrics?: ConsentMetrics;
+	// What the role adds to its health check, such as whether it listens to the broker: never a
+	// reason for the check to fail, which would restart the role
+	readonly health?: () => Readonly<Record<string, unknown>>;
 }
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
@@ -343,7 +346,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		});
 	}
 
-	app.get('/health', async () => ({ status: 'ok' }));
+	app.get('/health', async () => ({ status: 'ok', ...options.health?.() }));
 
 	// An event the dispatcher posts for an owner wakes their assistant: the turn runs in the
 	// owner's room, reads the event through the contracts and tells the owner, and whatever it

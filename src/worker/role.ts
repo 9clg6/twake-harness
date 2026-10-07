@@ -7,7 +7,7 @@ import { startExpiryScheduler } from '../consents/expiry.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
 import { startCurationScheduler } from '../curation/curation.js';
 import type { Db } from '../db/client.js';
-import { startActivityListener } from '../wakeups/activity.js';
+import { startActivityListener, type ActivityListener } from '../wakeups/activity.js';
 
 export interface WorkerRoleOptions {
 	readonly config: Config;
@@ -28,16 +28,20 @@ export interface WorkerRole {
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const consentMetrics = makeConsentMetrics();
+	let activity: ActivityListener | null = null;
 	const app = await buildApp({
 		config,
 		db,
 		consentMetrics,
+		// Whether it listens, which the check says without failing: a broker down does not restart
+		// the role, as the client connects again by itself
+		health: () =>
+			activity === null ? {} : { activity: activity.connected() ? 'connected' : 'disconnected' },
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
-	const activity =
-		config.activity === null
-			? null
-			: await startActivityListener({ config, db, log: app.log }, config.activity);
+	if (config.activity !== null) {
+		activity = await startActivityListener({ config, db, log: app.log }, config.activity);
+	}
 	const curation = startCurationScheduler(db, app.log, config.curation.intervalMs);
 	const expiry = startExpiryScheduler(
 		db,

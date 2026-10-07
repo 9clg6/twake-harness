@@ -302,6 +302,19 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect(turnCalls(r.h.apisix.llm.calls, completed.id)).toHaveLength(0);
 	});
 
+	it('says in its health check that it listens, from its connection alone', async () => {
+		// A probe of the broker would declare a queue of the broker's naming, which the harness's
+		// user may not do: refused, it would close the channel the listener reads on
+		for (let i = 0; i < 3; i += 1) {
+			const health = await worker.app.inject({ method: 'GET', url: '/health' });
+			expect(health.statusCode).toBe(200);
+			expect(health.json()).toEqual({ status: 'ok', activity: 'connected' });
+		}
+		const next = activityEvent();
+		await publish(next);
+		await answerTo(next);
+	});
+
 	it('listens on the same queue once the types it listens to change', async () => {
 		// An instance of its own on the broker, whose types the deployment changes between two starts
 		const prefix = `${PREFIX}.retyped`;
