@@ -171,6 +171,24 @@ describe('a provisioned assistant', () => {
 		expect(again.body).toEqual(mine);
 	});
 
+	it('becomes ready after its identity failed once to reach the homeserver', async () => {
+		const dave = await h.synapse.registerUser('dave');
+		let failed = false;
+		h.apisix.matrixFault = (call) => {
+			if (failed || !call.path.includes('/keys/device_signing/upload')) return null;
+			if (!call.path.includes(encodeURIComponent('@twake-space-assistant-dave:'))) return null;
+			failed = true;
+			return 500;
+		};
+		try {
+			const mine = await provisionUntilReady(dave.userId);
+			expect(failed).toBe(true);
+			expect(mine.userId).toBe('@twake-space-assistant-dave:test.local');
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+	});
+
 	it('joins the direct room its owner opens and invites it to, and answers its owner there', async () => {
 		const carol = await h.synapse.registerUser('carol');
 		const client = await startE2eeClient(h.synapse.url, carol);
