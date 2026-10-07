@@ -4,8 +4,8 @@ import { z } from 'zod';
 import type { ActivitySource } from '../config.js';
 import { cut } from '../llm/data.js';
 import { listenOnOwnQueue, ownQueueName, type Listener } from './listener.js';
-import { logHandled, outcomeOf, type Handled } from './logs.js';
-import { wake, type WakeDeps, type WakeOutcome, type Wakeup } from './wake.js';
+import { logHandled, outcomeOf, type Handled, type RecipientOutcome } from './logs.js';
+import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
@@ -97,20 +97,24 @@ function leftOutFields(message: unknown, event: ActivityEvent): string[] {
 
 type ActivityEvent = z.infer<typeof activityEventSchema>;
 
-// The attributes that identify an event, as far as a message that is no readable event has them
+// The attributes that identify an event, as far as a message the listener does not read has them
 const IDENTITY = { source: 'source', eventId: 'id', type: 'type' } as const;
 
 function identityOf(
 	message: unknown,
 	routingKey: string
-): Pick<Handled, 'source' | 'eventId' | 'type'> {
-	const identity: { source?: string; eventId?: string; type?: string } = { type: routingKey };
+): Pick<Handled, 'source' | 'eventId' | 'type' | 'recipients'> {
+	const identity: { source?: string; eventId?: string; type?: string; recipients?: number } = {
+		type: routingKey
+	};
 	for (const [field, attribute] of Object.entries(IDENTITY)) {
 		const value = valueAt(message, [attribute]);
 		if (typeof value === 'string' && value.length > 0 && value.length <= 200) {
 			identity[field as keyof typeof IDENTITY] = value;
 		}
 	}
+	const recipients = valueAt(message, ['data', 'recipients']);
+	if (Array.isArray(recipients)) identity.recipients = recipients.length;
 	return identity;
 }
 
@@ -213,7 +217,14 @@ export async function startActivityListener(
 			// A type the deployment no longer lists keeps its binding, since the library removes none:
 			// its events are taken and dropped. An event comes by the queue's own name when its dead
 			// letters are moved back into it.
-			if (routingKey !== queue && !source.types.includes(routingKey)) return;
+			if (routingKey !== queue && !source.types.includes(routingKey)) {
+				logHandled(log, {
+					...identityOf(message, routingKey),
+					outcome: 'ignored',
+					reason: 'type not listened to'
+				});
+				return;
+			}
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) {
 				const reason = malformation(message, parsed.error);
@@ -235,14 +246,19 @@ export async function startActivityListener(
 					'recipient skipped'
 				);
 			}
-			const outcomes: WakeOutcome[] = [];
+			// Those left out count among the recipients of the event: past the most it reads, as
+			// ignored, and those it cannot read, as invalid
+			const outcomes: RecipientOutcome[] = [
+				...skipped.map((): RecipientOutcome => 'invalid'),
+				...Array.from({ length: ignored }, (): RecipientOutcome => 'ignored')
+			];
 			for (const wakeup of wakeups) outcomes.push(await wake(deps, wakeup));
 			logHandled(log, {
 				source: event.source,
 				eventId: event.id,
 				type: event.type,
 				recipients: (event.data.recipients ?? []).length,
-				outcome: outcomeOf(outcomes)
+				...outcomeOf(outcomes)
 			});
 		}
 	);

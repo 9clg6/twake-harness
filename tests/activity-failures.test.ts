@@ -8,6 +8,8 @@ import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
 
 const ACTIVITY = 'activity';
 const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
+// A type the deployment does not listen to
+const COMPLETED = 'com.twake.tasks.task.completed.v1';
 // The instance's own names on the broker, and its own user there
 const PREFIX = 'twake-harness-test';
 const QUEUE = `${PREFIX}.activity`;
@@ -174,6 +176,60 @@ describe('an event that fails holds back none of those after it, and is never lo
 				reason: 'no data.object'
 			},
 			{ eventId: next.id, type: ASSIGNED, outcome: 'woken', reason: undefined }
+		]);
+		expect(logs.text()).not.toContain('Salary review');
+	});
+
+	it('logs one line per event, with what came of each recipient and nothing anyone wrote', async () => {
+		const mark = logs.lines().length;
+		const dave = { email: 'dave@test.local', reason: 'assigned' };
+		const elsewhere = { email: 'alice@elsewhere.test', reason: 'assigned' };
+		const unreadable = { email: 'not an address', reason: 'assigned' };
+		const many = activityEvent([ALICE, dave, elsewhere, unreadable]);
+		const nobody = activityEvent([]);
+		// Of a type the deployment no longer listens to, whose binding stays on the broker until it
+		// is removed there
+		const completed: ActivityEvent = { ...activityEvent(), type: COMPLETED };
+		await broker.channel.bindQueue(QUEUE, ACTIVITY, COMPLETED);
+		const next = activityEvent();
+		try {
+			await publish(many);
+			await toldOf(many);
+			// Delivered again, as after a restart
+			await publish(many);
+			await publish(nobody);
+			await publish(completed);
+			await publish(next);
+			await toldOf(next);
+		} finally {
+			await broker.channel.unbindQueue(QUEUE, ACTIVITY, COMPLETED);
+		}
+		expect(turnCalls(r.h.apisix.llm.calls, many.id)).toHaveLength(1);
+		expect(turnCalls(r.h.apisix.llm.calls, completed.id)).toHaveLength(0);
+		expect(
+			handled(mark).map(({ eventId, recipients, outcome, outcomes, reason }) => ({
+				eventId,
+				recipients,
+				outcome,
+				outcomes,
+				reason
+			}))
+		).toEqual([
+			{
+				eventId: many.id,
+				recipients: 4,
+				outcome: 'woken',
+				outcomes: { woken: 1, no_assistant: 1, ignored: 1, invalid: 1 }
+			},
+			{
+				eventId: many.id,
+				recipients: 4,
+				outcome: 'duplicate',
+				outcomes: { duplicate: 1, no_assistant: 1, ignored: 1, invalid: 1 }
+			},
+			{ eventId: nobody.id, recipients: 0, outcome: 'ignored', outcomes: {} },
+			{ eventId: completed.id, recipients: 1, outcome: 'ignored', reason: 'type not listened to' },
+			{ eventId: next.id, recipients: 1, outcome: 'woken', outcomes: { woken: 1 } }
 		]);
 		expect(logs.text()).not.toContain('Salary review');
 	});

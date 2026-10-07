@@ -6,8 +6,12 @@ import type { WakeOutcome } from './wake.js';
 // What came of a message: what came of its recipients, or its dead lettering
 export type MessageOutcome = WakeOutcome | 'dead_lettered';
 
+// What came of one recipient: a wake-up's outcome, or invalid for a recipient named in a shape
+// the listener cannot read, which it skips
+export type RecipientOutcome = WakeOutcome | 'invalid';
+
 // The outcome of a message is the first of these that one of its recipients had, the one the
-// operator most needs to see
+// operator most needs to see; a recipient that cannot be read counts as ignored
 const PRECEDENCE: Readonly<Record<WakeOutcome, number>> = {
 	woken: 0,
 	capped: 1,
@@ -17,7 +21,7 @@ const PRECEDENCE: Readonly<Record<WakeOutcome, number>> = {
 };
 
 // The one line a message gives once the listener is done with it: what identifies it, how many
-// recipients it names and what came of it, and why it went to the dead letter queue, never what
+// recipients it names and what came of them, and why it was ignored or dead-lettered, never what
 // it says
 export interface Handled {
 	readonly source?: string;
@@ -25,6 +29,8 @@ export interface Handled {
 	readonly type?: string;
 	readonly recipients?: number;
 	readonly outcome: MessageOutcome;
+	// How many of its recipients had each outcome
+	readonly outcomes?: Readonly<Partial<Record<RecipientOutcome, number>>>;
 	readonly reason?: string;
 }
 
@@ -33,13 +39,19 @@ export function logHandled(log: FastifyBaseLogger, handled: Handled): void {
 	else log.info(handled, 'event handled');
 }
 
-// The outcome of a message from those of its recipients: ignored when it names nobody
-export function outcomeOf(recipients: readonly WakeOutcome[]): WakeOutcome {
+// The outcome of a message from those of its recipients, ignored when it names nobody, and how
+// many had each
+export function outcomeOf(
+	recipients: readonly RecipientOutcome[]
+): Required<Pick<Handled, 'outcome' | 'outcomes'>> {
+	const outcomes: Partial<Record<RecipientOutcome, number>> = {};
 	let outcome: WakeOutcome = 'ignored';
 	for (const recipient of recipients) {
-		if (PRECEDENCE[recipient] < PRECEDENCE[outcome]) outcome = recipient;
+		outcomes[recipient] = (outcomes[recipient] ?? 0) + 1;
+		const counted = recipient === 'invalid' ? 'ignored' : recipient;
+		if (PRECEDENCE[counted] < PRECEDENCE[outcome]) outcome = counted;
 	}
-	return outcome;
+	return { outcome, outcomes };
 }
 
 // A failure as a log line may say it: its type, code and message, and none of the fields it
