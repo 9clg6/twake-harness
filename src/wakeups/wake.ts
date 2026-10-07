@@ -8,6 +8,7 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
+import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 
 // Someone an event names, as its source knows them
 export interface Person {
@@ -30,7 +31,7 @@ export interface Wakeup {
 	};
 }
 
-export type WakeOutcome = 'woken' | 'no_assistant';
+export type WakeOutcome = 'woken' | 'no_assistant' | 'ignored';
 
 export interface WakeDeps {
 	readonly config: Config;
@@ -55,11 +56,24 @@ function told(wakeup: Wakeup, messages: Messages): string {
 		: messages.events.published(wakeup.type, wakeup.id, fenced(wakeup));
 }
 
+function same(a: string | null, b: string | null): boolean {
+	return a !== null && b !== null && a.toLowerCase() === b.toLowerCase();
+}
+
+// Whether the recipient is the person whose action it was, by either identifier the source gives
+function isOwnAction({ actor, recipient }: Wakeup): boolean {
+	return same(actor.email, recipient.email) || same(actor.uuid, recipient.uuid);
+}
+
 // Wakes the assistant of the person a wake-up is for, its owner: a turn of origin event in their
-// room, serialized with their other turns, which tells them of the event it carries
+// room, serialized with their other turns, which tells them of the event it carries. The owner is
+// the recipient by their email, which is their principal: only a person of the instance's mail
+// domain has one, and nobody is woken for their own action.
 export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome> {
 	const { config, db } = deps;
-	const owner = wakeup.recipient.email?.toLowerCase() ?? '';
+	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
+	if (owner === null || matrixLocalpartOfPrincipal(config, owner) === null) return 'ignored';
+	if (isOwnAction(wakeup)) return 'ignored';
 	const outcome = await withPrincipal(db, { id: owner }, async (tx) => {
 		const assistant = await findAssistant(tx, owner);
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {

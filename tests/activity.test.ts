@@ -184,6 +184,40 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 	});
 
+	// Publishes events that must wake nobody, then an assignment for Alice: once she is told of it,
+	// the queue, read in order, has taken every event before it
+	async function publishThenNext(...events: ActivityEvent[]): Promise<void> {
+		const next = activityEvent();
+		for (const event of [...events, next]) await publish(event);
+		await answerTo(next);
+	}
+
+	it('wakes nobody for a recipient without an assistant or of another mail domain, nor for no recipient', async () => {
+		const withoutAssistant = activityEvent({
+			recipients: [{ email: 'dave@test.local', reason: 'assigned' }]
+		});
+		const elsewhere = activityEvent({
+			recipients: [{ email: 'alice@elsewhere.test', reason: 'assigned' }]
+		});
+		const unnamed = activityEvent({ recipients: [{ uuid: ALICE_UUID, reason: 'assigned' }] });
+		const nobody = activityEvent({ recipients: [] });
+		await publishThenNext(withoutAssistant, elsewhere, unnamed, nobody);
+		for (const event of [withoutAssistant, elsewhere, unnamed, nobody]) {
+			expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(0);
+		}
+		// Each was taken all the same, none dead-lettered
+		expect((await broker.queue(QUEUE))?.messages).toBe(0);
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+	});
+
+	it('never wakes me for my own action, known by my email or by my uuid', async () => {
+		const byEmail = activityEvent({ actor: { email: 'Alice@test.local' } });
+		const byUuid = activityEvent({ actor: { uuid: ALICE_UUID, email: 'alice.old@test.local' } });
+		await publishThenNext(byEmail, byUuid);
+		expect(turnCalls(r.h.apisix.llm.calls, byEmail.id)).toHaveLength(0);
+		expect(turnCalls(r.h.apisix.llm.calls, byUuid.id)).toHaveLength(0);
+	});
+
 	it('reads a quorum queue of its own, one consumer at a time, its dead letters apart', async () => {
 		const queue = await broker.queue(QUEUE);
 		expect(queue?.type).toBe('quorum');
