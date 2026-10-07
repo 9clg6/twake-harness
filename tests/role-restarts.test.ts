@@ -54,9 +54,11 @@ describe('an assistant whose matrix role restarts', () => {
 	let inboxReads = 0;
 	async function inboxOf(userId: string, deviceId: string): Promise<number> {
 		inboxReads += 1;
+		// The device named by the stable parameter of MSC3202, the one every Synapse reads: from 1.162
+		// on, the unstable one is ignored and the sync reads no device's inbox
 		const query = new URLSearchParams({
 			user_id: userId,
-			'org.matrix.msc3202.device_id': deviceId,
+			device_id: deviceId,
 			timeout: '0',
 			filter: JSON.stringify({ room: { rooms: [] }, account_data: { limit: inboxReads } })
 		});
