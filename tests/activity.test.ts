@@ -120,6 +120,30 @@ function silent(): Writable {
 	return new Writable({ write: (_chunk, _encoding, done) => done() });
 }
 
+// A log stream that keeps the lines a role writes, for a test to read them
+interface LogSink {
+	readonly stream: Writable;
+	lines(): Record<string, unknown>[];
+}
+
+function logSink(): LogSink {
+	const chunks: string[] = [];
+	return {
+		stream: new Writable({
+			write: (chunk: Buffer, _encoding, done) => {
+				chunks.push(chunk.toString('utf8'));
+				done();
+			}
+		}),
+		lines: () =>
+			chunks
+				.join('')
+				.split('\n')
+				.filter((line) => line.length > 0)
+				.map((line) => JSON.parse(line) as Record<string, unknown>)
+	};
+}
+
 // The event as the model was handed it: the line between the fences of the block
 const FENCED = /^<<<event-data ([0-9a-f]{12})\n(.+)\nevent-data \1>>>$/m;
 
@@ -127,6 +151,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 	let broker: TestBroker;
 	let r: ConsentRoom;
 	let worker: WorkerRole;
+	const workerLogs = logSink();
 	beforeAll(async () => {
 		broker = await startTestBroker();
 		// The exchange the applications publish on, as the platform declares it, and the instance's
@@ -149,7 +174,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker' },
 			db: r.h.db,
-			logStream: silent()
+			logStream: workerLogs.stream
 		});
 		// A literal model: it tells the owner what the event it was handed says
 		r.h.apisix.llm.script = (request: ChatRequest) => {
@@ -273,13 +298,22 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		throw new Error(`fewer than ${count} turns of ${event.id}`);
 	}
 
+	// Carol has an assistant too, Friday, and reads French: made once, for the tests that need a
+	// second owner
+	let carolsAssistant: Promise<void> | null = null;
+	function withCarol(): Promise<void> {
+		carolsAssistant ??= (async () => {
+			await r.h.synapse.registerUser('carol');
+			const created = await r.h.api.post('carol@test.local', '/v1/assistants', { name: 'Friday' });
+			expect(created.status).toBe(201);
+			const french = await r.h.api.tool('carol@test.local', 'set_language', { language: 'fr' });
+			expect(french.status).toBe(200);
+		})();
+		return carolsAssistant;
+	}
+
 	it('tells each recipient once, however often the event is delivered', async () => {
-		// Carol has an assistant too, and reads French
-		await r.h.synapse.registerUser('carol');
-		const created = await r.h.api.post('carol@test.local', '/v1/assistants', { name: 'Friday' });
-		expect(created.status).toBe(201);
-		const french = await r.h.api.tool('carol@test.local', 'set_language', { language: 'fr' });
-		expect(french.status).toBe(200);
+		await withCarol();
 		const carol = { uuid: CAROL_UUID, email: 'Carol@Test.Local', reason: 'assigned' };
 		const event = activityEvent({ recipients: [ALICE, carol] });
 		await publish(event);
@@ -306,6 +340,40 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await answerTo(next);
 		await toldOf(next, 2);
 		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(2);
+	});
+
+	it('wakes the valid recipients of an event, skipping one with a malformed email or uuid', async () => {
+		await withCarol();
+		const event = activityEvent({
+			recipients: [
+				{ email: 'alice-at-test.local', reason: 'assigned' },
+				{ uuid: 'carol-uuid', email: 'carol@test.local', reason: 'assigned' },
+				ALICE
+			]
+		});
+		// The next event for both is the next one each assistant tells
+		const next = activityEvent({
+			recipients: [ALICE, { uuid: CAROL_UUID, email: 'carol@test.local', reason: 'assigned' }]
+		});
+		await publish(event);
+		await publish(next);
+		await answerTo(next);
+		await toldOf(next, 2);
+		const turns = turnCalls(r.h.apisix.llm.calls, event.id);
+		expect(turns).toHaveLength(1);
+		expect(turns[0]?.request.messages[0]?.content).toContain('"Jarvis"');
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+		// Each skipped recipient is logged by its place and its faulty fields, never its values
+		const skipped = workerLogs
+			.lines()
+			.filter((line) => line['msg'] === 'recipient skipped' && line['eventId'] === event.id);
+		expect(skipped.map((line) => [line['recipient'], line['fields']])).toEqual([
+			[0, ['email']],
+			[1, ['uuid']]
+		]);
+		const logged = JSON.stringify(workerLogs.lines());
+		expect(logged).not.toContain('alice-at-test.local');
+		expect(logged).not.toContain('carol-uuid');
 	});
 
 	it('takes and drops an event routed by a type it no longer listens to', async () => {

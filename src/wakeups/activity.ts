@@ -12,6 +12,7 @@ const ACTIVITY_EXCHANGE = 'activity';
 // and fixed once the queue is declared
 const DELIVERY_LIMIT = 5;
 
+// Someone an event is for, as its application names them
 const recipientSchema = z.object({
 	uuid: z.uuid().optional(),
 	email: z.email().optional(),
@@ -47,17 +48,28 @@ const activityEventSchema = z.object({
 		}),
 		// A plain text excerpt of the object, which ADR 006 caps at 280 characters
 		preview: z.string().max(1000).optional(),
-		// Exactly who the event is for: nobody is inferred
-		recipients: z.array(recipientSchema).max(100).default([])
+		// Exactly who the event is for, nobody inferred, each read on its own: one the application
+		// names wrongly takes nobody else's turn away
+		recipients: z.array(z.unknown()).max(100).default([])
 	})
 });
 
 type ActivityEvent = z.infer<typeof activityEventSchema>;
 
+// A recipient left out, by their place among the event's recipients and the names of the fields
+// the application got wrong: never what it wrote there
+interface SkippedRecipient {
+	readonly index: number;
+	readonly fields: readonly string[];
+}
+
 // One wake-up per recipient. What the application computed (its ids, key, link and time, and who
 // acted) is shown apart from what people wrote (the title, the board's name and the preview), as
 // the contracts return it under untrusted.
-function wakeupsOf(event: ActivityEvent): Wakeup[] {
+function wakeupsOf(event: ActivityEvent): {
+	readonly wakeups: Wakeup[];
+	readonly skipped: SkippedRecipient[];
+} {
 	const { object, preview } = event.data;
 	const computedObject = {
 		type: object.type,
@@ -72,29 +84,41 @@ function wakeupsOf(event: ActivityEvent): Wakeup[] {
 		...(object.board === undefined ? {} : { board_name: object.board.name }),
 		...(preview === undefined ? {} : { preview })
 	};
-	return event.data.recipients.map((recipient) => ({
-		source: event.source,
-		id: event.id,
-		type: event.type,
-		recipient: {
-			email: recipient.email ?? null,
-			uuid: recipient.uuid ?? null,
-			reason: recipient.reason
-		},
-		actor: { email: event.twakeactor ?? null, uuid: event.twakeactorid ?? null },
-		shown: {
-			computed: {
-				type: event.type,
-				source: event.source,
-				id: event.id,
-				...(event.time === undefined ? {} : { time: event.time }),
-				...(event.twakeactor === undefined ? {} : { actor: event.twakeactor }),
-				reason: recipient.reason,
-				object: computedObject
-			},
-			untrusted
+	const wakeups: Wakeup[] = [];
+	const skipped: SkippedRecipient[] = [];
+	event.data.recipients.forEach((named, index) => {
+		const parsed = recipientSchema.safeParse(named);
+		if (!parsed.success) {
+			const fields = parsed.error.issues.map((issue) => String(issue.path[0] ?? 'recipient'));
+			skipped.push({ index, fields: [...new Set(fields)] });
+			return;
 		}
-	}));
+		const recipient = parsed.data;
+		wakeups.push({
+			source: event.source,
+			id: event.id,
+			type: event.type,
+			recipient: {
+				email: recipient.email ?? null,
+				uuid: recipient.uuid ?? null,
+				reason: recipient.reason
+			},
+			actor: { email: event.twakeactor ?? null, uuid: event.twakeactorid ?? null },
+			shown: {
+				computed: {
+					type: event.type,
+					source: event.source,
+					id: event.id,
+					...(event.time === undefined ? {} : { time: event.time }),
+					...(event.twakeactor === undefined ? {} : { actor: event.twakeactor }),
+					reason: recipient.reason,
+					object: computedObject
+				},
+				untrusted
+			}
+		});
+	});
+	return { wakeups, skipped };
 }
 
 export interface ActivityListener {
@@ -137,7 +161,15 @@ export async function startActivityListener(
 			if (routingKey !== queue && !source.types.includes(routingKey)) return;
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
-			for (const wakeup of wakeupsOf(parsed.data)) await wake(deps, wakeup);
+			const event = parsed.data;
+			const { wakeups, skipped } = wakeupsOf(event);
+			for (const { index, fields } of skipped) {
+				deps.log.warn(
+					{ source: event.source, eventId: event.id, recipient: index, fields },
+					'recipient skipped'
+				);
+			}
+			for (const wakeup of wakeups) await wake(deps, wakeup);
 		},
 		{
 			bindings: source.types.map((type) => ({ exchange: ACTIVITY_EXCHANGE, routingKey: type })),
