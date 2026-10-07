@@ -10,16 +10,22 @@ export interface AssistantIdentity {
 	readonly masterKey: string;
 }
 
-// The assistant's identity once its device is signed by it, as the matrix role recorded it; null
-// while it is not
-export async function readyIdentity(
-	db: Db,
-	owner: string,
-	userId: string
-): Promise<AssistantIdentity | null> {
+// Where the assistant's identity stands, as the matrix role recorded it: ready once its device is
+// signed by it; waiting for the owner's recovery after a lost store; not ready while being prepared
+export type IdentityState =
+	| { readonly state: 'ready'; readonly identity: AssistantIdentity }
+	| { readonly state: 'awaiting_recovery' }
+	| { readonly state: 'not_ready' };
+
+export async function readIdentity(db: Db, owner: string, userId: string): Promise<IdentityState> {
 	const record = await withPrincipal(db, { id: owner }, (tx) => findCrossSigning(tx, owner));
-	if (record === null || record.deviceId === null) return null;
-	return { userId, deviceId: record.deviceId, masterKey: record.masterPublicKey };
+	if (record === null) return { state: 'not_ready' };
+	if (record.awaitingRecovery) return { state: 'awaiting_recovery' };
+	if (record.deviceId === null) return { state: 'not_ready' };
+	return {
+		state: 'ready',
+		identity: { userId, deviceId: record.deviceId, masterKey: record.masterPublicKey }
+	};
 }
 
 // Asks the matrix role to make the assistant's device and identity now, rather than when it first

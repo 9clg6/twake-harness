@@ -14,7 +14,7 @@ import { makeAgentService, type AgentService, type OwnerTurnResult } from './age
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
 import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
-import { readyIdentity, requestPreparation } from './assistants/provisioning.js';
+import { readIdentity, requestPreparation } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
@@ -124,6 +124,8 @@ const NO_ASSISTANT = { error: 'no assistant' } as const;
 const NOT_A_MEMBER = { error: 'not a member' } as const;
 // Others are in that room: what the assistant writes its owner there would reach them too
 const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
+// The assistant's escrowed identity waits for its owner's recovery (POST /v1/assistants/me/recover)
+const RECOVERY_NEEDED = { error: 'recovery_needed' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
 // The harness builds the consent in: no owner withdraws it
@@ -395,13 +397,21 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				? reply.code(422).send(OWNER_NOT_ON_HOMESERVER)
 				: reply.code(502).send({ error: 'assistant creation failed' });
 		}
-		const identity = await readyIdentity(db, owner, provisioned.userId);
-		if (identity !== null) {
+		const known = await readIdentity(db, owner, provisioned.userId);
+		if (known.state === 'ready') {
 			request.log.info(
-				{ client, owner, userId: identity.userId },
+				{ client, owner, userId: known.identity.userId },
 				'assistant provisioned for a client'
 			);
-			return reply.code(200).send(identity);
+			return reply.code(200).send(known.identity);
+		}
+		// Only the owner's recovery brings an escrowed identity back: preparing it changes nothing
+		if (known.state === 'awaiting_recovery') {
+			request.log.info(
+				{ client, owner, userId: provisioned.userId },
+				'assistant awaits its recovery'
+			);
+			return reply.code(409).send(RECOVERY_NEEDED);
 		}
 		const queued = await requestPreparation(db, owner);
 		request.log.info({ client, owner, userId: provisioned.userId, queued }, 'assistant not ready');

@@ -893,6 +893,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		await ensureEncryption(intent);
 		const result = await recoverFromEscrow(escrow, intent, owner);
 		log.info({ owner, userId: assistant.userId, result }, 'recovery done');
+		// The device the recovered identity signed is recorded, the wait for the recovery is over: a
+		// provisioner hands that device out again
+		if (result === 'recovered') await onEncryptionReady(intent, owner);
 		if (assistant.roomId === null) return;
 		const { notices } = getMessages(localeOf(assistant, config.locale));
 		await enqueueJob(db, {

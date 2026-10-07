@@ -1,3 +1,6 @@
+import { mkdtemp, writeFile } from 'node:fs/promises';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startTestHarness, type TestHarness } from './helpers/app.js';
@@ -452,5 +455,67 @@ describe('a provisioned assistant', () => {
 		});
 		expect(notMember.status).toBe(409);
 		expect(notMember.body).toEqual({ error: 'not a member' });
+	});
+});
+
+describe('a provisioned assistant whose identity waits for its recovery', () => {
+	let h: MatrixTestHarness;
+
+	async function provision(
+		owner: string
+	): Promise<{ status: number; body: Record<string, unknown> }> {
+		const res = await h.apps[0]!.inject({
+			method: 'PUT',
+			url: assistantPath(owner),
+			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
+			payload: {}
+		});
+		return { status: res.statusCode, body: res.json() as Record<string, unknown> };
+	}
+
+	async function provisionUntil(owner: string, status: number): Promise<Record<string, unknown>> {
+		for (let i = 0; i < 160; i += 1) {
+			const res = await provision(owner);
+			if (res.status === status) return res.body;
+			await sleep(250);
+		}
+		throw new Error(`the provisioning never answered ${status}`);
+	}
+
+	beforeAll(async () => {
+		const dir = await mkdtemp(join(tmpdir(), 'provisioning-escrow-'));
+		const tokenPath = join(dir, 'token');
+		await writeFile(tokenPath, 'pod-service-account-token\n');
+		h = await startMatrixHarness({
+			env: {
+				PROVISIONER_CLIENT_IDS: PROVISIONER,
+				ESCROW_ENABLED: 'true',
+				OPENBAO_K8S_TOKEN_PATH: tokenPath
+			}
+		});
+	}, 240_000);
+	afterAll(async () => {
+		if (h !== undefined) await h.close();
+	});
+
+	it('tells its provisioner the owner must recover it, then gives its identity again once they did', async () => {
+		const rita = await h.synapse.registerUser('rita');
+		const before = await provisionUntil(rita.userId, 200);
+		// The identity is escrowed, then the role loses its store
+		for (let i = 0; i < 120; i += 1) {
+			if (h.apisix.openbao.store.has('twake-harness/assistants/rita@test.local')) break;
+			await sleep(250);
+		}
+		await h.restartRole({ wipeCryptoStore: true });
+
+		expect(await provisionUntil(rita.userId, 409)).toEqual({ error: 'recovery_needed' });
+		// Asking again changes nothing: only the owner's recovery brings the identity back
+		expect((await provision(rita.userId)).status).toBe(409);
+
+		const asked = await h.api.post('rita@test.local', '/v1/assistants/me/recover', {});
+		expect(asked.status).toBe(202);
+		const after = await provisionUntil(rita.userId, 200);
+		expect(after['masterKey']).toBe(before['masterKey']);
+		expect(after['deviceId']).not.toBe(before['deviceId']);
 	});
 });

@@ -165,9 +165,19 @@ async function crossSign(
 	// The identity recorded as ours, with the device it signed once it did: a device that is not
 	// signed is recorded as none, since the owner's clients would not trust it
 	let current = recorded;
-	async function record(masterPublicKey: string, signedDeviceId: string | null): Promise<void> {
-		if (current?.masterPublicKey === masterPublicKey && current.deviceId === signedDeviceId) return;
-		const next = { owner, masterPublicKey, deviceId: signedDeviceId };
+	async function record(
+		masterPublicKey: string,
+		signedDeviceId: string | null,
+		awaitingRecovery = false
+	): Promise<void> {
+		if (
+			current?.masterPublicKey === masterPublicKey &&
+			current.deviceId === signedDeviceId &&
+			current.awaitingRecovery === awaitingRecovery
+		) {
+			return;
+		}
+		const next = { owner, masterPublicKey, deviceId: signedDeviceId, awaitingRecovery };
 		await withPrincipal(db, { id: owner }, (tx) => saveCrossSigning(tx, next));
 		current = next;
 	}
@@ -186,8 +196,9 @@ async function crossSign(
 		return { outcome: 'signed', masterPublicKey: serverKey };
 	}
 	if (!holdsIdentity && escrowed !== null && serverKey === escrowed.masterPublicKey) {
-		// No device of this store is signed until the owner's recovery brings the identity back
-		if (current !== null) await record(current.masterPublicKey, null);
+		// No device of this store is signed until the owner's recovery brings the identity back, which
+		// a provisioner is told
+		await record(current?.masterPublicKey ?? serverKey, null, true);
 		log.warn(
 			{ owner, userId, deviceId },
 			'cross-signing identity escrowed, waiting for its recovery'
