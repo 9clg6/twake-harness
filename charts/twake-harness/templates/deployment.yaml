@@ -146,8 +146,11 @@ spec:
               value: {{ .Values.config.eventsClientIds | quote }}
             - name: PROVISIONER_CLIENT_IDS
               value: {{ .Values.config.provisionerClientIds | quote }}
-            {{- /* The worker role alone listens to RabbitMQ, and only it gets the broker's address */}}
+            {{- /* The worker role alone listens to RabbitMQ, and only it gets the broker's address. It wakes the owners by their email on the mail domain, MATRIX_MAIL_DOMAIN or else MATRIX_SERVER_NAME, which every role gets when set */}}
             {{- if and (eq .Values.role "worker") .Values.config.activityEnabled }}
+            {{- if not (or .Values.config.matrixServerName .Values.config.matrixMailDomain) }}
+            {{- fail "config.matrixServerName or config.matrixMailDomain must be set for the worker role to listen to the activity exchange: it wakes the owners by their email on that mail domain" }}
+            {{- end }}
             - name: ACTIVITY_ENABLED
               value: "true"
             - name: ACTIVITY_AMQP_URL

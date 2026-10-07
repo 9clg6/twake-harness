@@ -90,7 +90,9 @@ config:
   # The service clients, by token subject, allowed to post events for an owner (comma separated)
   eventsClientIds: ''
   # The activity exchange of RabbitMQ, which the worker role listens to, and it alone: each
-  # recipient of an event of the types below who has an assistant is told of it in their room
+  # recipient of an event of the types below who has an assistant is told of it in their room.
+  # The worker then needs matrixServerName or matrixMailDomain below: it wakes the owners by their
+  # email on that mail domain
   activityEnabled: false
   # The Secret and key holding the AMQP URL, its vhost included, which carries the password of the
   # instance's own RabbitMQ user; an empty name means the chart's own Secret (secretEnv or
