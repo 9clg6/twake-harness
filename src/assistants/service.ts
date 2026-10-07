@@ -161,7 +161,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 		async provision(owner) {
 			const live = await current(owner);
 			if (live !== null) {
-				await saveProvisioned(db, owner, live.userId);
+				await saveProvisioned(db, { owner, userId: live.userId, owesWelcome: false });
 				return { ok: true, userId: live.userId };
 			}
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
@@ -173,10 +173,13 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				// The account is registered once and kept, as for an assistant the owner creates
 				await admin.registerUser(localpart);
 				const named = await admin.setDisplayName(userId, name);
-				const { reclaimed } = await withPrincipal(db, { id: owner }, (tx) =>
-					saveAssistant(tx, { owner, userId, name, roomId: null })
-				);
-				await saveProvisioned(db, owner, userId);
+				// Saved together: an assistant saved alone would be found live by the next call, and would
+				// never owe its owner the greeting
+				const { reclaimed } = await withPrincipal(db, { id: owner }, async (tx) => {
+					const saved = await saveAssistant(tx, { owner, userId, name, roomId: null });
+					await saveProvisioned(tx, { owner, userId, owesWelcome: true });
+					return saved;
+				});
 				log.info({ owner, userId, named, reclaimed }, 'assistant provisioned');
 				return { ok: true, userId };
 			} catch (err: unknown) {

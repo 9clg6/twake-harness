@@ -71,6 +71,15 @@ spec:
               value: {{ .Values.config.authAudience | quote }}
             - name: APISIX_BASE_URL
               value: {{ .Values.config.apisixBaseUrl | quote }}
+            {{- /* Every role refreshes the catalog of contracts and the api role calls them: each needs these */}}
+            {{- with .Values.config.contractsBasePath }}
+            - name: CONTRACTS_BASE_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.contractsOpenapiPath }}
+            - name: CONTRACTS_OPENAPI_PATH
+              value: {{ . | quote }}
+            {{- end }}
             - name: LLM_MODEL
               value: {{ .Values.config.llmModel | quote }}
             {{- with .Values.config.llmMaxTokens }}

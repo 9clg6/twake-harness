@@ -17,6 +17,7 @@ import { z } from 'zod';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
+	claimProvisionedWelcome,
 	clearAssistantRoomId,
 	findAssistant,
 	findDialog,
@@ -697,18 +698,34 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			return;
 		}
-		await db.sql`
-			insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${invited})
-			on conflict (room_id) do nothing`;
-		if (assistant.roomId === null) {
-			await withPrincipal(db, { id: owner }, (tx) => setAssistantRoomId(tx, owner, roomId));
-		}
+		const toOwner = await fetchMessages(owner);
+		// A provisioned assistant greets its owner in the first room they open with it, as one the
+		// creator conversation makes greets them in the room it opens. The room becomes one of its
+		// rooms in the transaction that takes the greeting and queues the job sending it: what the
+		// owner writes there is heard only from then on, so nothing answers them before the greeting,
+		// and the greeting goes out once, whatever comes after. The owner is in the room already, so
+		// the greeting is encrypted for their devices at once.
+		// Two rooms the owner opens at the same time both find the assistant without a room: the lock
+		// the claim takes on the owner's row lets one of them have the greeting, while each makes
+		// itself the assistant's room, the last one winning, so the room greeted may not be the one
+		// the assistant writes its owner in.
+		const welcomeQueued = await withPrincipal(db, { id: owner }, async (tx) => {
+			await tx.sql`
+				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${invited})
+				on conflict (room_id) do nothing`;
+			if (assistant.roomId !== null) return false;
+			await setAssistantRoomId(tx, owner, roomId);
+			if (!(await claimProvisionedWelcome(tx, owner, invited))) return false;
+			return enqueueJob(tx, {
+				kind: 'send',
+				payload: { asUserId: invited, roomId, text: toOwner.welcome(assistant.name) },
+				dedupKey: `welcome:${roomId}`,
+				groupKey: `send:${roomId}`
+			});
+		});
+		if (welcomeQueued) log.info({ roomId, owner }, 'welcome queued');
 		log.info({ roomId, owner, userId: invited }, 'assistant room opened by its owner');
-		await announceCommands(
-			{ admin, log },
-			{ roomId, assistantUserId: invited },
-			await fetchMessages(owner)
-		);
+		await announceCommands({ admin, log }, { roomId, assistantUserId: invited }, toOwner);
 	}
 
 	// Whether anyone but these is in the room, joined or invited

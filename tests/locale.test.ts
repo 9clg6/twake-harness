@@ -4,6 +4,7 @@ import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { CALENDAR_CATALOG, invitationEvent } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
+import { PROVISIONER, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
 describe('a deployment that speaks French', () => {
@@ -15,7 +16,11 @@ describe('a deployment that speaks French', () => {
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
 		h = await startMatrixHarness({
-			env: { ASSISTANT_LOCALE: 'fr', EVENTS_CLIENT_IDS: 'dispatcher' }
+			env: {
+				ASSISTANT_LOCALE: 'fr',
+				EVENTS_CLIENT_IDS: 'dispatcher',
+				PROVISIONER_CLIENT_IDS: PROVISIONER
+			}
 		});
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
@@ -67,6 +72,22 @@ describe('a deployment that speaks French', () => {
 		).toBe(
 			"Bonjour, je m'appelle Lucie et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir."
 		);
+	});
+
+	it('welcomes in French the owner of an assistant a provisioner asked for', async () => {
+		const bruno = await h.synapse.registerUser('bruno');
+		const brunoClient = await startE2eeClient(h.synapse.url, bruno);
+		try {
+			const mine = await provisionUntilReady(h.api, bruno.userId);
+			const room = await brunoClient.createDirectRoom(mine.userId);
+			expect(
+				await brunoClient.waitForMessage(room, mine.userId, (t) => t.startsWith('Bonjour'))
+			).toBe(
+				"Bonjour, je m'appelle Assistant et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir."
+			);
+		} finally {
+			await brunoClient.stop();
+		}
 	});
 
 	it('tells the model the name the owner chose, so the assistant introduces itself by it', async () => {

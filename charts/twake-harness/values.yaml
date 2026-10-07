@@ -39,6 +39,12 @@ config:
   authAudience: ''
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
+  # Where the contracts sit under that address: the prefix of their calls and the path of their
+  # curated OpenAPI; empty means the harness defaults, no prefix and contracts/openapi.json.
+  # A harness whose APISIX base sits under a prefix reaches the contracts at the root with
+  # contractsBasePath '..' and contractsOpenapiPath '../contracts/openapi.json'
+  contractsBasePath: ''
+  contractsOpenapiPath: ''
   llmModel: qwen3.8
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
