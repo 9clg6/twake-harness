@@ -103,6 +103,10 @@ spec:
             - name: TURN_HISTORY_MAX_CHARS
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- with .Values.config.turnMaxToolCalls }}
+            - name: TURN_MAX_TOOL_CALLS
+              value: {{ . | int64 | quote }}
+            {{- end }}
             - name: ORG_AGENT_ENABLED
               value: {{ .Values.config.orgAgentEnabled | quote }}
             - name: ORG_AGENT_LOCALPART
