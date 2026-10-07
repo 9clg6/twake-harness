@@ -9,6 +9,12 @@ export type Role = (typeof ROLES)[number];
 const LOG_LEVELS = ['fatal', 'error', 'warn', 'info', 'debug', 'trace'] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
 
+// How the matrix role holds an owner's words to the devices their cross-signing identity signed:
+// enforce takes them only from such a device; report takes them all the same, and logs and tells
+// the owner what enforce would not take
+const OWNER_DEVICE_TRUST_MODES = ['report', 'enforce'] as const;
+export type OwnerDeviceTrust = (typeof OWNER_DEVICE_TRUST_MODES)[number];
+
 export interface Config {
 	readonly role: Role;
 	readonly host: string;
@@ -80,6 +86,8 @@ export interface Config {
 		readonly hsToken: string;
 		// Where the matrix role keeps the assistants' encryption state, on its volume
 		readonly cryptoStorePath: string;
+		// Whether an owner's words count only from a device their cross-signing identity signed
+		readonly ownerDeviceTrust: OwnerDeviceTrust;
 	};
 	readonly org: {
 		// The organization agent: one bot of the harness answering the organization's members
@@ -158,6 +166,9 @@ const envSchema = z.object({
 	MATRIX_AS_TOKEN: z.string().default('injected-by-apisix'),
 	MATRIX_HS_TOKEN: z.string().default(''),
 	MATRIX_CRYPTO_STORE_PATH: z.string().min(1).default('/data/crypto'),
+	// Reporting unless a deployment chooses to enforce, so that a deployment that sets nothing never
+	// starts refusing its owners
+	OWNER_DEVICE_TRUST: z.enum(OWNER_DEVICE_TRUST_MODES).default('report'),
 	ORG_AGENT_ENABLED: z.enum(['true', 'false']).default('false'),
 	ORG_AGENT_LOCALPART: z.string().min(1).default('twake-space-assistant-org'),
 	ORG_AGENT_NAME: z.string().min(1).default('Twake Space'),
@@ -280,7 +291,8 @@ export function loadConfig(env: Env): Config {
 			assistantPrefix: values.MATRIX_ASSISTANT_PREFIX,
 			asToken: values.MATRIX_AS_TOKEN,
 			hsToken: values.MATRIX_HS_TOKEN,
-			cryptoStorePath: values.MATRIX_CRYPTO_STORE_PATH
+			cryptoStorePath: values.MATRIX_CRYPTO_STORE_PATH,
+			ownerDeviceTrust: values.OWNER_DEVICE_TRUST
 		},
 		org: {
 			enabled: values.ORG_AGENT_ENABLED === 'true',
