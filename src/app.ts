@@ -495,6 +495,29 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		return reply.code(204).send();
 	});
 
+	// The owner's recovery, asked by their provisioner as it asks for the assistant: the provisioner
+	// authenticated them, and the job is the one of /v1/assistants/me/recover, which puts back the
+	// identity the owner's clients already trust
+	app.post('/v1/provisioning/assistants/:owner/recover', async (request, reply) => {
+		const client = await admitProvisioner(request, reply);
+		if (client === null) return reply;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant === null || assistant.deletedAt !== null) {
+			return reply.code(404).send(NO_ASSISTANT);
+		}
+		const queued = await enqueueJob(db, {
+			kind: 'recover',
+			payload: { owner },
+			dedupKey: `recover:${owner}`,
+			groupKey: `send:${assistant.roomId ?? owner}`
+		});
+		request.log.info({ client, owner, queued }, 'recovery requested for a client');
+		return reply.code(202).send({ queued });
+	});
+
 	// Prometheus exposition: what the autoscaler and the dashboards read
 	app.get('/metrics', async (_request, reply) => {
 		const snapshot = agent.admission.snapshot();
