@@ -37,8 +37,30 @@ export function failureOf(err: unknown): Record<string, unknown> | string {
 	};
 }
 
-// The fields under which the library logs what a message holds
-const CONTENT_FIELDS: ReadonlySet<string> = new Set(['payload', 'rawContentPreview']);
+// The fields of the library's lines that a log line may carry: names, counts, delays and
+// outcomes, and its failure as failureOf says it. Any other is left out, such as the payload of a
+// message, the first characters of a body that is no JSON, and the stack of a failure, which
+// quotes its message.
+const LIBRARY_FIELDS: ReadonlySet<string> = new Set([
+	'exchange',
+	'routingKey',
+	'queue',
+	'queues',
+	'bindings',
+	'prefetch',
+	'count',
+	'attempt',
+	'attempts',
+	'maxAttempts',
+	'maxRetries',
+	'retryDelayMs',
+	'duration',
+	'inflightCount',
+	'messageSize',
+	'action',
+	'subscriptionsRestored',
+	'subscriptionsFailed'
+]);
 
 // The library's own lines that the listener's say better: about a message, and about the one
 // connection attempt the listener lets it make each time, which reads as giving up
@@ -56,16 +78,14 @@ function fieldsOf(context: unknown): Record<string, unknown> {
 	if (typeof context !== 'object' || context === null) return {};
 	const fields: Record<string, unknown> = {};
 	for (const [key, value] of Object.entries(context)) {
-		if (CONTENT_FIELDS.has(key)) continue;
 		if (key === 'error') fields['err'] = failureOf(value);
-		else fields[key] = value;
+		else if (LIBRARY_FIELDS.has(key)) fields[key] = value;
 	}
 	return fields;
 }
 
-// The logger the RabbitMQ library writes through: its lines keep their context but for what a
-// message holds, which no line carries at any level, and those the listener's own lines restate
-// go to debug
+// The logger the RabbitMQ library writes through: its lines keep the fields of their context a
+// log line may carry, at every level, and those the listener's own lines restate go to debug
 export function brokerLogger(log: FastifyBaseLogger): ILogger {
 	const write =
 		(level: Level) =>

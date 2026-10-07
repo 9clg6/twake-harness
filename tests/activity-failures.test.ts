@@ -66,6 +66,21 @@ interface OwnVhost {
 	readonly channel: ConfirmChannel;
 }
 
+// The first word of what people wrote, as a JSON parse error would quote it
+const CONTENT = CONFIDENTIAL.split(' ')[0] ?? CONFIDENTIAL;
+
+// Nothing of what an event says reaches a worker's logs, at any level, nor a stack in the lines
+// of its listener, which would quote the message of a failure
+function expectNoContentIn(capture: LogCapture): void {
+	expect(capture.text()).not.toContain(CONTENT);
+	expect(
+		capture
+			.lines()
+			.filter((line) => line['listener'] !== undefined && JSON.stringify(line).includes('"stack"'))
+			.map((line) => line['msg'])
+	).toEqual([]);
+}
+
 // What an application publishes: a CloudEvent naming the people it is for in data.recipients
 interface ActivityEvent extends Record<string, unknown> {
 	readonly id: string;
@@ -214,7 +229,12 @@ describe('an event that fails holds back none of those after it, and is never lo
 	// A worker of its own, on a vhost of its own, as the instance's user there
 	function workerOn(amqpUrl: string, logStream: PassThrough, db: Db = r.h.db): Promise<WorkerRole> {
 		return startWorkerRole({
-			config: { ...r.h.config, role: 'worker', activity: { amqpUrl, types: [ASSIGNED] } },
+			config: {
+				...r.h.config,
+				role: 'worker',
+				logLevel: 'debug',
+				activity: { amqpUrl, types: [ASSIGNED] }
+			},
 			db,
 			logStream,
 			retryDelayMs: RETRY_DELAY_MS
@@ -294,7 +314,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			},
 			{ eventId: next.id, type: ASSIGNED, outcome: 'woken', reason: undefined }
 		]);
-		expect(logs.text()).not.toContain('Salary review');
+		expectNoContentIn(logs);
 	});
 
 	it('logs one line per event, with what came of each recipient and nothing anyone wrote', async () => {
@@ -348,7 +368,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			{ eventId: completed.id, recipients: 1, outcome: 'ignored', reason: 'type not listened to' },
 			{ eventId: next.id, recipients: 1, outcome: 'woken', outcomes: { woken: 1 } }
 		]);
-		expect(logs.text()).not.toContain('Salary review');
+		expectNoContentIn(logs);
 	});
 
 	it('tries an event again while the database is down, ever further apart, then wakes me once', async () => {
@@ -379,6 +399,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect(handled(mark).map(({ eventId, outcome }) => ({ eventId, outcome }))).toEqual([
 			{ eventId: event.id, outcome: 'woken' }
 		]);
+		expectNoContentIn(logs);
 	});
 
 	it('dead-letters an event that keeps failing after five attempts, and goes on with the next', async () => {
@@ -404,6 +425,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			{ eventId: failing.id, outcome: 'dead_lettered', reason: 'failed 5 times' },
 			{ eventId: next.id, outcome: 'woken', reason: undefined }
 		]);
+		expectNoContentIn(logs);
 	});
 
 	it('wakes nobody twice when its dead letters are replayed once the fault is fixed', async () => {
@@ -442,6 +464,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 				(await broker.queue(DEAD_LETTERS))?.messages === 0 &&
 				(await broker.queue(QUEUE))?.messages === 0
 		);
+		expectNoContentIn(logs);
 	});
 
 	it('forgets the wake-ups past their retention, and keeps the younger ones', async () => {
@@ -527,6 +550,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			await late.stop();
 		}
 		await until('no connection left', async () => (await connections()) === 0);
+		expectNoContentIn(lateLogs);
 	});
 
 	it('dead-letters an event that brings the worker down whenever it holds it, once past five returns', async () => {
@@ -605,6 +629,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			if (!stopped) await away.stop();
 			await proxy.close();
 		}
+		expectNoContentIn(awayLogs);
 	});
 
 	it('tries again when it cannot read its queue again after a reconnection, saying so meanwhile', async () => {
@@ -631,6 +656,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		} finally {
 			await gone.stop();
 		}
+		expectNoContentIn(goneLogs);
 	});
 
 	// Last of the suite, since every connection to the broker drops
@@ -646,6 +672,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const event = activityEvent();
 		await publish(event);
 		await toldOf(event);
+		expectNoContentIn(logs);
 	});
 });
 
