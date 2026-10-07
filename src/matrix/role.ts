@@ -17,7 +17,7 @@ import { z } from 'zod';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
-	claimWelcome,
+	claimProvisionedWelcome,
 	clearAssistantRoomId,
 	findAssistant,
 	findDialog,
@@ -707,9 +707,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			// creator conversation makes greets them in the room it opens. The greeting is taken with
 			// the job that sends it, so that it goes out once, whatever comes after; the owner is in the
 			// room already, so it is encrypted for their devices at once.
-			const welcomed = await withPrincipal(db, { id: owner }, async (tx) => {
+			const welcomeQueued = await withPrincipal(db, { id: owner }, async (tx) => {
 				await setAssistantRoomId(tx, owner, roomId);
-				if (!(await claimWelcome(tx, owner, invited))) return false;
+				if (!(await claimProvisionedWelcome(tx, owner, invited))) return false;
 				return enqueueJob(tx, {
 					kind: 'send',
 					payload: { asUserId: invited, roomId, text: toOwner.welcome(assistant.name) },
@@ -717,7 +717,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					groupKey: `send:${roomId}`
 				});
 			});
-			if (welcomed) log.info({ roomId, owner }, 'welcome queued');
+			if (welcomeQueued) log.info({ roomId, owner }, 'welcome queued');
 		}
 		log.info({ roomId, owner, userId: invited }, 'assistant room opened by its owner');
 		await announceCommands({ admin, log }, { roomId, assistantUserId: invited }, toOwner);

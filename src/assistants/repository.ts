@@ -158,7 +158,11 @@ export async function saveProvisioned(
 }
 
 // Takes the greeting a provisioned assistant owes its owner: true for the one call that took it
-export async function claimWelcome(tx: Tx, owner: string, userId: string): Promise<boolean> {
+export async function claimProvisionedWelcome(
+	tx: Tx,
+	owner: string,
+	userId: string
+): Promise<boolean> {
 	const claimed = await tx.sql`
 		update assistant_provisioned set owes_welcome = false
 		where owner = ${owner} and user_id = ${userId} and owes_welcome`;
