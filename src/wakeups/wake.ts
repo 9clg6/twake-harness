@@ -9,6 +9,7 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
 
 // Someone an event names, as its source knows them
 export interface Person {
@@ -39,8 +40,6 @@ export interface WakeDeps {
 	readonly log: FastifyBaseLogger;
 }
 
-const TASK_ASSIGNED = 'com.twake.tasks.task.assigned.v1';
-
 // The event as the model is handed it: one line of JSON, so that nothing a third party wrote can
 // start a line of its own, between fences of a random nonce it cannot close
 function fenced(wakeup: Wakeup): string {
@@ -51,7 +50,7 @@ function fenced(wakeup: Wakeup): string {
 
 // What the owner's assistant is told, in its owner's language: what arrived, then the event
 function told(wakeup: Wakeup, messages: Messages): string {
-	return wakeup.type === TASK_ASSIGNED
+	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
 		? messages.events.taskAssigned(wakeup.id, fenced(wakeup))
 		: messages.events.published(wakeup.type, wakeup.id, fenced(wakeup));
 }

@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { findTimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
+import { TASK_ASSIGNED_EVENT_TYPE } from './wakeups/event-types.js';
 
 const ROLES = ['api', 'matrix', 'worker'] as const;
 export type Role = (typeof ROLES)[number];
@@ -205,7 +206,7 @@ const envSchema = z.object({
 		.default('twake-harness'),
 	ACTIVITY_ENABLED: z.enum(['true', 'false']).default('false'),
 	ACTIVITY_AMQP_URL: z.string().default(''),
-	ACTIVITY_TYPES: z.string().default('com.twake.tasks.task.assigned.v1'),
+	ACTIVITY_TYPES: z.string().default(TASK_ASSIGNED_EVENT_TYPE),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
