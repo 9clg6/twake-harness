@@ -135,7 +135,8 @@ export interface FakeApisix {
 	close(): Promise<void>;
 }
 
-function lastUserContent(request: ChatRequest): string {
+// What the owner said last in a request to the model, or nothing
+export function lastUserContent(request: ChatRequest): string {
 	for (let i = request.messages.length - 1; i >= 0; i -= 1) {
 		const message = request.messages[i];
 		if (message !== undefined && message.role === 'user' && message.content !== null) {
