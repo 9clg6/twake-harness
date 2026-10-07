@@ -65,6 +65,8 @@ export interface Messages {
 		// The turn answered, or failed or was refused, its answer or notice a message of its own
 		readonly done: string;
 		readonly notDone: string;
+		// The turn answered once it reached its limit of tool calls: there is more to do
+		readonly limited: string;
 		// The turn ended on a question to the owner, which follows as a message of its own
 		readonly asking: string;
 		// No answer came in time: whatever comes later follows as a message of its own
@@ -214,6 +216,7 @@ const ENGLISH: Messages = {
 		progress: (actions) => `⏳ On it… (${actions} ${actions === 1 ? 'action' : 'actions'} done)`,
 		done: '✅ Done',
 		notDone: '❌ Not done',
+		limited: '⏸️ Limit reached',
 		asking: 'I need your answer to go on: see below.',
 		late: 'This is taking longer than expected. If no answer follows, ask me again.'
 	},
@@ -356,6 +359,7 @@ const FRENCH: Messages = {
 			`⏳ Je m'en occupe… (${actions} ${actions <= 1 ? 'action faite' : 'actions faites'})`,
 		done: '✅ Terminé',
 		notDone: '❌ Pas abouti',
+		limited: '⏸️ Limite atteinte',
 		asking: "J'ai besoin de ta réponse pour continuer : voir ci-dessous.",
 		late: 'Ça prend plus de temps que prévu. Si aucune réponse ne suit, redemande-moi.'
 	},

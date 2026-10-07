@@ -97,11 +97,13 @@ interface SendJob {
 	// The message the text answers, for the reactions on it: the owner's own, or the assistant's
 	// question their reaction answered
 	readonly replyTo?: string;
-	readonly outcome?: TurnOutcome;
+	readonly outcome?: 'answered' | 'failed';
 	// The text asks the owner about a frozen call: the event sent is remembered for their answer
 	readonly request?: PendingQuestion;
 	// The text as HTML, laid out by the harness itself
 	readonly html?: string;
+	// The turn answered once it reached its limit of tool calls
+	readonly atLimit?: true;
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
@@ -147,7 +149,8 @@ function isSendJob(value: unknown): value is SendJob {
 			job['outcome'] === 'answered' ||
 			job['outcome'] === 'failed') &&
 		(job['request'] === undefined || isPendingQuestion(job['request'])) &&
-		(job['html'] === undefined || typeof job['html'] === 'string')
+		(job['html'] === undefined || typeof job['html'] === 'string') &&
+		(job['atLimit'] === undefined || job['atLimit'] === true)
 	);
 }
 
@@ -168,6 +171,12 @@ function annotationOf(event: RoomEvent): { readonly eventId: string; readonly ke
 		typeof key === 'string'
 		? { eventId, key }
 		: null;
+}
+
+// How the turn of a reply ended, as its send job tells it
+function outcomeOf(job: SendJob): TurnOutcome {
+	if (job.outcome === 'failed') return 'failed';
+	return job.atLimit === true ? 'limited' : 'answered';
 }
 
 function turnOf(job: SendJob): TurnRef | null {
@@ -894,7 +903,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			if (turn !== null) {
 				feedback
-					.answerSent(turn, job.payload.outcome ?? 'answered')
+					.answerSent(turn, outcomeOf(job.payload))
 					.catch((err: unknown) =>
 						log.warn({ roomId: turn.roomId, err }, 'answer feedback failed')
 					);

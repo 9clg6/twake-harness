@@ -2,8 +2,9 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Messages } from '../i18n/messages.js';
 
-// How a turn ended, as the send job tells it: only an answered message earns the check mark
-export type TurnOutcome = 'answered' | 'failed';
+// How a turn ended: answered, answered once it reached its limit of tool calls, or failed or was
+// refused, which alone earns no check mark
+export type TurnOutcome = 'answered' | 'limited' | 'failed';
 
 // The owner's message a turn answers, in the room of the assistant that answers it
 export interface TurnRef {
@@ -71,12 +72,13 @@ const DEFAULT_TYPING_MAX_MS = 5 * 60_000;
 const ACK_TTL_MS = 60 * 60_000;
 const STOP_GRACE_MS = 5_000;
 
-// The words a status ends on: the turn answered, or failed or was refused, a question to its owner
-// follows, or no answer came in time
-type Closing = 'done' | 'notDone' | 'asking' | 'late';
+// The words a status ends on: the turn answered, answered at its limit of tool calls, or failed or
+// was refused, a question to its owner follows, or no answer came in time
+type Closing = 'done' | 'limited' | 'notDone' | 'asking' | 'late';
 
 const CLOSINGS: Readonly<Record<TurnOutcome, Closing>> = {
 	answered: 'done',
+	limited: 'limited',
 	failed: 'notDone'
 };
 
@@ -428,7 +430,7 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 						);
 					}
 				}
-				if (outcome === 'answered') await react(turn, ANSWERED);
+				if (outcome !== 'failed') await react(turn, ANSWERED);
 			})();
 			track(work);
 			return work;

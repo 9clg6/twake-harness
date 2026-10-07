@@ -24,6 +24,7 @@ const ASKING = 'I need your answer to go on: see below.';
 const LATE = 'This is taking longer than expected. If no answer follows, ask me again.';
 const FAILED = 'Something went wrong on my side. Please try again in a moment.';
 const BUSY = 'I am busy right now and cannot take this message. Please send it again in a moment.';
+const LIMITED = '⏸️ Limit reached';
 
 // The delay the deployment gives a turn before its status shows, the default
 const STATUS_DELAY_MS = 3000;
@@ -501,6 +502,30 @@ describe('a status message while my assistant works on a message', () => {
 			expect((times[i] ?? 0) - (times[i - 1] ?? 0)).toBeGreaterThanOrEqual(STATUS_DELAY_MS - 500);
 		}
 		expect(counts.at(-1)?.content['body']).toBe('⏳ On it… (6 actions done)');
+	});
+
+	it('closes the status of a turn that reached its limit of calls on a line of its own', async () => {
+		let asked = '';
+		const account = 'I read your consents six times; two reads remain. Ask me to continue.';
+		r.h.apisix.llm.script = (req: ChatRequest, index: number): ScriptedReply =>
+			req.tools === undefined
+				? { content: account }
+				: {
+						toolCalls: [0, 1, 2, 3].map((n) => ({
+							id: `limit_${index}_${n}`,
+							type: 'function' as const,
+							function: { name: 'consents_list', arguments: '{}' }
+						})),
+						hold: statusShown(() => asked)
+					};
+		const before = feedback.shown().length;
+		asked = await r.client.sendText(r.room, 'Read them all, slowly');
+		const status = await replySaying(asked, LIMITED);
+		expect(saidBy(status)[0]).toBe(WORKING);
+		expect(shownSince(before).map((m) => m.body)).toEqual([LIMITED, account]);
+		// The turn answered: the check mark comes on my message
+		const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
+		expect(check).toBeDefined();
 	});
 
 	it('keeps a question to me a message of its own, its status pointing to it', async () => {

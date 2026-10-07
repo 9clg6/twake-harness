@@ -62,6 +62,8 @@ export interface SendPayload {
 	readonly request?: PendingQuestion;
 	// The text as HTML, when the harness laid it out itself rather than the model writing Markdown
 	readonly html?: string;
+	// The turn answered once it reached its limit of tool calls: there is more to do
+	readonly atLimit?: true;
 }
 
 // The actions a turn has done so far, which the matrix role shows its owner in the turn's status
@@ -141,7 +143,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			// The harness's own request, laid out by the harness as HTML too
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
-				: {})
+				: {}),
+			...(result.kind === 'ok' && result.atLimit === true ? { atLimit: true } : {})
 		};
 	}
 

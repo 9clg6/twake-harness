@@ -44,6 +44,8 @@ export interface TurnOutput {
 	readonly pendingCallId?: string;
 	// That question in its parts, when the harness laid it out as a request about the call
 	readonly request?: OwnerRequest;
+	// The turn reached its limit of tool calls before it answered: there is more to do
+	readonly atLimit?: true;
 }
 
 export interface TurnDeps {
@@ -336,5 +338,5 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		answer = input.limitNotice(actions);
 	}
 	messages.push({ role: 'assistant', content: answer });
-	return { answer, messages: [...input.history, ...messages], tokens };
+	return { answer, messages: [...input.history, ...messages], tokens, atLimit: true };
 }

@@ -192,6 +192,8 @@ export type OwnerTurnResult =
 			readonly pendingCallId?: string;
 			// That question in its parts, when the harness laid it out as a request about the call
 			readonly request?: OwnerRequest;
+			// The turn reached its limit of tool calls before it answered: there is more to do
+			readonly atLimit?: true;
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -679,7 +681,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					answer: turn.answer,
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
-					...(turn.request === undefined ? {} : { request: turn.request })
+					...(turn.request === undefined ? {} : { request: turn.request }),
+					...(turn.atLimit === true ? { atLimit: true } : {})
 				};
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {
