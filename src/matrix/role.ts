@@ -70,6 +70,9 @@ export interface MatrixRoleOptions {
 	readonly pollIntervalMs?: number;
 	// How long the SDK may process a push before the role gives it up, PUSH_DEADLINE_MS by default
 	readonly pushDeadlineMs?: number;
+	// How long a status message waits for its turn's answer before it gives up, as long as the
+	// typing by default
+	readonly statusMaxMs?: number;
 }
 
 export interface MatrixRole {
@@ -598,7 +601,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
-	// Eyes and typing while a turn works, a check mark once it answered
+	// Eyes, typing and, once it takes a while, a status message while a turn works, a check mark
+	// once it answered
 	const feedback = makeChatFeedback({
 		log,
 		setTyping: async (userId, roomId, typing, timeoutMs) => {
@@ -614,7 +618,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		},
 		redactEvent: async (userId, roomId, eventId) => {
 			await appservice.getIntentForUserId(userId).underlyingClient.redactEvent(roomId, eventId);
-		}
+		},
+		// The organization agent speaks the deployment's language with every member
+		statusTexts: async (turn) => {
+			const room = await assistantRoom(turn.roomId);
+			const toOwner =
+				room === null || room.owner === ORGANIZATION_PRINCIPAL
+					? messages
+					: await fetchMessages(room.owner);
+			return toOwner.status;
+		},
+		statusDelayMs: config.turn.statusDelayMs,
+		...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs })
 	});
 
 	// The harness's requests in the assistants' rooms, and the owners' answers to them
@@ -839,14 +854,26 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (room !== null) await onEncryptionReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
 			const turn = turnOf(job.payload);
-			if (turn !== null) await feedback.answerReady(turn);
-			const { text, html } = job.payload;
-			const sent = await intent.sendEvent(
-				job.payload.roomId,
-				html === undefined ? makeRichText(text) : makeLaidOutText(text, html)
+			const { text, html, request } = job.payload;
+			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
+			// An answer takes the place of the status message the owner saw while the turn worked, if
+			// any; a question goes out as a message of its own, the one the owner's answer points to
+			const replaced =
+				turn === null
+					? null
+					: await feedback.answerReady(
+							turn,
+							request === undefined ? { kind: 'answer', content } : { kind: 'question' }
+						);
+			const sent = replaced ?? (await intent.sendEvent(job.payload.roomId, content));
+			log.info(
+				{
+					roomId: job.payload.roomId,
+					asUserId: job.payload.asUserId,
+					replacedStatus: replaced !== null
+				},
+				'answer sent'
 			);
-			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
-			const request = job.payload.request;
 			if (request !== undefined) {
 				const requestRoom = {
 					roomId: job.payload.roomId,

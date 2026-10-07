@@ -1,5 +1,8 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Messages } from '../i18n/messages.js';
+import type { RichText } from './format.js';
+
 // How a turn ended, as the send job tells it: only an answered message earns the check mark
 export type TurnOutcome = 'answered' | 'failed';
 
@@ -9,6 +12,12 @@ export interface TurnRef {
 	readonly roomId: string;
 	readonly eventId: string;
 }
+
+// What a turn sends its owner: an answer, which takes the place of the status message they saw
+// while it worked, or a question about a call, which goes out as a message of its own, the one
+// their answer points to
+export type TurnReply =
+	{ readonly kind: 'answer'; readonly content: RichText } | { readonly kind: 'question' };
 
 export interface ChatFeedbackOptions {
 	readonly log: FastifyBaseLogger;
@@ -21,20 +30,33 @@ export interface ChatFeedbackOptions {
 		content: Record<string, unknown>
 	): Promise<string>;
 	redactEvent(userId: string, roomId: string, eventId: string): Promise<void>;
+	// The texts of a turn's status message, in its owner's language as it is now
+	statusTexts(turn: TurnRef): Promise<Messages['status']>;
+	// How long a turn may go without an answer before its status message shows
+	readonly statusDelayMs: number;
+	readonly statusMaxMs?: number;
 	readonly typingTimeoutMs?: number;
 	readonly typingRefreshMs?: number;
 	readonly typingMaxMs?: number;
 }
 
 // What the owner sees while the assistant works on a message, as Hermes showed it: eyes on the
-// message and the assistant typing, then a check mark once the message is answered. All of it is
-// best effort: a failure is logged and never holds a turn or an answer back.
+// message and the assistant typing, then a check mark once the message is answered. A turn that
+// takes a while also posts a status message, a reply to the message, which its answer replaces,
+// so that one message remains. All of it is best effort: a failure is logged and never holds a
+// turn or an answer back, the answer's own replacement of the status aside, which is the answer
+// going out and fails as a message would.
 export interface ChatFeedback {
 	turnQueued(turn: TurnRef): Promise<void>;
-	// Right before the answer goes out, so the typing stops as the answer appears
-	answerReady(turn: TurnRef): Promise<void>;
+	// Right before the reply goes out: the typing stops as it appears, and an answer takes the place
+	// of the status message the owner sees, if any. Resolves to the status's event id once replaced,
+	// or to null when the reply is to go out as a message of its own. A replacement that fails
+	// throws, the status staying for the next attempt.
+	answerReady(turn: TurnRef, reply: TurnReply): Promise<string | null>;
 	answerSent(turn: TurnRef, outcome: TurnOutcome): Promise<void>;
-	// Lets what is already on its way (a check mark, a stopped typing) go out, within a bound
+	// Lets what is already on its way (a check mark, a stopped typing) go out, within a bound. A
+	// status still waiting for its answer gives up: the answer, once the role is back, goes out as a
+	// message of its own.
 	stop(): Promise<void>;
 }
 
@@ -47,6 +69,40 @@ const DEFAULT_TYPING_MAX_MS = 5 * 60_000;
 // The eyes of a turn that never answered are forgotten after this
 const ACK_TTL_MS = 60 * 60_000;
 const STOP_GRACE_MS = 5_000;
+// What a client that shows no edits shows of one, by the convention of the spec: the new text
+// marked as an edit, cut short, the new content carrying it whole
+const EDIT_FALLBACK_MAX_CHARS = 1_000;
+
+// What a status message shows: the harness's own words, or the answer as it would have gone out
+interface StatusContent {
+	readonly msgtype: 'm.text';
+	readonly body: string;
+	readonly format?: string;
+	readonly formatted_body?: string;
+}
+
+// The status message of a turn, from the delay before it shows to its replacement
+interface Status {
+	readonly turn: TurnRef;
+	readonly queuedAt: number;
+	// The timer that posts the status once it is due, then the one that gives it up
+	timer: NodeJS.Timeout | null;
+	// Resolves to the status's event id once posted, or to null when it could not be; null until
+	// it is due
+	posted: Promise<string | null> | null;
+	texts: Messages['status'] | null;
+	// The status's events go out one after the other: clients show the last edit sent
+	chain: Promise<unknown>;
+	// Replaced by the answer, or given up: nothing changes it any more
+	closed: boolean;
+}
+
+function editFallback(body: string): string {
+	const characters = Array.from(body);
+	return characters.length <= EDIT_FALLBACK_MAX_CHARS
+		? `* ${body}`
+		: `* ${characters.slice(0, EDIT_FALLBACK_MAX_CHARS).join('')}…`;
+}
 
 interface Ack {
 	// Resolves to the id of the eyes reaction, or null when it could not be sent
@@ -75,6 +131,8 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 	const typingTimeoutMs = options.typingTimeoutMs ?? DEFAULT_TYPING_TIMEOUT_MS;
 	const typingRefreshMs = options.typingRefreshMs ?? DEFAULT_TYPING_REFRESH_MS;
 	const typingMaxMs = options.typingMaxMs ?? DEFAULT_TYPING_MAX_MS;
+	// A turn that died never answers: its status gives up when its typing would stop
+	const statusMaxMs = options.statusMaxMs ?? DEFAULT_TYPING_MAX_MS;
 	// The matrix role runs as a single replica, so this memory is the only one. A restart between a
 	// turn and its answer forgets the eyes: they stay on that message, next to the check mark.
 	const acks = new Map<string, Ack>();
@@ -82,6 +140,8 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 	// The typing calls of a room go out one after the other, so a late "typing" never lands after
 	// the "stopped typing" sent before the answer
 	const typingChains = new Map<string, Promise<void>>();
+	// The status messages of the turns in the works, by the message they answer
+	const statuses = new Map<string, Status>();
 	// The calls on their way, which a stop lets finish while the homeserver and the store are up
 	const inflight = new Set<Promise<unknown>>();
 	function track(work: Promise<unknown>): void {
@@ -149,23 +209,155 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 		}
 	}
 
+	// The status's work, after what is already on its way
+	function inTurn<T>(status: Status, work: () => Promise<T>): Promise<T> {
+		const next = status.chain.then(work);
+		status.chain = next.catch(() => undefined);
+		track(status.chain);
+		return next;
+	}
+
+	function forget(status: Status): void {
+		if (status.timer !== null) clearTimeout(status.timer);
+		status.timer = null;
+		if (statuses.get(status.turn.eventId) === status) statuses.delete(status.turn.eventId);
+	}
+
+	// An edit of the status: clients show its new content in the status's place
+	async function replace(status: Status, eventId: string, content: StatusContent): Promise<void> {
+		const { turn } = status;
+		await options.sendEvent(turn.assistantUserId, turn.roomId, 'm.room.message', {
+			msgtype: 'm.text',
+			body: editFallback(content.body),
+			'm.new_content': content,
+			'm.relates_to': { rel_type: 'm.replace', event_id: eventId }
+		});
+	}
+
+	// The status of the turn, due once the turn went without an answer for the delay
+	function scheduleStatus(turn: TurnRef, now: number): void {
+		if (statuses.has(turn.eventId)) return;
+		const status: Status = {
+			turn,
+			queuedAt: now,
+			timer: null,
+			posted: null,
+			texts: null,
+			chain: Promise.resolve(),
+			closed: false
+		};
+		status.timer = setTimeout(() => postStatus(status), options.statusDelayMs);
+		statuses.set(turn.eventId, status);
+	}
+
+	function postStatus(status: Status): void {
+		const { turn } = status;
+		const left = status.queuedAt + statusMaxMs - Date.now();
+		// Due only past the bound: the turn has died, it gets no status
+		if (left <= 0) {
+			forget(status);
+			return;
+		}
+		status.timer = setTimeout(() => void giveUp(status), left);
+		status.posted = inTurn(status, async () => {
+			try {
+				const texts = await options.statusTexts(turn);
+				status.texts = texts;
+				const eventId = await options.sendEvent(
+					turn.assistantUserId,
+					turn.roomId,
+					'm.room.message',
+					{
+						msgtype: 'm.text',
+						body: texts.working,
+						// A reply, so the owner sees which of their messages it is about
+						'm.relates_to': { 'm.in_reply_to': { event_id: turn.eventId } }
+					}
+				);
+				log.info({ roomId: turn.roomId, eventId: turn.eventId }, 'status posted');
+				return eventId;
+			} catch (err: unknown) {
+				log.warn({ roomId: turn.roomId, eventId: turn.eventId, err }, 'status failed');
+				return null;
+			}
+		});
+	}
+
+	// No answer came in time, or the role stops: the status says so, and the answer, should it come,
+	// goes out as a message of its own
+	function giveUp(status: Status): Promise<void> {
+		forget(status);
+		return inTurn(status, async () => {
+			if (status.closed) return;
+			status.closed = true;
+			const eventId = await status.posted;
+			if (eventId === null || status.texts === null) return;
+			const { turn } = status;
+			try {
+				await replace(status, eventId, { msgtype: 'm.text', body: status.texts.late });
+				log.info({ roomId: turn.roomId, eventId: turn.eventId }, 'status given up');
+			} catch (err: unknown) {
+				log.warn({ roomId: turn.roomId, eventId: turn.eventId, err }, 'status update failed');
+			}
+		});
+	}
+
+	// The status takes the reply: an answer in its place, or, for a question, which goes out on its
+	// own, the words that point to it
+	function replyIn(status: Status, reply: TurnReply): Promise<string | null> {
+		return inTurn(status, async () => {
+			if (status.closed) return null;
+			const eventId = await status.posted;
+			const { texts, turn } = status;
+			if (eventId === null || texts === null) {
+				status.closed = true;
+				forget(status);
+				return null;
+			}
+			if (reply.kind === 'question') {
+				status.closed = true;
+				forget(status);
+				try {
+					await replace(status, eventId, { msgtype: 'm.text', body: texts.asking });
+				} catch (err: unknown) {
+					log.warn({ roomId: turn.roomId, eventId: turn.eventId, err }, 'status update failed');
+				}
+				return null;
+			}
+			await replace(status, eventId, reply.content);
+			status.closed = true;
+			forget(status);
+			return eventId;
+		});
+	}
+
 	return {
 		turnQueued: async (turn) => {
 			const now = Date.now();
 			forgetOldAcks(now);
-			// Both are registered before anything is awaited: a fast answer finds them in place
+			// All are registered before anything is awaited: a fast answer finds them in place
 			startTyping(turn);
+			scheduleStatus(turn, now);
 			const reaction = react(turn, WORKING);
 			track(reaction);
 			acks.set(turn.eventId, { reaction, at: now });
 			await reaction;
 		},
-		answerReady: async (turn) => {
+		answerReady: async (turn, reply) => {
 			const session = sessions.get(keyOf(turn));
-			if (session === undefined) return;
-			session.pending.delete(turn.eventId);
-			// Another message of the owner may still be in the works: the assistant keeps typing for it
-			if (session.pending.size === 0) await endTyping(turn);
+			if (session !== undefined) {
+				session.pending.delete(turn.eventId);
+				// Another message of the owner may still be in the works: the assistant keeps typing for it
+				if (session.pending.size === 0) await endTyping(turn);
+			}
+			const status = statuses.get(turn.eventId);
+			if (status === undefined) return null;
+			if (status.posted === null) {
+				// Answered before its status was due: it never shows
+				forget(status);
+				return null;
+			}
+			return replyIn(status, reply);
 		},
 		answerSent: (turn, outcome) => {
 			const work = (async (): Promise<void> => {
@@ -193,6 +385,10 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 				clearTimeout(session.deadline);
 			}
 			sessions.clear();
+			for (const status of [...statuses.values()]) {
+				if (status.posted === null) forget(status);
+				else void giveUp(status);
+			}
 			await settleWithin([...inflight], STOP_GRACE_MS);
 		}
 	};

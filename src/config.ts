@@ -33,6 +33,9 @@ export interface Config {
 		readonly memoryNudgeInterval: number;
 		// The most characters of past conversation a turn shows the model
 		readonly historyMaxChars: number;
+		// How long a turn of an owner's message may go without an answer before its assistant posts
+		// a status message, which the answer then replaces
+		readonly statusDelayMs: number;
 	};
 	readonly curation: {
 		readonly intervalMs: number;
@@ -134,6 +137,7 @@ const envSchema = z.object({
 	// context it leaves room for the system prompt and its memory, the tool definitions, the turn's own
 	// messages and tool results, and an answer of up to LLM_MAX_TOKENS
 	TURN_HISTORY_MAX_CHARS: z.coerce.number().int().min(1).default(24_000),
+	TURN_STATUS_DELAY_MS: z.coerce.number().int().min(1000).default(3000),
 	CURATION_INTERVAL_MS: z.coerce.number().int().min(0).default(86_400_000),
 	ADMISSION_MAX_INFLIGHT: z.coerce.number().int().min(1).default(32),
 	ADMISSION_USER_QUEUE: z.coerce.number().int().min(0).default(2),
@@ -244,7 +248,8 @@ export function loadConfig(env: Env): Config {
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
-			historyMaxChars: values.TURN_HISTORY_MAX_CHARS
+			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,
+			statusDelayMs: values.TURN_STATUS_DELAY_MS
 		},
 		curation: {
 			intervalMs: values.CURATION_INTERVAL_MS

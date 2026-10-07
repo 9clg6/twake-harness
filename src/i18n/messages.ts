@@ -56,6 +56,16 @@ export interface Messages {
 		// owner: the actions it did, and how to have it carry on
 		callLimit(actions: number): string;
 	};
+	// The status message of a turn that takes a while, a reply to the owner's message, which the
+	// answer then replaces
+	readonly status: {
+		// While the turn works
+		readonly working: string;
+		// The turn ended on a question to the owner, which follows as a message of its own
+		readonly asking: string;
+		// No answer came in time: whatever comes later follows as a message of its own
+		readonly late: string;
+	};
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
@@ -195,6 +205,11 @@ const ENGLISH: Messages = {
 		callLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`
 	},
+	status: {
+		working: '⏳ On it…',
+		asking: 'I need your answer to go on: see below.',
+		late: 'This is taking longer than expected. If no answer follows, ask me again.'
+	},
 	consent: {
 		firstRead: (application, covers, shown) =>
 			firstUse(
@@ -326,6 +341,11 @@ const FRENCH: Messages = {
 		// One action, or none, is singular in French
 		callLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`
+	},
+	status: {
+		working: "⏳ Je m'en occupe…",
+		asking: "J'ai besoin de ta réponse pour continuer : voir ci-dessous.",
+		late: 'Ça prend plus de temps que prévu. Si aucune réponse ne suit, redemande-moi.'
 	},
 	consent: {
 		firstRead: (application, covers, shown) =>
