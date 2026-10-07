@@ -158,6 +158,11 @@ const TO_DEVICE_ONLY_FILTER = JSON.stringify({
 // safety net, the inboxes being read at each start of the role
 const MAX_INBOX_PAGES = 1_000;
 
+// Whether a caller joined a read of an inbox during the page under way
+interface InboxJoins {
+	during: boolean;
+}
+
 interface ToDeviceSync {
 	readonly next_batch?: string;
 	readonly to_device?: { events?: unknown[] };
@@ -428,20 +433,31 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// encryption is ready at the start of the role, and after a message of its rooms fails to
 	// decrypt. Where a read stopped is kept per device, across restarts, so that the next one goes
 	// on from there.
-	const inboxReads = new Map<string, Promise<number>>();
+	const inboxReads = new Map<
+		string,
+		{ readonly joins: InboxJoins; readonly done: Promise<number> }
+	>();
 	function fetchMissedKeyShares(userId: string, roomId: string | null): Promise<number> {
 		// A caller that comes during a read joins it, the read taking what the inbox holds, where
 		// cross-signing's oneAtATime queues its callers: the two stay apart
 		const underWay = inboxReads.get(userId);
-		if (underWay !== undefined) return underWay;
-		const read = fetchToDeviceInbox(userId, roomId).finally(() => {
-			if (inboxReads.get(userId) === read) inboxReads.delete(userId);
+		if (underWay !== undefined) {
+			underWay.joins.during = true;
+			return underWay.done;
+		}
+		const joins: InboxJoins = { during: false };
+		const done = fetchToDeviceInbox(userId, roomId, joins).finally(() => {
+			if (inboxReads.get(userId)?.done === done) inboxReads.delete(userId);
 		});
-		inboxReads.set(userId, read);
-		return read;
+		inboxReads.set(userId, { joins, done });
+		return done;
 	}
 
-	async function fetchToDeviceInbox(userId: string, roomId: string | null): Promise<number> {
+	async function fetchToDeviceInbox(
+		userId: string,
+		roomId: string | null,
+		joins: InboxJoins
+	): Promise<number> {
 		const intent = appservice.getIntentForUserId(userId);
 		await ensureEncryption(intent);
 		const client = intent.underlyingClient;
@@ -454,6 +470,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		let fetched = 0;
 		for (let page = 0; page < MAX_INBOX_PAGES; page += 1) {
 			if (closing) return fetched;
+			joins.during = false;
 			const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
 				timeout: 0,
 				filter: TO_DEVICE_ONLY_FILTER,
@@ -474,8 +491,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (typeof sync.next_batch !== 'string') return fetched;
 			since = sync.next_batch;
 			await userStorage?.storeValue(positionKey, since);
-			// A page with nothing left: the sync past every message also let Synapse drop them
-			if (events.length === 0) return fetched;
+			// A page with nothing left ends the read, the sync past every message letting Synapse drop
+			// them, unless a caller joined meanwhile: its key share may have come after this page
+			if (events.length === 0 && !joins.during) return fetched;
 		}
 		log.warn({ userId, fetched }, 'to-device inbox read stopped before its end');
 		return fetched;

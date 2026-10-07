@@ -221,6 +221,45 @@ describe('an assistant whose matrix role restarts', () => {
 		).toBe('echo: one key, one failed page');
 	});
 
+	it('answers a message that failed to decrypt as a read of its inbox was ending', async () => {
+		const { client, assistant, room } = await meetProvisionedAssistant('oli');
+		// Synapse holds the role for down a while longer once it stayed down for several seconds, so
+		// that the key share of a message written just after the restart waits in the inbox too
+		await h.role.stop();
+		await client.sendText(room, 'before the restart');
+		await sleep(7000);
+		// The read at start takes the key share above on its first page; its second page, empty, is
+		// answered at once but comes back only once the next message failed to decrypt
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let reads = 0;
+		let lastPageHeld = false;
+		h.apisix.matrixHoldReply = (call) => {
+			if (!isInboxReadOf(assistant.userId, call)) return null;
+			reads += 1;
+			if (reads !== 2) return null;
+			lastPageHeld = true;
+			return released;
+		};
+		try {
+			await h.restartRole();
+			for (let i = 0; i < 80 && !lastPageHeld; i += 1) await sleep(250);
+			expect(lastPageHeld).toBe(true);
+			const late = await client.sendText(room, 'right after the restart');
+			expect(await failedToDecrypt(late)).toBe(true);
+		} finally {
+			release();
+			h.apisix.matrixHoldReply = null;
+		}
+		for (const text of ['before the restart', 'right after the restart']) {
+			expect(
+				await client.waitForMessage(room, assistant.userId, (t) => t === `echo: ${text}`, 60_000)
+			).toBe(`echo: ${text}`);
+		}
+	});
+
 	it('reads a key share behind more to-device messages than the homeserver hands at once', async () => {
 		const { client, assistant, room } = await meetProvisionedAssistant('ivy');
 		// Synapse keeps every to-device message of a device until the device syncs past it, those it
