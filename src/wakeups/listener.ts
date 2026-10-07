@@ -1,6 +1,7 @@
 import { RabbitMQClient, type RabbitMQMessageHandler } from '@linagora/rabbitmq-client';
 
 import type { Config } from '../config.js';
+import { brokerLogger, logHandled } from './logs.js';
 import type { WakeDeps } from './wake.js';
 
 // How many times a message may come back before it is dead-lettered, as one that brings the
@@ -43,15 +44,21 @@ export async function listenOnOwnQueue(
 	own: OwnQueue,
 	handle: RabbitMQMessageHandler
 ): Promise<Listener> {
+	const log = deps.log.child({ listener: own.name });
 	const client = new RabbitMQClient({
 		url: own.url,
-		// The library's own lines, at info at most: at debug it logs every message it receives
-		// whole, what other people wrote included, which no line of the harness holds
-		logger: deps.log.child(
-			{ listener: own.name },
-			{ level: ['trace', 'debug'].includes(deps.log.level) ? 'info' : deps.log.level }
-		),
-		prefetch: 1
+		// The library's own lines, without what a message holds, which they would carry at every
+		// level, the body of every message it receives at debug included
+		logger: brokerLogger(log),
+		prefetch: 1,
+		hooks: {
+			// A message that is no JSON never reaches the handler: the library dead-letters it
+			onMessageDlq: ({ routingKey, reason }) => {
+				if (reason === 'invalid_json') {
+					logHandled(log, { type: routingKey, outcome: 'dead_lettered', reason: 'not JSON' });
+				}
+			}
+		}
 	});
 	await client.init();
 	const queue = ownQueueName(deps.config, own.name);

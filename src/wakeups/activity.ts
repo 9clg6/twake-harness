@@ -4,7 +4,8 @@ import { z } from 'zod';
 import type { ActivitySource } from '../config.js';
 import { cut } from '../llm/data.js';
 import { listenOnOwnQueue, ownQueueName, type Listener } from './listener.js';
-import { wake, type WakeDeps, type Wakeup } from './wake.js';
+import { logHandled, outcomeOf, type Handled } from './logs.js';
+import { wake, type WakeDeps, type WakeOutcome, type Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
@@ -96,6 +97,30 @@ function leftOutFields(message: unknown, event: ActivityEvent): string[] {
 
 type ActivityEvent = z.infer<typeof activityEventSchema>;
 
+// The attributes that identify an event, as far as a message that is no readable event has them
+const IDENTITY = { source: 'source', eventId: 'id', type: 'type' } as const;
+
+function identityOf(
+	message: unknown,
+	routingKey: string
+): Pick<Handled, 'source' | 'eventId' | 'type'> {
+	const identity: { source?: string; eventId?: string; type?: string } = { type: routingKey };
+	for (const [field, attribute] of Object.entries(IDENTITY)) {
+		const value = valueAt(message, [attribute]);
+		if (typeof value === 'string' && value.length > 0 && value.length <= 200) {
+			identity[field as keyof typeof IDENTITY] = value;
+		}
+	}
+	return identity;
+}
+
+// Why a message is no event of the activity exchange: the attribute at fault, never its value
+function malformation(message: unknown, error: z.ZodError): string {
+	const path = (error.issues[0]?.path ?? []).map(String);
+	if (path.length === 0) return 'not a CloudEvent';
+	return `${valueAt(message, path) === undefined ? 'no' : 'invalid'} ${path.join('.')}`;
+}
+
 // A recipient left out, by their place among the event's recipients and the names of the fields
 // the application got wrong: never what it wrote there
 interface SkippedRecipient {
@@ -175,6 +200,7 @@ export async function startActivityListener(
 	source: ActivitySource
 ): Promise<Listener> {
 	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
+	const log = deps.log.child({ listener: ACTIVITY_EXCHANGE });
 	return listenOnOwnQueue(
 		deps,
 		{
@@ -189,7 +215,11 @@ export async function startActivityListener(
 			// letters are moved back into it.
 			if (routingKey !== queue && !source.types.includes(routingKey)) return;
 			const parsed = activityEventSchema.safeParse(message);
-			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
+			if (!parsed.success) {
+				const reason = malformation(message, parsed.error);
+				logHandled(log, { ...identityOf(message, routingKey), outcome: 'dead_lettered', reason });
+				throw new DeadLetterError(reason);
+			}
 			const event = parsed.data;
 			const fields = leftOutFields(message, event);
 			if (fields.length > 0) {
@@ -205,7 +235,15 @@ export async function startActivityListener(
 					'recipient skipped'
 				);
 			}
-			for (const wakeup of wakeups) await wake(deps, wakeup);
+			const outcomes: WakeOutcome[] = [];
+			for (const wakeup of wakeups) outcomes.push(await wake(deps, wakeup));
+			logHandled(log, {
+				source: event.source,
+				eventId: event.id,
+				type: event.type,
+				recipients: (event.data.recipients ?? []).length,
+				outcome: outcomeOf(outcomes)
+			});
 		}
 	);
 }
