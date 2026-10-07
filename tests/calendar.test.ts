@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Writable } from 'node:stream';
+import type { ConfirmChannel } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
@@ -20,7 +21,7 @@ import {
 	type ScriptedReply,
 	type ToolCall
 } from './helpers/fake-apisix.js';
-import { startTestBroker, type TestBroker, type TestVhost } from './helpers/rabbitmq.js';
+import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
 
 // Where Twake Calendar sends a notification per invitee of each change to a meeting, on its own
 // vhost
@@ -298,7 +299,8 @@ function calendarApp(call: ContractCall): ContractReply {
 
 describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 	let broker: TestBroker;
-	let calendar: TestVhost;
+	// The platform's own channel on Calendar's vhost
+	let calendar: ConfirmChannel;
 	let r: ConsentRoom;
 	let worker: WorkerRole;
 	beforeAll(async () => {
@@ -307,14 +309,14 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		// the platform creates it on both vhosts: on each, it may declare and write its own names
 		// only, and read the source exchange and its own queues
 		calendar = await broker.addVhost(CALENDAR);
-		await calendar.channel.assertExchange(FANOUT, 'fanout', { durable: true });
+		await calendar.assertExchange(FANOUT, 'fanout', { durable: true });
 		await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
 		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, {
 			configure: `^${PREFIX}\\.`,
 			write: `^${PREFIX}\\.`,
 			read: `^(activity|${PREFIX}\\..+)$`
 		});
-		await calendar.allow(HARNESS_USER, {
+		await broker.allow(HARNESS_USER, CALENDAR, {
 			configure: `^${PREFIX}\\.`,
 			write: `^${PREFIX}\\.`,
 			read: `^(${FANOUT}|${PREFIX}\\..+)$`
@@ -322,7 +324,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		// Many turns of one owner in a row: admission is the subject of its own suite
 		r = await startConsentRoom({
 			CALENDAR_ENABLED: 'true',
-			CALENDAR_AMQP_URL: calendar.urlFor(HARNESS_USER, HARNESS_PASSWORD),
+			CALENDAR_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD, CALENDAR),
 			// The instance also listens to the activity exchange, for invitations published there
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
@@ -344,8 +346,13 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		if (broker !== undefined) await broker.stop();
 	});
 
-	function publish(notification: Notification): Promise<void> {
-		return calendar.publish(FANOUT, '', notification);
+	// Publishes as Calendar's side service does, persistent JSON, once the broker took it
+	async function publish(notification: Notification): Promise<void> {
+		calendar.publish(FANOUT, '', Buffer.from(JSON.stringify(notification)), {
+			persistent: true,
+			contentType: 'application/json'
+		});
+		await calendar.waitForConfirms();
 	}
 
 	// What Alice's assistant told her of an invitation, in her room
@@ -453,8 +460,8 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		});
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 		// The broker holds nothing more of it: taken, and not dead-lettered
-		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
-		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(0);
+		expect((await broker.queue(QUEUE, CALENDAR))?.messages).toBe(0);
+		expect((await broker.queue(DEAD_LETTERS, CALENDAR))?.messages).toBe(0);
 	});
 
 	it('reads what it can of an invitation: a long title cut, a bad organizer or time left out', async () => {
@@ -907,8 +914,8 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			expect(turnOf(uid)).toHaveLength(0);
 		}
 		// Each was taken all the same, none dead-lettered
-		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
-		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(0);
+		expect((await broker.queue(QUEUE, CALENDAR))?.messages).toBe(0);
+		expect((await broker.queue(DEAD_LETTERS, CALENDAR))?.messages).toBe(0);
 	});
 
 	it('names an invitation by the id the calendar producer gave it, and tells me once however often it comes', async () => {
@@ -1029,7 +1036,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 	});
 
 	it('sets aside a notification it cannot use in its dead letter queue', async () => {
-		const before = (await calendar.queue(DEAD_LETTERS))?.messages ?? 0;
+		const before = (await broker.queue(DEAD_LETTERS, CALENDAR))?.messages ?? 0;
 		// As the calendar producer's tests sent them, an iCalendar without VEVENT and a VEVENT
 		// without UID; then an iCalendar that cannot be read, and a notification that is no JSON
 		await publish(notification({ uid: 'no-vevent', event: vcalendar() }));
@@ -1040,34 +1047,34 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			})
 		);
 		await publish(notification({ uid: 'unreadable', event: 'not an iCalendar' }));
-		calendar.channel.publish(FANOUT, '', Buffer.from('not json'), { persistent: true });
-		await calendar.channel.waitForConfirms();
+		calendar.publish(FANOUT, '', Buffer.from('not json'), { persistent: true });
+		await calendar.waitForConfirms();
 		// Then a new invitation: once Alice is told of it, the queue, read in order, has set aside
 		// every notification before it
 		await publish(notification({ uid: 'uid-after-unusable' }));
 		await answerTo('uid-after-unusable');
-		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(before + 4);
-		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
+		expect((await broker.queue(DEAD_LETTERS, CALENDAR))?.messages).toBe(before + 4);
+		expect((await broker.queue(QUEUE, CALENDAR))?.messages).toBe(0);
 	});
 
 	it('keeps nothing of a notification for someone off the mail domain, even one it cannot use', async () => {
 		// The fanout carries every tenant's invitations: one for another domain's invitee, whose
 		// iCalendar cannot be read, is taken without effect rather than set aside
-		const before = (await calendar.queue(DEAD_LETTERS))?.messages ?? 0;
+		const before = (await broker.queue(DEAD_LETTERS, CALENDAR))?.messages ?? 0;
 		await publish(
 			notification({ uid: 'elsewhere', recipient: 'bob@elsewhere.test', event: 'not an iCalendar' })
 		);
 		await publish(notification({ uid: 'uid-after-elsewhere' }));
 		await answerTo('uid-after-elsewhere');
-		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(before);
-		expect((await calendar.queue(QUEUE))?.messages).toBe(0);
+		expect((await broker.queue(DEAD_LETTERS, CALENDAR))?.messages).toBe(before);
+		expect((await broker.queue(QUEUE, CALENDAR))?.messages).toBe(0);
 	});
 
 	it('reads a quorum queue of its own on Calendar’s vhost, one message at a time, its dead letters apart', async () => {
-		const queue = await calendar.queue(QUEUE);
+		const queue = await broker.queue(QUEUE, CALENDAR);
 		expect(queue?.type).toBe('quorum');
 		// The worker holds one message at a time, which it takes once what it wakes is written
-		expect(await calendar.prefetchOf(QUEUE)).toEqual([1]);
+		expect(await broker.prefetchOf(QUEUE, CALENDAR)).toEqual([1]);
 		// The same guarantees as the activity queue: dead letters into the instance's own exchange
 		// on this vhost, kept until its dead letter queue takes them, and five returns at most
 		expect(queue?.arguments).toMatchObject({
@@ -1077,17 +1084,17 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			'x-single-active-consumer': true,
 			'x-delivery-limit': 5
 		});
-		expect(await calendar.bindingsOf(DEAD_LETTERS)).toEqual([
+		expect(await broker.bindingsOf(DEAD_LETTERS, CALENDAR)).toEqual([
 			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }
 		]);
 	});
 
 	it('binds its queue to the fanout as a user that cannot declare it, on a connection of its own', async () => {
 		// One connection of the instance's user on Calendar's vhost, besides its activity one
-		expect((await calendar.connectedUsers()).filter((user) => user === HARNESS_USER)).toHaveLength(
-			1
-		);
-		const bindings = await calendar.bindingsOf(QUEUE);
+		expect(
+			(await broker.connectedUsers(CALENDAR)).filter((user) => user === HARNESS_USER)
+		).toHaveLength(1);
+		const bindings = await broker.bindingsOf(QUEUE, CALENDAR);
 		expect(bindings.filter((binding) => binding.source === FANOUT)).toHaveLength(1);
 		expect(bindings.filter((binding) => binding.source !== FANOUT)).toEqual([
 			{ source: `${PREFIX}.dlx`, routingKey: QUEUE }

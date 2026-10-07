@@ -28,48 +28,36 @@ export interface QueueState {
 	readonly messages: number;
 }
 
-// A vhost of the broker other than the default one, as the platform sets it up for an application
-// such as Calendar
-export interface TestVhost {
-	// The platform's own channel on it, with every right
-	readonly channel: ConfirmChannel;
-	// The address of the broker for one of its users, on this vhost
-	urlFor(user: string, password: string): string;
-	// Lets a user of the broker do this much on this vhost
-	allow(user: string, permissions: Permissions): Promise<void>;
-	bindingsOf(queue: string): Promise<Binding[]>;
-	queue(name: string): Promise<QueueState | null>;
-	// As the broker's own, on this vhost
-	waitForMessages(name: string, count: number): Promise<void>;
-	prefetchOf(queue: string): Promise<number[]>;
-	// The user of each connection open on this vhost, one entry per connection
-	connectedUsers(): Promise<string[]>;
-	// Publishes as an application's own service does, persistent JSON, once the broker took it
-	publish(exchange: string, routingKey: string, body: unknown): Promise<void>;
-}
-
+// The broker, as the platform runs it: the default vhost, where the activity exchange is, and the
+// vhosts it creates for an application such as Calendar. What reads a vhost reads the default one
+// unless told otherwise.
 export interface TestBroker {
-	// The platform's own channel, with every right: what sets the broker up and publishes on it
+	// The platform's own channel on the default vhost, with every right: what sets the broker up and
+	// publishes on it
 	readonly channel: ConfirmChannel;
-	// The address of the broker for one of its users, on the default vhost
-	urlFor(user: string, password: string): string;
+	// The address of the broker for one of its users
+	urlFor(user: string, password: string, vhost?: string): string;
+	// Creates a user, who may do this much on the default vhost
 	addUser(user: string, password: string, permissions: Permissions): Promise<void>;
+	// Creates a vhost, which the platform's own user may do everything on, and resolves to the
+	// platform's channel there
+	addVhost(name: string): Promise<ConfirmChannel>;
+	// Lets a user do this much on another vhost
+	allow(user: string, vhost: string, permissions: Permissions): Promise<void>;
 	// What routes to a queue, but the default exchange, which routes to every queue by its name
-	bindingsOf(queue: string): Promise<Binding[]>;
-	queue(name: string): Promise<QueueState | null>;
+	bindingsOf(queue: string, vhost?: string): Promise<Binding[]>;
+	queue(name: string, vhost?: string): Promise<QueueState | null>;
 	// Resolves once the broker counts that many messages in a queue. It counts those of a quorum
 	// queue on the queue's tick, every five seconds, so a message settled a moment ago may still be
 	// counted; and a dead letter until its dead letter queue takes it, so once a quorum queue is
 	// counted empty, its dead letter queue holds every message dead-lettered from it.
-	waitForMessages(name: string, count: number): Promise<void>;
+	waitForMessages(name: string, count: number, vhost?: string): Promise<void>;
 	// How many messages each consumer of a queue may hold unacknowledged
-	prefetchOf(queue: string): Promise<number[]>;
-	// The user of each connection open, one entry per connection
-	connectedUsers(): Promise<string[]>;
+	prefetchOf(queue: string, vhost?: string): Promise<number[]>;
+	// The user of each connection open, one entry per connection: on every vhost unless one is named
+	connectedUsers(vhost?: string): Promise<string[]>;
 	// Publishes as an application does, persistent and under its id, once the broker took it
 	publish(exchange: string, routingKey: string, body: unknown, messageId?: string): Promise<void>;
-	// Creates a vhost, which the platform's own user may do everything on
-	addVhost(name: string): Promise<TestVhost>;
 	stop(): Promise<void>;
 }
 
@@ -173,16 +161,20 @@ export async function startTestBroker(): Promise<TestBroker> {
 
 	return {
 		channel,
-		urlFor: (user, password) => urlOn('/', user, password),
+		urlFor: (user, password, vhost = '/') => urlOn(vhost, user, password),
 		addUser: async (user, password, permissions) => {
 			await rabbitmqctl('add_user', user, password);
 			await allowOn('/', user, permissions);
 		},
-		bindingsOf: (queue) => bindingsOn('/', queue),
-		queue: (name) => queueOn('/', name),
-		waitForMessages: (name, count) => messagesOn('/', name, count),
-		prefetchOf: (queue) => prefetchOn('/', queue),
-		connectedUsers: async () => (await connectionsOf()).map((row) => row.user),
+		allow: (user, vhost, permissions) => allowOn(vhost, user, permissions),
+		bindingsOf: (queue, vhost = '/') => bindingsOn(vhost, queue),
+		queue: (name, vhost = '/') => queueOn(vhost, name),
+		waitForMessages: (name, count, vhost = '/') => messagesOn(vhost, name, count),
+		prefetchOf: (queue, vhost = '/') => prefetchOn(vhost, queue),
+		connectedUsers: async (vhost) =>
+			(await connectionsOf())
+				.filter((row) => vhost === undefined || row.vhost === vhost)
+				.map((row) => row.user),
 		publish: async (exchange, routingKey, body, messageId) => {
 			channel.publish(exchange, routingKey, Buffer.from(JSON.stringify(body)), {
 				persistent: true,
@@ -196,26 +188,8 @@ export async function startTestBroker(): Promise<TestBroker> {
 			// The default user the platform's channel connects as, which a new vhost grants nothing
 			await allowOn(name, 'guest', { configure: '.*', write: '.*', read: '.*' });
 			const connection = await connect(urlOn(name, 'guest', 'guest'));
-			const vhostChannel = await connection.createConfirmChannel();
 			vhosts.push(connection);
-			return {
-				channel: vhostChannel,
-				urlFor: (user, password) => urlOn(name, user, password),
-				allow: (user, permissions) => allowOn(name, user, permissions),
-				bindingsOf: (queue) => bindingsOn(name, queue),
-				queue: (queue) => queueOn(name, queue),
-				waitForMessages: (queue, count) => messagesOn(name, queue, count),
-				prefetchOf: (queue) => prefetchOn(name, queue),
-				connectedUsers: async () =>
-					(await connectionsOf()).filter((row) => row.vhost === name).map((row) => row.user),
-				publish: async (exchange, routingKey, body) => {
-					vhostChannel.publish(exchange, routingKey, Buffer.from(JSON.stringify(body)), {
-						persistent: true,
-						contentType: 'application/json'
-					});
-					await vhostChannel.waitForConfirms();
-				}
-			};
+			return connection.createConfirmChannel();
 		},
 		stop: async () => {
 			for (const connection of vhosts) await connection.close();
