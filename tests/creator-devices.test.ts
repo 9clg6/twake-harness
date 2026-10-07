@@ -83,6 +83,25 @@ async function logged(
 
 const IDENTITY_ROUTE = '/v1/assistants/me/owner-identity';
 
+// One of the harness's tables is out of reach while `run` runs, as with a database failing on it
+async function withoutTable(
+	r: CreatorRoom,
+	table: string,
+	run: () => Promise<void>
+): Promise<void> {
+	await r.h.db.sql.unsafe(`alter table ${table} rename to ${table}_away`);
+	try {
+		await run();
+	} finally {
+		await r.h.db.sql.unsafe(`alter table ${table}_away rename to ${table}`);
+	}
+}
+
+async function assistantName(r: CreatorRoom): Promise<string | null> {
+	const reply = await r.h.api.get<{ name?: string }>(OWNER, '/v1/assistants/me');
+	return reply.status === 200 ? (reply.body.name ?? null) : null;
+}
+
 const UNVERIFIED_MESSAGE =
 	'I did not act on your last message: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then send it again.';
 const UNENCRYPTED_MESSAGE =
@@ -145,6 +164,54 @@ describe('the creator takes my commands only from the sessions my identity signe
 			UNENCRYPTED_MESSAGE
 		);
 		expect((await r.h.api.get(OWNER, '/v1/assistants/me')).status).toBe(200);
+	});
+
+	it('renames my assistant only from my verified session', async () => {
+		const other = await unverifiedSession(r, sessions);
+		const eventId = await other.sendText(r.room, '/rename Alfred');
+		expect((await r.h.decisionOn(eventId))?.['msg']).toBe('assistant ignored an unverified device');
+		expect(await assistantName(r)).toBe('Jarvis');
+		const renamed = r.saying('Your assistant is now called').length;
+		await r.client.sendText(r.room, '/rename Jeeves');
+		expect(await r.nextSaying('Your assistant is now called', renamed)).toBe(
+			'Your assistant is now called Jeeves.'
+		);
+		expect(await assistantName(r)).toBe('Jeeves');
+	});
+
+	it('takes the name it asked me for only from my verified session', async () => {
+		const deleted = r.saying('Your assistant is deleted').length;
+		await r.client.sendText(r.room, '/delete');
+		await r.nextSaying('Your assistant is deleted', deleted);
+		const asked = r.saying('Which name').length;
+		await r.client.sendText(r.room, '/newbot');
+		await r.nextSaying('Which name', asked);
+		// A name from a session I never verified is no answer to the question
+		const other = await unverifiedSession(r, sessions);
+		const fromOther = await other.sendText(r.room, 'Alfred');
+		expect((await r.h.decisionOn(fromOther))?.['msg']).toBe(
+			'assistant ignored an unverified device'
+		);
+		expect(await assistantName(r)).toBeNull();
+		// The one my verified session gives is
+		const done = r.saying('Done.').length;
+		await r.client.sendText(r.room, 'Iris');
+		expect(await r.nextSaying('Done.', done)).toContain('Iris');
+		expect(await assistantName(r)).toBe('Iris');
+	});
+
+	it('takes no command when it cannot check my session, and tells me to try again', async () => {
+		const notices = r.saying('Something went wrong on my side').length;
+		await withoutTable(r, 'owner_cross_signing', async () => {
+			const eventId = await r.client.sendText(r.room, '/delete');
+			expect(await logged(r, 'owner device check failed', eventId)).toMatchObject({
+				mode: 'enforce'
+			});
+			expect(await r.nextSaying('Something went wrong on my side', notices)).toBe(
+				'Something went wrong on my side. Please try again in a moment.'
+			);
+		});
+		expect(await assistantName(r)).toBe('Iris');
 	});
 
 	it('lets me accept a new identity through the API before I have an assistant', async () => {
