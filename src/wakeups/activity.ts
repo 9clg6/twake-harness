@@ -10,7 +10,7 @@ import {
 	type Listener,
 	type Reading
 } from './listener.js';
-import type { RecipientOutcome } from './logs.js';
+import type { RecipientOutcome } from './outcomes.js';
 import type { WakeDeps, Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type

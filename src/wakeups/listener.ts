@@ -9,14 +9,8 @@ import {
 
 import type { Config } from '../config.js';
 import { isTransient } from '../db/transient.js';
-import {
-	brokerLogger,
-	failureOf,
-	logHandled,
-	outcomeOf,
-	type Handled,
-	type RecipientOutcome
-} from './logs.js';
+import { brokerLogger, failureOf, logHandled, type Handled } from './logs.js';
+import { outcomeOf, type RecipientOutcome } from './outcomes.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // How many times a message may come back before it is dead-lettered, as one that brings the
