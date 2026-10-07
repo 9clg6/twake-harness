@@ -132,8 +132,9 @@ export async function startActivityListener(
 		queue,
 		async (message, { routingKey }) => {
 			// A type the deployment no longer lists keeps its binding, since the library removes none:
-			// its events are taken and dropped
-			if (!source.types.includes(routingKey)) return;
+			// its events are taken and dropped. An event comes by the queue's own name when its dead
+			// letters are moved back into it.
+			if (routingKey !== queue && !source.types.includes(routingKey)) return;
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
 			for (const wakeup of wakeupsOf(parsed.data)) await wake(deps, wakeup);

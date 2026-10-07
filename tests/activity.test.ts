@@ -323,6 +323,18 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		}
 	});
 
+	it('reads an event put back into its queue by name, as dead letters are replayed', async () => {
+		// Moving dead letters back, as the management UI does, sends them to the queue by its name,
+		// through the default exchange
+		const replayed = activityEvent();
+		broker.channel.sendToQueue(QUEUE, Buffer.from(JSON.stringify(replayed)), {
+			persistent: true,
+			messageId: replayed.id
+		});
+		await broker.channel.waitForConfirms();
+		await answerTo(replayed);
+	});
+
 	it('reads a quorum queue of its own, one consumer at a time, its dead letters apart', async () => {
 		const queue = await broker.queue(QUEUE);
 		expect(queue?.type).toBe('quorum');
