@@ -10,7 +10,7 @@ import {
 	setRequestFn,
 	type MatrixEvent
 } from 'matrix-bot-sdk';
-import { StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
+import { RoomId, ShieldStateCode, StoreType } from '@matrix-org/matrix-sdk-crypto-nodejs';
 import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
@@ -24,6 +24,7 @@ import {
 import { reactionAnswer } from '../consents/answers.js';
 import type { PendingQuestion } from '../consents/consent.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
+import { findRequest } from '../consents/repository.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
@@ -42,6 +43,7 @@ import {
 	type CrossSigningResult
 } from './cross-signing.js';
 import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
+import { machineOf } from './crypto-requests.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
@@ -49,6 +51,8 @@ import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js'
 import { makeConsentRequests } from './consent-requests.js';
 import { makeLaidOutText, makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
+import { makeOwnerDeviceGate, type OwnerWords } from './owner-devices.js';
+import type { EventSender } from './owner-keys.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { makeAppserviceStorage } from './storage.js';
 
@@ -86,6 +90,15 @@ interface RoomEvent {
 	readonly event_id?: string;
 	readonly content?: Record<string, unknown>;
 }
+
+// A message that reached an assistant encrypted, with the encrypted event as it arrived, null when
+// it was not kept
+interface Encrypted {
+	readonly event: Record<string, unknown> | null;
+}
+
+// The encrypted events of the pushes under way that the SDK has yet to decrypt, at most
+const MAX_ENCRYPTED_IN_FLIGHT = 1_000;
 
 interface SendJob {
 	readonly asUserId: string;
@@ -441,11 +454,34 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
+	// The encrypted events of a push as they arrived, until the SDK decrypted them or failed to: the
+	// SDK's decrypted event no longer tells which device encrypted it, and an owner's words count
+	// only once that device is known
+	const encryptedEvents = new Map<string, Record<string, unknown>>();
+	appservice.on('room.encrypted_event', (_roomId: string, event: Record<string, unknown>) => {
+		const eventId = event['event_id'];
+		if (typeof eventId !== 'string') return;
+		if (encryptedEvents.size >= MAX_ENCRYPTED_IN_FLIGHT) {
+			const oldest = encryptedEvents.keys().next();
+			if (oldest.done !== true) encryptedEvents.delete(oldest.value);
+		}
+		encryptedEvents.set(eventId, event);
+	});
+	function takeEncrypted(eventId: string | undefined): Record<string, unknown> | null {
+		if (eventId === undefined) return null;
+		const encrypted = encryptedEvents.get(eventId) ?? null;
+		encryptedEvents.delete(eventId);
+		return encrypted;
+	}
+
 	appservice.on(
 		'room.failed_decryption',
 		guard(
 			'decryption retry',
 			async (roomId: string, event: RoomEvent, err: unknown) => {
+				// What the SDK hands here is the encrypted event itself
+				const encrypted = event as unknown as Record<string, unknown>;
+				takeEncrypted(event.event_id);
 				log.error(
 					{ roomId, sender: event.sender, eventId: event.event_id, err },
 					'decryption failed'
@@ -458,15 +494,17 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					if (fetched === 0) return;
 					const intent = appservice.getIntentForUserId(room.userId);
 					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
-						// What the SDK hands here is the raw event itself
-						new EncryptedRoomEvent(event as unknown as Record<string, unknown>),
+						new EncryptedRoomEvent(encrypted),
 						roomId
 					);
 					// The raw event, as a push hands it: the SDK's wrapper keeps its id under another name,
 					// and the message would lose it, with the dedup of its turn and its reactions
-					if (decrypted.type === 'm.room.message') await onRoomMessage(roomId, decrypted.raw, true);
+					if (decrypted.type === 'm.room.message') {
+						await onRoomMessage(roomId, decrypted.raw, { event: encrypted });
+					}
 					// An answer whose key came late counts like any other
-					if (decrypted.type === 'm.reaction') await onOwnerAnswer(roomId, decrypted.raw);
+					if (decrypted.type === 'm.reaction')
+						await onOwnerAnswer(roomId, decrypted.raw, encrypted);
 				} catch (retryErr: unknown) {
 					log.warn({ roomId, eventId: event.event_id, err: retryErr }, 'decryption retry failed');
 				}
@@ -625,9 +663,56 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		metrics: consentMetrics
 	});
 
+	// Who encrypted an event, as the assistant's encryption engine reads it when it decrypts the
+	// event again: the SDK keeps that to itself
+	async function senderOf(
+		assistantUserId: string,
+		roomId: string,
+		encrypted: Record<string, unknown> | null
+	): Promise<EventSender> {
+		if (encrypted === null) throw new Error('the encrypted event was not kept');
+		const intent = appservice.getIntentForUserId(assistantUserId);
+		await ensureEncryption(intent);
+		const decrypted = await machineOf(intent).decryptRoomEvent(
+			JSON.stringify(encrypted),
+			new RoomId(roomId)
+		);
+		const shield = decrypted.shieldState(false);
+		return {
+			userId: decrypted.sender?.toString() ?? null,
+			deviceId: decrypted.senderDevice?.toString() ?? null,
+			curve25519Key: decrypted.senderCurve25519Key ?? null,
+			ed25519Key: decrypted.senderClaimedEd25519Key ?? null,
+			unauthenticated:
+				shield?.code === ShieldStateCode.AuthenticityNotGuaranteed ||
+				shield?.code === ShieldStateCode.MismatchedSender
+		};
+	}
+
+	// An owner's words count only from a device their cross-signing identity signed, in enforce
+	// mode; in report mode they count all the same, and the devices that fall short are reported
+	const ownerDevices = makeOwnerDeviceGate({
+		db,
+		log,
+		mode: config.matrix.ownerDeviceTrust,
+		fetchMessages,
+		senderOf,
+		queryKeys: async (assistantUserId, ownerUserId) => {
+			const intent = appservice.getIntentForUserId(assistantUserId);
+			await ensureEncryption(intent);
+			return intent.underlyingClient.doRequest('POST', '/_matrix/client/v3/keys/query', null, {
+				device_keys: { [ownerUserId]: [] }
+			});
+		}
+	});
+
 	// The owner's answer to a request of the harness: a bare ✅ or ❌ on it. Only an event that
-	// arrived encrypted, from the owner's own device, counts.
-	async function onOwnerAnswer(roomId: string, event: RoomEvent): Promise<void> {
+	// arrived encrypted, from a device of the owner their identity signed, counts.
+	async function onOwnerAnswer(
+		roomId: string,
+		event: RoomEvent,
+		encrypted: Record<string, unknown> | null
+	): Promise<void> {
 		if (event.type !== 'm.reaction') return;
 		const sender = event.sender ?? '';
 		// The assistants' own reactions mark the messages they answered
@@ -638,32 +723,50 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (says === null) return;
 		const room = await assistantRoom(roomId);
 		if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
-		if (principalOfMatrixUser(config, sender) !== room.owner) {
-			log.info({ roomId, sender, owner: room.owner }, 'answer ignored: not the owner');
+		const owner = room.owner;
+		if (principalOfMatrixUser(config, sender) !== owner) {
+			log.info({ roomId, sender, owner }, 'answer ignored: not the owner');
 			return;
 		}
+		// A reaction on anything but one of the harness's questions answers nothing
+		const asked = await withPrincipal(db, { id: owner }, (tx) =>
+			findRequest(tx, owner, annotation.eventId)
+		);
+		if (asked === null) return;
+		const eventId = event.event_id ?? `${roomId}:${Date.now()}`;
+		const words: OwnerWords = {
+			roomId,
+			owner,
+			ownerUserId: sender,
+			assistantUserId: room.userId,
+			eventId,
+			via: 'answer',
+			encrypted
+		};
+		if (!(await ownerDevices.admit(words))) return;
 		await requests.reacted(
-			{ roomId, owner: room.owner, assistantUserId: room.userId },
+			{ roomId, owner, assistantUserId: room.userId },
 			annotation.eventId,
 			says,
-			event.event_id ?? `${roomId}:${Date.now()}`
+			eventId
 		);
 	}
 
 	// The messages that reached an assistant encrypted, between the SDK's decrypted event and the
-	// same event handed on as a room message: only those may answer a question, or start a turn in
-	// an encrypted room
-	const decryptedMessages = new Set<string>();
+	// same event handed on as a room message, with the encrypted event as it arrived: only those may
+	// answer a question, or start a turn in an encrypted room
+	const decryptedMessages = new Map<string, Record<string, unknown> | null>();
 
 	appservice.on(
 		'room.decrypted_event',
 		guard(
 			'owner answer',
 			async (roomId: string, event: RoomEvent) => {
+				const encrypted = takeEncrypted(event.event_id);
 				if (event.type === 'm.room.message' && event.event_id !== undefined) {
-					decryptedMessages.add(event.event_id);
+					decryptedMessages.set(event.event_id, encrypted);
 				}
-				await onOwnerAnswer(roomId, event);
+				await onOwnerAnswer(roomId, event, encrypted);
 			},
 			(roomId: string, event: RoomEvent) => ({
 				roomId,
@@ -677,8 +780,14 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		'room.message',
 		guard(
 			'room message',
-			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) =>
-				onRoomMessage(roomId, event, decryptedMessages.delete((event as RoomEvent).event_id ?? '')),
+			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) => {
+				const eventId = (event as RoomEvent).event_id ?? '';
+				const encrypted: Encrypted | null = decryptedMessages.has(eventId)
+					? { event: decryptedMessages.get(eventId) ?? null }
+					: null;
+				decryptedMessages.delete(eventId);
+				return onRoomMessage(roomId, event, encrypted);
+			},
 			(roomId: string, event: MatrixEvent<unknown> | RoomEvent) => ({
 				roomId,
 				eventId: (event as RoomEvent).event_id,
@@ -690,7 +799,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	async function onRoomMessage(
 		roomId: string,
 		event: MatrixEvent<unknown> | RoomEvent,
-		encrypted: boolean
+		encrypted: Encrypted | null
 	): Promise<void> {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
@@ -719,14 +828,26 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					return;
 				}
 				owner = principal;
-				const requestRoom = { roomId, owner, assistantUserId: room.userId };
-				if (encrypted && (await requests.wrote(requestRoom, eventId, text))) return;
+				if (encrypted !== null) {
+					const words: OwnerWords = {
+						roomId,
+						owner,
+						ownerUserId: sender,
+						assistantUserId: room.userId,
+						eventId,
+						via: 'message',
+						encrypted: encrypted.event
+					};
+					if (!(await ownerDevices.admit(words))) return;
+					const requestRoom = { roomId, owner, assistantUserId: room.userId };
+					if (await requests.wrote(requestRoom, eventId, text)) return;
+				}
 			}
 			// In an encrypted room, the devices of the owner, or of the organization's members, encrypt
 			// what they write: a message in their name that came in clear was written on the server
 			// side, and starts nothing. A room whose encryption cannot be read counts as encrypted, so
 			// that a failure of the homeserver lets no such message through.
-			if (!encrypted) {
+			if (encrypted === null) {
 				const encryption = await roomEncryption(room.userId, roomId);
 				if (encryption !== 'clear') {
 					log.info(
