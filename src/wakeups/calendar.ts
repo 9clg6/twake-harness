@@ -3,8 +3,7 @@ import { DeadLetterError, RabbitMQClient } from '@linagora/rabbitmq-client';
 import ICAL from 'ical.js';
 import { z } from 'zod';
 
-import { formatOffset } from '../agent/clock.js';
-import { wallTimeIn } from '../agent/invitation.js';
+import { formatOffset, wallTimeIn } from '../agent/clock.js';
 import type { CalendarSource, Config } from '../config.js';
 import { cut } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';

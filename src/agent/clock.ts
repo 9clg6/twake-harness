@@ -75,6 +75,41 @@ export function offsetMinutesAt(instant: Date, timeZone: string): number {
 	return Math.round((wall - Math.floor(instant.getTime() / 1000) * 1000) / 60_000);
 }
 
+// A wall time without offset, such as 2026-10-13T18:00:00, its fraction of a second left out
+const WALL = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/;
+
+function isCalendarDate(year: string, month: string, day: string): boolean {
+	const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
+	return (
+		date.getUTCFullYear() === Number(year) &&
+		date.getUTCMonth() === Number(month) - 1 &&
+		date.getUTCDate() === Number(day)
+	);
+}
+
+// A wall time in a zone the runtime knows, such as Europe/Paris, as RFC 3339 with the zone's offset
+// at that time: the offset at the instant first guessed, then again at the instant that offset
+// gives, which settles a time near a change of offset, daylight saving time included; null for a
+// time or a zone it cannot read
+export function wallTimeIn(wall: string, timeZone: string): string | null {
+	const zone = findTimeZone(timeZone);
+	const match = WALL.exec(wall);
+	if (zone === null || match === null) return null;
+	const [, year = '', month = '', day = '', hour = '', minute = '', second = '00'] = match;
+	if (!isCalendarDate(year, month, day)) return null;
+	const at = Date.UTC(
+		Number(year),
+		Number(month) - 1,
+		Number(day),
+		Number(hour),
+		Number(minute),
+		Number(second)
+	);
+	const guessed = offsetMinutesAt(new Date(at), zone);
+	const settled = offsetMinutesAt(new Date(at - guessed * 60_000), zone);
+	return `${year}-${month}-${day}T${hour}:${minute}:${second}${formatOffset(settled)}`;
+}
+
 export function describeMoment(instant: Date, timeZone: string, locale: Locale): Moment {
 	const date = new Intl.DateTimeFormat(locale, {
 		timeZone,

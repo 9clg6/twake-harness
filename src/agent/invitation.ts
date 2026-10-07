@@ -1,5 +1,5 @@
 import { fenced } from '../llm/data.js';
-import { findTimeZone, formatOffset, offsetMinutesAt } from './clock.js';
+import { wallTimeIn } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
 // What an invitation's wake-up carries of its time: start and end from DTSTART and DTEND, and the
@@ -33,53 +33,8 @@ const NOT_CHECKED = 'availability not checked: ';
 
 // RFC 3339 with its offset or Z, the shape read_freebusy accepts as it is
 const AWARE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?:Z|[+-]\d{2}:\d{2})$/;
-// A wall time without offset, written when the event's TZID is unknown to the harness
-const WALL = /^(\d{4})-(\d{2})-(\d{2})T(\d{2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/;
 // The date of an all-day event
-const DATE = /^(\d{4})-(\d{2})-(\d{2})$/;
-
-function isCalendarDate(year: string, month: string, day: string): boolean {
-	const date = new Date(Date.UTC(Number(year), Number(month) - 1, Number(day)));
-	return (
-		date.getUTCFullYear() === Number(year) &&
-		date.getUTCMonth() === Number(month) - 1 &&
-		date.getUTCDate() === Number(day)
-	);
-}
-
-// A wall time of a zone as RFC 3339 with the zone's offset at that time: the offset at the instant
-// first guessed, then again at the instant that offset gives, which settles a time near a change
-// of offset, daylight saving time included
-function inZone(
-	date: readonly [string, string, string],
-	time: readonly [string, string, string],
-	timeZone: string
-): string {
-	const [year, month, day] = date;
-	const [hour, minute, second] = time;
-	const wall = Date.UTC(
-		Number(year),
-		Number(month) - 1,
-		Number(day),
-		Number(hour),
-		Number(minute),
-		Number(second)
-	);
-	const guessed = offsetMinutesAt(new Date(wall), timeZone);
-	const settled = offsetMinutesAt(new Date(wall - guessed * 60_000), timeZone);
-	return `${year}-${month}-${day}T${hour}:${minute}:${second}${formatOffset(settled)}`;
-}
-
-// A wall time, such as 2026-10-13T18:00:00, in a zone the runtime knows, such as Europe/Paris, as
-// RFC 3339 with the zone's offset then; null for a time or a zone it cannot read
-export function wallTimeIn(wall: string, timeZone: string): string | null {
-	const zone = findTimeZone(timeZone);
-	const match = WALL.exec(wall);
-	if (zone === null || match === null) return null;
-	const [, year = '', month = '', day = '', hour = '', minute = '', second = '00'] = match;
-	if (!isCalendarDate(year, month, day)) return null;
-	return inZone([year, month, day], [hour, minute, second], zone);
-}
+const DATE = /^\d{4}-\d{2}-\d{2}$/;
 
 function timeOf(
 	value: unknown,
@@ -94,23 +49,20 @@ function timeOf(
 	if (typeof value !== 'string') return unreadable;
 	if (AWARE.test(value))
 		return Number.isNaN(Date.parse(value)) ? unreadable : { ok: true, time: value };
-	const date = DATE.exec(value);
-	if (date !== null) {
-		const [, year = '', month = '', day = ''] = date;
-		if (!isCalendarDate(year, month, day)) return unreadable;
+	if (DATE.test(value)) {
 		// An all-day event runs from midnight to midnight where the deployment is
-		return { ok: true, time: inZone([year, month, day], ['00', '00', '00'], defaultZone) };
+		const midnight = wallTimeIn(`${value}T00:00:00`, defaultZone);
+		return midnight === null ? unreadable : { ok: true, time: midnight };
 	}
-	const wall = WALL.exec(value);
-	if (wall === null) return unreadable;
-	const [, year = '', month = '', day = '', hour = '', minute = '', second = '00'] = wall;
-	if (!isCalendarDate(year, month, day)) return unreadable;
+	// A wall time, in the zone the invitation names: one the runtime does not know is no zone
+	if (wallTimeIn(value, 'UTC') === null) return unreadable;
 	if (typeof timezone !== 'string' || timezone.length === 0) {
 		return { ok: false, reason: `${NOT_CHECKED}a time without offset and no time zone` };
 	}
-	const zone = findTimeZone(timezone);
-	if (zone === null) return { ok: false, reason: `${NOT_CHECKED}unknown time zone ${timezone}` };
-	return { ok: true, time: inZone([year, month, day], [hour, minute, second], zone) };
+	const time = wallTimeIn(value, timezone);
+	return time === null
+		? { ok: false, reason: `${NOT_CHECKED}unknown time zone ${timezone}` }
+		: { ok: true, time };
 }
 
 // The invitation's own period, as read_freebusy takes it, or why it is not asked: the contract
