@@ -31,7 +31,12 @@ import {
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
-import { checkAvailability, type Invitation, type ToolRunner } from './invitation.js';
+import {
+	carriesInvitation,
+	checkAvailability,
+	type Invitation,
+	type ToolRunner
+} from './invitation.js';
 import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
@@ -298,8 +303,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		log: FastifyBaseLogger,
 		messages: Messages
 	): Promise<Told> {
-		const invitation = input.origin === 'event' ? input.event?.invitation : undefined;
-		if (invitation === undefined) return { message: input.message, question: null };
+		const event = input.origin === 'event' ? input.event : undefined;
+		if (!carriesInvitation(event)) return { message: input.message, question: null };
+		const { invitation } = event;
 		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
 			const tool = tools.find(name);

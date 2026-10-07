@@ -1,22 +1,27 @@
+import { z } from 'zod';
+
 import { fenced } from '../llm/data.js';
 import { wallTimeIn } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
-// What an invitation's wake-up carries of its time: start and end from DTSTART and DTEND, and the
-// TZID, "UTC", or null for an all-day event
-export interface InvitationTimes {
-	readonly start: unknown;
-	readonly end: unknown;
-	readonly timezone: unknown;
-}
+// What the wake-up of an invitation carries for the harness to check it, which its turn's payload
+// keeps: its UID, its start and end from DTSTART and DTEND, and the TZID, "UTC", or null for an
+// all-day event
+export const invitationSchema = z.object({
+	uid: z.string().min(1),
+	start: z.string().nullable(),
+	end: z.string().nullable(),
+	timezone: z.string().nullable()
+});
 
-// What the wake-up of an invitation carries for the harness to check it: its UID, and its times
-// as the calendar wrote them
-export interface Invitation {
-	readonly uid: string;
-	readonly start: string | null;
-	readonly end: string | null;
-	readonly timezone: string | null;
+export type Invitation = z.infer<typeof invitationSchema>;
+
+// Whether an event carries an invitation for the harness to check, whichever source it came from:
+// what its wake-up tells, and its turn, follow from that alone, never from its type
+export function carriesInvitation<T extends { readonly invitation?: Invitation | undefined }>(
+	event: T | undefined
+): event is T & { readonly invitation: Invitation } {
+	return event?.invitation !== undefined;
 }
 
 // The period read_freebusy is asked about, or why it is not asked
@@ -68,7 +73,10 @@ function timeOf(
 // The invitation's own period, as read_freebusy takes it, or why it is not asked: the contract
 // refuses a time without offset, a period that ends before it starts and one over 31 days, so
 // none of those is ever sent, and no length is guessed for an event without an end
-export function invitationSlot(times: InvitationTimes, defaultZone: string): InvitationSlot {
+export function invitationSlot(
+	times: Pick<Invitation, 'start' | 'end' | 'timezone'>,
+	defaultZone: string
+): InvitationSlot {
 	const start = timeOf(times.start, times.timezone, defaultZone, 'start');
 	if (!start.ok) return start;
 	const end = timeOf(times.end, times.timezone, defaultZone, 'end');

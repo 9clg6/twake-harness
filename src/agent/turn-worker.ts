@@ -11,6 +11,7 @@ import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import type { RefusalReason } from './admission.js';
+import { invitationSchema } from './invitation.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
 const turnPayload = z.object({
@@ -26,14 +27,7 @@ const turnPayload = z.object({
 		.object({
 			id: z.string().min(1),
 			type: z.string().min(1),
-			invitation: z
-				.object({
-					uid: z.string().min(1),
-					start: z.string().nullable(),
-					end: z.string().nullable(),
-					timezone: z.string().nullable()
-				})
-				.optional()
+			invitation: invitationSchema.optional()
 		})
 		.optional()
 });

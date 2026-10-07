@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
-import type { Invitation } from '../agent/invitation.js';
+import { carriesInvitation, type Invitation } from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
@@ -50,7 +50,7 @@ function eventData(wakeup: Wakeup): string {
 
 // What the owner's assistant is told, in its owner's language: what arrived, then the event
 function told(wakeup: Wakeup, messages: Messages): string {
-	if (wakeup.invitation !== undefined) return messages.events.invited(wakeup.id, eventData(wakeup));
+	if (carriesInvitation(wakeup)) return messages.events.invited(wakeup.id, eventData(wakeup));
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
 		? messages.events.taskAssigned(wakeup.id, eventData(wakeup))
 		: messages.events.published(wakeup.type, wakeup.id, eventData(wakeup));
