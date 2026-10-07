@@ -40,6 +40,11 @@ import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
+import {
+	findOwnerCrossSigning,
+	pinAccepted,
+	type OwnerCrossSigning
+} from './matrix/owner-cross-signing-repository.js';
 import { listMemory } from './memory/repository.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
@@ -101,6 +106,37 @@ const skillBodySchema = z
 		content: z.string().min(1).max(20_000)
 	})
 	.strict();
+
+// The identity an owner accepts, given by the master key the harness showed them
+const ownerIdentityBodySchema = z.object({ master_key: z.string().min(1).max(128) }).strict();
+
+// The cross-signing identity an owner's assistant holds for them, and the one that signed the
+// session their words last came from when it was another, as the owner reads them
+interface OwnerIdentityView {
+	readonly pinned: {
+		readonly master_key: string;
+		readonly pinned_by: string;
+		readonly pinned_at: string;
+	} | null;
+	readonly published: { readonly master_key: string; readonly seen_at: string } | null;
+}
+
+function toOwnerIdentityView(held: OwnerCrossSigning | null): OwnerIdentityView {
+	return {
+		pinned:
+			held === null
+				? null
+				: {
+						master_key: held.masterPublicKey,
+						pinned_by: held.pinnedBy,
+						pinned_at: held.pinnedAt.toISOString()
+					},
+		published:
+			held === null || held.seen === null
+				? null
+				: { master_key: held.seen.masterPublicKey, seen_at: held.seen.at.toISOString() }
+	};
+}
 
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
@@ -411,6 +447,52 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				});
 				request.log.info({ principal: principal.id, queued }, 'recovery requested');
 				return reply.code(202).send({ queued });
+			});
+
+			// The cross-signing identity the owner's assistant takes their words with, and the one that
+			// signed the session their words last came from when it was another, such as after they
+			// reset theirs: only the owner, with their own token, makes the assistant hold that one
+			// instead
+			scope.get('/assistants/me/owner-identity', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+				if ((await assistants.find(principal.id)) === null) {
+					return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				}
+				const held = await withPrincipal(db, principal, (tx) =>
+					findOwnerCrossSigning(tx, principal.id)
+				);
+				return toOwnerIdentityView(held);
+			});
+
+			scope.put('/assistants/me/owner-identity', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+				const parsed = ownerIdentityBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				if ((await assistants.find(principal.id)) === null) {
+					return reply.code(404).send(RESOURCE_UNAVAILABLE);
+				}
+				const masterKey = parsed.data.master_key;
+				// Only the identity that signed the session the owner's words last came from, as the
+				// harness showed it to them, and only while it is still the latest one seen
+				const accepted = await withPrincipal(db, principal, async (tx) => {
+					const held = await findOwnerCrossSigning(tx, principal.id);
+					if (held?.seen?.masterPublicKey !== masterKey) return { held, pinned: null };
+					return { held, pinned: await pinAccepted(tx, principal.id, masterKey) };
+				});
+				if (accepted.pinned === null) {
+					return reply
+						.code(409)
+						.send({ error: 'not the identity seen', ...toOwnerIdentityView(accepted.held) });
+				}
+				request.log.info(
+					{ principal: principal.id, replaced: accepted.held?.pinnedBy ?? null },
+					'owner identity accepted'
+				);
+				return toOwnerIdentityView(accepted.pinned);
 			});
 
 			scope.delete('/assistants/me', async (request, reply) => {

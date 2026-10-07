@@ -148,6 +148,17 @@ export interface Messages {
 	// How the owner's assistant finds an invitation the conversation does not hold, as after a
 	// restart or in a new session: it searches the events, then reads the one it found
 	readonly lookup: string;
+	// The owner's words came from a session of theirs that their cross-signing identity did not
+	// sign, or that another identity than the one their assistant holds for them signed
+	readonly ownerDevices: {
+		// Not taken: what was not, why, and what the owner can do about it
+		refused(via: OwnerWordsKind, reason: DeviceShortfall): string;
+		// Taken all the same, the deployment only reporting: why the session falls short, and what
+		// the owner can do about it
+		reported(reason: DeviceShortfall): string;
+		// Not taken: the message came in clear, in a room that reads as clear
+		readonly unencrypted: string;
+	};
 }
 
 // A question about the first use of an application at one level. What the catalog says the level
@@ -296,7 +307,36 @@ const ENGLISH: Messages = {
 		].join('\n'),
 	addressing: null,
 	lookup:
-		'To find an invitation that is not in this conversation, search for it with list_events, then read it with read_event before you speak of it or act on it.'
+		'To find an invitation that is not in this conversation, search for it with list_events, then read it with read_event before you speak of it or act on it.',
+	ownerDevices: {
+		refused: (via, reason) => {
+			const what =
+				via === 'message'
+					? 'I did not act on your last message'
+					: 'I did not take your answer, so my question still waits';
+			const again = via === 'message' ? 'send it again' : 'answer again';
+			switch (reason) {
+				case 'unverified':
+					return `${what}: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then ${again}.`;
+				case 'no_identity':
+					return `${what}: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then ${again}.`;
+				case 'changed':
+					return `${what}: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}); until then I act on none of your messages.`;
+			}
+		},
+		reported: (reason) => {
+			switch (reason) {
+				case 'unverified':
+					return 'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
+				case 'no_identity':
+					return 'Your account has no encryption identity yet, so I cannot verify your sessions. I act on what you write for now; set one up so that I keep doing so: sign out of Twake Chat and sign in again.';
+				case 'changed':
+					return `Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}) so that I keep doing so.`;
+			}
+		},
+		unencrypted:
+			'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.'
+	}
 };
 
 // Tutoiement, as Hermes spoke. The name is chosen by the user, so no word around it agrees in
@@ -442,7 +482,36 @@ const FRENCH: Messages = {
 	addressing:
 		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer.",
 	lookup:
-		"Pour retrouver une invitation qui n'est pas dans cette conversation, cherche-la avec list_events, puis lis-la avec read_event avant d'en parler ou d'agir."
+		"Pour retrouver une invitation qui n'est pas dans cette conversation, cherche-la avec list_events, puis lis-la avec read_event avant d'en parler ou d'agir.",
+	ownerDevices: {
+		refused: (via, reason) => {
+			const what =
+				via === 'message'
+					? "Je n'ai pas donné suite à ton dernier message"
+					: "Je n'ai pas pris ta réponse en compte, ma question attend donc toujours";
+			const again = via === 'message' ? 'renvoie-le' : 'réponds à nouveau';
+			switch (reason) {
+				case 'unverified':
+					return `${what} : ${via === 'message' ? 'il' : 'elle'} vient d'une de tes sessions que je ne peux pas vérifier. Dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier » ; puis ${again}.`;
+				case 'no_identity':
+					return `${what} : ton compte n'a pas encore d'identité de chiffrement, je ne peux donc vérifier aucune de tes sessions. Déconnecte-toi de Twake Chat et reconnecte-toi pour la créer ; puis ${again}.`;
+				case 'changed':
+					return `${what} : ton identité de chiffrement n'est pas celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) ; d'ici là, je ne donne suite à aucun de tes messages.`;
+			}
+		},
+		reported: (reason) => {
+			switch (reason) {
+				case 'unverified':
+					return "Cette session n'est pas vérifiée. Je donne suite à ce que tu y écris pour l'instant ; vérifie-la pour que cela continue : dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier ».";
+				case 'no_identity':
+					return "Ton compte n'a pas encore d'identité de chiffrement, je ne peux donc pas vérifier tes sessions. Je donne suite à ce que tu écris pour l'instant ; crée-la pour que cela continue : déconnecte-toi de Twake Chat et reconnecte-toi.";
+				case 'changed':
+					return `Ton identité de chiffrement n'est pas celle que je connais. Je donne suite à ce que tu écris pour l'instant ; si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) pour que cela continue.`;
+			}
+		},
+		unencrypted:
+			"Je n'ai pas donné suite à ton dernier message : il m'est parvenu non chiffré, et je ne donne suite qu'à ce que tes sessions vérifiées chiffrent."
+	}
 };
 
 const CATALOG: Readonly<Record<Locale, Messages>> = { en: ENGLISH, fr: FRENCH };
@@ -450,3 +519,13 @@ const CATALOG: Readonly<Record<Locale, Messages>> = { en: ENGLISH, fr: FRENCH };
 export function getMessages(locale: Locale): Messages {
 	return CATALOG[locale];
 }
+
+// A message, or an answer to one of the harness's questions
+export type OwnerWordsKind = 'message' | 'answer';
+
+// Why a session of the owner falls short: their identity did not sign it, they have no identity,
+// or their identity is not the one their assistant holds
+export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
+
+// Where an owner confirms an identity they reset themselves, which no message in the chat can do
+const OWNER_IDENTITY_ROUTE = 'PUT /v1/assistants/me/owner-identity';
