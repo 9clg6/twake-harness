@@ -121,6 +121,8 @@ spec:
               value: {{ .Values.config.orgAgentMembers | quote }}
             - name: EVENTS_CLIENT_IDS
               value: {{ .Values.config.eventsClientIds | quote }}
+            - name: PROVISIONER_CLIENT_IDS
+              value: {{ .Values.config.provisionerClientIds | quote }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
             {{- with .Values.config.matrixServerName }}
             - name: MATRIX_SERVER_NAME
