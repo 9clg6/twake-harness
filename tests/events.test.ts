@@ -10,6 +10,8 @@ import {
 	type ActivityEvent,
 	type ActivityExchange
 } from './helpers/activity.js';
+import { startTestHarness, type TestHarness } from './helpers/app.js';
+import { makeClient } from './helpers/client.js';
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
@@ -37,6 +39,7 @@ function acceptCall(uid: string): ToolCall[] {
 	];
 }
 
+// An event as a dispatcher used to post it for an owner
 const EVENT = { owner: 'alice@test.local', event_id: 'evt-1', type: INVITED };
 
 function remember(content: string, target: 'memory' | 'user' = 'memory'): ToolCall[] {
@@ -67,12 +70,7 @@ describe('an event wakes my assistant', () => {
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
 		activity = await startActivityExchange([ASSIGNED, INVITED]);
-		h = await startMatrixHarness({
-			env: {
-				...activity.settings,
-				EVENTS_CLIENT_IDS: 'dispatcher, other-service'
-			}
-		});
+		h = await startMatrixHarness({ env: activity.settings });
 		// These tests are about events: Alice already let her assistant read her calendar and write
 		// in it
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
@@ -103,36 +101,6 @@ describe('an event wakes my assistant', () => {
 		if (activity !== undefined) await activity.close();
 		if (client !== undefined) await client.stop();
 		if (h !== undefined) await h.close();
-	});
-
-	it('refuses an event without credentials, from a user, or for a user without an assistant', async () => {
-		const calls = h.apisix.llm.calls.length;
-		const app = h.apps[0];
-		if (app === undefined) throw new Error('no api replica');
-		const anonymous = await app.inject({ method: 'POST', url: '/v1/events', payload: EVENT });
-		expect(anonymous.statusCode).toBe(401);
-		const asUser = await h.api.post('alice@test.local', '/v1/events', {
-			...EVENT,
-			event_id: 'evt-2'
-		});
-		expect(asUser.status).toBe(403);
-		const nobody = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'nobody',
-			event_id: 'evt-3',
-			type: INVITED
-		});
-		expect(nobody.status).toBe(404);
-		const malformed = await h.api.post('dispatcher', '/v1/events', { owner: 'alice' });
-		expect(malformed.status).toBe(400);
-		const reasons = h
-			.logLines()
-			.filter((l) => l['msg'] === 'event refused')
-			.map((l) => l['reason']);
-		expect(reasons).toEqual(
-			expect.arrayContaining(['missing', 'not_a_dispatcher', 'no_assistant'])
-		);
-		await sleep(1000);
-		expect(h.apisix.llm.calls.length).toBe(calls);
 	});
 
 	it('lets an event make its assistant read, never act on its own: acting waits for the owner', async () => {
@@ -286,5 +254,26 @@ describe('an event wakes my assistant', () => {
 			'/v1/memory'
 		);
 		expect(kept.body.user).toContain('Prefers meetings in the morning');
+	});
+});
+
+describe('the API, which events no longer come through', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		// A deployment that still names the service clients a dispatcher posted events as
+		h = await startTestHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service' } });
+	});
+	afterAll(async () => {
+		if (h !== undefined) await h.close();
+	});
+
+	it('starts with the clients a deployment still names, and answers POST /v1/events as a route it never had', async () => {
+		const c = makeClient(h);
+		for (const sub of ['dispatcher', 'alice@test.local']) {
+			expect(await c.post(sub, '/v1/events', EVENT)).toEqual({
+				status: 404,
+				body: { message: 'Route POST:/v1/events not found', error: 'Not Found', statusCode: 404 }
+			});
+		}
 	});
 });

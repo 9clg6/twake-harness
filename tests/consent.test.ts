@@ -61,7 +61,7 @@ describe('my assistant asks before it first uses an application', () => {
 	let room: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
-		h = await startMatrixHarness({ env: { EVENTS_CLIENT_IDS: 'dispatcher' } });
+		h = await startMatrixHarness();
 		h.apisix.contracts.spec = CATALOG;
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		alice = await h.synapse.registerUser('alice');

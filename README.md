@@ -119,7 +119,7 @@ An owner who resets their identity, so that their sessions are signed by a new o
 
 ### Identity
 
-One person is one principal everywhere in the harness: the subject of their platform token, which is their email. A user of the homeserver is that same person: `@alice:<MATRIX_SERVER_NAME>` is the principal `alice@<MATRIX_MAIL_DOMAIN>`, and the mail domain defaults to the server name. The creator conversation, the API, the `owner` of the events the dispatcher posts and the owner header of the contract calls all carry that principal, so the assistant created from Twake Chat is the one the API returns for the owner's token, and a delegation keyed by email at the gateway matches. A principal of another mail domain has no account on the homeserver, so no room can be opened for it: the API refuses to create its assistant with a 422.
+One person is one principal everywhere in the harness: the subject of their platform token, which is their email. A user of the homeserver is that same person: `@alice:<MATRIX_SERVER_NAME>` is the principal `alice@<MATRIX_MAIL_DOMAIN>`, and the mail domain defaults to the server name. The creator conversation, the API, the email by which an event from RabbitMQ names its recipient and the owner header of the contract calls all carry that principal, so the assistant created from Twake Chat is the one the API returns for the owner's token, and a delegation keyed by email at the gateway matches. A principal of another mail domain has no account on the homeserver, so no room can be opened for it: the API refuses to create its assistant with a 422.
 
 ### Organization agent
 
@@ -127,7 +127,7 @@ With `ORG_AGENT_ENABLED`, the matrix role runs one more bot, the organization ag
 
 ### Events
 
-The dispatcher wakes an assistant by posting an event to `POST /v1/events` with the owner's identifier, the event's id and its type, under a token of one of the service clients named in `EVENTS_CLIENT_IDS` (by subject); a user's token is refused. The harness queues a turn in the owner's room, deduplicated on the event id, in which the assistant reads the event through the contracts and tells the owner; whatever that turn prepares to write waits for the owner's yes (see Consent). An event for a user without an assistant is refused and logged. These turns skip the hourly cap of `WAKEUPS_PER_HOUR`, which counts the wake-ups from the broker alone (see The activity exchange), and are deferred as any event's turn when admission refuses them (see Admission). An invitation reaches its invitee from Calendar's fanout instead (see Calendar's invitations).
+Events reach the assistants from RabbitMQ alone, which the worker role listens to: the `activity` exchange, where the applications publish their CloudEvents, and Calendar's fanout of the invitations it sends (see below). Each event comes with its turn, in the room of the owner it is for: the model is handed what the event says, and never reads it again through the contracts. The harness takes no event over HTTP: `POST /v1/events`, through which a dispatcher posted events, is gone, and a deployment that still sets `EVENTS_CLIENT_IDS`, the service clients it took them from, starts as before and ignores it.
 
 ### The activity exchange
 

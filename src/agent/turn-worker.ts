@@ -19,10 +19,10 @@ const turnPayload = z.object({
 	roomId: z.string().min(1),
 	eventId: z.string().min(1),
 	text: z.string().min(1),
-	// Who started the turn: the owner's message, or an event a dispatcher posted
+	// Who started the turn: the owner's message, or an event the harness took from the broker
 	origin: z.enum(['owner', 'event']).optional(),
-	// The event a dispatcher posted, when the turn is an event's: its id and CloudEvent type, and
-	// for an invitation, what the harness checks before the model speaks
+	// The event, when the turn is an event's: its id and CloudEvent type, as its source published
+	// them, and for an invitation, what the harness checks before the model speaks
 	event: z
 		.object({
 			id: z.string().min(1),
@@ -44,9 +44,8 @@ const EVENT_TURN_RETRY_MS = 2000;
 const EVENT_TURN_RETRY_MAX_MS = 60_000;
 
 // What links a turn's contract calls and log lines to their cause: the Matrix id of the owner's
-// message, or, for a turn an event woke, the bare id the dispatcher posted, which is also the
-// event's row id and the dispatcher's own request and correlation ids, so that the gateway's
-// audit records match it exactly. The prefixed form stays the turn's internal key.
+// message, or, for a turn an event woke, the bare id the event's source gave it, so that the
+// gateway's audit records match it exactly. The prefixed form stays the turn's internal key.
 function correlationIdOf(payload: TurnPayload, origin: TurnOrigin): string {
 	if (origin !== 'event') return payload.eventId;
 	if (payload.event !== undefined) return payload.event.id;
