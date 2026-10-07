@@ -25,18 +25,19 @@ export async function startTcpProxy(upstream: () => Upstream): Promise<TcpProxy>
 			return;
 		}
 		const { host, port } = upstream();
-		const server = connect(port, host);
-		for (const socket of [client, server]) {
+		// The connection on to the upstream server, carrying what the client sends and back
+		const onward = connect(port, host);
+		for (const socket of [client, onward]) {
 			sockets.add(socket);
 			socket.on('error', () => undefined);
 			socket.on('close', () => {
 				sockets.delete(socket);
 				client.destroy();
-				server.destroy();
+				onward.destroy();
 			});
 		}
-		client.pipe(server);
-		server.pipe(client);
+		client.pipe(onward);
+		onward.pipe(client);
 	});
 	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
 	const address = server.address();
