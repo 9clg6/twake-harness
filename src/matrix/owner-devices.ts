@@ -58,6 +58,10 @@ export interface CheckedEvent {
 	readonly event: Record<string, unknown>;
 }
 
+// Where an owner's words came in clear: in a room of their assistant that reads as clear, or to
+// the creator, which takes encrypted commands only
+export type UnencryptedReason = 'clear room' | 'unencrypted';
+
 // Whether the owner's words count, and then the event to act on: the one the check decrypted, or
 // null when the check could not decrypt it, which only report mode takes all the same
 export type Admission =
@@ -86,9 +90,9 @@ export interface OwnerDeviceGate {
 	// signed by the identity the harness holds for the owner, in report mode always. Either way the
 	// device is logged without the words, and the owner is told when it falls short.
 	admit(words: OwnerWords): Promise<Admission>;
-	// Whether the owner's words that came in clear, in a room of their assistant that reads as clear,
-	// count: never in enforce mode, where the owner is told, and as before in report mode
-	admitUnencrypted(words: OwnerWords): Promise<boolean>;
+	// Whether the owner's words that came in clear count: never in enforce mode, where the owner is
+	// told, and as before in report mode; the reason says where they came in clear
+	admitUnencrypted(words: OwnerWords, reason: UnencryptedReason): Promise<boolean>;
 }
 
 export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate {
@@ -206,9 +210,9 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			await tell(words, verdict.device, reason, (m) => m.ownerDevices.refused(via, shortfall));
 			return REFUSED;
 		},
-		admitUnencrypted: async (words) => {
+		admitUnencrypted: async (words, reason) => {
 			const { roomId, owner, eventId } = words;
-			const fields = { roomId, owner, eventId, mode, reason: 'clear room' };
+			const fields = { roomId, owner, eventId, mode, reason };
 			if (mode === 'report') {
 				log.info(fields, 'owner message unencrypted');
 				return true;
