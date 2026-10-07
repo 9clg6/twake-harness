@@ -456,6 +456,34 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect((await calendar.queue(DEAD_LETTERS))?.messages).toBe(0);
 	});
 
+	it('reads what it can of an invitation: a long title cut, a bad organizer or time left out', async () => {
+		// 1,600 characters of title, an end the calendar wrote wrong, and an organizer that is no
+		// address, whose notification's sender stands in
+		const title = 'Réunion '.repeat(200);
+		await publish(
+			notification({
+				uid: 'uid-lenient',
+				sender: ' Dave@Test.Local ',
+				lines: [
+					`SUMMARY:${title}`,
+					'DTSTART:20261006T150000Z',
+					'DTEND:2026100',
+					'ORGANIZER:mailto:not an address'
+				]
+			})
+		);
+		const shown = shownIn(lastUser((await turnsOf('uid-lenient', 1))[0]?.request));
+		expect(shown?.untrusted.title).toBe(title.slice(0, 1000));
+		expect(shown?.object).toEqual({
+			type: 'event',
+			uid: 'uid-lenient',
+			start: '2026-10-06T15:00:00Z',
+			end: null,
+			timezone: 'UTC',
+			organizer: 'dave@test.local'
+		});
+	});
+
 	it('checks my slot before the model speaks, the invitation left out, then tells me I am free', async () => {
 		// Alice let her assistant read her calendar
 		await grantConsent(r.h.db, 'alice@test.local', 'calendar', 'read');

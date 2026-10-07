@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import { DeadLetterError, RabbitMQClient } from '@linagora/rabbitmq-client';
 import ICAL from 'ical.js';
+import { z } from 'zod';
 
 import { formatOffset } from '../agent/clock.js';
 import { INVITED_EVENT_TYPE, wallTimeIn } from '../agent/invitation.js';
@@ -16,6 +17,12 @@ const CALENDAR_FANOUT = 'calendar:event:notificationEmail:send';
 // The source the calendar producer gave the invitations it published, which wake-ups are kept by
 const SOURCE = 'twake://calendar';
 
+// The most characters of a title the model is shown: the organizer writes it, at any length, and
+// one longer is cut rather than refused
+const TITLE_MAX = 1000;
+
+const address = z.email();
+
 // An address as the calendar compares them: trimmed and in lower case, or null for anything else
 function addressOf(value: unknown): string | null {
 	if (typeof value !== 'string') return null;
@@ -24,12 +31,21 @@ function addressOf(value: unknown): string | null {
 }
 
 // The organizer of an invitation: its ORGANIZER without mailto:, or the sender of the notification
-// when it names none
+// when it names none; whichever is an email address, so that nothing else passes for what the
+// calendar computed
 function organizerOf(vevent: ICAL.Component, sender: unknown): string | null {
 	const written = vevent.getFirstPropertyValue('organizer');
 	const organizer =
 		typeof written === 'string' ? addressOf(written.trim().replace(/^mailto:/i, '')) : null;
-	return organizer ?? addressOf(sender);
+	for (const candidate of [organizer, addressOf(sender)]) {
+		if (candidate !== null && address.safeParse(candidate).success) return candidate;
+	}
+	return null;
+}
+
+function cut(text: string, max: number): string {
+	const characters = Array.from(text);
+	return characters.length <= max ? text : characters.slice(0, max).join('');
 }
 
 // A property's value as the calendar wrote it, escapes included
@@ -156,7 +172,7 @@ function wakeupOf(message: Record<string, unknown>): Wakeup | null {
 					...(occurrence === null ? {} : { occurrence })
 				}
 			},
-			untrusted: typeof title === 'string' ? { title } : {}
+			untrusted: typeof title === 'string' ? { title: cut(title, TITLE_MAX) } : {}
 		},
 		invitation: { uid, start: start.at, end: end.at, timezone: start.timezone }
 	};
