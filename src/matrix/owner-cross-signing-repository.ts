@@ -21,7 +21,12 @@ export interface OwnerCrossSigning {
 
 // Why the owner is told about one of their devices
 export type DeviceNoticeReason =
-	'unverified' | 'no_identity' | 'identity_changed' | 'check_failed' | 'unencrypted';
+	| 'unverified'
+	| 'no_identity'
+	| 'identity_changed'
+	| 'check_failed'
+	| 'unencrypted'
+	| 'old_session';
 
 interface OwnerCrossSigningRow {
 	owner: string;

@@ -167,6 +167,9 @@ export interface Messages {
 		reported(reason: DeviceShortfall): string;
 		// Not taken: the message came in clear, in a room that reads as clear
 		readonly unencrypted: string;
+		// Not taken: the owner's client encrypted the words with a Megolm session it has used for longer
+		// than the harness keeps what it received, and how to have it start a new one
+		oldSession(via: OwnerWordsKind): string;
 	};
 }
 
@@ -358,7 +361,15 @@ const ENGLISH: Messages = {
 			}
 		},
 		unencrypted:
-			'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.'
+			'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.',
+		oldSession: (via) => {
+			const what =
+				via === 'message'
+					? 'I did not act on your last message'
+					: 'I did not take your answer, so my question still waits';
+			const again = via === 'message' ? 'send it again' : 'answer again';
+			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then ${again}.`;
+		}
 	}
 };
 
@@ -548,7 +559,16 @@ const FRENCH: Messages = {
 			}
 		},
 		unencrypted:
-			"Je n'ai pas donné suite à ton dernier message : il m'est parvenu non chiffré, et je ne donne suite qu'à ce que tes sessions vérifiées chiffrent."
+			"Je n'ai pas donné suite à ton dernier message : il m'est parvenu non chiffré, et je ne donne suite qu'à ce que tes sessions vérifiées chiffrent.",
+		oldSession: (via) => {
+			const what =
+				via === 'message'
+					? "Je n'ai pas donné suite à ton dernier message"
+					: "Je n'ai pas pris ta réponse en compte, ma question attend donc toujours";
+			const encrypted = via === 'message' ? "l'a chiffré" : "l'a chiffrée";
+			const again = via === 'message' ? 'renvoie-le' : 'réponds à nouveau';
+			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Dans Twake Chat, envoie /discardsession dans cette conversation pour qu'elle en utilise de nouvelles ; puis ${again}.`;
+		}
 	}
 };
 

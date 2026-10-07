@@ -210,9 +210,13 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 					seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)
 				);
 				if (old) {
+					const { deviceId, curve25519Key } = checked.sender;
 					log.info(
-						{ roomId, owner, eventId, via, mode, deviceId: checked.sender.deviceId },
+						{ roomId, owner, eventId, via, mode, deviceId },
 						'assistant ignored words of an old session'
+					);
+					await tell(words, deviceId ?? curve25519Key ?? 'unknown', 'old_session', false, (m) =>
+						m.ownerDevices.oldSession(via)
 					);
 					return REFUSED;
 				}

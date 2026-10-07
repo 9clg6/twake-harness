@@ -106,6 +106,8 @@ const UNVERIFIED_MESSAGE =
 	'I did not act on your last message: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then send it again.';
 const UNENCRYPTED_MESSAGE =
 	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
+const OLD_SESSION_MESSAGE =
+	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 
@@ -303,5 +305,28 @@ describe('while the harness only reports the sessions the creator would not take
 			);
 		});
 		expect(r.saying('I create and manage')).toHaveLength(helped);
+	});
+
+	it('takes no command of a session it first saw over a month ago, and tells me to start a new one', async () => {
+		const helped = r.saying('I create and manage').length;
+		await r.client.sendText(r.room, '/help');
+		await r.nextSaying('I create and manage', helped);
+		const notices = r.saying('I did not act on your last message: your app').length;
+		await withPrincipal(
+			r.h.db,
+			{ id: OWNER },
+			(tx) => tx.sql`
+				update owner_megolm_sessions set first_seen_at = now() - interval '31 days'
+				where owner = ${OWNER}`
+		);
+		const eventId = await r.client.sendText(r.room, '/help');
+		expect(await r.h.decisionOn(eventId)).toMatchObject({
+			msg: 'assistant ignored words of an old session',
+			mode: 'report'
+		});
+		expect(await r.nextSaying('I did not act on your last message: your app', notices)).toBe(
+			OLD_SESSION_MESSAGE
+		);
+		expect(r.saying('I create and manage')).toHaveLength(helped + 1);
 	});
 });

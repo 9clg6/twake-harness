@@ -190,6 +190,27 @@ async function firstSeen(r: ConsentRoom, sessionId: string): Promise<Date | null
 	return rows[0]?.first_seen_at ?? null;
 }
 
+// Alice's Megolm sessions as the harness sees them a month after it first decrypted words of them,
+// while `run` runs
+async function sessionsAMonthOld(r: ConsentRoom, run: () => Promise<void>): Promise<void> {
+	await withPrincipal(
+		r.h.db,
+		{ id: OWNER },
+		(tx) => tx.sql`
+			update owner_megolm_sessions set first_seen_at = now() - interval '31 days'
+			where owner = ${OWNER}`
+	);
+	try {
+		await run();
+	} finally {
+		await withPrincipal(
+			r.h.db,
+			{ id: OWNER },
+			(tx) => tx.sql`update owner_megolm_sessions set first_seen_at = now() where owner = ${OWNER}`
+		);
+	}
+}
+
 // Alice was last told about her sessions over a minute ago, as the harness counts it
 async function lastToldAMinuteAgo(r: ConsentRoom): Promise<void> {
 	await withPrincipal(
@@ -234,6 +255,8 @@ const UNENCRYPTED_MESSAGE =
 	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
 const NO_IDENTITY_MESSAGE =
 	'I did not act on your last message: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then send it again.';
+const OLD_SESSION_MESSAGE =
+	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 const CHANGED_REPORT =
@@ -643,6 +666,28 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/tasks/items');
 	});
 
+	it('takes no words of a session it first saw over a month ago, and tells me to start a new one', async () => {
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Recent words');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Recent words');
+		const notices = r.saying('I did not act on your last message: your app').length;
+		await sessionsAMonthOld(r, async () => {
+			const eventId = await r.client.sendText(r.room, 'Words of an old session');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'enforce',
+				deviceId: r.client.deviceId
+			});
+			expect(await r.nextSaying('I did not act on your last message: your app', notices)).toBe(
+				OLD_SESSION_MESSAGE
+			);
+		});
+		const told = r.h.apisix.llm.calls.flatMap((c) => c.request.messages);
+		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('old session'))).toBe(
+			false
+		);
+	});
+
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
@@ -945,5 +990,24 @@ describe('while the harness only reports the sessions it would not act on', () =
 		await other.sendText(r.room, 'Words it decrypts');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Words it decrypts');
 		expect(await firstSeen(r, sessionId)).not.toBeNull();
+	});
+
+	it('takes no fresh words of a session it first saw over a month ago, and tells me to start a new one', async () => {
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Words of the day');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Words of the day');
+		const notices = r.saying('I did not act on your last message: your app').length;
+		await sessionsAMonthOld(r, async () => {
+			const eventId = await r.client.sendText(r.room, 'Fresh words of an old session');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored words of an old session',
+				mode: 'report',
+				deviceId: r.client.deviceId
+			});
+			expect(await r.nextSaying('I did not act on your last message: your app', notices)).toBe(
+				OLD_SESSION_MESSAGE
+			);
+		});
+		expect(r.saying('Heard: Fresh words of an old session')).toHaveLength(0);
 	});
 });
