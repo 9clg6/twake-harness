@@ -142,7 +142,9 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
 			ACTIVITY_TYPES: `${ASSIGNED}, ${MENTIONED}`,
-			RABBITMQ_PREFIX: PREFIX
+			RABBITMQ_PREFIX: PREFIX,
+			// The suite wakes Alice's assistant more often than an owner may start turns by default
+			ADMISSION_USER_PER_MINUTE: '120'
 		});
 		worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker' },
@@ -304,6 +306,21 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await answerTo(next);
 		await toldOf(next, 2);
 		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(2);
+	});
+
+	it('takes and drops an event routed by a type it no longer listens to', async () => {
+		// A type the deployment listened to before keeps its binding: the library removes none
+		const completed = 'com.twake.tasks.task.completed.v1';
+		await broker.channel.bindQueue(QUEUE, ACTIVITY, completed);
+		try {
+			const stale = activityEvent({ type: completed });
+			await publishThenNext(stale);
+			expect(turnCalls(r.h.apisix.llm.calls, stale.id)).toHaveLength(0);
+			expect((await broker.queue(QUEUE))?.messages).toBe(0);
+			expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+		} finally {
+			await broker.channel.unbindQueue(QUEUE, ACTIVITY, completed);
+		}
 	});
 
 	it('reads a quorum queue of its own, one consumer at a time, its dead letters apart', async () => {

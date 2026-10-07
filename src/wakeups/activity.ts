@@ -130,7 +130,10 @@ export async function startActivityListener(
 		deadLetterExchange,
 		queue,
 		queue,
-		async (message) => {
+		async (message, { routingKey }) => {
+			// A type the deployment no longer lists keeps its binding, since the library removes none:
+			// its events are taken and dropped
+			if (!source.types.includes(routingKey)) return;
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
 			for (const wakeup of wakeupsOf(parsed.data)) await wake(deps, wakeup);
