@@ -412,6 +412,18 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		return served.join('\n');
 	}
 
+	// What the model was told of the invitation of this id, once its turn came
+	async function toldOfId(id: string): Promise<string> {
+		for (let i = 0; i < 120; i += 1) {
+			const told = r.h.apisix.llm.calls
+				.map((call) => lastUser(call.request))
+				.find((t) => t.includes(`(id ${id})`));
+			if (told !== undefined) return told;
+			await sleep(250);
+		}
+		throw new Error(`no turn of ${id}`);
+	}
+
 	// What the model was told of the invitation of this id, and what the harness checked of it
 	function toldOf(calls: readonly RecordedCall[], id: string): string {
 		const told = calls.map((call) => lastUser(call.request)).find((t) => t.includes(`(id ${id})`));
@@ -935,6 +947,16 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(turn).toHaveLength(1);
 		expect(lastUser(turn[0]?.request)).toContain(
 			`(id ${producerId('uid-twice', 'alice@test.local', '0')})`
+		);
+	});
+
+	it('hashes a UID as the calendar wrote it, a bare comma and semicolon and an escape included', async () => {
+		// The calendar producer hashed the UID as it stands in the iCalendar, which the audit's
+		// records are found by: the harness reads it the same, never as the parser unescapes it
+		const written = 'weird,uid;with\\Nescapes';
+		await publish(notification({ uid: written }));
+		expect(await toldOfId(producerId(written, 'alice@test.local', '0'))).toContain(
+			'[event] An invitation has been sent to me'
 		);
 	});
 

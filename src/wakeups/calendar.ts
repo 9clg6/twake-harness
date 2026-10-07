@@ -45,13 +45,40 @@ function organizerOf(vevent: ICAL.Component, sender: unknown): string | null {
 	return null;
 }
 
-// A property's value as the calendar wrote it, escapes included
-function written(property: ICAL.Property | null): string | null {
-	if (property === null) return null;
-	const [, , type, value] = property.toJSON() as [string, unknown, string, unknown];
-	return typeof value === 'string'
-		? ICAL.stringify.value(value, type, ICAL.design.icalendar, false)
-		: null;
+// The lines of an iCalendar, unfolded as the calendar producer read them: a line that goes on on
+// the next one, after a space or a tab, is made whole
+function unfolded(text: string): string[] {
+	return text
+		.replace(/\r\n/g, '\n')
+		.replace(/\n[ \t]/g, '')
+		.split('\n');
+}
+
+// The VEVENTs of an iCalendar as written, each as its unfolded lines, in their order
+function writtenVevents(text: string): string[][] {
+	const vevents: string[][] = [];
+	let lines: string[] | null = null;
+	for (const line of unfolded(text)) {
+		if (/^BEGIN:VEVENT$/i.test(line)) {
+			lines = [];
+		} else if (/^END:VEVENT$/i.test(line)) {
+			if (lines !== null) vevents.push(lines);
+			lines = null;
+		} else {
+			lines?.push(line);
+		}
+	}
+	return vevents;
+}
+
+// A content line as the calendar producer read it: a name, parameters, then the value after them
+const CONTENT_LINE = /^[^;:]+((?:;[^:;"=]+=(?:"[^"]*"|[^:;"])*)*):(.*)$/;
+
+// The value of a VEVENT's first property of a name, exactly as written, escapes included; null
+// when it has none, or one the producer could not read either
+function writtenValue(lines: readonly string[], name: 'UID' | 'RECURRENCE-ID'): string | null {
+	const line = lines.find((candidate) => new RegExp(`^${name}[;:]`, 'i').test(candidate));
+	return line === undefined ? null : (CONTENT_LINE.exec(line)?.[2] ?? null);
 }
 
 // One of an invitation's times, as RFC 3339 with the offset of the zone it names, and that zone;
@@ -89,9 +116,15 @@ function whenOf(vevent: ICAL.Component, name: 'dtstart' | 'dtend'): When {
 	}
 }
 
-// The VEVENT an invitation is about: the first that is no occurrence of a series, which a series'
-// own carries, else the first, which an invitation to one occurrence holds alone
-function veventOf(text: unknown): ICAL.Component {
+// The VEVENT an invitation is about, as the parser reads it and as written: the first that is no
+// occurrence of a series, which a series' own carries, else the first, which an invitation to one
+// occurrence holds alone
+interface Vevent {
+	readonly parsed: ICAL.Component;
+	readonly written: readonly string[];
+}
+
+function veventOf(text: unknown): Vevent {
 	if (typeof text !== 'string') throw new DeadLetterError('a notification without its iCalendar');
 	let vevents: ICAL.Component[];
 	try {
@@ -103,26 +136,33 @@ function veventOf(text: unknown): ICAL.Component {
 	} catch (err: unknown) {
 		throw new DeadLetterError('an iCalendar that cannot be read', { cause: err });
 	}
-	const vevent = vevents.find((candidate) => !candidate.hasProperty('recurrence-id')) ?? vevents[0];
-	if (vevent === undefined) throw new DeadLetterError('an iCalendar without VEVENT');
-	return vevent;
+	const written = writtenVevents(text);
+	if (written.length !== vevents.length) {
+		throw new DeadLetterError('an iCalendar whose VEVENTs do not read as they are written');
+	}
+	const own = written.findIndex((lines) => !lines.some((line) => /^RECURRENCE-ID[;:]/i.test(line)));
+	const at = own === -1 ? 0 : own;
+	const parsed = vevents[at];
+	const lines = written[at];
+	if (parsed === undefined || lines === undefined) {
+		throw new DeadLetterError('an iCalendar without VEVENT');
+	}
+	return { parsed, written: lines };
 }
 
-// The id the calendar producer gave an invitation, which the gateway's audit records carry and
-// tests elsewhere compute again: the hex SHA-256 of its UID as written, its invitee, its SEQUENCE,
-// 0 when it has none, and for an occurrence its RECURRENCE-ID as written, joined with |
-function invitationId(vevent: ICAL.Component, recipient: string): string {
-	const sequence = vevent.getFirstPropertyValue('sequence');
-	const occurrence = written(vevent.getFirstProperty('recurrence-id'));
+// The id the calendar producer gave an invitation, which the gateway's audit records carry and an
+// E2E computes again: the hex SHA-256 of its UID exactly as written, its invitee, its SEQUENCE, 0
+// when it has none, and for an occurrence its RECURRENCE-ID exactly as written, joined with |
+function invitationId(vevent: Vevent, uid: string, recipient: string): string {
+	const sequence = vevent.parsed.getFirstPropertyValue('sequence');
+	const occurrence = writtenValue(vevent.written, 'RECURRENCE-ID');
 	const parts = [
-		written(vevent.getFirstProperty('uid')),
+		uid,
 		recipient,
 		String(typeof sequence === 'number' ? sequence : 0),
-		occurrence
+		...(occurrence === null ? [] : [occurrence])
 	];
-	return createHash('sha256')
-		.update(parts.filter((part) => part !== null).join('|'))
-		.digest('hex');
+	return createHash('sha256').update(parts.join('|')).digest('hex');
 }
 
 // The wake-up a notification of Calendar brings its invitee, for a new invitation alone: an update,
@@ -138,16 +178,18 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 	const recipient = addressOf(message['recipientEmail']);
 	if (recipient === null || matrixLocalpartOfPrincipal(config, recipient) === null) return null;
 	const vevent = veventOf(message['event']);
-	const uid = vevent.getFirstPropertyValue('uid');
-	if (typeof uid !== 'string' || uid.length === 0) {
+	// The UID as the calendar knows it, which the contracts take, and as written, which is hashed
+	const uid = vevent.parsed.getFirstPropertyValue('uid');
+	const writtenUid = writtenValue(vevent.written, 'UID');
+	if (typeof uid !== 'string' || uid.length === 0 || writtenUid === null) {
 		throw new DeadLetterError('an invitation without UID');
 	}
-	const id = invitationId(vevent, recipient);
-	const organizer = organizerOf(vevent, message['senderEmail']);
-	const start = whenOf(vevent, 'dtstart');
-	const end = whenOf(vevent, 'dtend');
-	const occurrence = written(vevent.getFirstProperty('recurrence-id'));
-	const title = vevent.getFirstPropertyValue('summary');
+	const id = invitationId(vevent, writtenUid, recipient);
+	const organizer = organizerOf(vevent.parsed, message['senderEmail']);
+	const start = whenOf(vevent.parsed, 'dtstart');
+	const end = whenOf(vevent.parsed, 'dtend');
+	const occurrence = writtenValue(vevent.written, 'RECURRENCE-ID');
+	const title = vevent.parsed.getFirstPropertyValue('summary');
 	return {
 		source: SOURCE,
 		id,
