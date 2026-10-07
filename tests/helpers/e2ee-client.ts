@@ -84,6 +84,10 @@ export interface E2eeClient {
 		count: number,
 		timeoutMs?: number
 	): Promise<string[]>;
+	// A reaction whose encrypted content names no event: the event it annotates, and its key, are
+	// only in its clear part, as clients that keep relations out of what they encrypt send it;
+	// resolves to the event id of the reaction
+	reactInClear(roomId: string, eventId: string, key: string): Promise<string>;
 	// The content of a text message as this session would encrypt it for the room, sent nowhere
 	seal(roomId: string, text: string): Promise<Record<string, unknown>>;
 	// The master key of the user's cross-signing identity, as the homeserver publishes it
@@ -431,6 +435,13 @@ export async function startE2eeClient(
 				await new Promise((resolve) => setTimeout(resolve, 250));
 			}
 			return keys();
+		},
+		reactInClear: async (roomId, eventId, key) => {
+			const encrypted = await client.crypto.encryptRoomEvent(roomId, 'm.reaction', {});
+			return client.sendRawEvent(roomId, 'm.room.encrypted', {
+				...encrypted,
+				'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key }
+			});
 		},
 		seal: async (roomId, text) =>
 			(await client.crypto.encryptRoomEvent(roomId, 'm.room.message', {

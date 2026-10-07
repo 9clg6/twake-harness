@@ -191,6 +191,16 @@ function outcomeOf(job: SendJob): TurnOutcome {
 	return job.atLimit === true ? 'limited' : 'answered';
 }
 
+// An encrypted event without the relation its clear part carries: the engine would otherwise take
+// that relation for the decrypted event's own when the encrypted content names none, and the event
+// an answer is for must be the one the owner's session encrypted
+function withoutClearRelation(encrypted: Record<string, unknown>): Record<string, unknown> {
+	const content: unknown = encrypted['content'];
+	if (typeof content !== 'object' || content === null) return encrypted;
+	const { 'm.relates_to': _relation, ...sealed } = content as Record<string, unknown>;
+	return { ...encrypted, content: sealed };
+}
+
 function turnOf(job: SendJob): TurnRef | null {
 	return job.replyTo === undefined
 		? null
@@ -711,7 +721,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const intent = appservice.getIntentForUserId(assistantUserId);
 		await ensureEncryption(intent);
 		const decrypted = await machineOf(intent).decryptRoomEvent(
-			JSON.stringify(encrypted),
+			JSON.stringify(withoutClearRelation(encrypted)),
 			new RoomId(roomId)
 		);
 		const shield = decrypted.shieldState(false);

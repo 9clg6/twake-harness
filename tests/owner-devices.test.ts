@@ -214,13 +214,14 @@ describe('my assistant acts only on what the sessions my identity signed write',
 	const sessions: E2eeClient[] = [];
 	beforeAll(async () => {
 		r = await startConsentRoom({ OWNER_DEVICE_TRUST: 'enforce', ADMISSION_USER_PER_MINUTE: '100' });
-		r.h.apisix.contracts.spec = readCatalog(['mail', 'drive', 'notes']);
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		r.h.apisix.contracts.spec = readCatalog(['mail', 'drive', 'notes', 'tasks']);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(4);
 		r.h.apisix.contracts.handler = (c) => ({ status: 200, body: { found: c.path } });
 		r.h.apisix.llm.script = modelFor({
 			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } },
 			'Find the plan in my drive': { tool: 'search_drive', args: { q: 'plan' } },
-			'Search my notes': { tool: 'search_notes', args: { q: 'notes' } }
+			'Search my notes': { tool: 'search_notes', args: { q: 'notes' } },
+			'List my tasks': { tool: 'search_tasks', args: { q: 'tasks' } }
 		});
 	}, 240_000);
 	afterAll(async () => {
@@ -529,6 +530,20 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		const refused = r.saying('All right').length;
 		await r.client.sendText(r.room, 'non');
 		expect(await r.nextSaying('All right', refused)).toBe('All right, I will not do it.');
+	});
+
+	it('takes a reaction for an answer only by the question its encrypted content names', async () => {
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'List my tasks');
+		const question = await r.nextQuestion(seen);
+		// A no that names the question only in its clear part answers nothing
+		const inClear = await r.client.reactInClear(r.room, question, '❌');
+		await logged(r, 'answer ignored: not the event checked', inClear);
+		expect((await r.callsTo('tasks')).map((c) => c.status)).toEqual(['open']);
+		// One whose encrypted content names it answers it
+		const found = r.saying('Found:').length;
+		await r.client.react(r.room, question, '✅');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/tasks/items');
 	});
 
 	it('acts on none of my words once my identity changed, until I accept it through the API', async () => {
