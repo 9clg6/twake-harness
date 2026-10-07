@@ -105,6 +105,12 @@ jobs:
           printf 'config:\n  turnMaxToolCalls: 20\n' > /tmp/tools.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/tools.yaml > /tmp/tools-rendered.yaml
           grep -A1 TURN_MAX_TOOL_CALLS /tmp/tools-rendered.yaml | grep -q '"20"'
+      # TURN_STATUS_DELAY_MS is rendered only when config.turnStatusDelayMs is set, as an integer
+      - run: helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/default.yaml && ! grep -q TURN_STATUS_DELAY_MS /tmp/default.yaml
+      - run: |
+          printf 'config:\n  turnStatusDelayMs: 5000\n' > /tmp/status.yaml
+          helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h -f /tmp/status.yaml > /tmp/status-rendered.yaml
+          grep -A1 TURN_STATUS_DELAY_MS /tmp/status-rendered.yaml | grep -q '"5000"'
       # ADMISSION_* are rendered only when their config.admission* value is set, and as integers:
       # 0 counts, and a large value from a values file comes out whole instead of as 1e+06
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q ADMISSION_ /tmp/default.yaml
