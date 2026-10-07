@@ -126,6 +126,9 @@ export async function startActivityListener(
 		{
 			bindings: others.map((type) => ({ exchange: ACTIVITY_EXCHANGE, routingKey: type })),
 			deadLetterExchange: `${prefix}.dlx`,
+			// The platform owns the exchange: its RabbitMQ user may not declare it, and the library
+			// only checks that it is there before it binds
+			passiveExchanges: [ACTIVITY_EXCHANGE],
 			queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT }
 		}
 	);

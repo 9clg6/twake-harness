@@ -8,10 +8,14 @@ import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
 
 const ACTIVITY = 'activity';
 const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
-// The instance's own names on the broker
+// Another type the deployment listens to, which has no sentence of its own
+const MENTIONED = 'com.twake.chat.message.mentioned.v1';
+// The instance's own names on the broker, and its own user there
 const PREFIX = 'twake-harness-test';
 const QUEUE = `${PREFIX}.activity`;
 const DEAD_LETTERS = `${QUEUE}.dlq`;
+const HARNESS_USER = 'twake-harness-test';
+const HARNESS_PASSWORD = 'harness-test-password';
 
 // Who is who in Twake Tasks: its users by their entryUUID, the board and the task
 const ALICE_UUID = '6f1c2a4e-8b3d-4c5e-9f70-112233445566';
@@ -20,21 +24,38 @@ const BOARD_ID = '3c4d5e6f-7a8b-4c9d-8e0f-a1b2c3d4e5f6';
 const PROJECT_ID = '9d8c7b6a-5f4e-4d3c-9b2a-0f1e2d3c4b5a';
 const TASK_ID = '1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e';
 
+// What an application publishes: a CloudEvent naming the people it is for in data.recipients
+interface ActivityEvent extends Record<string, unknown> {
+	readonly id: string;
+	readonly type: string;
+}
+
+interface EventOptions {
+	readonly type?: string;
+	// Who acted, Bob unless told otherwise; null for an event that names nobody
+	readonly actor?: { readonly email?: string; readonly uuid?: string } | null;
+	readonly recipients?: readonly Record<string, unknown>[];
+}
+
+const ALICE = { uuid: ALICE_UUID, email: 'alice@test.local', reason: 'assigned' };
+
 let serial = 0;
 
-// An assignment as Twake Tasks publishes it on the activity exchange: a CloudEvent naming the
-// assignee in data.recipients, with the email of their membership in the task's project
-function assignment(): Record<string, unknown> & { id: string } {
+// An event as Twake Tasks publishes it on the activity exchange, an assignment unless told
+// otherwise: the assignee in data.recipients, with the email of their membership in the project
+function activityEvent(options: EventOptions = {}): ActivityEvent {
 	serial += 1;
+	const actor =
+		options.actor === undefined ? { email: 'bob@test.local', uuid: BOB_UUID } : options.actor;
 	return {
 		specversion: '1.0',
 		id: `0199b6f2-${String(serial).padStart(4, '0')}-7c3e-8a1f-6d2b4e8c9a07`,
 		source: 'twake://tasks',
-		type: ASSIGNED,
+		type: options.type ?? ASSIGNED,
 		time: '2026-10-07T14:41:40.123456Z',
 		twakeorg: 'org-test',
-		twakeactorid: BOB_UUID,
-		twakeactor: 'bob@test.local',
+		...(actor?.uuid === undefined ? {} : { twakeactorid: actor.uuid }),
+		...(actor?.email === undefined ? {} : { twakeactor: actor.email }),
 		data: {
 			object: {
 				type: 'task',
@@ -45,7 +66,7 @@ function assignment(): Record<string, unknown> & { id: string } {
 				container: { kind: 'project', id: PROJECT_ID }
 			},
 			assignee: { id: ALICE_UUID },
-			recipients: [{ uuid: ALICE_UUID, email: 'alice@test.local', reason: 'assigned' }]
+			recipients: options.recipients ?? [ALICE]
 		}
 	};
 }
@@ -68,11 +89,19 @@ describe('an assignment published on the activity exchange wakes the assignee’
 	let worker: WorkerRole;
 	beforeAll(async () => {
 		broker = await startTestBroker();
-		// The exchange the applications publish on, as the platform declares it
+		// The exchange the applications publish on, as the platform declares it, and the instance's
+		// user, as the platform creates it: it may declare and write its own names only, and read
+		// the activity exchange and its own queues
 		await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, {
+			configure: `^${PREFIX}\\.`,
+			write: `^${PREFIX}\\.`,
+			read: `^(${PREFIX}\\..*|${ACTIVITY})$`
+		});
 		r = await startConsentRoom({
 			ACTIVITY_ENABLED: 'true',
-			ACTIVITY_AMQP_URL: broker.urlFor('guest', 'guest'),
+			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
+			ACTIVITY_TYPES: `${ASSIGNED}, ${MENTIONED}`,
 			RABBITMQ_PREFIX: PREFIX
 		});
 		worker = await startWorkerRole({
@@ -86,12 +115,13 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			const fenced = FENCED.exec(told)?.[2];
 			if (fenced === undefined) return { content: `Heard: ${told}` };
 			const event = JSON.parse(fenced) as {
+				id: string;
 				actor: string;
 				object: { key: string };
 				untrusted: { title: string; board_name: string };
 			};
 			return {
-				content: `Task ${event.object.key} "${event.untrusted.title}" on ${event.untrusted.board_name}, from ${event.actor}`
+				content: `Task ${event.object.key} "${event.untrusted.title}" on ${event.untrusted.board_name}, from ${event.actor} (${event.id})`
 			};
 		};
 	}, 240_000);
@@ -101,14 +131,22 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		if (broker !== undefined) await broker.stop();
 	});
 
+	// Published as the application does: routed by its type
+	function publish(event: ActivityEvent): Promise<void> {
+		return broker.publish(ACTIVITY, event.type, event, event.id);
+	}
+
+	// What Alice's assistant told her of an event, in her room
+	function answerTo(event: ActivityEvent): Promise<string> {
+		return r.client.waitForMessage(r.room, r.assistantId, (t) => t.includes(`(${event.id})`));
+	}
+
 	it('tells me in our room of a task assigned to me, with its title, key and board', async () => {
-		const event = assignment();
-		await broker.publish(ACTIVITY, ASSIGNED, event, event.id);
-		const answer = await r.client.waitForMessage(r.room, r.assistantId, (t) =>
-			t.includes('ROAD-12')
-		);
+		const event = activityEvent();
+		await publish(event);
+		const answer = await answerTo(event);
 		expect(answer).toBe(
-			'Task ROAD-12 "Write the quarterly report" on Roadmap, from bob@test.local'
+			`Task ROAD-12 "Write the quarterly report" on Roadmap, from bob@test.local (${event.id})`
 		);
 		// The model was told what arrived, then handed the event fenced as data: what Tasks computed,
 		// apart from what people wrote, and nothing to read again through the contracts
@@ -162,5 +200,25 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect(await broker.bindingsOf(DEAD_LETTERS)).toEqual([
 			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }
 		]);
+	});
+
+	it('binds its queue to the types it listens to only, as a user that cannot declare the exchange', async () => {
+		// The harness's own user cannot declare the activity exchange: it only binds to it
+		expect(await broker.connectedUsers()).toContain(HARNESS_USER);
+		const bindings = await broker.bindingsOf(QUEUE);
+		expect(
+			bindings
+				.filter((binding) => binding.source === ACTIVITY)
+				.map((binding) => binding.routingKey)
+				.sort()
+		).toEqual([MENTIONED, ASSIGNED]);
+		// An event of another type never reaches it: the assignment published after it is the next
+		// one the assistant tells
+		const completed = activityEvent({ type: 'com.twake.tasks.task.completed.v1' });
+		const next = activityEvent();
+		await publish(completed);
+		await publish(next);
+		await answerTo(next);
+		expect(turnCalls(r.h.apisix.llm.calls, completed.id)).toHaveLength(0);
 	});
 });
