@@ -228,6 +228,14 @@ function isHttpsUrl(value: string): boolean {
 	return URL.canParse(value) && new URL(value).protocol === 'https:';
 }
 
+// The items of a comma separated setting, without the spaces around them nor the empty ones
+function listOf(value: string): string[] {
+	return value
+		.split(',')
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+}
+
 function isAmqpUrl(value: string): boolean {
 	return URL.canParse(value) && ['amqp:', 'amqps:'].includes(new URL(value).protocol);
 }
@@ -244,9 +252,7 @@ function activitySource(values: { ACTIVITY_AMQP_URL: string; ACTIVITY_TYPES: str
 			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
 		);
 	}
-	const types = values.ACTIVITY_TYPES.split(',')
-		.map((type) => type.trim())
-		.filter((type) => type.length > 0);
+	const types = listOf(values.ACTIVITY_TYPES);
 	if (types.length === 0) {
 		throw new Error('invalid configuration: ACTIVITY_TYPES lists no CloudEvent type');
 	}
@@ -357,19 +363,13 @@ export function loadConfig(env: Env): Config {
 			localpart: values.ORG_AGENT_LOCALPART,
 			name: values.ORG_AGENT_NAME,
 			persona: values.ORG_AGENT_PERSONA,
-			members: values.ORG_AGENT_MEMBERS.split(',')
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
+			members: listOf(values.ORG_AGENT_MEMBERS)
 		},
 		events: {
-			clientIds: values.EVENTS_CLIENT_IDS.split(',')
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
+			clientIds: listOf(values.EVENTS_CLIENT_IDS)
 		},
 		provisioning: {
-			clientIds: values.PROVISIONER_CLIENT_IDS.split(',')
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
+			clientIds: listOf(values.PROVISIONER_CLIENT_IDS)
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
