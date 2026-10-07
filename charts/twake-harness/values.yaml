@@ -116,8 +116,9 @@ config:
   wakeupsPerHour: ''
   # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
   # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new
-  # invitation who has an assistant is told of it in their room. It needs the mail domain,
-  # matrixMailDomain or matrixServerName.
+  # invitation who has an assistant is told of it in their room. The worker then needs
+  # matrixServerName or matrixMailDomain below: it wakes the owners by their email on that mail
+  # domain
   calendarEnabled: false
   # The Secret and key holding the AMQP URL of Calendar's vhost, which carries the password of the
   # instance's own RabbitMQ user; an empty name means the chart's own Secret (secretEnv or

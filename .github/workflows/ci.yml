@@ -227,13 +227,18 @@ jobs:
           if grep -q 'ACTIVITY_' /tmp/calendar-worker.yaml; then exit 1; fi
           kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/calendar-worker.yaml
       - run: |
-          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set config.calendarEnabled=true --set config.calendarAmqpUrlSecret=harness-rabbitmq --set config.calendarAmqpUrlSecretKey=calendar-url --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-both.yaml
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set config.calendarEnabled=true --set config.calendarAmqpUrlSecret=harness-rabbitmq --set config.calendarAmqpUrlSecretKey=calendar-url --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs --set config.matrixServerName=example.org > /tmp/calendar-both.yaml
           grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-both.yaml | grep -q 'name: harness-rabbitmq'
           grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-both.yaml | grep -q 'key: calendar-url'
           grep -A1 'name: ACTIVITY_ENABLED' /tmp/calendar-both.yaml | grep -q '"true"'
           test "$(grep -c 'name: RABBITMQ_PREFIX' /tmp/calendar-both.yaml)" -eq 1
           test "$(grep -c 'port: 5672' /tmp/calendar-both.yaml)" -eq 1
           kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/calendar-both.yaml
+      # A worker that listens to Calendar is refused without the owners' mail domain, as one that
+      # listens to the activity exchange is
+      - run: |
+          if helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.calendarEnabled=true > /dev/null 2> /tmp/calendar-domain.err; then exit 1; fi
+          grep -q "config.matrixServerName or config.matrixMailDomain must be set for the worker role to listen to Calendar's fanout" /tmp/calendar-domain.err
       - run: |
           for role in api matrix; do
             helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.calendarEnabled=true --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-$role.yaml

@@ -175,6 +175,9 @@ spec:
             {{- end }}
             {{- end }}
             {{- if and (eq .Values.role "worker") .Values.config.calendarEnabled }}
+            {{- if not (or .Values.config.matrixServerName .Values.config.matrixMailDomain) }}
+            {{- fail "config.matrixServerName or config.matrixMailDomain must be set for the worker role to listen to Calendar's fanout: it wakes the owners by their email on that mail domain" }}
+            {{- end }}
             - name: CALENDAR_ENABLED
               value: "true"
             - name: CALENDAR_AMQP_URL
