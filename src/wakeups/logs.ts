@@ -11,7 +11,9 @@ export type MessageOutcome = WakeOutcome | 'dead_lettered';
 export type RecipientOutcome = WakeOutcome | 'invalid';
 
 // The outcome of a message is the first of these that one of its recipients had, the one the
-// operator most needs to see; a recipient that cannot be read counts as ignored
+// operator most needs to see; a recipient that cannot be read counts as ignored. Every outcome of
+// a wake-up has its place here, and a new one compiles once it has: one that holds back a turn
+// due, such as a cap on an owner's wake-ups, comes right after woken.
 const PRECEDENCE: Readonly<Record<WakeOutcome, number>> = {
 	woken: 0,
 	capped: 1,
