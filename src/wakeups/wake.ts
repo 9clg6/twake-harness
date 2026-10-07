@@ -31,7 +31,7 @@ export interface Wakeup {
 	};
 }
 
-export type WakeOutcome = 'woken' | 'no_assistant' | 'ignored';
+export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored';
 
 export interface WakeDeps {
 	readonly config: Config;
@@ -79,6 +79,12 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
 			return 'no_assistant' as const;
 		}
+		// Kept with the turn it queues, or not at all: an owner the event already woke is not woken
+		// again
+		const recorded = await tx.sql`
+			insert into wakeups (source, event_id, owner) values (${wakeup.source}, ${wakeup.id}, ${owner})
+			on conflict do nothing`;
+		if (recorded.count === 0) return 'duplicate' as const;
 		const key = `event:${JSON.stringify([wakeup.source, wakeup.id, owner])}`;
 		const payload: TurnPayload = {
 			owner,
