@@ -184,8 +184,9 @@ function shownText(request: Pick<OwnerRequest, 'call' | 'summary'>): string[] {
 // The request as the conversation keeps it, which later turns of the model read: as its owner
 // read it, with the call in the place of what its application said of it. That is the
 // application's data, which may hold what a third party wrote, and only its owner reads it. A call
-// without arguments is kept as its owner read it too, without an empty call: the model's own call,
-// just before the request in the conversation, already says what would run.
+// without arguments shows no empty call there either, the model's own call just before the
+// request saying what would run, unless a summary stood in its place: the call shows there, {}, as
+// any call does.
 export function conversationText(request: OwnerRequest): string {
 	return requestText({ ...request, summary: null });
 }
