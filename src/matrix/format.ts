@@ -72,6 +72,10 @@ const RAW_TAG = /<\/?([A-Za-z][A-Za-z0-9-]*)[^<>]*>/g;
 const LINK_SCHEMES = /^(https?:|mailto:)/i;
 
 const markdown = new MarkdownIt({ html: true, linkify: true, breaks: true });
+// Only an address with a scheme becomes a link, and an e-mail address a mailto one: a file name
+// whose extension is a domain, such as notes-demo.md, stays text. linkify-it 6 does so by default,
+// whereas its version 5 linked any name that ends like a domain.
+markdown.linkify.set({ fuzzyLink: false, fuzzyEmail: true });
 
 // The model writes placeholders such as <name> far more often than HTML: a tag neither rendered nor
 // dropped is shown as the text it is, instead of being parsed as an element and lost

@@ -123,8 +123,10 @@ const TO_PAUL = {
 	}
 };
 
-// What the model writes alongside a mail it prepared, in Markdown, as in its answers
-const DETAILS = 'Here is the mail I prepared:\n- **To:** Paul Martin\n- **Subject:** Q4 budget';
+// What the model writes alongside a mail it prepared, in Markdown, as in its answers, with a file
+// name whose extension is also a domain
+const DETAILS =
+	'Here is the mail I prepared:\n- **To:** Paul Martin\n- **Subject:** Q4 budget\n- **Attached:** notes-demo.md';
 
 // What a mail written by someone else told the model to write alongside its call: Markdown and
 // HTML that would pass for the harness's own words, were they not held in the quote
@@ -344,6 +346,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 				'<ul>',
 				'<li><strong>To:</strong> Paul Martin</li>',
 				'<li><strong>Subject:</strong> Q4 budget</li>',
+				'<li><strong>Attached:</strong> notes-demo.md</li>',
 				'</ul></blockquote>',
 				`<p>${HIGH_RISK_IN_MAIL}</p>`,
 				`<pre><code class="language-json">${JSON.stringify(TO_PAUL, null, 2)}</code></pre>`,
