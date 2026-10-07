@@ -4,10 +4,11 @@ import ICAL from 'ical.js';
 import { z } from 'zod';
 
 import { formatOffset } from '../agent/clock.js';
-import { INVITED_EVENT_TYPE, wallTimeIn } from '../agent/invitation.js';
+import { wallTimeIn } from '../agent/invitation.js';
 import type { CalendarSource, Config } from '../config.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { DELIVERY_LIMIT } from './activity.js';
+import { INVITED_EVENT_TYPE } from './event-types.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // Where Calendar's side service sends a notification for each invitee of each change to a

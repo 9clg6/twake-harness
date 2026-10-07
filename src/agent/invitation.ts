@@ -2,10 +2,6 @@ import { fenced } from '../wakeups/wake.js';
 import { findTimeZone, formatOffset, offsetMinutesAt } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
-// The CloudEvent type of an invitation, as the calendar producer named it: what a new invitation
-// in Calendar wakes its invitee's assistant as
-export const INVITED_EVENT_TYPE = 'com.twake.calendar.event.invited.v1';
-
 // What an invitation's wake-up carries of its time: start and end from DTSTART and DTEND, and the
 // TZID, "UTC", or null for an all-day event
 export interface InvitationTimes {
