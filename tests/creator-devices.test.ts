@@ -20,9 +20,10 @@ interface CreatorRoom {
 	readonly client: E2eeClient;
 	readonly room: string;
 	readonly creatorId: string;
-	// What the creator said in the room that starts with a prefix, as Alice's session read it
-	saying(prefix: string): string[];
-	nextSaying(prefix: string, seen: number): Promise<string>;
+	// What the creator said in the room, or in another conversation of Alice's with it, that starts
+	// with a prefix, as Alice's session read it
+	saying(prefix: string, inRoom?: string): string[];
+	nextSaying(prefix: string, seen: number, inRoom?: string): Promise<string>;
 	close(): Promise<void>;
 }
 
@@ -33,9 +34,9 @@ async function startCreatorRoom(env: Record<string, string>): Promise<CreatorRoo
 	const creatorId = h.role.creatorUserId;
 	const room = await client.createDirectRoom(creatorId);
 	await client.waitForMessage(room, creatorId, (t) => t.includes('/newbot'));
-	const saying = (prefix: string): string[] =>
+	const saying = (prefix: string, inRoom = room): string[] =>
 		client.messages
-			.filter((m) => m.roomId === room && m.sender === creatorId && m.body.startsWith(prefix))
+			.filter((m) => m.roomId === inRoom && m.sender === creatorId && m.body.startsWith(prefix))
 			.map((m) => m.body);
 	return {
 		h,
@@ -44,9 +45,9 @@ async function startCreatorRoom(env: Record<string, string>): Promise<CreatorRoo
 		room,
 		creatorId,
 		saying,
-		nextSaying: async (prefix, seen) => {
+		nextSaying: async (prefix, seen, inRoom = room) => {
 			for (let i = 0; i < 120; i += 1) {
-				const latest = saying(prefix).at(seen);
+				const latest = saying(prefix, inRoom).at(seen);
 				if (latest !== undefined) return latest;
 				await sleep(250);
 			}
@@ -66,6 +67,13 @@ async function unverifiedSession(r: CreatorRoom, sessions: E2eeClient[]): Promis
 	});
 	sessions.push(session);
 	return session;
+}
+
+// A conversation Alice opens with the creator without encryption, once the creator greeted her there
+async function clearConversation(r: CreatorRoom): Promise<string> {
+	const room = await r.h.synapse.createDirectRoom(r.alice, r.creatorId);
+	await r.client.waitForMessage(room, r.creatorId, (t) => t.includes('/newbot'));
+	return room;
 }
 
 async function logged(
@@ -154,15 +162,28 @@ describe('the creator takes my commands only from the sessions my identity signe
 		).toBe(false);
 	});
 
-	it('takes no command written in clear in my name, and tells me why', async () => {
-		const notices = r.saying('I did not act on your last message: it reached me').length;
+	it('takes no command written in clear in my name in our encrypted conversation, and only logs it', async () => {
+		const notices = r.saying('I did not act on your last message').length;
 		const eventId = await r.h.synapse.sendText(r.alice, r.room, '/delete');
+		expect(await r.h.decisionOn(eventId)).toMatchObject({
+			msg: 'assistant ignored an unencrypted message',
+			reason: 'encrypted room'
+		});
+		expect((await r.h.api.get(OWNER, '/v1/assistants/me')).status).toBe(200);
+		// My sessions encrypt what I write here: words in clear were not mine, and I am not told
+		await sleep(1000);
+		expect(r.saying('I did not act on your last message')).toHaveLength(notices);
+	});
+
+	it('takes no command written in clear in a conversation opened without encryption, and tells me why', async () => {
+		const clear = await clearConversation(r);
+		const eventId = await r.h.synapse.sendText(r.alice, clear, '/delete');
 		expect(await r.h.decisionOn(eventId)).toMatchObject({
 			msg: 'assistant ignored an unencrypted message',
 			reason: 'unencrypted',
 			mode: 'enforce'
 		});
-		expect(await r.nextSaying('I did not act on your last message: it reached me', notices)).toBe(
+		expect(await r.nextSaying('I did not act on your last message: it reached me', 0, clear)).toBe(
 			UNENCRYPTED_MESSAGE
 		);
 		expect((await r.h.api.get(OWNER, '/v1/assistants/me')).status).toBe(200);
@@ -284,14 +305,63 @@ describe('while the harness only reports the sessions the creator would not take
 		expect(r.saying('This session of yours is not verified')).toHaveLength(1);
 	});
 
-	it('takes a command written in clear in my name all the same, and logs it', async () => {
-		const helped = r.saying('I create and manage').length;
-		const eventId = await r.h.synapse.sendText(r.alice, r.room, '/help');
-		expect(await r.nextSaying('I create and manage', helped)).toContain('/newbot');
+	it('takes a command written in clear in a conversation opened without encryption all the same, and logs it', async () => {
+		const clear = await clearConversation(r);
+		const helped = r.saying('I create and manage', clear).length;
+		const eventId = await r.h.synapse.sendText(r.alice, clear, '/help');
+		expect(await r.nextSaying('I create and manage', helped, clear)).toContain('/newbot');
 		expect(await logged(r, 'owner message unencrypted', eventId)).toMatchObject({
 			mode: 'report',
 			reason: 'unencrypted'
 		});
+	});
+
+	it('takes no command written in clear in my name in our encrypted conversation, and logs it without its words', async () => {
+		const asked = r.saying('Which name').length;
+		await r.client.sendText(r.room, '/newbot');
+		await r.nextSaying('Which name', asked);
+		const done = r.saying('Done.').length;
+		await r.client.sendText(r.room, 'Jarvis');
+		expect(await r.nextSaying('Done.', done)).toContain(ASSISTANT_ID);
+		// What a component on the server could write in my name: it cannot encrypt for the room
+		const eventId = await r.h.synapse.sendText(r.alice, r.room, '/delete');
+		const decision = await r.h.decisionOn(eventId);
+		expect(decision).toMatchObject({
+			msg: 'assistant ignored an unencrypted message',
+			reason: 'encrypted room',
+			roomId: r.room,
+			sender: r.alice.userId,
+			owner: OWNER
+		});
+		// The log names the message, never what it says
+		expect(JSON.stringify(decision)).not.toContain('/delete');
+		expect(await assistantName(r)).toBe('Jarvis');
+		// What my session encrypts is taken as before
+		const renamed = r.saying('Your assistant is now called').length;
+		await r.client.sendText(r.room, '/rename Jeeves');
+		expect(await r.nextSaying('Your assistant is now called', renamed)).toBe(
+			'Your assistant is now called Jeeves.'
+		);
+		expect(await assistantName(r)).toBe('Jeeves');
+	});
+
+	it('takes a conversation whose encryption it cannot read for an encrypted one', async () => {
+		// The homeserver fails to tell any room's encryption while I open a new conversation with the
+		// creator, which therefore never learns that this one is encrypted
+		r.h.apisix.matrixFault = (call) =>
+			call.method === 'GET' && call.path.includes('/state/m.room.encryption') ? 502 : null;
+		try {
+			const fresh = await r.client.createDirectRoom(r.creatorId);
+			await r.client.waitForMessage(fresh, r.creatorId, (t) => t.includes('/newbot'));
+			const eventId = await r.h.synapse.sendText(r.alice, fresh, '/delete');
+			expect(await r.h.decisionOn(eventId)).toMatchObject({
+				msg: 'assistant ignored an unencrypted message',
+				reason: 'encryption state unreadable'
+			});
+		} finally {
+			r.h.apisix.matrixFault = null;
+		}
+		expect(await assistantName(r)).toBe('Jeeves');
 	});
 
 	it('takes no command it cannot check before it decrypts it, and tells me to try again', async () => {
