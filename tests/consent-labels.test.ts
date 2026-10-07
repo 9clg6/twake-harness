@@ -5,7 +5,8 @@ import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 
 const APPLICATIONS = ['mail', 'drive', 'photos', 'tasks', 'notes', 'wiki', 'boards'];
 
-// One read contract per application, and one write in Mail
+// One read contract per application, and one write in Mail; and calls that take no arguments:
+// Mail lists its mailboxes and turns the vacation response off, Drive tells the storage used
 const READS_CATALOG = readCatalog(APPLICATIONS) as { paths: Record<string, unknown> };
 const CATALOG = {
 	...READS_CATALOG,
@@ -19,10 +20,32 @@ const CATALOG = {
 				'x-twake-risk': 'low',
 				parameters: [{ name: 'item_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
+		},
+		'/contracts/v1/mail/mailboxes': {
+			get: {
+				operationId: 'list_mailboxes',
+				summary: "Lists the user's mailboxes",
+				tags: ['mail.mailboxes.read.v1']
+			}
+		},
+		'/contracts/v1/mail/vacation': {
+			delete: {
+				operationId: 'clear_vacation_response',
+				summary: "Turns the user's vacation response off",
+				tags: ['mail.vacation.set.v1'],
+				'x-twake-risk': 'low'
+			}
+		},
+		'/contracts/v1/drive/storage': {
+			get: {
+				operationId: 'read_storage_usage',
+				summary: "Tells how much of the user's storage is used",
+				tags: ['drive.storage.read.v1']
+			}
 		}
 	}
 };
-const CONTRACTS = APPLICATIONS.length + 1;
+const CONTRACTS = APPLICATIONS.length + 4;
 
 // How the contracts service names its applications to their owners. Mail is named apart in each
 // language, to tell which one the owner reads; Drive is described in English only, the
@@ -68,6 +91,14 @@ const WRITES: Record<string, string> = {
 	'Archive the newsletter': 'archive_mail',
 	"Archive la lettre d'information": 'archive_mail'
 };
+// What the owner asks that the model calls without arguments
+const WITHOUT_ARGUMENTS: Record<string, string> = {
+	'List my mailboxes': 'list_mailboxes',
+	'Turn my vacation response off': 'clear_vacation_response',
+	'Liste mes dossiers de mail': 'list_mailboxes',
+	'Coupe ma réponse automatique': 'clear_vacation_response',
+	'Quelle place prennent mes fichiers ?': 'read_storage_usage'
+};
 
 function model(request: ChatRequest): ScriptedReply {
 	const last = request.messages.at(-1);
@@ -80,6 +111,8 @@ function model(request: ChatRequest): ScriptedReply {
 	if (read !== undefined) return { toolCalls: call(read, { q: 'budget' }) };
 	const write = WRITES[content];
 	if (write !== undefined) return { toolCalls: call(write, { item_id: 'newsletter-42' }) };
+	const bare = WITHOUT_ARGUMENTS[content];
+	if (bare !== undefined) return { toolCalls: call(bare, {}) };
 	return { content: `Heard: ${content}` };
 }
 
@@ -89,6 +122,9 @@ const ALLOW = {
 	en: 'Do you allow it? I would start with this:',
 	fr: "Tu m'autorises ? Je commencerais par ceci :"
 };
+// How it ends about a call without arguments, which shows nothing below it: the lines before say
+// what the level covers
+const ALLOW_ALONE = { en: 'Do you allow it?', fr: "Tu m'autorises ?" };
 const HOW_TO_ANSWER = {
 	en: 'Answer with the buttons below, or reply yes or no.',
 	fr: 'Réponds avec les boutons ci-dessous, ou par oui ou non.'
@@ -113,6 +149,18 @@ function shown(
 			`<pre><code class="language-json">${json}</code></pre>`,
 			`<p>${HOW_TO_ANSWER[language]}</p>`
 		].join('\n')
+	};
+}
+
+// A question about a call without arguments as Alice's client receives it: no call under it,
+// only how to answer
+function shownAlone(
+	question: readonly string[],
+	language: 'en' | 'fr' = 'en'
+): { body: string; html: string } {
+	return {
+		body: [question.join('\n'), HOW_TO_ANSWER[language]].join('\n\n'),
+		html: [`<p>${question.join('<br />\n')}</p>`, `<p>${HOW_TO_ANSWER[language]}</p>`].join('\n')
 	};
 }
 
@@ -182,6 +230,46 @@ describe('the question names the application in plain words', () => {
 				ARCHIVE
 			)
 		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('shows no empty call under a first read or write without arguments: what the level covers says it', async () => {
+		await serve(DESCRIBED);
+		const reading = [
+			'This is the first time I need to read your data in Twake Mail.',
+			'Reading: list, search and read your mail',
+			ALLOW_ALONE.en
+		];
+		const read = await askedAfter('List my mailboxes');
+		expect(read).toEqual(shownAlone(reading));
+		expect(await askedAfter('Turn my vacation response off')).toEqual(
+			shownAlone([
+				'This is the first time I need to change your data in Twake Mail.',
+				'Writing: move, archive and delete your mail',
+				ALLOW_ALONE.en
+			])
+		);
+		// In its next turn, the model reads the request as I read it, after its own call, which
+		// already says what it would have run
+		const told = r.h.apisix.llm.calls.at(-1)?.request.messages ?? [];
+		expect(told.filter((m) => m.role === 'assistant').map((m) => m.content)).toContain(read.body);
+		expect(
+			told.some((m) =>
+				m.tool_calls?.some(
+					(c) => c.function.name === 'list_mailboxes' && c.function.arguments === '{}'
+				)
+			)
+		).toBe(true);
+		// Through the API, the chat answers with the same request, and the call that waits shows the
+		// question alone
+		const res = await r.h.api.post<{ answer: string; pending_call: { request: string } }>(
+			'bob@test.local',
+			'/v1/chat',
+			{ message: 'List my mailboxes' }
+		);
+		expect(res.status).toBe(200);
+		expect(res.body.answer).toBe(shownAlone(reading).body);
+		expect(res.body.pending_call.request).toBe(reading.join('\n'));
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
@@ -358,6 +446,45 @@ describe('the question names the application in plain words', () => {
 			shown(
 				[`C'est la première fois que j'ai besoin de lire tes données dans Wiki Twake. ${ALLOW.fr}`],
 				SEARCH,
+				'fr'
+			)
+		);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('shows no empty call under a first read or write without arguments, in my language', async () => {
+		await serve(DESCRIBED);
+		const told = r.saying('Tool:').length;
+		await r.client.sendText(r.room, 'Parle-moi en français');
+		expect(await r.nextSaying('Tool:', told)).toContain('"language":"fr"');
+
+		const opening = "C'est la première fois";
+		expect(await askedAfter('Liste mes dossiers de mail', opening)).toEqual(
+			shownAlone(
+				[
+					"C'est la première fois que j'ai besoin de lire tes données dans Messagerie Twake.",
+					'Lecture : lister, chercher et lire tes mails',
+					ALLOW_ALONE.fr
+				],
+				'fr'
+			)
+		);
+		expect(await askedAfter('Coupe ma réponse automatique', opening)).toEqual(
+			shownAlone(
+				[
+					"C'est la première fois que j'ai besoin de modifier tes données dans Messagerie Twake.",
+					'Écriture : déplacer, archiver et supprimer tes mails',
+					ALLOW_ALONE.fr
+				],
+				'fr'
+			)
+		);
+		// Drive says what reading covers in English only: the question names it alone
+		expect(await askedAfter('Quelle place prennent mes fichiers ?', opening)).toEqual(
+			shownAlone(
+				[
+					`C'est la première fois que j'ai besoin de lire tes données dans Twake Drive. ${ALLOW_ALONE.fr}`
+				],
 				'fr'
 			)
 		);

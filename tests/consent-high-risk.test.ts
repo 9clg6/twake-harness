@@ -60,6 +60,14 @@ const CATALOG = {
 				parameters: [pathParameter('email_id')]
 			}
 		},
+		'/contracts/v1/mail/trash': {
+			delete: {
+				operationId: 'empty_trash',
+				summary: "Deletes every mail in the user's trash for good",
+				tags: ['mail.trash.empty.v1'],
+				'x-twake-risk': 'high'
+			}
+		},
 		'/contracts/v1/mail/emails/{email_id}/spam': {
 			post: {
 				operationId: 'report_spam',
@@ -142,6 +150,7 @@ const REQUESTS: Record<string, Reply> = {
 	'Answer the offer': { said: HOSTILE, tool: 'send_email', args: OFFER },
 	'Archive the newsletter': { tool: 'archive_email', args: { email_id: 'm-news' } },
 	'Delete the old offer for good': { tool: 'delete_email', args: { email_id: 'm-offer' } },
+	'Empty my trash': { tool: 'empty_trash', args: {} },
 	'Report that mail as spam': { tool: 'report_spam', args: { email_id: 'm-junk' } },
 	'What do I have to do today?': {
 		said: 'Let me look at your tasks.',
@@ -220,7 +229,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		// Many turns of one owner in a row: admission is the subject of its own suite
 		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100' });
 		r.h.apisix.contracts.spec = CATALOG;
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(7);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(8);
 		r.h.apisix.llm.script = literalModel;
 	}, 240_000);
 	afterAll(async () => {
@@ -398,7 +407,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		expect(warned.map((l) => [l['contract'], l['declared']])).toEqual(
 			warned.map(() => ['mail.email.spam.v1', 'critical'])
 		);
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(7);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(8);
 		expect(unknownRisks()).toHaveLength(warned.length);
 	});
 
@@ -552,5 +561,49 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 			asked(HIGH_RISK_IN_MAIL, TO_PAUL, 'I am sending Paul the Q4 budget, as you asked.')
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('shows me which action a high-risk call without arguments is, never an empty call', async () => {
+		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'write');
+		let seen = requests().length;
+		await r.client.sendText(r.room, 'Empty my trash');
+		const request = await nextRequest(seen);
+		// The tool, as the harness names it, stands as code under the question, in the call's place
+		expect(request.body).toBe([HIGH_RISK_IN_MAIL, 'empty_trash', HOW_TO_ANSWER].join('\n\n'));
+		expect(request.content['formatted_body']).toBe(
+			[
+				`<p>${HIGH_RISK_IN_MAIL}</p>`,
+				'<pre><code>empty_trash</code></pre>',
+				`<p>${HOW_TO_ANSWER}</p>`
+			].join('\n')
+		);
+		// My ✅ empties it, and the model reads the request as I read it, after its own call
+		const done = r.saying('Done:').length;
+		await r.client.react(r.room, request.eventId, '✅');
+		expect(await r.nextSaying('Done:', done)).toContain('DELETE /contracts/v1/mail/trash');
+		const told = r.h.apisix.llm.calls.at(-1)?.request.messages ?? [];
+		expect(told.filter((m) => m.role === 'assistant').map((m) => m.content)).toContain(
+			request.body
+		);
+
+		// Had I taken writing back, one request asks for both, about that same action, and my no
+		// empties nothing
+		await withdrawConsent(r.h.db, 'alice@test.local', 'mail', 'write');
+		seen = requests().length;
+		await r.client.sendText(r.room, 'Empty my trash');
+		const again = await nextRequest(seen);
+		expect(again.body).toBe(
+			[
+				'This is the first time I need to change your data in mail, and actions like this one need your yes each time. Do you allow it, starting with this one, exactly as below?',
+				'empty_trash',
+				HOW_TO_ANSWER
+			].join('\n\n')
+		);
+		const acknowledged = r.saying('All right').length;
+		await r.client.react(r.room, again.eventId, '❌');
+		await r.nextSaying('All right', acknowledged);
+		expect(r.h.apisix.contracts.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
+			'DELETE /contracts/v1/mail/trash'
+		]);
 	});
 });

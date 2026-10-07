@@ -6,6 +6,8 @@ import type { ConsentLevel, WaitReason } from './consent.js';
 
 // A call the harness froze, as its request to the owner tells of it
 export interface RequestedCall {
+	// The tool the call is to, as the harness names it
+	readonly tool: string;
 	// The application as its owner reads it, from labelOf: its name, and what the call's level
 	// covers there when the catalog says
 	readonly application: DomainLabel;
@@ -22,6 +24,14 @@ export interface RequestedCall {
 	readonly said: string | null;
 }
 
+// What stands for a call under the harness's question: the call as it was frozen, whole, as
+// indented JSON; or, for a call the model wrote without arguments, which says nothing so, the tool
+// it calls, as the harness names it
+export interface ShownCall {
+	readonly kind: 'arguments' | 'tool';
+	readonly text: string;
+}
+
 // The harness's request to an owner about a call it froze, in the parts their client shows apart,
 // in this order. Only the question, the labels and how to answer are the harness's own words, and
 // the parts stay apart wherever the request goes, so that the API can show the question without
@@ -32,9 +42,10 @@ export interface OwnerRequest {
 	readonly said: { readonly label: string; readonly text: string } | null;
 	// The harness's question, in Markdown: the application named as the catalog does
 	readonly question: string;
-	// The call as it was frozen, whole, as indented JSON: what its owner reads of it when its
-	// contract offers no preview, and what the conversation keeps of it either way
-	readonly call: string;
+	// The call under the question: what its owner reads of it when its contract offers no preview,
+	// and what the conversation keeps of it either way; null when the request shows none, for a
+	// call the model wrote without arguments whose question asks about its application alone
+	readonly call: ShownCall | null;
 	// What its contract said the call would do, under the harness's label for it, in Markdown,
 	// which names the application: what its owner reads in the call's place; null for a contract
 	// that offers no preview
@@ -62,30 +73,61 @@ function linesOf(text: string): string[] {
 	return text.split(/\r\n|[\n\r\u0085\u2028\u2029]/);
 }
 
-// The harness's question for the reasons a call waits for: a first use asks about the
-// application; a high-risk write, or a write that a turn an event started prepared, about that
-// very call; and the first of either in its application about both
-function questionFor(call: RequestedCall, consent: Messages['consent']): string {
+// A call the model wrote without arguments, such as listing the mailboxes, which as JSON would
+// show its owner an empty object
+function hasNoArguments(args: unknown): boolean {
+	return typeof args === 'object' && args !== null && Object.keys(args).length === 0;
+}
+
+// The harness's question for the reasons a call waits for, with the call it shows: a first use
+// asks about the application; a high-risk write, or a write that a turn an event started
+// prepared, about that very call; and the first of either in its application about both. Unless
+// a summary stands in its place, a call without arguments shows its tool instead, where the
+// question asks about that very call, and nothing under a first use's, whose words say it all.
+function questionFor(
+	call: RequestedCall,
+	consent: Messages['consent']
+): Pick<OwnerRequest, 'question' | 'call'> {
 	const { name, covers } = call.application;
 	const firstUse = call.reasons.includes('consent');
+	const bare = call.summary === null && hasNoArguments(call.arguments);
+	const frozen: ShownCall = {
+		kind: 'arguments',
+		text: JSON.stringify(call.arguments, null, 2) ?? 'null'
+	};
+	// What a question about that very call shows of it
+	const itself: ShownCall = bare ? { kind: 'tool', text: call.tool } : frozen;
 	// A high-risk write asks every time, whoever started the turn: its question also holds for one
 	// that a turn an event started prepared
 	if (call.reasons.includes('high_risk')) {
-		return firstUse ? consent.firstHighRisk(name, covers) : consent.highRisk(name);
+		return {
+			question: firstUse ? consent.firstHighRisk(name, covers) : consent.highRisk(name),
+			call: itself
+		};
 	}
 	if (call.reasons.includes('event_turn')) {
-		return firstUse ? consent.firstEventWrite(name, covers) : consent.eventWrite(name);
+		return {
+			question: firstUse ? consent.firstEventWrite(name, covers) : consent.eventWrite(name),
+			call: itself
+		};
 	}
-	return call.level === 'read' ? consent.firstRead(name, covers) : consent.firstWrite(name, covers);
+	return {
+		question:
+			call.level === 'read'
+				? consent.firstRead(name, covers, !bare)
+				: consent.firstWrite(name, covers, !bare),
+		call: bare ? null : frozen
+	};
 }
 
-// The request about a frozen call, or null when the call, or its summary, is too large to show
-// whole in one message: an owner is never asked about a call they cannot see whole
+// The request about a frozen call, or null when what it shows of the call, the call or its
+// summary, is too large to show whole in one message: an owner is never asked about a call they
+// cannot see whole
 export function makeOwnerRequest(call: RequestedCall, messages: Messages): OwnerRequest | null {
-	const frozen = JSON.stringify(call.arguments, null, 2) ?? 'null';
-	const shown = call.summary ?? frozen;
-	if (byteLength(shown) + byteLength(escapeHtml(shown)) > CALL_BYTES) return null;
 	const { consent } = messages;
+	const asked = questionFor(call, consent);
+	const shown = call.summary ?? asked.call?.text ?? '';
+	if (byteLength(shown) + byteLength(escapeHtml(shown)) > CALL_BYTES) return null;
 	const said = Array.from(call.said?.trim() ?? '');
 	return {
 		said:
@@ -96,8 +138,7 @@ export function makeOwnerRequest(call: RequestedCall, messages: Messages): Owner
 						text:
 							said.length > SAID_LENGTH ? `${said.slice(0, SAID_LENGTH).join('')}…` : said.join('')
 					},
-		question: questionFor(call, consent),
-		call: frozen,
+		...asked,
 		summary:
 			call.summary === null
 				? null
@@ -115,18 +156,24 @@ function quoted(label: string, text: string): string {
 // The request as plain text: the body of its message, and what the API answers. The model's
 // words, and what an application said of the call, are quoted under the harness's labels.
 export function requestText(request: OwnerRequest): string {
-	const { said, summary } = request;
+	const { said, call, summary } = request;
 	return [
 		...(said === null ? [] : [quoted(said.label, said.text)]),
 		request.question,
-		summary === null ? request.call : quoted(summary.label, summary.text),
+		...(summary === null
+			? call === null
+				? []
+				: [call.text]
+			: [quoted(summary.label, summary.text)]),
 		request.howToAnswer
 	].join('\n\n');
 }
 
-// The request as the conversation keeps it, which later turns of the model read: the call as it
-// was frozen, never what its application said of it. That is the application's data, which may
-// hold what a third party wrote, and only its owner reads it.
+// The request as the conversation keeps it, which later turns of the model read: as its owner
+// read it, with the call in the place of what its application said of it. That is the
+// application's data, which may hold what a third party wrote, and only its owner reads it. A call
+// without arguments is kept as its owner read it too, without an empty call: the model's own call,
+// just before the request in the conversation, already says what would run.
 export function conversationText(request: OwnerRequest): string {
 	return requestText({ ...request, summary: null });
 }
@@ -134,13 +181,19 @@ export function conversationText(request: OwnerRequest): string {
 // The harness's own Markdown: no HTML of its own, and no link it did not write
 const QUESTION_MARKDOWN = new MarkdownIt({ html: false, linkify: false, breaks: true });
 
+// The call under the question as code: its arguments as JSON, or the tool it calls
+function callHtml(call: ShownCall): string {
+	const language = call.kind === 'arguments' ? ' class="language-json"' : '';
+	return `<pre><code${language}>${escapeHtml(call.text)}</code></pre>`;
+}
+
 // The request as HTML, laid out by the harness. The model's words are plain text in a quote under
 // the harness's label, never rendered: no heading, table, image or link they hold can stand out
 // against the question or its buttons. The call, or its contract's summary under the harness's
 // label, is code, and only the question and that label are rendered, from the harness's own
 // Markdown.
 export function requestHtml(request: OwnerRequest): string {
-	const { said, summary } = request;
+	const { said, call, summary } = request;
 	const quoted =
 		said === null
 			? []
@@ -152,7 +205,9 @@ export function requestHtml(request: OwnerRequest): string {
 		...quoted,
 		QUESTION_MARKDOWN.render(request.question).trim(),
 		...(summary === null
-			? [`<pre><code class="language-json">${escapeHtml(request.call)}</code></pre>`]
+			? call === null
+				? []
+				: [callHtml(call)]
 			: [
 					QUESTION_MARKDOWN.render(summary.label).trim(),
 					`<pre><code>${escapeHtml(summary.text)}</code></pre>`

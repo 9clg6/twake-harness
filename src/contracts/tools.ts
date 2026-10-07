@@ -416,6 +416,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		}
 		const request = makeOwnerRequest(
 			{
+				tool: contract.toolName,
 				application,
 				level: contract.level,
 				reasons,

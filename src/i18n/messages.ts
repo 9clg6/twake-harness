@@ -56,13 +56,16 @@ export interface Messages {
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
-		// Every question shows the call below it, then how to answer.
+		// Every question shows the call below it, or what stands in its place, then how to answer; a
+		// first use's about a call the model wrote without arguments shows none, since reading or
+		// writing in the application is all there is to know of it.
 		// The application as the catalog names it, or else by its id, and what reading covers there
-		// when the catalog says, both from labelOf
-		firstRead(application: string, covers: string | null): string;
+		// when the catalog says, both from labelOf; and whether the request shows the call below
+		firstRead(application: string, covers: string | null, shown: boolean): string;
 		// Asked before the assistant first writes in an application, even one its owner lets it read:
-		// the application as for reading, and what writing covers there when the catalog says
-		firstWrite(application: string, covers: string | null): string;
+		// the application as for reading, what writing covers there when the catalog says, and
+		// whether the request shows the call below
+		firstWrite(application: string, covers: string | null, shown: boolean): string;
 		// Asked before every high-risk write, whatever its owner allowed: the application as for
 		// writing
 		highRisk(application: string): string;
@@ -189,19 +192,19 @@ const ENGLISH: Messages = {
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.'
 	},
 	consent: {
-		firstRead: (application, covers) =>
+		firstRead: (application, covers, shown) =>
 			firstUse(
 				`This is the first time I need to read your data in ${application}.`,
 				'Reading:',
 				covers,
-				'Do you allow it? I would start with this:'
+				shown ? 'Do you allow it? I would start with this:' : 'Do you allow it?'
 			),
-		firstWrite: (application, covers) =>
+		firstWrite: (application, covers, shown) =>
 			firstUse(
 				`This is the first time I need to change your data in ${application}.`,
 				'Writing:',
 				covers,
-				'Do you allow it? I would start with this:'
+				shown ? 'Do you allow it? I would start with this:' : 'Do you allow it?'
 			),
 		highRisk: (application) =>
 			`Actions like this one in ${application} need your yes each time. Shall I do this one, exactly as below?`,
@@ -319,19 +322,19 @@ const FRENCH: Messages = {
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant."
 	},
 	consent: {
-		firstRead: (application, covers) =>
+		firstRead: (application, covers, shown) =>
 			firstUse(
 				`C'est la première fois que j'ai besoin de lire tes données dans ${application}.`,
 				'Lecture :',
 				covers,
-				"Tu m'autorises ? Je commencerais par ceci :"
+				shown ? "Tu m'autorises ? Je commencerais par ceci :" : "Tu m'autorises ?"
 			),
-		firstWrite: (application, covers) =>
+		firstWrite: (application, covers, shown) =>
 			firstUse(
 				`C'est la première fois que j'ai besoin de modifier tes données dans ${application}.`,
 				'Écriture :',
 				covers,
-				"Tu m'autorises ? Je commencerais par ceci :"
+				shown ? "Tu m'autorises ? Je commencerais par ceci :" : "Tu m'autorises ?"
 			),
 		highRisk: (application) =>
 			`Dans ${application}, les actions comme celle-ci demandent ton accord à chaque fois. Je fais celle-ci, exactement comme ci-dessous ?`,
