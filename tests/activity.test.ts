@@ -115,6 +115,11 @@ const TASKS_CATALOG = {
 	}
 };
 
+// A log stream that keeps nothing, for a role whose logs a test does not read
+function silent(): Writable {
+	return new Writable({ write: (_chunk, _encoding, done) => done() });
+}
+
 // The event as the model was handed it: the line between the fences of the block
 const FENCED = /^<<<event-data ([0-9a-f]{12})\n(.+)\nevent-data \1>>>$/m;
 
@@ -142,7 +147,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker' },
 			db: r.h.db,
-			logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
+			logStream: silent()
 		});
 		// A literal model: it tells the owner what the event it was handed says
 		r.h.apisix.llm.script = (request: ChatRequest) => {
@@ -451,7 +456,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 					activity: { amqpUrl: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD), types }
 				},
 				db: r.h.db,
-				logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
+				logStream: silent()
 			});
 		try {
 			await (await listening([ASSIGNED])).stop();
@@ -482,7 +487,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 				APISIX_CONSUMER_KEY: config.apisix.consumerKey
 			}),
 			db: r.h.db,
-			logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
+			logStream: silent()
 		});
 		try {
 			const health = await quiet.app.inject({ method: 'GET', url: '/health' });
