@@ -85,6 +85,13 @@ function turnCalls(calls: readonly RecordedCall[], eventId: string): RecordedCal
 	return calls.filter((call) => lastUser(call.request).includes(`(id ${eventId})`));
 }
 
+// Those of one assistant, known by the name its system prompt gives it
+function turnsOf(calls: readonly RecordedCall[], eventId: string, name: string): RecordedCall[] {
+	return turnCalls(calls, eventId).filter((call) =>
+		call.request.messages[0]?.content?.includes(`"${name}"`)
+	);
+}
+
 describe('an event that fails holds back none of those after it, and is never lost', () => {
 	let broker: TestBroker;
 	let r: ConsentRoom;
@@ -333,4 +340,46 @@ describe('an event that fails holds back none of those after it, and is never lo
 			{ eventId: next.id, outcome: 'woken', reason: undefined }
 		]);
 	});
+
+	it('wakes nobody twice when its dead letters are replayed once the fault is fixed', async () => {
+		await broker.channel.purgeQueue(DEAD_LETTERS);
+		// Carol has an assistant too, whose wake-ups the database refuses for now
+		await r.h.synapse.registerUser('carol');
+		const created = await r.h.api.post('carol@test.local', '/v1/assistants', { name: 'Friday' });
+		expect(created.status).toBe(201);
+		const carol = { email: 'carol@test.local', reason: 'assigned' };
+		const event = activityEvent([ALICE, carol]);
+		await refuseWakeups(`new.owner = 'carol@test.local'`);
+		try {
+			// Alice is told at the first attempt, and the event is dead-lettered for Carol's sake
+			await publish(event);
+			await toldOf(event);
+			await failuresOf(event, 5);
+			await until(
+				'the event dead-lettered',
+				async () => (await broker.queue(DEAD_LETTERS))?.messages === 1
+			);
+		} finally {
+			await allowWakeups();
+		}
+		const mark = logs.lines().length;
+		expect(await broker.replay(DEAD_LETTERS, QUEUE)).toBe(1);
+		await until('Carol told', () => turnsOf(r.h.apisix.llm.calls, event.id, 'Friday').length > 0);
+		expect(
+			handled(mark).map(({ eventId, outcome, outcomes }) => ({ eventId, outcome, outcomes }))
+		).toEqual([{ eventId: event.id, outcome: 'woken', outcomes: { duplicate: 1, woken: 1 } }]);
+		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Jarvis')).toHaveLength(1);
+		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Friday')).toHaveLength(1);
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+		expect((await broker.queue(QUEUE))?.messages).toBe(0);
+	});
 });
+
+// Waits for what a condition tells, a minute at most
+async function until(what: string, condition: () => Promise<boolean> | boolean): Promise<void> {
+	for (let i = 0; i < 240; i += 1) {
+		if (await condition()) return;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	throw new Error(`${what}: not within a minute`);
+}

@@ -58,6 +58,10 @@ export interface TestBroker {
 	connectedUsers(vhost?: string): Promise<string[]>;
 	// Publishes as an application does, persistent and under its id, once the broker took it
 	publish(exchange: string, routingKey: string, body: unknown, messageId?: string): Promise<void>;
+	// Moves every message of a queue to another, as an operator replays a dead letter queue once
+	// its cause is fixed, with a shovel or the management UI: through the default exchange, under
+	// the name of the queue it goes to. Resolves to how many it moved.
+	replay(from: string, to: string): Promise<number>;
 	stop(): Promise<void>;
 }
 
@@ -190,6 +194,21 @@ export async function startTestBroker(): Promise<TestBroker> {
 			const connection = await connect(urlOn(name, 'guest', 'guest'));
 			vhosts.push(connection);
 			return connection.createConfirmChannel();
+		},
+		replay: async (from, to) => {
+			for (let moved = 0; ; moved += 1) {
+				const message = await channel.get(from, { noAck: false });
+				if (message === false) return moved;
+				const { messageId, contentType, headers } = message.properties;
+				channel.sendToQueue(to, message.content, {
+					persistent: true,
+					messageId,
+					contentType,
+					headers
+				});
+				await channel.waitForConfirms();
+				channel.ack(message);
+			}
 		},
 		stop: async () => {
 			for (const connection of vhosts) await connection.close();
