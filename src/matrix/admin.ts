@@ -10,6 +10,15 @@ export interface MatrixAdmin {
 	leaveRoom(asUserId: string, roomId: string): Promise<void>;
 	// The members joined to a room, as the user named reads them; null when that user is not in it
 	joinedMembers(asUserId: string, roomId: string): Promise<string[] | null>;
+	// A state event of a room as the user named reads it, its content; null when the room has none
+	readState(asUserId: string, roomId: string, type: string, stateKey: string): Promise<unknown>;
+	writeState(
+		asUserId: string,
+		roomId: string,
+		type: string,
+		stateKey: string,
+		content: unknown
+	): Promise<void>;
 	// The cross-signing keys of an assistant, uploaded as the application service, which may
 	// replace an identity the user already has: the device's own token would need interactive
 	// authentication, which a user without a password cannot give
@@ -179,6 +188,28 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 			if (response.status !== 200) fail('joined members', response);
 			const joined = response.body['joined'];
 			return typeof joined === 'object' && joined !== null ? Object.keys(joined) : [];
+		},
+		async readState(asUserId, roomId, type, stateKey) {
+			const response = await call(
+				'GET',
+				`/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(type)}/${encodeURIComponent(stateKey)}`,
+				undefined,
+				options.asToken,
+				asUserId
+			);
+			if (response.status === 404) return null;
+			if (response.status !== 200) fail('read of a state event', response);
+			return response.body;
+		},
+		async writeState(asUserId, roomId, type, stateKey, content) {
+			const response = await call(
+				'PUT',
+				`/rooms/${encodeURIComponent(roomId)}/state/${encodeURIComponent(type)}/${encodeURIComponent(stateKey)}`,
+				content,
+				options.asToken,
+				asUserId
+			);
+			if (response.status !== 200) fail('write of a state event', response);
 		}
 	};
 }

@@ -49,6 +49,11 @@ export interface Messages {
 		// Any command that broke on the harness's side: the dialog starts over
 		readonly requestFailed: string;
 	};
+	// The commands an assistant answers itself in its owner's rooms, without the model: what the
+	// client shows of each after « / », and the answer
+	readonly assistantCommands: {
+		readonly help: { readonly description: string; readonly answer: string };
+	};
 	readonly notices: {
 		readonly turnFailed: string;
 		readonly busy: string;
@@ -189,6 +194,17 @@ const ENGLISH: Messages = {
 		requestFailed:
 			'Something went wrong on my side and your request was not done. Please try again in a moment.'
 	},
+	assistantCommands: {
+		help: {
+			description: 'What I can do, and how to allow or take back my access to your apps',
+			answer: [
+				'I am your assistant. Write to me as you would to a person: I answer, I look things up in your Twake apps when you ask me to, and I remember what you ask me to remember.',
+				'The first time I need to read or change your data in an app, I ask you first: answer yes or no.',
+				'To know what I may access, or to take a permission back, just ask me, for instance « what may you read? » or « stop using my calendar ».',
+				'Commands: !help shows this message.'
+			].join('\n\n')
+		}
+	},
 	notices: {
 		turnFailed: 'Something went wrong on my side. Please try again in a moment.',
 		busy: 'I am busy right now and cannot take this message. Please send it again in a moment.',
@@ -319,6 +335,18 @@ const FRENCH: Messages = {
 			`Je n'ai pas compris « ${text} ». Envoie /help pour voir les commandes.`,
 		requestFailed:
 			"Quelque chose s'est mal passé de mon côté : ta demande n'a pas abouti. Réessaie dans un instant."
+	},
+	assistantCommands: {
+		help: {
+			description:
+				"Ce que je sais faire, et comment m'autoriser ou me retirer l'accès à tes applications",
+			answer: [
+				'Je suis ton assistant. Écris-moi comme à une personne : je te réponds, je cherche dans tes applications Twake quand tu me le demandes, et je retiens ce que tu me demandes de retenir.',
+				"La première fois que j'ai besoin de lire ou de modifier tes données dans une application, je te demande d'abord ton accord : réponds oui ou non.",
+				"Pour savoir ce que je peux consulter, ou me retirer une autorisation, demande-le-moi simplement, par exemple « qu'as-tu le droit de lire ? » ou « arrête d'utiliser mon agenda ».",
+				'Commandes : !help affiche ce message.'
+			].join('\n\n')
+		}
 	},
 	notices: {
 		turnFailed: "Quelque chose s'est mal passé de mon côté. Réessaie dans un instant.",

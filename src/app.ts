@@ -13,7 +13,7 @@ import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
-import { localeOf } from './assistants/locale.js';
+import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
 import { readyIdentity, requestPreparation } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
@@ -42,6 +42,7 @@ import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
+import { announceCommands } from './matrix/commands.js';
 import { listMemory } from './memory/repository.js';
 import { principalOfMatrixUser } from './principals/identity.js';
 import type { Principal } from './principals/principal.js';
@@ -439,6 +440,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
 		});
 		request.log.info({ client, owner, userId: assistant.userId, roomId }, 'assistant room named');
+		// Announced at the join already, unless the room refused it then
+		await announceCommands(
+			{ admin: matrixAdmin, log: request.log },
+			{ roomId, assistantUserId: assistant.userId },
+			await fetchOwnerMessages(db, owner, config.locale)
+		);
 		return reply.code(204).send();
 	});
 

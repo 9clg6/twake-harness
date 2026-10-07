@@ -34,6 +34,7 @@ import { getMessages, type Messages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
+import { announceCommands, commandOf } from './commands.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { makeEnsureEncryption, routeEncryptionSetups } from './encryption.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
@@ -599,6 +600,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await withPrincipal(db, { id: owner }, (tx) => setAssistantRoomId(tx, owner, roomId));
 		}
 		log.info({ roomId, owner, userId: invited }, 'assistant room opened by its owner');
+		await announceCommands(
+			{ admin, log },
+			{ roomId, assistantUserId: invited },
+			await fetchMessages(owner)
+		);
 	}
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
@@ -809,6 +815,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					);
 					return;
 				}
+			}
+			// A command the assistant announced in its owner's rooms is answered by the harness, not
+			// the model; it goes out after what the assistant was already saying in the room
+			if (owner !== ORGANIZATION_PRINCIPAL && commandOf(text, raw.content) === 'help') {
+				const { assistantCommands } = await fetchMessages(owner);
+				await enqueueJob(db, {
+					kind: 'send',
+					payload: { asUserId: room.userId, roomId, text: assistantCommands.help.answer },
+					dedupKey: `command:${eventId}`,
+					groupKey: `send:${roomId}`
+				});
+				log.info({ roomId, owner, eventId, command: 'help' }, 'assistant command answered');
+				return;
 			}
 			// The turns of one owner run one after the other, in the order they were sent
 			const queued = await enqueueJob(db, {

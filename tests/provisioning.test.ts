@@ -187,6 +187,103 @@ describe('a provisioned assistant', () => {
 		expect(answer).toContain('hello, assistant');
 	});
 
+	// What Twake Chat offers after « / » for the assistant (MSC4332): a state event per bot, keyed by
+	// the bot's id, its descriptions as MSC1767 text
+	async function announcedCommands(
+		viewer: MatrixUser,
+		roomId: string,
+		botUserId: string,
+		attempts = 40
+	): Promise<unknown> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/org.matrix.msc4332.commands/${encodeURIComponent(botUserId)}`;
+		for (let i = 0; i < attempts; i += 1) {
+			const res = await h.synapse.request(viewer, 'GET', path);
+			if (res.status === 200) return res.body;
+			await sleep(250);
+		}
+		return null;
+	}
+
+	it('announces its commands in the direct room its owner invites it to', async () => {
+		const nina = await h.synapse.registerUser('nina');
+		const client = await startE2eeClient(h.synapse.url, nina);
+		clients.push(client);
+		const mine = await provisionUntilReady(nina.userId);
+
+		const room = await client.createDirectRoom(mine.userId);
+		await waitForMember(nina, room, mine.userId);
+
+		expect(await announcedCommands(nina, room, mine.userId)).toEqual({
+			commands: [
+				{
+					name: 'help',
+					syntax: 'help',
+					description: {
+						'm.text': [
+							{ body: 'What I can do, and how to allow or take back my access to your apps' }
+						]
+					}
+				}
+			]
+		});
+	});
+
+	it('announces its commands in a room the client names, once the room lets it', async () => {
+		const pam = await h.synapse.registerUser('pam');
+		const mine = await provisionUntilReady(pam.userId);
+		const roomsPath = '/_matrix/client/v3/rooms';
+		// A direct room where only its creator may announce commands: the assistant's announcement at
+		// its join is refused
+		const created = await h.synapse.request(pam, 'POST', '/_matrix/client/v3/createRoom', {
+			is_direct: true,
+			preset: 'private_chat',
+			invite: [mine.userId],
+			power_level_content_override: { events: { 'org.matrix.msc4332.commands': 100 } }
+		});
+		const room = created.body['room_id'] as string;
+		await waitForMember(pam, room, mine.userId);
+		expect(await announcedCommands(pam, room, mine.userId, 8)).toBeNull();
+
+		// The owner lets members announce commands there, then the client names the room
+		const levelsPath = `${roomsPath}/${encodeURIComponent(room)}/state/m.room.power_levels/`;
+		const levels = (await h.synapse.request(pam, 'GET', levelsPath)).body as Record<
+			string,
+			unknown
+		>;
+		const events = {
+			...(levels['events'] as Record<string, number>),
+			'org.matrix.msc4332.commands': 0
+		};
+		await h.synapse.request(pam, 'PUT', levelsPath, { ...levels, events });
+		const named = await provisionerPut(`${assistantPath(pam.userId)}/home`, { roomId: room });
+		expect(named.status).toBe(204);
+
+		expect(await announcedCommands(pam, room, mine.userId)).toMatchObject({
+			commands: [{ name: 'help', syntax: 'help' }]
+		});
+	});
+
+	it('answers !help itself, without asking the model', async () => {
+		const oscar = await h.synapse.registerUser('oscar');
+		const client = await startE2eeClient(h.synapse.url, oscar);
+		clients.push(client);
+		const mine = await provisionUntilReady(oscar.userId);
+		const room = await client.createDirectRoom(mine.userId);
+		await waitForMember(oscar, room, mine.userId);
+
+		// As Twake Chat sends a command the assistant announced
+		await client.sendText(room, '!help');
+
+		const answer = await client.waitForMessage(room, mine.userId, (text) =>
+			text.startsWith('I am your assistant')
+		);
+		expect(answer).toContain('Commands: !help shows this message.');
+		const asked = h.apisix.llm.calls.some((call) =>
+			call.request.messages.some((message) => message.content?.includes('!help') === true)
+		);
+		expect(asked).toBe(false);
+	});
+
 	it('takes the direct room the client names as the room it writes to its owner in', async () => {
 		const dave = await h.synapse.registerUser('dave');
 		const client = await startE2eeClient(h.synapse.url, dave);
