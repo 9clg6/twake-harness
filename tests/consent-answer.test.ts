@@ -10,7 +10,13 @@ import {
 	type ToolCall
 } from './helpers/fake-apisix.js';
 import { withdrawConsent } from './helpers/consents.js';
-import { eventually, watchFeedback, type RoomFeedback } from './helpers/feedback.js';
+import {
+	eventually,
+	expectAnswered,
+	expectSeenOnly,
+	watchFeedback,
+	type RoomFeedback
+} from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -592,11 +598,7 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
-		// The check mark joins the eyes, which stay
-		const check = await eventually(() => feedback.reactionsOn(request).find((r) => r.key === '✅'));
-		expect(check).toBeDefined();
-		expect(feedback.reactionsOn(request).map((r) => r.key)).toEqual(['👀', '✅']);
-		expect(feedback.redactions()).toEqual([]);
+		await expectAnswered(feedback, request);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 
@@ -613,15 +615,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await nextAnswer(answered)).toContain('Send the Q4 figures');
-		// The check mark joins the eyes, which stay
-		const check = await eventually(() => feedback.reactionsOn(yes).find((r) => r.key === '✅'));
-		expect(check).toBeDefined();
-		expect(feedback.reactionsOn(yes).map((r) => r.key)).toEqual(['👀', '✅']);
-		expect(feedback.redactions()).toEqual([]);
+		await expectAnswered(feedback, yes);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 
-	it('stops showing it is working on my answer when the turn it resumes fails', async () => {
+	it('stops typing when the turn my answer resumes fails, leaving the request seen but not answered', async () => {
 		await withdrawConsent(h.db, 'alice@test.local', 'contacts', 'read');
 		// Once the call I allowed came back, the model answers nothing
 		h.apisix.llm.script = slowModelUsing('search_contacts', { q: 'Anna' }, '');
@@ -636,10 +634,7 @@ describe('my answer lets my assistant carry on', () => {
 		expect(await typing).toBe(true);
 		expect(await eventually(() => failures().length > failed, 30_000)).toBe(true);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
-		await sleep(1000);
-		// No check mark joins the eyes, which stay
-		expect(feedback.reactionsOn(request).map((r) => r.key)).toEqual(['👀']);
-		expect(feedback.redactions()).toEqual([]);
+		await expectSeenOnly(feedback, request);
 	});
 
 	it('tells me what it did and what remains when my yes takes it past its limit of calls', async () => {

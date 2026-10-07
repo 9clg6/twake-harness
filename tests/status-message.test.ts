@@ -5,6 +5,8 @@ import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers
 import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix.js';
 import {
 	eventually,
+	expectAnswered,
+	expectSeenOnly,
 	inReplyTo,
 	watchFeedback,
 	type RoomFeedback,
@@ -201,11 +203,7 @@ describe('a status message while my assistant works on a message', () => {
 		expect(edit['content']).toMatchObject({
 			'm.relates_to': { rel_type: 'm.replace', event_id: status?.eventId }
 		});
-		// The check mark joins the eyes on my message once it is answered, and the eyes stay
-		const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
-		expect(check).toBeDefined();
-		expect(feedback.reactionsOn(asked).map((x) => x.key)).toEqual(['👀', '✅']);
-		expect(feedback.redactions()).toEqual([]);
+		await expectAnswered(feedback, asked);
 	});
 
 	it('posts no status for a message answered before it was due, however long typing takes to stop', async () => {
@@ -370,6 +368,33 @@ describe('a status message while my assistant works on a message', () => {
 		expect(check).toBeDefined();
 	});
 
+	it('marks my message answered after its eyes, even when they go out after the answer', async () => {
+		let asked = '';
+		let held = false;
+		const answer = 'Answered before my eyes went out';
+		r.h.apisix.llm.script = () => ({ content: answer });
+		// The eyes on my message wait at the gateway until the answer is out, and until a check mark
+		// sent meanwhile has reached me
+		r.h.apisix.matrixHold = (c) => {
+			const relation = relationOf(c.body);
+			if (held || !sendsEvent(c) || relation?.['rel_type'] !== 'm.annotation') return null;
+			if (relation['key'] !== '👀') return null;
+			held = true;
+			return (async () => {
+				await shows(answer);
+				await eventually(() => feedback.reactionsOn(asked).some((x) => x.key === '✅'), 3000);
+			})();
+		};
+		try {
+			asked = await r.client.sendText(r.room, 'Quick, while your eyes wait');
+			expect(await shows(answer)).toBe(true);
+			await expectAnswered(feedback, asked);
+			expect(held).toBe(true);
+		} finally {
+			r.h.apisix.matrixHold = null;
+		}
+	});
+
 	it('closes the status of a failed turn, its notice following on its own', async () => {
 		let asked = '';
 		r.h.apisix.llm.script = () => ({ content: null, hold: statusShown(() => asked) });
@@ -382,10 +407,8 @@ describe('a status message while my assistant works on a message', () => {
 		const notice = shownSince(before)[1];
 		expect(inReplyTo(notice?.original ?? {})).toBeNull();
 		expect(await notified()).toContain(notice?.eventId);
-		// No check mark on a message that was not answered, as before, and the eyes stay
-		await sleep(1000);
-		expect(feedback.reactionsOn(asked).map((x) => x.key)).toEqual(['👀']);
-		expect(feedback.redactions()).toEqual([]);
+		// No check mark on a message that was not answered, as before
+		await expectSeenOnly(feedback, asked);
 	});
 
 	it('closes the status of a refused turn, its notice following on its own', async () => {
@@ -411,7 +434,7 @@ describe('a status message while my assistant works on a message', () => {
 			const notice = shownSince(before).find((m) => m.body === BUSY);
 			expect(inReplyTo(notice?.original ?? {})).toBeNull();
 			expect(await notified()).toContain(notice?.eventId);
-			expect(feedback.reactionsOn(second).filter((x) => x.key === '✅')).toEqual([]);
+			await expectSeenOnly(feedback, second);
 		} finally {
 			await spendToday(0);
 		}

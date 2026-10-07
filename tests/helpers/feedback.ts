@@ -1,3 +1,5 @@
+import { expect } from 'vitest';
+
 import type { E2eeClient } from './e2ee-client.js';
 import type { MatrixUser, TestSynapse } from './synapse.js';
 
@@ -42,10 +44,8 @@ export function inReplyTo(content: Record<string, unknown>): string | null {
 // What the owner sees of their assistant at work in its room: its reactions on an event, whether
 // it is typing, and its messages, edits applied
 export interface RoomFeedback {
-	// A reaction the assistant redacted is gone from what the owner's client shows
 	reactionsOn(eventId: string): Reaction[];
-	// The events the assistant redacted in the room
-	redactions(): string[];
+	redactedEventIds(): string[];
 	isTyping(): Promise<boolean>;
 	shown(): ShownMessage[];
 }
@@ -64,28 +64,22 @@ let syncs = 0;
 
 export function watchFeedback(options: RoomFeedbackOptions): RoomFeedback {
 	const { synapse, owner, client, room, assistantId } = options;
-	function redactions(): string[] {
-		return client.events.flatMap((e) =>
-			e.roomId === room && e.type === 'm.room.redaction' && e.sender === assistantId
-				? [e.redacts ?? '']
-				: []
-		);
-	}
 	return {
-		reactionsOn: (eventId) => {
-			const taken = new Set(redactions());
-			return client.events
+		reactionsOn: (eventId) =>
+			client.events
 				.filter((e) => e.roomId === room && e.type === 'm.reaction' && e.sender === assistantId)
 				.flatMap((e) => {
 					const relation = e.content['m.relates_to'] as Record<string, unknown> | undefined;
-					return relation?.['rel_type'] === 'm.annotation' &&
-						relation['event_id'] === eventId &&
-						!taken.has(e.eventId)
+					return relation?.['rel_type'] === 'm.annotation' && relation['event_id'] === eventId
 						? [{ eventId: e.eventId, key: String(relation['key']) }]
 						: [];
-				});
-		},
-		redactions,
+				}),
+		redactedEventIds: () =>
+			client.events.flatMap((e) =>
+				e.roomId === room && e.type === 'm.room.redaction' && e.sender === assistantId
+					? [e.redacts ?? '']
+					: []
+			),
 		// Typing notifications are ephemeral: the SDK client drops them, a sync without a token shows
 		// who is typing in the room right now
 		isTyping: async () => {
@@ -145,4 +139,21 @@ export async function eventually<T>(read: () => T | Promise<T>, timeoutMs = 15_0
 		await sleep(200);
 	}
 	return read();
+}
+
+// An answered message keeps the eyes the assistant put on it, the check mark after them: in an
+// encrypted room, the homeserver keeps a redacted reaction as an empty encrypted event, which some
+// clients show as a message they cannot read
+export async function expectAnswered(feedback: RoomFeedback, eventId: string): Promise<void> {
+	await eventually(() => feedback.reactionsOn(eventId).some((r) => r.key === '✅'));
+	expect(feedback.reactionsOn(eventId).map((r) => r.key)).toEqual(['👀', '✅']);
+	expect(feedback.redactedEventIds()).toEqual([]);
+}
+
+// A message whose turn failed or was refused keeps its eyes and gets no check mark, once what would
+// come late has had a second to show
+export async function expectSeenOnly(feedback: RoomFeedback, eventId: string): Promise<void> {
+	await sleep(1000);
+	expect(feedback.reactionsOn(eventId).map((r) => r.key)).toEqual(['👀']);
+	expect(feedback.redactedEventIds()).toEqual([]);
 }
