@@ -3,7 +3,11 @@ import { expect } from 'vitest';
 import { readJsonColumn, withPrincipal } from '../../src/db/client.js';
 import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './e2ee-client.js';
 import type { ChatRequest, ScriptedReply, ToolCall } from './fake-apisix.js';
-import { startMatrixHarness, type MatrixTestHarness } from './matrix-harness.js';
+import {
+	startMatrixHarness,
+	type MatrixStartOptions,
+	type MatrixTestHarness
+} from './matrix-harness.js';
 import type { MatrixUser } from './synapse.js';
 
 function sleep(ms: number): Promise<void> {
@@ -84,8 +88,11 @@ export interface ConsentRoom {
 	close(): Promise<void>;
 }
 
-export async function startConsentRoom(env: Record<string, string> = {}): Promise<ConsentRoom> {
-	const h = await startMatrixHarness({ env });
+export async function startConsentRoom(
+	env: Record<string, string> = {},
+	options: Omit<MatrixStartOptions, 'env'> = {}
+): Promise<ConsentRoom> {
+	const h = await startMatrixHarness({ ...options, env });
 	const alice = await h.synapse.registerUser('alice');
 	const client = await startE2eeClient(h.synapse.url, alice);
 	const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {

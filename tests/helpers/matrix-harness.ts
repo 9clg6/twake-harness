@@ -45,6 +45,8 @@ export interface MatrixStartOptions {
 	readonly env?: Record<string, string>;
 	// How long the role lets the SDK process a push before it gives the push up
 	readonly pushDeadlineMs?: number;
+	// How long a status message waits for its turn's answer before it gives up
+	readonly statusMaxMs?: number;
 }
 
 // The lines by which the matrix role tells what it made of a message of an assistant's room
@@ -74,6 +76,9 @@ export async function startMatrixHarness(
 		MATRIX_HS_TOKEN: hsToken,
 		MATRIX_CRYPTO_STORE_PATH: join(await mkdtemp(join(tmpdir(), 'harness-crypto-')), 'crypto'),
 		LOG_LEVEL: 'info',
+		// The status message of a slow turn has a suite of its own: elsewhere, whatever the speed of
+		// the runner, a turn answers with a message of its own as before
+		TURN_STATUS_DELAY_MS: '600000',
 		...(options.env ?? {})
 	});
 	const synapse = await startTestSynapse({
@@ -119,7 +124,8 @@ export async function startMatrixHarness(
 			port,
 			bindAddress: '0.0.0.0',
 			pollIntervalMs: 100,
-			...(options.pushDeadlineMs === undefined ? {} : { pushDeadlineMs: options.pushDeadlineMs })
+			...(options.pushDeadlineMs === undefined ? {} : { pushDeadlineMs: options.pushDeadlineMs }),
+			...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs })
 		});
 	await reserved.release();
 	let role = await startRole();

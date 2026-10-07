@@ -11,12 +11,41 @@ export interface Reaction {
 	readonly key: string;
 }
 
-// What the owner sees of their assistant at work in its room: its reactions on an event, and
-// whether it is typing
+// An edit of a message: the content the owner's client shows in the message's place
+export interface Edit {
+	readonly eventId: string;
+	readonly content: Record<string, unknown>;
+	// When the homeserver received it
+	readonly at: number;
+}
+
+// A message of the assistant as the owner's client shows it: the content of its latest edit, in
+// its place, or else its own
+export interface ShownMessage {
+	readonly eventId: string;
+	readonly body: string;
+	readonly content: Record<string, unknown>;
+	// The message as it was sent, when the homeserver received it, and its edits in the order they
+	// came
+	readonly original: Record<string, unknown>;
+	readonly at: number;
+	readonly edits: readonly Edit[];
+}
+
+// The event a message answers as a reply, or null when it is no reply
+export function inReplyTo(content: Record<string, unknown>): string | null {
+	const relation = content['m.relates_to'] as Record<string, unknown> | undefined;
+	const reply = relation?.['m.in_reply_to'] as Record<string, unknown> | undefined;
+	return typeof reply?.['event_id'] === 'string' ? reply['event_id'] : null;
+}
+
+// What the owner sees of their assistant at work in its room: its reactions on an event, whether
+// it is typing, and its messages, edits applied
 export interface RoomFeedback {
 	reactionsOn(eventId: string): Reaction[];
 	isRedacted(eventId: string): boolean;
 	isTyping(): Promise<boolean>;
+	shown(): ShownMessage[];
 }
 
 export interface RoomFeedbackOptions {
@@ -62,6 +91,37 @@ export function watchFeedback(options: RoomFeedbackOptions): RoomFeedback {
 			return (joined?.ephemeral?.events ?? []).some((event) => {
 				const typing = event as { type?: string; content?: { user_ids?: string[] } };
 				return typing.type === 'm.typing' && (typing.content?.user_ids ?? []).includes(assistantId);
+			});
+		},
+		// A client shows an edit (m.replace) of a message in the message's place, and only from the
+		// message's own sender
+		shown: () => {
+			const messages: {
+				eventId: string;
+				original: Record<string, unknown>;
+				at: number;
+				edits: Edit[];
+			}[] = [];
+			for (const e of client.events) {
+				if (e.roomId !== room || e.sender !== assistantId || e.type !== 'm.room.message') continue;
+				const relation = e.content['m.relates_to'] as Record<string, unknown> | undefined;
+				const replacement = e.content['m.new_content'];
+				if (relation?.['rel_type'] === 'm.replace') {
+					const edited = messages.find((m) => m.eventId === relation['event_id']);
+					if (typeof replacement === 'object' && replacement !== null) {
+						edited?.edits.push({
+							eventId: e.eventId,
+							content: replacement as Record<string, unknown>,
+							at: e.at
+						});
+					}
+					continue;
+				}
+				messages.push({ eventId: e.eventId, original: e.content, at: e.at, edits: [] });
+			}
+			return messages.map((m) => {
+				const content = m.edits.at(-1)?.content ?? m.original;
+				return { ...m, content, body: String(content['body'] ?? '') };
 			});
 		}
 	};

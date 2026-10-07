@@ -62,6 +62,18 @@ export interface SendPayload {
 	readonly request?: PendingQuestion;
 	// The text as HTML, when the harness laid it out itself rather than the model writing Markdown
 	readonly html?: string;
+	// The turn answered once it reached its limit of tool calls: there is more to do
+	readonly atLimit?: true;
+}
+
+// The actions a turn has done so far, which the matrix role shows its owner in the turn's status
+// message
+export interface ProgressPayload {
+	readonly asUserId: string;
+	readonly roomId: string;
+	// The message the turn answers, whose status shows them
+	readonly replyTo: string;
+	readonly actions: number;
 }
 
 export interface TurnWorkerOptions {
@@ -89,6 +101,24 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return rooms.length === 0 ? null : assistant;
 	}
 
+	// Each count goes to the matrix role best effort, in a group of the room's counts alone: no count
+	// holds an answer back, even when no matrix role takes counts, and one that comes after its
+	// answer is dropped there
+	function reportActions(
+		log: FastifyBaseLogger,
+		payload: Omit<ProgressPayload, 'actions'>
+	): (actions: number) => void {
+		return (actions) => {
+			void enqueueJob(db, {
+				kind: 'progress',
+				payload: { ...payload, actions } satisfies ProgressPayload,
+				groupKey: `progress:${payload.roomId}`
+			}).catch((err: unknown) => {
+				log.warn({ actions, err }, 'actions not reported');
+			});
+		};
+	}
+
 	// What the assistant sends back for a turn: its answer, or the fixed notice of a refused or
 	// failed turn, and the question it asks when the turn froze a call
 	function replyTo(
@@ -113,7 +143,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			// The harness's own request, laid out by the harness as HTML too
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
-				: {})
+				: {}),
+			...(result.kind === 'ok' && result.atLimit === true ? { atLimit: true } : {})
 		};
 	}
 
@@ -126,13 +157,18 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return;
 		}
 		const turnLog = log.child({ reqId: `resume:${pendingCallId}`, roomId });
+		const actionsDone =
+			request.replyTo === undefined
+				? null
+				: reportActions(turnLog, { asUserId: assistant.userId, roomId, replyTo: request.replyTo });
 		const result = await agent.runOwnerTurn({
 			principal: { id: owner },
 			target: { kind: 'room', roomId },
 			message: null,
 			log: turnLog,
 			assistantName: assistant.name,
-			resume: { pendingCallId, through }
+			resume: { pendingCallId, through },
+			...(actionsDone === null ? {} : { actionsDone })
 		});
 		// A call already decided, by an answer delivered twice for instance, runs nothing more
 		if (result.kind === 'missing' || result.kind === 'decided') {
@@ -181,6 +217,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			}
 			const correlationId = correlationIdOf(parsed.data, origin);
 			const turnLog = log.child({ reqId: correlationId, roomId });
+			// A turn woken by an event posted to the API answers no message of the room
+			const actionsDone = eventId.startsWith('$')
+				? reportActions(turnLog, { asUserId: assistant.userId, roomId, replyTo: eventId })
+				: null;
 			const result = await agent.runOwnerTurn({
 				principal: { id: owner },
 				target: { kind: 'room', roomId },
@@ -189,7 +229,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				correlationId,
 				origin,
 				assistantName: assistant.name,
-				...(parsed.data.event === undefined ? {} : { event: parsed.data.event })
+				...(parsed.data.event === undefined ? {} : { event: parsed.data.event }),
+				...(actionsDone === null ? {} : { actionsDone })
 			});
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			// Read once the turn is over: the owner may have changed their language in it

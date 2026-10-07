@@ -66,6 +66,24 @@ function queryOf(params: URLSearchParams): Record<string, string | readonly stri
 	return query;
 }
 
+// A call through the /matrix route as the gateway sees it: an encrypted event carries its relation
+// to another event in clear, under m.relates_to of its body
+export interface MatrixCall {
+	readonly method: string;
+	readonly path: string;
+	// The JSON body, or null when there is none or it is no JSON
+	readonly body: unknown;
+}
+
+function parseBody(chunks: readonly Buffer[]): unknown {
+	if (chunks.length === 0) return null;
+	try {
+		return JSON.parse(Buffer.concat(chunks).toString('utf8')) as unknown;
+	} catch {
+		return null;
+	}
+}
+
 export interface ContractReply {
 	readonly status: number;
 	readonly body: unknown;
@@ -105,10 +123,10 @@ export interface FakeApisix {
 	// real route does with its secret header: whatever token the caller sent, Synapse sees this one
 	matrixAsToken: string | null;
 	// A failure the /matrix route answers instead of forwarding, for the calls it returns a status for
-	matrixFault: ((call: { method: string; path: string }) => number | null) | null;
+	matrixFault: ((call: MatrixCall) => number | null) | null;
 	// A wait before the /matrix route forwards, for the calls it returns one for: a homeserver slow
 	// to answer them
-	matrixHold: ((call: { method: string; path: string }) => Promise<void> | null) | null;
+	matrixHold: ((call: MatrixCall) => Promise<void> | null) | null;
 	// What went through the /matrix route, for diagnosis
 	readonly matrixCalls: { method: string; path: string; status: number; ms: number }[];
 	close(): Promise<void>;
@@ -357,13 +375,14 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			headers['authorization'] = `Bearer ${fake.matrixAsToken}`;
 			const startedAt = Date.now();
 			const path = url.pathname.slice('/matrix'.length) + url.search;
-			const fault = fake.matrixFault?.({ method: req.method ?? 'GET', path }) ?? null;
+			const call: MatrixCall = { method: req.method ?? 'GET', path, body: parseBody(chunks) };
+			const fault = fake.matrixFault?.(call) ?? null;
 			if (fault !== null) {
 				matrixCalls.push({ method: req.method ?? 'GET', path, status: fault, ms: 0 });
 				sendJson(res, fault, { errcode: 'M_UNKNOWN', error: 'Internal server error' });
 				return;
 			}
-			await fake.matrixHold?.({ method: req.method ?? 'GET', path });
+			await fake.matrixHold?.(call);
 			// Like the real gateway, an upstream that fails or goes away mid-call is answered with a 502
 			try {
 				const upstream = await fetch(target, {
