@@ -10,7 +10,7 @@ import type { Db } from '../db/client.js';
 import { startActivityListener } from '../wakeups/activity.js';
 import { startCalendarListener } from '../wakeups/calendar.js';
 import type { Listener } from '../wakeups/listener.js';
-import { startWakeupPurge } from '../wakeups/retention.js';
+import { startWakeupPurgeScheduler } from '../wakeups/retention.js';
 
 export interface WorkerRoleOptions {
 	readonly config: Config;
@@ -67,7 +67,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		config.consent.requestLifetimeMs,
 		consentMetrics
 	);
-	const purge = startWakeupPurge(db, app.log, config.wakeups.retentionMs);
+	const purge = startWakeupPurgeScheduler(db, app.log, config.wakeups.retentionMs);
 	return {
 		app,
 		stop: async () => {
