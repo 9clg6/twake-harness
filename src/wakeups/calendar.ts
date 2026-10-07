@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { DeadLetterError, RabbitMQClient } from '@linagora/rabbitmq-client';
+import { DeadLetterError } from '@linagora/rabbitmq-client';
 import ICAL from 'ical.js';
 import { z } from 'zod';
 
@@ -7,8 +7,8 @@ import { formatOffset, wallTimeIn } from '../agent/clock.js';
 import type { CalendarSource, Config } from '../config.js';
 import { cut } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
-import { DELIVERY_LIMIT } from './activity.js';
 import { INVITED_EVENT_TYPE } from './event-types.js';
+import { listenOnOwnQueue, type Listener } from './listener.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // Where Calendar's side service sends a notification for each invitee of each change to a
@@ -177,47 +177,19 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Wakeup | nu
 	};
 }
 
-export interface CalendarListener {
-	// Whether it holds its connection to the broker, as the client knows it without asking the
-	// broker, as for the activity exchange
-	connected(): boolean;
-	close(): Promise<void>;
-}
-
-// Listens to Calendar's fanout on the instance's own quorum queue, on Calendar's vhost, with the
-// same guarantees as the activity queue: one message at a time, a single active consumer, a
-// delivery limit and the instance's own dead letters. A new invitation wakes its invitee's
-// assistant; a message is taken once what it wakes is written.
+// Listens to Calendar's fanout on the instance's own queue, on Calendar's vhost: a new invitation
+// wakes its invitee's assistant
 export async function startCalendarListener(
 	deps: WakeDeps,
 	source: CalendarSource
-): Promise<CalendarListener> {
-	const prefix = deps.config.rabbitmq.prefix;
-	const client = new RabbitMQClient({
-		url: source.amqpUrl,
-		logger: deps.log.child({ listener: 'calendar' }),
-		prefetch: 1
-	});
-	await client.init();
-	const queue = `${prefix}.calendar`;
-	const deadLetterExchange = `${prefix}.dlx`;
-	// Bound first to its own dead letter exchange under its own name, as the activity queue is, so
-	// that its dead letters keep one key; then to the fanout, which routes on no key
-	await client.subscribe(
-		deadLetterExchange,
-		queue,
-		queue,
+): Promise<Listener> {
+	return listenOnOwnQueue(
+		deps,
+		// A fanout routes on no key: one binding takes all
+		{ url: source.amqpUrl, name: 'calendar', exchange: CALENDAR_FANOUT, routingKeys: [''] },
 		async (message) => {
 			const wakeup = wakeupOf(message, deps.config);
 			if (wakeup !== null) await wake(deps, wakeup);
-		},
-		{
-			bindings: [{ exchange: CALENDAR_FANOUT, routingKey: '' }],
-			deadLetterExchange,
-			// Calendar owns the fanout: the instance's user may not declare it
-			passiveExchanges: [CALENDAR_FANOUT],
-			queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT }
 		}
 	);
-	return { connected: () => client.isConnected(), close: () => client.close() };
 }

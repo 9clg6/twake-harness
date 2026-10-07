@@ -1,17 +1,13 @@
-import { DeadLetterError, RabbitMQClient } from '@linagora/rabbitmq-client';
+import { DeadLetterError } from '@linagora/rabbitmq-client';
 import { z } from 'zod';
 
 import type { ActivitySource } from '../config.js';
 import { cut } from '../llm/data.js';
+import { listenOnOwnQueue, ownQueueName, type Listener } from './listener.js';
 import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
-
-// How many times a message may come back before it is dead-lettered, as one that brings the
-// worker down whenever it is delivered: set, since RabbitMQ 3.13 has no limit and 4.0 one of 20,
-// and fixed once the queue is declared
-export const DELIVERY_LIMIT = 5;
 
 // The most recipients of one event the listener reads, in their order: the others are left out
 const MAX_RECIPIENTS = 100;
@@ -172,39 +168,21 @@ function wakeupsOf(event: ActivityEvent): {
 	};
 }
 
-export interface ActivityListener {
-	// Whether it holds its connection to the broker, as the client knows it without asking the
-	// broker: the library's own probe declares a queue of the broker's naming, which the
-	// instance's user may not do, and the refusal closes the channel the listener reads on
-	connected(): boolean;
-	close(): Promise<void>;
-}
-
-// Listens to the activity exchange on the instance's own quorum queue, one message at a time and
-// with a single active consumer, so that events keep their order whatever the replicas, and wakes
-// the assistant of each recipient of an event; a message is taken once what it wakes is written.
+// Listens to the activity exchange on the instance's own queue, bound to the types the deployment
+// lists alone, and wakes the assistant of each recipient of an event
 export async function startActivityListener(
 	deps: WakeDeps,
 	source: ActivitySource
-): Promise<ActivityListener> {
-	const { config } = deps;
-	const prefix = config.rabbitmq.prefix;
-	const client = new RabbitMQClient({
-		url: source.amqpUrl,
-		logger: deps.log.child({ listener: ACTIVITY_EXCHANGE }),
-		prefetch: 1
-	});
-	await client.init();
-	const queue = `${prefix}.${ACTIVITY_EXCHANGE}`;
-	const deadLetterExchange = `${prefix}.dlx`;
-	// The library binds the queue first to the exchange and key it is given, and keys the queue's
-	// dead letters after that key, which a quorum queue keeps as it was declared: bound first to its
-	// own dead letter exchange under its own name, the queue keeps the same key whatever types the
-	// deployment lists, and is bound to the activity exchange for those types alone
-	await client.subscribe(
-		deadLetterExchange,
-		queue,
-		queue,
+): Promise<Listener> {
+	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
+	return listenOnOwnQueue(
+		deps,
+		{
+			url: source.amqpUrl,
+			name: ACTIVITY_EXCHANGE,
+			exchange: ACTIVITY_EXCHANGE,
+			routingKeys: source.types
+		},
 		async (message, { routingKey }) => {
 			// A type the deployment no longer lists keeps its binding, since the library removes none:
 			// its events are taken and dropped. An event comes by the queue's own name when its dead
@@ -228,15 +206,6 @@ export async function startActivityListener(
 				);
 			}
 			for (const wakeup of wakeups) await wake(deps, wakeup);
-		},
-		{
-			bindings: source.types.map((type) => ({ exchange: ACTIVITY_EXCHANGE, routingKey: type })),
-			deadLetterExchange,
-			// The platform owns the exchange: its RabbitMQ user may not declare it, and the library
-			// only checks that it is there before it binds
-			passiveExchanges: [ACTIVITY_EXCHANGE],
-			queueArguments: { 'x-single-active-consumer': true, 'x-delivery-limit': DELIVERY_LIMIT }
 		}
 	);
-	return { connected: () => client.isConnected(), close: () => client.close() };
 }
