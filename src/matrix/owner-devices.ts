@@ -109,31 +109,36 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 	}
 
 	// Tells the owner in the room, once a minute at most per device when their words were not
-	// taken, and once per device when they were all the same
+	// taken, and once per device when they were all the same. Whether the owner could be told never
+	// changes whether their words count.
 	async function tell(
 		words: OwnerWords,
 		device: string,
 		reason: DeviceNoticeReason,
 		text: (messages: Messages) => string
 	): Promise<void> {
-		const { owner, roomId } = words;
-		const claimed = await withPrincipal(db, { id: owner }, (tx) =>
-			claimDeviceNotice(
-				tx,
-				owner,
-				device,
-				reason,
-				mode === 'enforce' ? REFUSAL_NOTICE_INTERVAL_MS : null
-			)
-		);
-		if (!claimed) return;
-		const messages = await deps.fetchMessages(owner);
-		await enqueueJob(db, {
-			kind: 'send',
-			payload: { asUserId: words.assistantUserId, roomId, text: text(messages) },
-			dedupKey: `device-notice:${words.eventId}`,
-			groupKey: `send:${roomId}`
-		});
+		const { owner, roomId, eventId } = words;
+		try {
+			const claimed = await withPrincipal(db, { id: owner }, (tx) =>
+				claimDeviceNotice(
+					tx,
+					owner,
+					device,
+					reason,
+					mode === 'enforce' ? REFUSAL_NOTICE_INTERVAL_MS : null
+				)
+			);
+			if (!claimed) return;
+			const messages = await deps.fetchMessages(owner);
+			await enqueueJob(db, {
+				kind: 'send',
+				payload: { asUserId: words.assistantUserId, roomId, text: text(messages) },
+				dedupKey: `device-notice:${eventId}`,
+				groupKey: `send:${roomId}`
+			});
+		} catch (err: unknown) {
+			log.error({ roomId, owner, eventId, reason, mode, err }, 'owner device notice failed');
+		}
 	}
 
 	return {
