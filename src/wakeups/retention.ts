@@ -2,8 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Db } from '../db/client.js';
 
-// How often the worker role forgets the wake-ups past their retention
-const PURGE_INTERVAL_MS = 3_600_000;
+// An hour, in milliseconds
+export const HOUR_MS = 3_600_000;
 
 // Forgets the wake-ups older than the retention, so that the table holds what a redelivery or a
 // replay of the dead letter queue may still bring back, and no more, and logs how many went.
@@ -35,7 +35,7 @@ export function startWakeupPurgeScheduler(
 		);
 	};
 	tick();
-	const timer = setInterval(tick, PURGE_INTERVAL_MS);
+	const timer = setInterval(tick, HOUR_MS);
 	return {
 		stop: () => {
 			clearInterval(timer);
