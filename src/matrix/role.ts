@@ -154,6 +154,20 @@ const TO_DEVICE_ONLY_FILTER = JSON.stringify({
 	account_data: { limit: 0 }
 });
 
+// The syncs one read of a device's to-device inbox makes at most, a hundred messages each: a
+// safety net, the inboxes being read at each start of the role
+const MAX_INBOX_PAGES = 1_000;
+
+// The reads of the assistants' inboxes the start of the role runs at once: on the first start
+// that keeps where a read stopped, every device reads from its oldest message, and each page
+// writes its position through the database pool
+const MAX_START_READS = 4;
+
+// Whether a caller joined a read of an inbox during the page under way
+interface InboxJoins {
+	during: boolean;
+}
+
 interface ToDeviceSync {
 	readonly next_batch?: string;
 	readonly to_device?: { events?: unknown[] };
@@ -304,6 +318,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start
 	const inFlight = makeWorkTracker();
+	// Set once the role stops: what Synapse pushes from then on is refused, and inbox reads end
+	let closing = false;
 	const creator = creatorUserId(config);
 	const admin = makeMatrixAdmin({
 		apisixBaseUrl: config.apisix.baseUrl,
@@ -414,34 +430,78 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		);
 	});
 
-	// Synapse's push of to-device messages (MSC2409) can skip a key share when another to-device
-	// message lands at the same instant, while the device's own inbox still holds it: after a failed
-	// decryption, the assistant's device fetches what the homeserver kept for it and reads again.
-	const syncSince = new Map<string, string>();
-	async function fetchMissedKeyShares(userId: string, roomId: string): Promise<number> {
+	// Synapse pushes no to-device message while it holds the role for down, as it does for a while
+	// once the role stopped, and its push of to-device messages (MSC2409) can skip a key share when
+	// another one lands at the same instant. It keeps a device's to-device messages, the pushed ones
+	// included, until the device syncs past them, and hands a hundred at most per sync, the oldest
+	// first. An assistant's device reads them page after page until none is left: once its
+	// encryption is ready at the start of the role, and after a message of its rooms fails to
+	// decrypt. Where a read stopped is kept per device, across restarts, so that the next one goes
+	// on from there.
+	const inboxReads = new Map<
+		string,
+		{ readonly joins: InboxJoins; readonly done: Promise<number> }
+	>();
+	function fetchMissedKeyShares(userId: string, roomId: string | null): Promise<number> {
+		// A caller that comes during a read joins it, the read taking what the inbox holds, where
+		// cross-signing's oneAtATime queues its callers: the two stay apart
+		const underWay = inboxReads.get(userId);
+		if (underWay !== undefined) {
+			underWay.joins.during = true;
+			return underWay.done;
+		}
+		const joins: InboxJoins = { during: false };
+		const done = fetchToDeviceInbox(userId, roomId, joins).finally(() => {
+			if (inboxReads.get(userId)?.done === done) inboxReads.delete(userId);
+		});
+		inboxReads.set(userId, { joins, done });
+		return done;
+	}
+
+	async function fetchToDeviceInbox(
+		userId: string,
+		roomId: string | null,
+		joins: InboxJoins
+	): Promise<number> {
 		const intent = appservice.getIntentForUserId(userId);
 		await ensureEncryption(intent);
 		const client = intent.underlyingClient;
-		const since = syncSince.get(userId);
-		const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
-			timeout: 0,
-			filter: TO_DEVICE_ONLY_FILTER,
-			...(since === undefined ? {} : { since })
-		})) as ToDeviceSync;
-		if (typeof sync.next_batch === 'string') syncSince.set(userId, sync.next_batch);
-		const events = sync.to_device?.events ?? [];
+		const userStorage = storage.storageForUser?.(userId);
+		// Kept per device: where one device stopped means nothing to the next one of the assistant
+		const positionKey = `to_device_since:${client.crypto.clientDeviceId}`;
+		let since: string | null = (await userStorage?.readValue(positionKey)) ?? null;
 		// The members' devices are looked up again too: a first sync carries no device lists
-		const members = await client.getJoinedRoomMembers(roomId);
-		await client.crypto.updateSyncData(
-			events as Parameters<typeof client.crypto.updateSyncData>[0],
-			sync.device_one_time_keys_count ?? (await lastCounts(userId)),
-			(sync.device_unused_fallback_key_types ?? (await lastFallbacks(userId))) as Parameters<
-				typeof client.crypto.updateSyncData
-			>[2],
-			[...new Set([...(sync.device_lists?.changed ?? []), ...members])],
-			sync.device_lists?.left ?? []
-		);
-		return events.length;
+		const members = roomId === null ? [] : await client.getJoinedRoomMembers(roomId);
+		let fetched = 0;
+		for (let page = 0; page < MAX_INBOX_PAGES; page += 1) {
+			if (closing) return fetched;
+			joins.during = false;
+			const sync = (await client.doRequest('GET', '/_matrix/client/v3/sync', {
+				timeout: 0,
+				filter: TO_DEVICE_ONLY_FILTER,
+				...(since === null ? {} : { since })
+			})) as ToDeviceSync;
+			const events = sync.to_device?.events ?? [];
+			const changed = sync.device_lists?.changed ?? [];
+			await client.crypto.updateSyncData(
+				events as Parameters<typeof client.crypto.updateSyncData>[0],
+				sync.device_one_time_keys_count ?? (await lastCounts(userId)),
+				(sync.device_unused_fallback_key_types ?? (await lastFallbacks(userId))) as Parameters<
+					typeof client.crypto.updateSyncData
+				>[2],
+				page === 0 ? [...new Set([...changed, ...members])] : changed,
+				sync.device_lists?.left ?? []
+			);
+			fetched += events.length;
+			if (typeof sync.next_batch !== 'string') return fetched;
+			since = sync.next_batch;
+			await userStorage?.storeValue(positionKey, since);
+			// A page with nothing left ends the read, the sync past every message letting Synapse drop
+			// them, unless a caller joined meanwhile: its key share may have come after this page
+			if (events.length === 0 && !joins.during) return fetched;
+		}
+		log.warn({ userId, fetched }, 'to-device inbox read stopped before its end');
+		return fetched;
 	}
 
 	// What the SDK last stored of a device's one-time keys, to hand its crypto a change of device
@@ -538,7 +598,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				try {
 					const fetched = await fetchMissedKeyShares(room.userId, roomId);
 					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
-					if (fetched === 0) return;
+				} catch (err: unknown) {
+					// Its pages before the failure may have taken the key share all the same
+					log.warn({ roomId, userId: room.userId, err }, 'missed key shares not all fetched');
+				}
+				// Tried again whatever the read found: one it joined may have taken the key share
+				try {
 					const intent = appservice.getIntentForUserId(room.userId);
 					const decrypted = await intent.underlyingClient.crypto.decryptRoomEvent(
 						new EncryptedRoomEvent(encrypted),
@@ -1351,9 +1416,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 	// Every assistant holds its encryption state from the start, so the key shares Synapse pushes
-	// while this role was away, or before an assistant speaks, are not lost
+	// before an assistant speaks are not lost, and reads those it kept unpushed while this role was
+	// away before a message of theirs fails to decrypt
 	// The assistants a provisioner asked for, with no room yet, too: their owners' clients check the
 	// identity before they open one, and a store lost since would leave the recorded one stale
+	const fewAtATime = makeLimiter(MAX_START_READS);
 	const assistantsAtStart = [
 		...(await listActiveAssistants(db)),
 		...(await listProvisionedWithoutRoom(db))
@@ -1365,7 +1432,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await onEncryptionReady(intent, owner);
 		} catch (err: unknown) {
 			log.warn({ userId, err }, 'encryption setup failed at start');
+			continue;
 		}
+		// In the background: the role listens meanwhile, and a message that fails to decrypt during
+		// the read joins it
+		inFlight.track(
+			fewAtATime(() => fetchMissedKeyShares(userId, null)).then(
+				(fetched) => {
+					if (fetched > 0) log.info({ userId, fetched }, 'to-device inbox read at start');
+				},
+				(err: unknown) => {
+					log.warn({ userId, err }, 'to-device inbox not read at start');
+				}
+			)
+		);
 	}
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
 	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts
@@ -1377,7 +1457,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// processing those pushes, its storage queries included, after the role has stopped. Its request
 	// listeners are wrapped here. Once the role stops, a push is refused, and Synapse pushes it again
 	// later; the pushes already accepted are counted, so that the stop waits for them.
-	let closing = false;
 	let pushesInFlight = 0;
 	const server: unknown = Reflect.get(appservice, 'appServer');
 	const appServer = server instanceof Server ? server : null;
@@ -1443,4 +1522,22 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 function ensureTrailingSlash(url: URL): URL {
 	return url.pathname.endsWith('/') ? url : new URL(`${url.href}/`);
+}
+
+// Runs what it is handed at most `max` at a time, the others waiting for their turn in order
+function makeLimiter(max: number): <T>(run: () => Promise<T>) => Promise<T> {
+	let running = 0;
+	const waiting: (() => void)[] = [];
+	return async <T>(run: () => Promise<T>): Promise<T> => {
+		if (running < max) running += 1;
+		else await new Promise<void>((resolve) => waiting.push(resolve));
+		try {
+			return await run();
+		} finally {
+			// The turn passes to the next in line, or frees its place
+			const next = waiting.shift();
+			if (next === undefined) running -= 1;
+			else next();
+		}
+	};
 }

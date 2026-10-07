@@ -127,6 +127,9 @@ export interface FakeApisix {
 	// A wait before the /matrix route forwards, for the calls it returns one for: a homeserver slow
 	// to answer them
 	matrixHold: ((call: MatrixCall) => Promise<void> | null) | null;
+	// A wait before the /matrix route hands back the homeserver's answer, for the calls it returns
+	// one for: an answer the homeserver made at once, slow to come back
+	matrixHoldReply: ((call: MatrixCall) => Promise<void> | null) | null;
 	// What went through the /matrix route, for diagnosis
 	readonly matrixCalls: { method: string; path: string; status: number; ms: number }[];
 	close(): Promise<void>;
@@ -329,7 +332,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		matrixUpstream: null as string | null,
 		matrixAsToken: null as string | null,
 		matrixFault: null as FakeApisix['matrixFault'],
-		matrixHold: null as FakeApisix['matrixHold']
+		matrixHold: null as FakeApisix['matrixHold'],
+		matrixHoldReply: null as FakeApisix['matrixHoldReply']
 	};
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
 	// One counter for the model and the contract calls, to tell which came first
@@ -391,6 +395,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 					...(chunks.length === 0 ? {} : { body: Buffer.concat(chunks) })
 				});
 				const body = Buffer.from(await upstream.arrayBuffer());
+				await fake.matrixHoldReply?.(call);
 				matrixCalls.push({
 					method: req.method ?? 'GET',
 					path,
@@ -572,6 +577,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		},
 		set matrixHold(value: FakeApisix['matrixHold']) {
 			fake.matrixHold = value;
+		},
+		get matrixHoldReply() {
+			return fake.matrixHoldReply;
+		},
+		set matrixHoldReply(value: FakeApisix['matrixHoldReply']) {
+			fake.matrixHoldReply = value;
 		},
 		matrixCalls,
 		close: () =>
