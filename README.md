@@ -34,28 +34,32 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 
 ## Configuration
 
-| Variable                       | Meaning                                                                                                                                                         |
-| ------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `HARNESS_ROLE`                 | `api`, `matrix` or `worker`                                                                                                                                     |
-| `HOST`, `PORT`                 | listening address, `0.0.0.0:8080` by default                                                                                                                    |
-| `DATABASE_URL`                 | PostgreSQL connection string of a plain role, never a superuser                                                                                                 |
-| `AUTH_JWKS_URL`                | JWKS of the OIDC provider the access tokens come from                                                                                                           |
-| `AUTH_ISSUER`, `AUTH_AUDIENCE` | expected `iss` and `aud` of the access tokens                                                                                                                   |
-| `LOG_LEVEL`                    | pino level, `info` by default                                                                                                                                   |
-| `ASSISTANT_LOCALE`             | language of the assistants' and creator's texts for an owner who chose none, `en` or `fr`                                                                       |
-| `ASSISTANT_TIMEZONE`           | IANA zone of the present each turn states, `UTC` by default                                                                                                     |
-| `PROVISIONER_CLIENT_IDS`       | the service clients, by token subject, admitted to the provisioning API (comma separated); empty for none                                                       |
-| `BROKER_CONSENT_URL`           | the token broker's consent link, the same for every user, that a request shows when the broker lacks an owner's permission; an https URL, empty for none        |
-| `LLM_MAX_TOKENS`               | token budget of one model call, `8192` by default; a call that ran out while thinking, with nothing written, is retried once at twice the budget, at most 32768 |
-| `ADMISSION_MAX_INFLIGHT`       | turns in flight on one replica, `32` by default                                                                                                                 |
-| `ADMISSION_USER_QUEUE`         | turns a user may wait for on a full replica, `2` by default, `0` for none                                                                                       |
-| `ADMISSION_USER_PER_MINUTE`    | turns one user may start per minute, `10` by default                                                                                                            |
-| `ADMISSION_USER_DAILY_TOKENS`  | tokens one user may spend per day, `200000` by default                                                                                                          |
-| `ADMISSION_GLOBAL_PER_MINUTE`  | turns the whole harness may start per minute, `400` by default                                                                                                  |
-| `TURN_HISTORY_MAX_CHARS`       | characters of past conversation a turn shows the model, `24000` by default: its latest exchanges whole, always the last; the session keeps all                  |
-| `TURN_MAX_TOOL_CALLS`          | tool calls one turn may make, `6` by default; past them nothing runs: the model tells the owner what it did, what remains, and that it goes on if asked         |
-| `TURN_STATUS_DELAY_MS`         | how long a turn may go without answering before the assistant posts a status message, which closes once the turn answered; `3000` by default, at least `1000`   |
-| `OWNER_DEVICE_TRUST`           | `report` by default, `enforce` only when set: whether an owner's words count only from the sessions their identity signed (see The owner's sessions)            |
+| Variable                       | Meaning                                                                                                                                                                |
+| ------------------------------ | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `HARNESS_ROLE`                 | `api`, `matrix` or `worker`                                                                                                                                            |
+| `HOST`, `PORT`                 | listening address, `0.0.0.0:8080` by default                                                                                                                           |
+| `DATABASE_URL`                 | PostgreSQL connection string of a plain role, never a superuser                                                                                                        |
+| `AUTH_JWKS_URL`                | JWKS of the OIDC provider the access tokens come from                                                                                                                  |
+| `AUTH_ISSUER`, `AUTH_AUDIENCE` | expected `iss` and `aud` of the access tokens                                                                                                                          |
+| `LOG_LEVEL`                    | pino level, `info` by default                                                                                                                                          |
+| `ASSISTANT_LOCALE`             | language of the assistants' and creator's texts for an owner who chose none, `en` or `fr`                                                                              |
+| `ASSISTANT_TIMEZONE`           | IANA zone of the present each turn states, `UTC` by default                                                                                                            |
+| `PROVISIONER_CLIENT_IDS`       | the service clients, by token subject, admitted to the provisioning API (comma separated); empty for none                                                              |
+| `BROKER_CONSENT_URL`           | the token broker's consent link, the same for every user, that a request shows when the broker lacks an owner's permission; an https URL, empty for none               |
+| `LLM_MAX_TOKENS`               | token budget of one model call, `8192` by default; a call that ran out while thinking, with nothing written, is retried once at twice the budget, at most 32768        |
+| `ADMISSION_MAX_INFLIGHT`       | turns in flight on one replica, `32` by default                                                                                                                        |
+| `ADMISSION_USER_QUEUE`         | turns a user may wait for on a full replica, `2` by default, `0` for none                                                                                              |
+| `ADMISSION_USER_PER_MINUTE`    | turns one user may start per minute, `10` by default                                                                                                                   |
+| `ADMISSION_USER_DAILY_TOKENS`  | tokens one user may spend per day, `200000` by default                                                                                                                 |
+| `ADMISSION_GLOBAL_PER_MINUTE`  | turns the whole harness may start per minute, `400` by default                                                                                                         |
+| `TURN_HISTORY_MAX_CHARS`       | characters of past conversation a turn shows the model, `24000` by default: its latest exchanges whole, always the last; the session keeps all                         |
+| `TURN_MAX_TOOL_CALLS`          | tool calls one turn may make, `6` by default; past them nothing runs: the model tells the owner what it did, what remains, and that it goes on if asked                |
+| `TURN_STATUS_DELAY_MS`         | how long a turn may go without answering before the assistant posts a status message, which closes once the turn answered; `3000` by default, at least `1000`          |
+| `OWNER_DEVICE_TRUST`           | `report` by default, `enforce` only when set: whether an owner's words count only from the sessions their identity signed (see The owner's sessions)                   |
+| `ACTIVITY_ENABLED`             | `true` to have the worker role listen to the `activity` exchange of RabbitMQ (see The activity exchange), `false` by default                                           |
+| `ACTIVITY_AMQP_URL`            | the AMQP URL of the broker, its vhost included, with the instance's own RabbitMQ user; needed once `ACTIVITY_ENABLED`, and secret: the chart reads it from a Secret    |
+| `ACTIVITY_TYPES`               | the CloudEvent types that wake an assistant (comma separated), each exactly, never a pattern; `com.twake.tasks.task.assigned.v1` by default                            |
+| `RABBITMQ_PREFIX`              | what the names of the queues and exchanges the instance declares on the broker start with, `twake-harness` by default: its own, so that no two instances share a queue |
 
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 
@@ -64,7 +68,7 @@ Migrations in `migrations/` run at start, under an advisory lock so replicas do 
 One image, one role per deployment, chosen by `HARNESS_ROLE`:
 
 - `api` serves the HTTP API behind APISIX.
-- `worker` runs the daily curation: for every owner, under their own principal, it merges duplicate memory entries and turns a request made the same way in three conversations or more into a skill proposal for that owner. It serves its health check and its metrics, and nothing else.
+- `worker` runs the daily curation: for every owner, under their own principal, it merges duplicate memory entries and turns a request made the same way in three conversations or more into a skill proposal for that owner. With `ACTIVITY_ENABLED`, it also listens to the activity exchange of RabbitMQ, the only role that connects to the broker (see The activity exchange). It serves its health check and its metrics, and nothing else.
 - `matrix` is the Matrix application service: it receives what Synapse pushes, answers as the creator user and the assistants, and calls Synapse through the `matrix` route of APISIX. `npm run matrix:registration` prints the registration file Synapse loads, given `MATRIX_APPSERVICE_URL`, the APISIX route Synapse pushes to.
 
 The Matrix tests start a real Synapse in a container, so Docker is needed to run them.
@@ -118,6 +122,14 @@ With `ORG_AGENT_ENABLED`, the matrix role runs one more bot, the organization ag
 ### Events
 
 The dispatcher wakes an assistant by posting an event to `POST /v1/events` with the owner's identifier, the event's id and its type, under a token of one of the service clients named in `EVENTS_CLIENT_IDS` (by subject); a user's token is refused. The harness queues a turn in the owner's room, deduplicated on the event id, in which the assistant reads the event through the contracts and tells the owner; whatever that turn prepares to write waits for the owner's yes (see Consent). An invitation is read, and its slot checked in the owner's calendar, by the harness before the model speaks: the model tells the owner who invites them, to what, when, and whether they are free, and prepares the acceptance, which the harness then asks them about under the model's words. An event for a user without an assistant is refused and logged.
+
+### The activity exchange
+
+With `ACTIVITY_ENABLED`, the worker role reads the `activity` exchange of RabbitMQ, where the applications publish their CloudEvents, as ADR 001 and 006 shape them, through `@linagora/rabbitmq-client` as Twake Tasks does. It declares a quorum queue of its own, `<RABBITMQ_PREFIX>.activity`, with a single active consumer, so that events keep their order whatever the replicas, a delivery limit of five, at-least-once dead lettering into its own exchange `<RABBITMQ_PREFIX>.dlx` and queue `<RABBITMQ_PREFIX>.activity.dlq`, and reject-publish overflow. It binds that queue to the types of `ACTIVITY_TYPES` only, and to its own dead letter exchange under its own name, which keeps its dead letters' key the same whatever the types. It never declares the `activity` exchange, and only checks that it is there: its RabbitMQ user may configure and write `^<prefix>\.` and read `^(activity|<prefix>\..+)$`, and nothing more. A queue keeps the arguments it was declared with, and a type taken out of `ACTIVITY_TYPES` keeps its binding until it is removed on the broker.
+
+The worker reads one message at a time. Each recipient of the event's `data.recipients`, whatever its reason, is woken when their email, lowercased, is on the mail domain, as for the principals, when they have an assistant with a room, and when they are not the event's actor, by email or by uuid. Their assistant gets a turn of origin event in that room, serialized with their other turns: the model is told what arrived, in the owner's language, a task assigned to them or an event of another type, and handed the event as one line of JSON between fences of a random nonce, what the application computed (type, ids, key, link, time, actor, reason) apart from what people wrote, under `untrusted` (title, board name). Whatever that turn prepares to write waits for the owner's yes (see Consent), and its contract calls carry the bare id of the event as their correlation id. A wake-up is kept by the event's source and id and the owner it woke, in the transaction that queues the turn, before the message is acknowledged: a redelivery, a restart or a replay of the dead letter queue wakes nobody twice, and two recipients of one event are each woken once. The `wakeups` table holds identifiers and dates only, and nothing of a recipient without an assistant. A message that is no such CloudEvent goes to the dead letter queue. The worker's health check says whether the listener holds its connection, `"activity": "connected"` or `"disconnected"`, and answers 200 either way.
+
+The chart renders these settings on the worker role only: `config.activityEnabled`, the URL from `config.activityAmqpUrlSecret` and `config.activityAmqpUrlSecretKey`, by default `ACTIVITY_AMQP_URL` in the chart's own Secret, `config.activityTypes` and `config.rabbitmqPrefix`. With `networkPolicy.rabbitmqNamespace`, it lets that role alone out to the broker's namespace, on `networkPolicy.rabbitmqPort` (5672). The suite runs a RabbitMQ 3.13 container, as on dev, from `RABBITMQ_IMAGE` when set.
 
 ### Provisioning API
 
