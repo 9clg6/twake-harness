@@ -3,6 +3,7 @@ import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { runMigrations } from '../src/db/migrate.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
@@ -273,8 +274,8 @@ describe('a provisioned assistant', () => {
 		await membershipOf(owner, roomId, assistantId, 'leave');
 	}
 
-	// The owner opens another direct room with the assistant, which the assistant holds as its own
-	async function openAnotherRoom(client: E2eeClient, assistantId: string): Promise<string> {
+	// The owner opens a direct room with the assistant, which the assistant then holds as its own
+	async function openRoom(client: E2eeClient, assistantId: string): Promise<string> {
 		const room = await client.createDirectRoom(assistantId);
 		for (let i = 0; i < 120; i += 1) {
 			const opened = h
@@ -302,7 +303,7 @@ describe('a provisioned assistant', () => {
 		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
 
 		await bringIn(wendy, xavier, first, mine.userId);
-		const second = await openAnotherRoom(client, mine.userId);
+		const second = await openRoom(client, mine.userId);
 		await askForHelp(client, second, mine.userId);
 		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
 	});
@@ -330,7 +331,7 @@ describe('a provisioned assistant', () => {
 
 		expect((await provisionUntilReady(h.api, yves.userId)).userId).toBe(userId);
 		await bringIn(yves, zoe, opened, userId);
-		const other = await openAnotherRoom(client, userId);
+		const other = await openRoom(client, userId);
 		await askForHelp(client, other, userId);
 		expect(greetedIn(client, userId, greeting)).toEqual([opened]);
 	});
@@ -610,6 +611,24 @@ describe('a provisioned assistant', () => {
 		});
 		expect(notMember.status).toBe(409);
 		expect(notMember.body).toEqual({ error: 'not a member' });
+	});
+
+	it('owes no greeting when it was provisioned before the greeting was', async () => {
+		const nora = await h.synapse.registerUser('nora');
+		const client = await startE2eeClient(h.synapse.url, nora);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, nora.userId);
+		// The database as it stood before, the assistant provisioned and without a room, brought up to
+		// date. Nothing there tells an assistant that never had a room from one whose rooms were all
+		// left, which would then greet its owner twice.
+		await h.db.sql`alter table assistant_provisioned drop column owes_welcome`;
+		await h.db
+			.sql`delete from schema_migrations where name = '0053_assistant_provisioned_welcome.sql'`;
+		expect((await runMigrations(h.db)).applied).toEqual(['0053_assistant_provisioned_welcome.sql']);
+
+		const room = await openRoom(client, mine.userId);
+		await askForHelp(client, room, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([]);
 	});
 });
 
