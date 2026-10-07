@@ -45,7 +45,8 @@ const resumePayload = z.object({
 	roomId: z.string().min(1),
 	pendingCallId: z.string().min(1),
 	// A job queued before answers came through the API was answered in the chat
-	through: z.enum(['chat', 'api']).default('chat')
+	through: z.enum(['chat', 'api']).default('chat'),
+	replyTo: z.string().min(1).optional()
 }) satisfies z.ZodType<ResumeRequest>;
 
 export interface SendPayload {
@@ -142,7 +143,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		const { notices } = await fetchOwnerMessages(db, owner, locale);
 		await enqueueJob(db, {
 			kind: 'send',
-			payload: replyTo(result, assistant, roomId, notices),
+			payload: {
+				...replyTo(result, assistant, roomId, notices),
+				// The owner's yes in the room, which the matrix role marks as answered, as a message
+				...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
+			},
 			dedupKey: `send:resume:${pendingCallId}`,
 			groupKey: `send:${roomId}`
 		});

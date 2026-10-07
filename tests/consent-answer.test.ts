@@ -6,9 +6,11 @@ import {
 	INJECTED_TITLE,
 	invitationEvent,
 	type ChatRequest,
+	type LlmScript,
 	type ToolCall
 } from './helpers/fake-apisix.js';
 import { withdrawConsent } from './helpers/consents.js';
+import { eventually, watchFeedback, type RoomFeedback } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -128,6 +130,7 @@ describe('my answer lets my assistant carry on', () => {
 	let alice: MatrixUser;
 	let client: E2eeClient;
 	let room: string;
+	let feedback: RoomFeedback;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
 		// Many turns of one owner in a row: admission is the subject of its own suite below
@@ -150,6 +153,7 @@ describe('my answer lets my assistant carry on', () => {
 		}
 		await client.joinRoom(room);
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Jarvis'));
+		feedback = watchFeedback({ synapse: h.synapse, owner: alice, client, room, assistantId });
 	}, 240_000);
 	afterAll(async () => {
 		if (client !== undefined) await client.stop();
@@ -585,6 +589,83 @@ describe('my answer lets my assistant carry on', () => {
 			'/v1/memory'
 		);
 		expect(kept.body.memory).not.toContain(INJECTED_NOTE);
+	});
+
+	// A model that calls a tool, then takes its time to answer: with what the call found, or with
+	// the answer given
+	function slowModelUsing(tool: string, args: unknown, answer: string | null): LlmScript {
+		return (request) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool' && last.name === tool) {
+				return { content: answer ?? `Found: ${last.content ?? ''}`, delayMs: 3000 };
+			}
+			return { toolCalls: call(tool, args) };
+		};
+	}
+
+	it('shows it is working on my ✅ to the request, then marks the request answered', async () => {
+		await withdrawConsent(h.db, 'alice@test.local', 'drive', 'read');
+		h.apisix.llm.script = slowModelUsing('search_files', { name: 'budget' }, null);
+		const seen = requests().length;
+		await client.sendText(room, 'Find my budget file');
+		const request = await nextRequest(seen);
+		const answered = answers().length;
+		await client.react(room, request, '✅');
+		// My reaction carries no reaction of its own: the eyes go on the request I answered
+		const typing = eventually(() => feedback.isTyping(), 10_000);
+		const eyes = await eventually(() => feedback.reactionsOn(request).find((r) => r.key === '👀'));
+		expect(eyes).toBeDefined();
+		expect(await typing).toBe(true);
+		expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
+		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
+			true
+		);
+		const check = await eventually(() => feedback.reactionsOn(request).find((r) => r.key === '✅'));
+		expect(check).toBeDefined();
+		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
+	});
+
+	it('shows it is working on my yes in words, then marks my yes answered', async () => {
+		await withdrawConsent(h.db, 'alice@test.local', 'tasks', 'read');
+		h.apisix.llm.script = slowModelUsing('list_my_tasks', { due: 'today' }, null);
+		const seen = requests().length;
+		await client.sendText(room, 'What is due today?');
+		await nextRequest(seen);
+		const answered = answers().length;
+		const yes = await client.sendText(room, 'yes');
+		const typing = eventually(() => feedback.isTyping(), 10_000);
+		const eyes = await eventually(() => feedback.reactionsOn(yes).find((r) => r.key === '👀'));
+		expect(eyes).toBeDefined();
+		expect(await typing).toBe(true);
+		expect(await nextAnswer(answered)).toContain('Send the Q4 figures');
+		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
+			true
+		);
+		const check = await eventually(() => feedback.reactionsOn(yes).find((r) => r.key === '✅'));
+		expect(check).toBeDefined();
+		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
+	});
+
+	it('stops showing it is working on my answer when the turn it resumes fails', async () => {
+		await withdrawConsent(h.db, 'alice@test.local', 'contacts', 'read');
+		// Once the call I allowed came back, the model answers nothing
+		h.apisix.llm.script = slowModelUsing('search_contacts', { q: 'Anna' }, '');
+		const seen = requests().length;
+		await client.sendText(room, "What is Anna's address?");
+		const request = await nextRequest(seen);
+		const failed = failures().length;
+		await client.react(room, request, '✅');
+		const typing = eventually(() => feedback.isTyping(), 10_000);
+		const eyes = await eventually(() => feedback.reactionsOn(request).find((r) => r.key === '👀'));
+		expect(eyes).toBeDefined();
+		expect(await typing).toBe(true);
+		expect(await eventually(() => failures().length > failed, 30_000)).toBe(true);
+		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
+			true
+		);
+		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
+		await sleep(1000);
+		expect(feedback.reactionsOn(request).filter((r) => r.key === '✅')).toEqual([]);
 	});
 
 	it('tells me what it did and what remains when my yes takes it past its limit of calls', async () => {

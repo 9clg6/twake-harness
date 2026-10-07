@@ -622,7 +622,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		fetchMessages,
 		lifetimeMs: config.consent.requestLifetimeMs,
-		metrics: consentMetrics
+		metrics: consentMetrics,
+		resumeQueued: (room, eventId) => {
+			const { roomId, assistantUserId } = room;
+			feedback
+				.turnQueued({ assistantUserId, roomId, eventId })
+				.catch((err: unknown) => log.warn({ roomId, eventId, err }, 'turn feedback failed'));
+		}
 	});
 
 	// The owner's answer to a request of the harness: a bare ✅ or ❌ on it. Only an event that
