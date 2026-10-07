@@ -1,4 +1,5 @@
 import { PassThrough } from 'node:stream';
+import type { ConfirmChannel } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { makeDb, type Db } from '../src/db/client.js';
@@ -19,6 +20,13 @@ const QUEUE = `${PREFIX}.activity`;
 const DEAD_LETTERS = `${QUEUE}.dlq`;
 const HARNESS_USER = 'twake-harness-test';
 const HARNESS_PASSWORD = 'harness-test-password';
+// What the instance's user may do on its vhost: declare and write its own names only, and read
+// the activity exchange and its own queues
+const PERMISSIONS = {
+	configure: `^${PREFIX}\\.`,
+	write: `^${PREFIX}\\.`,
+	read: `^(activity|${PREFIX}\\..+)$`
+};
 // What people wrote, which no log line may carry
 const CONFIDENTIAL = 'Salary review: Bob leaves in June';
 // The first delay of the worker's retries, which doubles from there
@@ -105,11 +113,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		// The exchange the applications publish on, and the instance's user, as the platform makes
 		// them: it may declare and write its own names only, and read activity and its own queues
 		await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, {
-			configure: `^${PREFIX}\\.`,
-			write: `^${PREFIX}\\.`,
-			read: `^(${ACTIVITY}|${PREFIX}\\..+)$`
-		});
+		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, PERMISSIONS);
 		r = await startConsentRoom({
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
@@ -173,6 +177,32 @@ describe('an event that fails holds back none of those after it, and is never lo
 	// The fault fixed
 	async function allowWakeups(): Promise<void> {
 		await r.h.db.sql.unsafe('drop trigger if exists refuse_wakeup on wakeups');
+	}
+
+	// What a worker's health check says of its listener
+	async function healthOf(role: WorkerRole): Promise<unknown> {
+		const health = await role.app.inject({ method: 'GET', url: '/health' });
+		expect(health.statusCode).toBe(200);
+		return health.json<{ activity?: string }>().activity;
+	}
+
+	// A worker of its own, on a vhost of its own, as the instance's user there
+	function workerOn(amqpUrl: string, logStream: PassThrough): Promise<WorkerRole> {
+		return startWorkerRole({
+			config: { ...r.h.config, role: 'worker', activity: { amqpUrl, types: [ASSIGNED] } },
+			db: r.h.db,
+			logStream,
+			retryDelayMs: RETRY_DELAY_MS
+		});
+	}
+
+	// Publishes an event as Twake Tasks does, on a vhost of its own
+	async function publishOn(channel: ConfirmChannel, event: ActivityEvent): Promise<void> {
+		channel.publish(ACTIVITY, event.type, Buffer.from(JSON.stringify(event)), {
+			persistent: true,
+			messageId: event.id
+		});
+		await channel.waitForConfirms();
 	}
 
 	// The lines of the attempts at an event that failed, once there are that many
@@ -372,6 +402,35 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Friday')).toHaveLength(1);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		expect((await broker.queue(QUEUE))?.messages).toBe(0);
+	});
+
+	it('starts while the broker is out of reach, tries again and again, and listens once it is back', async () => {
+		const channel = await broker.addVhost('away');
+		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+		await broker.addUser('twake-harness-away', HARNESS_PASSWORD, PERMISSIONS);
+		await broker.allow('twake-harness-away', 'away', PERMISSIONS);
+		const proxy = await startTcpProxy(() => broker.address());
+		proxy.cut();
+		const url = new URL(broker.urlFor('twake-harness-away', HARNESS_PASSWORD, 'away'));
+		url.hostname = '127.0.0.1';
+		url.port = String(proxy.port);
+		const awayLogs = captureLogs();
+		const away = await workerOn(url.toString(), awayLogs.stream);
+		try {
+			expect(await healthOf(away)).toBe('disconnected');
+			await until(
+				'three attempts',
+				() => awayLogs.lines().filter((line) => line['msg'] === 'listen failed').length >= 3
+			);
+			proxy.restore();
+			await until('listening', async () => (await healthOf(away)) === 'connected');
+			const event = activityEvent();
+			await publishOn(channel, event);
+			await toldOf(event);
+		} finally {
+			await away.stop();
+			await proxy.close();
+		}
 	});
 });
 

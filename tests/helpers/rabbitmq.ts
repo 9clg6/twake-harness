@@ -37,6 +37,8 @@ export interface TestBroker {
 	readonly channel: ConfirmChannel;
 	// The address of the broker for one of its users
 	urlFor(user: string, password: string, vhost?: string): string;
+	// Where the broker takes AMQP connections now: a restart may move it
+	address(): { readonly host: string; readonly port: number };
 	// Creates a user, who may do this much on the default vhost
 	addUser(user: string, password: string, permissions: Permissions): Promise<void>;
 	// Creates a vhost, which the platform's own user may do everything on, and resolves to the
@@ -166,6 +168,7 @@ export async function startTestBroker(): Promise<TestBroker> {
 	return {
 		channel,
 		urlFor: (user, password, vhost = '/') => urlOn(vhost, user, password),
+		address: () => ({ host: container.getHost(), port: container.getMappedPort(5672) }),
 		addUser: async (user, password, permissions) => {
 			await rabbitmqctl('add_user', user, password);
 			await allowOn('/', user, permissions);
