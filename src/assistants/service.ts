@@ -30,8 +30,15 @@ export type CreateResult =
 			readonly reason: 'exists' | 'invalid_name' | 'not_on_homeserver' | 'failed';
 	  };
 
+export type ProvisionResult =
+	| { readonly ok: true; readonly userId: string }
+	| { readonly ok: false; readonly reason: 'not_on_homeserver' | 'failed' };
+
 export interface AssistantService {
 	create(owner: string, name: string): Promise<CreateResult>;
+	// The owner's assistant as a provisioner asks for it: the live one, or a new one under the
+	// default name, without a room of its own, since the owner's client opens the direct room
+	provision(owner: string): Promise<ProvisionResult>;
 	find(owner: string): Promise<AssistantView | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
 	remove(owner: string): Promise<boolean>;
@@ -139,6 +146,28 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			} catch (err: unknown) {
 				log.error({ owner, userId, roomId, err }, 'assistant creation failed');
 				await undoCreation(owner, userId, roomId, saved);
+				return { ok: false, reason: 'failed' };
+			}
+		},
+		async provision(owner) {
+			const live = await current(owner);
+			if (live !== null) return { ok: true, userId: live.userId };
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
+			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
+			const userId = assistantUserId(config, ownerLocalpart);
+			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
+			const name = (await fetchOwnerMessages(db, owner, config.locale)).defaultAssistantName;
+			try {
+				// The account is registered once and kept, as for an assistant the owner creates
+				await admin.registerUser(localpart);
+				const named = await admin.setDisplayName(userId, name);
+				const { reclaimed } = await withPrincipal(db, { id: owner }, (tx) =>
+					saveAssistant(tx, { owner, userId, name, roomId: null })
+				);
+				log.info({ owner, userId, named, reclaimed }, 'assistant provisioned');
+				return { ok: true, userId };
+			} catch (err: unknown) {
+				log.error({ owner, userId, err }, 'assistant provisioning failed');
 				return { ok: false, reason: 'failed' };
 			}
 		},

@@ -3,6 +3,7 @@ import type { Writable } from 'node:stream';
 import Fastify, {
 	type FastifyBaseLogger,
 	type FastifyInstance,
+	type FastifyReply,
 	type FastifyRequest
 } from 'fastify';
 
@@ -13,7 +14,8 @@ import { makeAgentService, type AgentService, type OwnerTurnResult } from './age
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import type { TurnPayload } from './agent/turn-worker.js';
 import { localeOf } from './assistants/locale.js';
-import { findAssistant } from './assistants/repository.js';
+import { readyIdentity, requestPreparation } from './assistants/provisioning.js';
+import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
@@ -41,6 +43,7 @@ import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
 import { listMemory } from './memory/repository.js';
+import { principalOfMatrixUser } from './principals/identity.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
 import { findSession, listSessionIds } from './sessions/repository.js';
@@ -80,6 +83,16 @@ export interface AppOptions {
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
 
+// What a provisioner may say of the owner along with its call
+const provisionBodySchema = z.object({ timezone: z.string().min(1).max(64).optional() });
+
+// The direct room the owner's client opened with the assistant
+const homeBodySchema = z.object({ roomId: z.string().min(1).max(255) });
+
+// How long the room a client names may wait for the assistant to join it, and how often it looks
+const HOME_JOIN_WAIT_MS = 5_000;
+const HOME_JOIN_POLL_MS = 250;
+
 const chatBodySchema = z
 	.object({
 		message: z.string().min(1).max(32_768),
@@ -104,6 +117,12 @@ const skillBodySchema = z
 
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
+const NOT_A_PROVISIONER = { error: 'not a provisioner' } as const;
+const NO_ASSISTANT = { error: 'no assistant' } as const;
+// The room a client names is not one the assistant and its owner are both in
+const NOT_A_MEMBER = { error: 'not a member' } as const;
+// Others are in that room: what the assistant writes its owner there would reach them too
+const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
 // The harness builds the consent in: no owner withdraws it
@@ -243,18 +262,29 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	app.decorate('agent', agent);
 	const tools = agent.tools;
 
+	const matrixAdmin = makeMatrixAdmin({
+		apisixBaseUrl: config.apisix.baseUrl,
+		consumerKey: config.apisix.consumerKey,
+		asToken: config.matrix.asToken
+	});
 	const assistants =
-		options.assistants ??
-		makeAssistantService({
-			config,
-			db,
-			log: app.log,
-			admin: makeMatrixAdmin({
-				apisixBaseUrl: config.apisix.baseUrl,
-				consumerKey: config.apisix.consumerKey,
-				asToken: config.matrix.asToken
-			})
-		});
+		options.assistants ?? makeAssistantService({ config, db, log: app.log, admin: matrixAdmin });
+
+	// The members joined to a room the owner's client names, once the assistant is among them: it
+	// joins as soon as the matrix role takes its owner's invitation, which may come a moment after
+	// the client opened the room. Null when the assistant is not in the room by then.
+	async function membersOnceJoined(
+		assistantUserId: string,
+		roomId: string
+	): Promise<string[] | null> {
+		const deadline = Date.now() + HOME_JOIN_WAIT_MS;
+		for (;;) {
+			const members = await matrixAdmin.joinedMembers(assistantUserId, roomId);
+			if (members?.includes(assistantUserId) === true) return members;
+			if (Date.now() >= deadline) return null;
+			await new Promise((resolve) => setTimeout(resolve, HOME_JOIN_POLL_MS));
+		}
+	}
 
 	app.decorateRequest('principal', null);
 	app.addHook('onSend', async (request, reply) => {
@@ -323,6 +353,93 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		});
 		request.log.info({ client, owner, eventId, type }, 'event queued');
 		return reply.code(202).send({ queued: true, duplicate: false });
+	});
+
+	// A provisioner, such as the identity server the Twake Chat clients ask for their assistant,
+	// acts for the owner it names after authenticating them itself. Only the service clients named
+	// in the settings may, never a user. Resolves to the client admitted, or null once refused.
+	async function admitProvisioner(
+		request: FastifyRequest,
+		reply: FastifyReply
+	): Promise<string | null> {
+		const auth = await authenticate(request.headers.authorization);
+		if (!auth.ok) {
+			request.log.info({ reason: auth.reason }, 'provisioning refused');
+			await reply.code(401).send({ error: 'invalid token' });
+			return null;
+		}
+		const client = auth.principal.id;
+		if (!config.provisioning.clientIds.includes(client)) {
+			request.log.info({ client, reason: 'not_a_provisioner' }, 'provisioning refused');
+			await reply.code(403).send(NOT_A_PROVISIONER);
+			return null;
+		}
+		return client;
+	}
+
+	app.put('/v1/provisioning/assistants/:owner', async (request, reply) => {
+		const client = await admitProvisioner(request, reply);
+		if (client === null) return reply;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		// The owner by their Matrix identifier on the assistants' homeserver, as the provisioner
+		// authenticated them: their principal is the platform's email for that account
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		// The zone the owner's client reports is accepted, though the harness keeps none per owner
+		const parsed = provisionBodySchema.safeParse(request.body ?? {});
+		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+		const provisioned = await assistants.provision(owner);
+		if (!provisioned.ok) {
+			return provisioned.reason === 'not_on_homeserver'
+				? reply.code(422).send(OWNER_NOT_ON_HOMESERVER)
+				: reply.code(502).send({ error: 'assistant creation failed' });
+		}
+		const identity = await readyIdentity(db, owner, provisioned.userId);
+		if (identity !== null) {
+			request.log.info(
+				{ client, owner, userId: identity.userId },
+				'assistant provisioned for a client'
+			);
+			return reply.code(200).send(identity);
+		}
+		const queued = await requestPreparation(db, owner);
+		request.log.info({ client, owner, userId: provisioned.userId, queued }, 'assistant not ready');
+		return reply.code(503).header('retry-after', '5').send({ error: 'not_ready' });
+	});
+
+	// The direct room the owner's client opened with the assistant becomes the room the assistant
+	// writes to its owner in, as an event's turn does, and one of the rooms it answers them in. Only
+	// a room where the assistant and its owner are, and nobody else, may be that room.
+	app.put('/v1/provisioning/assistants/:owner/home', async (request, reply) => {
+		const client = await admitProvisioner(request, reply);
+		if (client === null) return reply;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const parsed = homeBodySchema.safeParse(request.body);
+		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+		const { roomId } = parsed.data;
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant === null || assistant.deletedAt !== null) {
+			return reply.code(404).send(NO_ASSISTANT);
+		}
+		const members = await membersOnceJoined(assistant.userId, roomId);
+		if (members === null || !members.includes(ownerUserId)) {
+			request.log.info({ client, owner, roomId, reason: 'not_a_member' }, 'room refused');
+			return reply.code(409).send(NOT_A_MEMBER);
+		}
+		if (members.some((member) => member !== ownerUserId && member !== assistant.userId)) {
+			request.log.info({ client, owner, roomId, reason: 'not_a_direct_room' }, 'room refused');
+			return reply.code(409).send(NOT_A_DIRECT_ROOM);
+		}
+		await withPrincipal(db, { id: owner }, async (tx) => {
+			await setAssistantRoomId(tx, owner, roomId);
+			await tx.sql`
+				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${assistant.userId})
+				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
+		});
+		request.log.info({ client, owner, userId: assistant.userId, roomId }, 'assistant room named');
+		return reply.code(204).send();
 	});
 
 	// Prometheus exposition: what the autoscaler and the dashboards read

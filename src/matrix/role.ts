@@ -101,6 +101,7 @@ interface SendJob {
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
+const preparePayload = z.object({ owner: z.string().min(1) });
 // How long a stop waits for the pushes and listeners under way before it goes on regardless
 const STOP_DRAIN_MS = 10_000;
 
@@ -813,16 +814,36 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		});
 	}
 
+	// A provisioner asked for the owner's assistant: its device and its identity are made now, since
+	// the owner's client checks the identity before it opens the room, rather than when it speaks
+	async function prepare(owner: string): Promise<void> {
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant === null || assistant.deletedAt !== null) {
+			log.info({ owner }, 'preparation dropped: no assistant');
+			return;
+		}
+		const intent = appservice.getIntentForUserId(assistant.userId);
+		await ensureEncryption(intent);
+		await onEncryptionReady(intent, owner);
+		log.info({ owner, userId: assistant.userId }, 'assistant prepared');
+	}
+
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send', 'recover'],
+		kinds: ['send', 'recover', 'prepare'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (job.kind === 'recover') {
 				const parsed = recoverPayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('recover payload is malformed');
 				await recover(parsed.data.owner);
+				return;
+			}
+			if (job.kind === 'prepare') {
+				const parsed = preparePayload.safeParse(job.payload);
+				if (!parsed.success) throw new Error('prepare payload is malformed');
+				await prepare(parsed.data.owner);
 				return;
 			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
