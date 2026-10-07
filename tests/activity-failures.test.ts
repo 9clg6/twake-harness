@@ -273,7 +273,11 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const next = activityEvent();
 		await publish(next);
 		await toldOf(next);
-		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(3);
+		// The broker counts a dead letter once its dead letter queue confirmed it
+		await until(
+			'three dead letters',
+			async () => (await broker.queue(DEAD_LETTERS))?.messages === 3
+		);
 		expect(turnCalls(r.h.apisix.llm.calls, withoutSource.id)).toHaveLength(0);
 		expect(turnCalls(r.h.apisix.llm.calls, withoutObject.id)).toHaveLength(0);
 		expect(
@@ -396,7 +400,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		}
 		const failures = await failuresOf(failing, 5);
 		expect(failures.map((line) => line['transient'])).toEqual(Array(5).fill(false));
-		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(1);
+		await until('one dead letter', async () => (await broker.queue(DEAD_LETTERS))?.messages === 1);
 		expect(turnCalls(r.h.apisix.llm.calls, failing.id)).toHaveLength(0);
 		expect(
 			handled(mark).map(({ eventId, outcome, reason }) => ({ eventId, outcome, reason }))
@@ -435,8 +439,13 @@ describe('an event that fails holds back none of those after it, and is never lo
 		).toEqual([{ eventId: event.id, outcome: 'woken', outcomes: { duplicate: 1, woken: 1 } }]);
 		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Jarvis')).toHaveLength(1);
 		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Friday')).toHaveLength(1);
-		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
-		expect((await broker.queue(QUEUE))?.messages).toBe(0);
+		// Taken from both queues, as the broker counts them once it settled them
+		await until(
+			'both queues empty',
+			async () =>
+				(await broker.queue(DEAD_LETTERS))?.messages === 0 &&
+				(await broker.queue(QUEUE))?.messages === 0
+		);
 	});
 
 	it('forgets the wake-ups past their retention, and keeps the younger ones', async () => {
