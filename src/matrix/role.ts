@@ -927,6 +927,23 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					);
 					return;
 				}
+				// An owner's assistant opens its rooms encrypted: one that reads as clear takes the
+				// owner's words only as long as the deployment only reports
+				const unencrypted: OwnerWords = {
+					roomId,
+					owner,
+					ownerUserId: sender,
+					assistantUserId: room.userId,
+					eventId,
+					via: 'message',
+					encrypted: null
+				};
+				if (
+					owner !== ORGANIZATION_PRINCIPAL &&
+					!(await ownerDevices.admitUnencrypted(unencrypted))
+				) {
+					return;
+				}
 			}
 			// The turns of one owner run one after the other, in the order they were sent
 			const queued = await enqueueJob(db, {

@@ -156,6 +156,8 @@ export interface Messages {
 		// Taken all the same, the deployment only reporting: why the session falls short, and what
 		// the owner can do about it
 		reported(reason: DeviceShortfall): string;
+		// Not taken: the message came in clear, in a room that reads as clear
+		readonly unencrypted: string;
 	};
 }
 
@@ -331,7 +333,9 @@ const ENGLISH: Messages = {
 				case 'changed':
 					return `Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}) so that I keep doing so.`;
 			}
-		}
+		},
+		unencrypted:
+			'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.'
 	}
 };
 
@@ -504,7 +508,9 @@ const FRENCH: Messages = {
 				case 'changed':
 					return `Ton identité de chiffrement n'est pas celle que je connais. Je donne suite à ce que tu écris pour l'instant ; si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) pour que cela continue.`;
 			}
-		}
+		},
+		unencrypted:
+			"Je n'ai pas donné suite à ton dernier message : il m'est parvenu non chiffré, et je ne donne suite qu'à ce que tes sessions vérifiées chiffrent."
 	}
 };
 

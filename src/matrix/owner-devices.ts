@@ -86,6 +86,9 @@ export interface OwnerDeviceGate {
 	// signed by the identity the harness holds for the owner, in report mode always. Either way the
 	// device is logged without the words, and the owner is told when it falls short.
 	admit(words: OwnerWords): Promise<Admission>;
+	// Whether the owner's words that came in clear, in a room of their assistant that reads as clear,
+	// count: never in enforce mode, where the owner is told, and as before in report mode
+	admitUnencrypted(words: OwnerWords): Promise<boolean>;
 }
 
 export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate {
@@ -202,6 +205,17 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			log.info(fields, 'assistant ignored an unverified device');
 			await tell(words, verdict.device, reason, (m) => m.ownerDevices.refused(via, shortfall));
 			return REFUSED;
+		},
+		admitUnencrypted: async (words) => {
+			const { roomId, owner, eventId } = words;
+			const fields = { roomId, owner, eventId, mode, reason: 'clear room' };
+			if (mode === 'report') {
+				log.info(fields, 'owner message unencrypted');
+				return true;
+			}
+			log.info(fields, 'assistant ignored an unencrypted message');
+			await tell(words, '*', 'unencrypted', (m) => m.ownerDevices.unencrypted);
+			return false;
 		}
 	};
 }
