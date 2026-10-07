@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { withPrincipal } from '../src/db/client.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
@@ -80,6 +81,8 @@ async function logged(
 	throw new Error(`nothing logged as ${msg} for ${eventId}`);
 }
 
+const IDENTITY_ROUTE = '/v1/assistants/me/owner-identity';
+
 const UNVERIFIED_MESSAGE =
 	'I did not act on your last message: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then send it again.';
 const UNENCRYPTED_MESSAGE =
@@ -142,6 +145,43 @@ describe('the creator takes my commands only from the sessions my identity signe
 			UNENCRYPTED_MESSAGE
 		);
 		expect((await r.h.api.get(OWNER, '/v1/assistants/me')).status).toBe(200);
+	});
+
+	it('lets me accept a new identity through the API before I have an assistant', async () => {
+		const bob = await r.h.synapse.registerUser('bob');
+		const client = await startE2eeClient(r.h.synapse.url, bob);
+		sessions.push(client);
+		const room = await client.createDirectRoom(r.creatorId);
+		await client.waitForMessage(room, r.creatorId, (t) => t.includes('/newbot'));
+		await client.sendText(room, '/help');
+		await client.waitForMessage(room, r.creatorId, (t) => t.startsWith('I create and manage'));
+		const before = await client.masterKey();
+		const after = await client.resetIdentity();
+		const eventId = await client.sendText(room, '/newbot');
+		expect(await r.h.decisionOn(eventId)).toMatchObject({
+			msg: 'assistant ignored an unverified device',
+			identity: 'changed'
+		});
+		const view = await r.h.api.get('bob@test.local', IDENTITY_ROUTE);
+		expect(view.status).toBe(200);
+		expect(view.body).toMatchObject({
+			pinned: { master_key: before },
+			published: { master_key: after }
+		});
+		const accepted = await r.h.api.put('bob@test.local', IDENTITY_ROUTE, { master_key: after });
+		expect(accepted.status).toBe(200);
+		await client.sendText(room, '/newbot');
+		expect(await client.waitForMessage(room, r.creatorId, (t) => t.startsWith('Which name'))).toBe(
+			'Which name do you want for your assistant?'
+		);
+		const held = await withPrincipal(
+			r.h.db,
+			{ id: 'bob@test.local' },
+			(tx) =>
+				tx.sql<{ pinned_by: string }[]>`
+					select pinned_by from owner_cross_signing where owner = 'bob@test.local'`
+		);
+		expect(held.map((row) => row.pinned_by)).toEqual(['api']);
 	});
 });
 
