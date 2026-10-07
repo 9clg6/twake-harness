@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
+import { announceCommands } from '../matrix/commands.js';
 import { assistantUserId } from '../matrix/registration.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import {
@@ -134,12 +135,19 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				// devices. The room and its index land together or not at all.
 				// A first assistant greets in the deployment's language; one created again, in the
 				// language its owner chose for the one before
-				const welcome = (await fetchOwnerMessages(db, owner, config.locale)).welcome(name);
+				const toOwner = await fetchOwnerMessages(db, owner, config.locale);
+				const welcome = toOwner.welcome(name);
 				await withPrincipal(db, { id: owner }, async (tx) => {
 					await setAssistantRoomId(tx, owner, opened);
 					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
 				});
 				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
+				// As in every room of the assistant: the client offers them after « / »
+				await announceCommands(
+					{ admin, log },
+					{ roomId: opened, assistantUserId: userId },
+					toOwner
+				);
 				return {
 					ok: true,
 					assistant: toView({ userId, name, roomId: opened })

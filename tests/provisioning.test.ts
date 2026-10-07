@@ -274,6 +274,26 @@ describe('a provisioned assistant', () => {
 		});
 	});
 
+	it('announces its commands in the room it opens itself when its owner creates it', async () => {
+		const uma = await h.synapse.registerUser('uma');
+		const created = await h.api.post<{ roomId: string; userId: string }>(
+			'uma@test.local',
+			'/v1/assistants',
+			{ name: 'Ula' }
+		);
+		expect(created.status).toBe(201);
+		for (let i = 0; i < 40; i += 1) {
+			const invites = await h.synapse.pendingInvites(uma);
+			if (invites.some((invite) => invite.roomId === created.body.roomId)) break;
+			await sleep(250);
+		}
+		await h.synapse.joinRoom(uma, created.body.roomId);
+
+		expect(await announcedCommands(uma, created.body.roomId, created.body.userId)).toMatchObject({
+			commands: [{ name: 'help', syntax: 'help' }]
+		});
+	});
+
 	it('announces its commands in a room the client names, once the room lets it', async () => {
 		const pam = await h.synapse.registerUser('pam');
 		const mine = await provisionUntilReady(pam.userId);
