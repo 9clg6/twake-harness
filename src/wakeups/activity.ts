@@ -12,6 +12,9 @@ const ACTIVITY_EXCHANGE = 'activity';
 // and fixed once the queue is declared
 const DELIVERY_LIMIT = 5;
 
+// The most recipients of one event the listener reads, in their order: the others are left out
+const MAX_RECIPIENTS = 100;
+
 // Text people wrote, cut to its first characters rather than refused, as the contracts cap theirs:
 // it is shown as data anyway
 function untrustedText(max: number) {
@@ -56,7 +59,7 @@ const activityEventSchema = z.object({
 		preview: untrustedText(1000).optional(),
 		// Exactly who the event is for, nobody inferred, each read on its own: one the application
 		// names wrongly takes nobody else's turn away
-		recipients: z.array(z.unknown()).max(100).default([])
+		recipients: z.array(z.unknown()).default([])
 	})
 });
 
@@ -75,6 +78,8 @@ interface SkippedRecipient {
 function wakeupsOf(event: ActivityEvent): {
 	readonly wakeups: Wakeup[];
 	readonly skipped: SkippedRecipient[];
+	// How many recipients past the most it reads
+	readonly ignored: number;
 } {
 	const { object, preview } = event.data;
 	const computedObject = {
@@ -92,7 +97,7 @@ function wakeupsOf(event: ActivityEvent): {
 	};
 	const wakeups: Wakeup[] = [];
 	const skipped: SkippedRecipient[] = [];
-	event.data.recipients.forEach((named, index) => {
+	event.data.recipients.slice(0, MAX_RECIPIENTS).forEach((named, index) => {
 		const parsed = recipientSchema.safeParse(named);
 		if (!parsed.success) {
 			const fields = parsed.error.issues.map((issue) => String(issue.path[0] ?? 'recipient'));
@@ -124,7 +129,11 @@ function wakeupsOf(event: ActivityEvent): {
 			}
 		});
 	});
-	return { wakeups, skipped };
+	return {
+		wakeups,
+		skipped,
+		ignored: Math.max(0, event.data.recipients.length - MAX_RECIPIENTS)
+	};
 }
 
 export interface ActivityListener {
@@ -168,7 +177,10 @@ export async function startActivityListener(
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
 			const event = parsed.data;
-			const { wakeups, skipped } = wakeupsOf(event);
+			const { wakeups, skipped, ignored } = wakeupsOf(event);
+			if (ignored > 0) {
+				deps.log.warn({ source: event.source, eventId: event.id, ignored }, 'recipients ignored');
+			}
 			for (const { index, fields } of skipped) {
 				deps.log.warn(
 					{ source: event.source, eventId: event.id, recipient: index, fields },

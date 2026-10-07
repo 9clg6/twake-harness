@@ -395,6 +395,23 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		});
 	});
 
+	it('reads the first hundred recipients of an event, and logs how many it left out', async () => {
+		const members = Array.from({ length: 100 }, (_, i) => ({
+			email: `member-${i}@test.local`,
+			reason: 'member'
+		}));
+		const crowded = activityEvent({ recipients: [...members, ALICE] });
+		await publishThenNext(crowded);
+		expect(turnCalls(r.h.apisix.llm.calls, crowded.id)).toHaveLength(0);
+		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
+		expect(
+			workerLogs
+				.lines()
+				.filter((line) => line['msg'] === 'recipients ignored' && line['eventId'] === crowded.id)
+				.map((line) => line['ignored'])
+		).toEqual([1]);
+	});
+
 	it('takes and drops an event routed by a type it no longer listens to', async () => {
 		// A type the deployment listened to before keeps its binding: the library removes none
 		const completed = 'com.twake.tasks.task.completed.v1';
