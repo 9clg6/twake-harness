@@ -171,6 +171,22 @@ describe('a provisioned assistant', () => {
 		expect(again.body).toEqual(mine);
 	});
 
+	it('joins the direct room its owner opens and invites it to, and answers its owner there', async () => {
+		const carol = await h.synapse.registerUser('carol');
+		const client = await startE2eeClient(h.synapse.url, carol);
+		clients.push(client);
+		const mine = await provisionUntilReady(carol.userId);
+
+		// As Twake Chat's « My assistant »: an encrypted direct room, the assistant invited. Synapse
+		// pushes nothing sent before the assistant's join, so the owner writes once it is there.
+		const room = await client.createDirectRoom(mine.userId);
+		await waitForMember(carol, room, mine.userId);
+		await client.sendText(room, 'hello, assistant');
+
+		const answer = await client.waitForMessage(room, mine.userId, (text) => text.includes('echo'));
+		expect(answer).toContain('hello, assistant');
+	});
+
 	it('takes the direct room the client names as the room it writes to its owner in', async () => {
 		const dave = await h.synapse.registerUser('dave');
 		const client = await startE2eeClient(h.synapse.url, dave);
@@ -209,6 +225,75 @@ describe('a provisioned assistant', () => {
 		const named = await provisionerPut(`${assistantPath(gina.userId)}/home`, { roomId: room });
 		expect(named.status).toBe(409);
 		expect(named.body).toEqual({ error: 'not a direct room' });
+	});
+
+	it('declines a room someone other than its owner invites it to', async () => {
+		const frank = await h.synapse.registerUser('frank');
+		const mallory = await h.synapse.registerUser('mallory');
+		const mine = await provisionUntilReady(frank.userId);
+
+		const room = await h.synapse.createDirectRoom(mallory, mine.userId);
+
+		let membership: unknown = 'invite';
+		for (let i = 0; i < 80 && membership === 'invite'; i += 1) {
+			await sleep(250);
+			const state = await h.synapse.request(
+				mallory,
+				'GET',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/m.room.member/${encodeURIComponent(mine.userId)}`
+			);
+			membership = state.body['membership'];
+		}
+		expect(membership).toBe('leave');
+		expect(
+			h.logLines().some((l) => l['msg'] === 'assistant declined an invite' && l['roomId'] === room)
+		).toBe(true);
+	});
+
+	it("declines a room another owner's assistant already answers in", async () => {
+		const ivan = await h.synapse.registerUser('ivan');
+		const judy = await h.synapse.registerUser('judy');
+		const ivanClient = await startE2eeClient(h.synapse.url, ivan);
+		clients.push(ivanClient);
+		const ivans = await provisionUntilReady(ivan.userId);
+		const judys = await provisionUntilReady(judy.userId);
+		const room = await ivanClient.createDirectRoom(ivans.userId);
+		await waitForMember(ivan, room, ivans.userId);
+		const invited = await h.synapse.request(
+			ivan,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
+			{ user_id: judy.userId }
+		);
+		expect(invited.status).toBe(200);
+		await h.synapse.joinRoom(judy, room);
+
+		// Judy brings her own assistant into Ivan's room: one assistant answers in a room
+		const brought = await h.synapse.request(
+			judy,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
+			{ user_id: judys.userId }
+		);
+		expect(brought.status).toBe(200);
+		let membership: unknown = 'invite';
+		for (let i = 0; i < 80 && membership === 'invite'; i += 1) {
+			await sleep(250);
+			const state = await h.synapse.request(
+				judy,
+				'GET',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/m.room.member/${encodeURIComponent(judys.userId)}`
+			);
+			membership = state.body['membership'];
+		}
+		expect(membership).toBe('leave');
+
+		// Ivan's assistant still answers him there
+		await ivanClient.sendText(room, 'still mine?');
+		const answer = await ivanClient.waitForMessage(room, ivans.userId, (text) =>
+			text.includes('still mine?')
+		);
+		expect(answer).toContain('echo');
 	});
 
 	it('refuses a room for an owner without assistant, and a room the assistant is not in', async () => {

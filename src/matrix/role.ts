@@ -19,7 +19,8 @@ import {
 	findAssistant,
 	findDialog,
 	listActiveAssistants,
-	saveDialog
+	saveDialog,
+	setAssistantRoomId
 } from '../assistants/repository.js';
 import { reactionAnswer } from '../consents/answers.js';
 import type { PendingQuestion } from '../consents/consent.js';
@@ -514,6 +515,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					return;
 				}
 				if (invited !== creator && !isAssistantUserId(config, invited)) return;
+				if (invited !== creator) {
+					await onAssistantInvite(roomId, invited, event.sender ?? '');
+					return;
+				}
 				log.info({ roomId, invited, sender: event.sender }, 'invite accepted');
 				try {
 					const intent = appservice.getIntentForUserId(invited);
@@ -539,6 +544,61 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			})
 		)
 	);
+
+	// An assistant joins the rooms its own owner invites it to, as the direct room the owner's client
+	// opens with it: the room becomes one of its rooms, where it answers its owner, and the first one
+	// becomes the room it writes to its owner in. An invitation from anyone else is declined.
+	async function onAssistantInvite(
+		roomId: string,
+		invited: string,
+		inviter: string
+	): Promise<void> {
+		const owner = principalOfMatrixUser(config, inviter);
+		const assistant =
+			owner === null
+				? null
+				: await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		// One assistant answers in a room: a room another one already answers in stays its own
+		const holder = await assistantRoom(roomId);
+		const declined =
+			owner === null ||
+			assistant === null ||
+			assistant.deletedAt !== null ||
+			assistant.userId !== invited
+				? 'not_its_owner'
+				: holder !== null && holder.userId !== invited
+					? 'another_assistant'
+					: null;
+		if (declined !== null || owner === null || assistant === null) {
+			log.info(
+				{ roomId, invited, sender: inviter, reason: declined },
+				'assistant declined an invite'
+			);
+			try {
+				await appservice.getIntentForUserId(invited).leaveRoom(roomId);
+			} catch (err: unknown) {
+				log.warn({ roomId, invited, err }, 'invite not declined');
+			}
+			return;
+		}
+		log.info({ roomId, invited, sender: inviter }, 'invite accepted');
+		try {
+			const intent = appservice.getIntentForUserId(invited);
+			// Key shares for this room may arrive with the next transaction: be ready to receive them
+			await ensureEncryption(intent);
+			await intent.joinRoom(roomId);
+		} catch (err: unknown) {
+			log.warn({ roomId, invited, err }, 'join failed');
+			return;
+		}
+		await db.sql`
+			insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${invited})
+			on conflict (room_id) do nothing`;
+		if (assistant.roomId === null) {
+			await withPrincipal(db, { id: owner }, (tx) => setAssistantRoomId(tx, owner, roomId));
+		}
+		log.info({ roomId, owner, userId: invited }, 'assistant room opened by its owner');
+	}
 
 	// The rooms of the assistants, kept as an index so a message is routed to its owner first
 	async function assistantRoom(
