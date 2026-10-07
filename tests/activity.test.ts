@@ -449,6 +449,28 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect(logged).not.toContain('document.cookie');
 	});
 
+	it('sends to its dead letter queue an event without its id, source, type or object', async () => {
+		const without = (key: string): Record<string, unknown> =>
+			Object.fromEntries(Object.entries(activityEvent()).filter(([name]) => name !== key));
+		const withoutObject = activityEvent();
+		const broken = [
+			without('id'),
+			without('source'),
+			without('type'),
+			{ ...withoutObject, data: { recipients: [ALICE] } }
+		];
+		const calls = r.h.apisix.llm.calls.length;
+		for (const body of broken) await broker.publish(ACTIVITY, ASSIGNED, body);
+		await publishThenNext();
+		try {
+			expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(broken.length);
+			// None of them woke Alice: her only turn is the next event's
+			expect(r.h.apisix.llm.calls).toHaveLength(calls + 1);
+		} finally {
+			await broker.channel.purgeQueue(DEAD_LETTERS);
+		}
+	});
+
 	it('takes and drops an event routed by a type it no longer listens to', async () => {
 		// A type the deployment listened to before keeps its binding: the library removes none
 		const completed = 'com.twake.tasks.task.completed.v1';
