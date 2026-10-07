@@ -26,6 +26,9 @@ export interface ScriptedReply {
 	reasoning?: string;
 	toolCalls?: ToolCall[];
 	delayMs?: number;
+	// The model answers only once this settles: a test keeps a call open to observe what runs
+	// meanwhile, instead of inferring it from timings
+	hold?: Promise<unknown>;
 	// Why the model stopped: stop or tool_calls unless told otherwise, such as length when it ran
 	// out of tokens, in which case it reports the whole budget as spent
 	finishReason?: string;
@@ -484,6 +487,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const request = (await readJson(req)) as ChatRequest;
 			const reply = llm.script(request, llm.calls.length);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
+			if (reply.hold !== undefined) await reply.hold;
 			llm.calls.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
 			const message: Record<string, unknown> = {
 				role: 'assistant',
