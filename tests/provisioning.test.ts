@@ -287,6 +287,64 @@ describe('a provisioned assistant', () => {
 		throw new Error(`${assistantId} never took ${room} as its room`);
 	}
 
+	// Holds the owner's assistant row, as a busy database would keep the matrix role waiting on it;
+	// resolves to what releases it
+	async function holdAssistantOf(owner: string): Promise<() => Promise<void>> {
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let held = (): void => undefined;
+		const holding = new Promise<void>((resolve) => {
+			held = resolve;
+		});
+		const transaction = h.db.sql.begin(async (sql) => {
+			await sql`select set_config('app.principal', ${owner}, true)`;
+			await sql`select 1 from assistants where owner = ${owner} for update`;
+			held();
+			await released;
+		});
+		await holding;
+		return async () => {
+			release();
+			await transaction;
+		};
+	}
+
+	it('greets its owner before it answers them, however soon they write', async () => {
+		const kate = await h.synapse.registerUser('kate');
+		const client = await startE2eeClient(h.synapse.url, kate);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, kate.userId);
+
+		// The owner writes the moment the assistant joined, while the database is slow to record the
+		// room as the assistant's
+		const release = await holdAssistantOf('kate@test.local');
+		let room: string;
+		try {
+			room = await client.createDirectRoom(mine.userId);
+			await waitForMember(kate, room, mine.userId);
+			const early = await client.sendText(room, '!help');
+			// Until the role is done with it: answered, or dropped as a message of a room nobody holds
+			await eventually(() =>
+				h
+					.logLines()
+					.some(
+						(l) =>
+							(l['msg'] === 'answer sent' && l['roomId'] === room) ||
+							(l['msg'] === 'room message failed' && l['eventId'] === early)
+					)
+			);
+		} finally {
+			await release();
+		}
+
+		await client.waitForMessage(room, mine.userId, (text) => text === WELCOME);
+		await askForHelp(client, room, mine.userId);
+		const said = client.messages.filter((m) => m.roomId === room && m.sender === mine.userId);
+		expect(said[0]?.body).toBe(WELCOME);
+	});
+
 	it('greets its owner once, whatever comes after: the room named, a restart, another room', async () => {
 		const wendy = await h.synapse.registerUser('wendy');
 		const xavier = await h.synapse.registerUser('xavier');
