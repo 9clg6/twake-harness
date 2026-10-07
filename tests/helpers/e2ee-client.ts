@@ -8,12 +8,23 @@ import {
 } from 'matrix-bot-sdk';
 import {
 	RequestType,
+	SecretStorageKey,
 	StoreType,
 	UserId,
-	type OlmMachine
+	type OlmMachine,
+	type SecretStorageItems
 } from '@matrix-org/matrix-sdk-crypto-nodejs';
 
 import type { MatrixUser } from './synapse.js';
+
+// How a session stands with its user's cross-signing identity, as Twake Chat leaves it: signed by
+// default, Twake Chat setting the identity up at the user's first sign-in and signing each later
+// session with the recovery key it keeps for them; or unsigned, as a session nobody verified
+export type SessionTrust = 'signed' | 'unsigned';
+
+export interface E2eeClientOptions {
+	readonly session?: SessionTrust;
+}
 
 export interface DecryptedMessage {
 	readonly roomId: string;
@@ -44,6 +55,7 @@ export interface DecryptionFailure {
 
 export interface E2eeClient {
 	readonly userId: string;
+	readonly deviceId: string;
 	readonly client: MatrixClient;
 	readonly messages: DecryptedMessage[];
 	readonly events: ReadEvent[];
@@ -72,7 +84,127 @@ export interface E2eeClient {
 		count: number,
 		timeoutMs?: number
 	): Promise<string[]>;
+	// The master key of the user's cross-signing identity, as the homeserver publishes it
+	masterKey(): Promise<string | null>;
+	// Replaces the user's identity with a new one, as a reset in Twake Chat does, and signs this
+	// session with it; resolves to its master key
+	resetIdentity(): Promise<string>;
 	stop(): Promise<void>;
+}
+
+// What Twake Chat keeps on its server for each user, by homeserver and user: the secret storage key
+// that unlocks their identity's private keys, and those keys under it
+const recoveries = new Map<
+	string,
+	{ readonly key: SecretStorageKey; readonly items: SecretStorageItems }
+>();
+
+function machineOf(client: MatrixClient): OlmMachine {
+	const crypto = client.crypto as unknown as { engine?: { machine?: OlmMachine } };
+	const machine = crypto.engine?.machine;
+	if (machine === undefined) throw new Error('the client has no encryption yet');
+	return machine;
+}
+
+// Sends a request the machine prepared with the user's own token, and hands its answer back; the
+// Rust SDK wraps the signatures it uploads in a field of its own
+async function send(
+	client: MatrixClient,
+	machine: OlmMachine,
+	path: string,
+	request: { readonly id: string; readonly body: string; readonly type: RequestType }
+): Promise<void> {
+	const parsed = JSON.parse(request.body) as Record<string, unknown>;
+	const body = 'signed_keys' in parsed ? parsed['signed_keys'] : parsed;
+	const response: unknown = await client.doRequest('POST', path, null, body);
+	await machine.markRequestAsSent(request.id, request.type, JSON.stringify(response ?? {}));
+}
+
+// The cross-signing keys go up with the user's password once they replace an identity
+async function uploadSigningKeys(
+	homeserverUrl: string,
+	user: MatrixUser,
+	keys: Record<string, unknown>
+): Promise<void> {
+	const post = (body: Record<string, unknown>): Promise<Response> =>
+		fetch(`${homeserverUrl}/_matrix/client/v3/keys/device_signing/upload`, {
+			method: 'POST',
+			headers: { authorization: `Bearer ${user.accessToken}`, 'content-type': 'application/json' },
+			body: JSON.stringify(body)
+		});
+	let res = await post(keys);
+	if (res.status === 401 && user.password !== undefined) {
+		const { session } = (await res.json()) as { session?: string };
+		res = await post({
+			...keys,
+			auth: {
+				type: 'm.login.password',
+				identifier: { type: 'm.id.user', user: user.userId },
+				password: user.password,
+				...(session === undefined ? {} : { session })
+			}
+		});
+	}
+	if (res.status !== 200) {
+		throw new Error(`upload of the cross-signing keys failed: HTTP ${res.status}`);
+	}
+}
+
+async function publishedMasterKey(client: MatrixClient, userId: string): Promise<string | null> {
+	const reply = (await client.doRequest('POST', '/_matrix/client/v3/keys/query', null, {
+		device_keys: { [userId]: [] }
+	})) as { master_keys?: Record<string, { keys?: Record<string, string> }> };
+	return Object.values(reply.master_keys?.[userId]?.keys ?? {})[0] ?? null;
+}
+
+// Sets a new identity up for the user, signs this session with it, and keeps its recovery
+async function setUpIdentity(
+	homeserverUrl: string,
+	user: MatrixUser,
+	client: MatrixClient
+): Promise<void> {
+	const machine = machineOf(client);
+	const requests = await machine.bootstrapCrossSigning(true);
+	if (requests.uploadKeysReq !== undefined && requests.uploadKeysReq !== null) {
+		await send(client, machine, '/_matrix/client/v3/keys/upload', requests.uploadKeysReq);
+	}
+	await uploadSigningKeys(
+		homeserverUrl,
+		user,
+		JSON.parse(requests.uploadSigningKeysReq) as Record<string, unknown>
+	);
+	await send(
+		client,
+		machine,
+		'/_matrix/client/v3/keys/signatures/upload',
+		requests.uploadSignaturesReq
+	);
+	const key = SecretStorageKey.createRandomKey();
+	recoveries.set(`${homeserverUrl} ${user.userId}`, {
+		key,
+		items: await machine.exportSecretsForSecretStorage(key)
+	});
+}
+
+// Signs this session with the user's identity, unlocked with the recovery kept for them; a user
+// whose identity was set up elsewhere leaves the session unsigned
+async function signWithRecovery(
+	homeserverUrl: string,
+	user: MatrixUser,
+	client: MatrixClient
+): Promise<void> {
+	const recovery = recoveries.get(`${homeserverUrl} ${user.userId}`);
+	if (recovery === undefined) return;
+	const machine = machineOf(client);
+	// The machine imports the private keys only once it knows the identity they belong to
+	await send(
+		client,
+		machine,
+		'/_matrix/client/v3/keys/query',
+		machine.queryKeysForUsers([new UserId(user.userId)])
+	);
+	const request = await machine.importSecretsFromSecretStorage(recovery.key, recovery.items);
+	await send(client, machine, '/_matrix/client/v3/keys/signatures/upload', request);
 }
 
 // The event a reaction annotates, and its key
@@ -122,7 +254,8 @@ function queryKeysBeforeTracking(client: MatrixClient): void {
 // Synapse directly.
 export async function startE2eeClient(
 	homeserverUrl: string,
-	user: MatrixUser
+	user: MatrixUser,
+	options: E2eeClientOptions = {}
 ): Promise<E2eeClient> {
 	const dir = await mkdtemp(join(tmpdir(), 'e2ee-'));
 	const client = new MatrixClient(
@@ -201,8 +334,16 @@ export async function startE2eeClient(
 	);
 	queryKeysBeforeTracking(client);
 	await client.start();
+	if ((options.session ?? 'signed') === 'signed') {
+		if ((await publishedMasterKey(client, user.userId)) === null) {
+			await setUpIdentity(homeserverUrl, user, client);
+		} else {
+			await signWithRecovery(homeserverUrl, user, client);
+		}
+	}
 	return {
 		userId: user.userId,
+		deviceId: client.crypto.clientDeviceId,
 		client,
 		messages,
 		events,
@@ -265,6 +406,13 @@ export async function startE2eeClient(
 				await new Promise((resolve) => setTimeout(resolve, 250));
 			}
 			return keys();
+		},
+		masterKey: () => publishedMasterKey(client, user.userId),
+		resetIdentity: async () => {
+			await setUpIdentity(homeserverUrl, user, client);
+			const key = await publishedMasterKey(client, user.userId);
+			if (key === null) throw new Error('no identity after a reset');
+			return key;
 		},
 		stop: async () => {
 			client.stop();
