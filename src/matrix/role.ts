@@ -622,22 +622,15 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		fetchMessages,
 		lifetimeMs: config.consent.requestLifetimeMs,
-		metrics: consentMetrics,
-		react: async (room, eventId, key) => {
-			await appservice
-				.getIntentForUserId(room.assistantUserId)
-				.underlyingClient.sendEvent(room.roomId, 'm.reaction', {
-					'm.relates_to': { rel_type: 'm.annotation', event_id: eventId, key }
-				});
-		}
+		metrics: consentMetrics
 	});
 
-	// The owner's answer to a request of the harness: one of its buttons, or a bare ✅ or ❌, on it.
-	// Only an event that arrived encrypted, from the owner's own device, counts.
+	// The owner's answer to a request of the harness: a bare ✅ or ❌ on it. Only an event that
+	// arrived encrypted, from the owner's own device, counts.
 	async function onOwnerAnswer(roomId: string, event: RoomEvent): Promise<void> {
 		if (event.type !== 'm.reaction') return;
 		const sender = event.sender ?? '';
-		// The assistants' own reactions are the buttons, and mark the messages they answered
+		// The assistants' own reactions mark the messages they answered
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		const annotation = annotationOf(event);
 		if (annotation === null) return;

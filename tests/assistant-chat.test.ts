@@ -181,6 +181,19 @@ describe('talking to my assistant in Matrix', () => {
 		expect(html).toContain('<b>kept</b>');
 	});
 
+	it('links an address only when it has a scheme: a file name whose extension is a domain stays text', async () => {
+		h.apisix.llm.script = () => ({
+			content:
+				'I saved notes-demo.md, rapport.py and plan.io in https://mmaudet-drive.example/#/folder/x and sent them to alice@example.com.'
+		});
+		const before = answers().length;
+		await client.sendText(room, 'where are my files?');
+		await answersAfter(before);
+		expect(lastAnswer().content['formatted_body']).toBe(
+			'I saved notes-demo.md, rapport.py and plan.io in <a href="https://mmaudet-drive.example/#/folder/x">https://mmaudet-drive.example/#/folder/x</a> and sent them to <a href="mailto:alice@example.com">alice@example.com</a>.'
+		);
+	});
+
 	interface Reaction {
 		readonly eventId: string;
 		readonly key: string;

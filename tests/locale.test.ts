@@ -135,15 +135,9 @@ describe('a deployment that speaks French', () => {
 			[
 				"C'est la première fois que j'ai besoin de lire tes données dans mail. Tu m'autorises ? Je commencerais par ceci :",
 				JSON.stringify({ from: 'paul@test.local' }, null, 2),
-				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
-		const asked = client.messages.find(
-			(m) => m.roomId === assistantRoom && m.sender === assistantId && m.body === request
-		);
-		if (asked === undefined) throw new Error('no question');
-		const buttons = await client.waitForReactions(assistantRoom, asked.eventId, assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 
@@ -183,15 +177,9 @@ describe('a deployment that speaks French', () => {
 			[
 				"C'est la première fois que j'ai besoin de modifier tes données dans tasks. Tu m'autorises ? Je commencerais par ceci :",
 				JSON.stringify({ task_id: 'task-q4' }, null, 2),
-				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
-		const asked = client.messages.find(
-			(m) => m.roomId === assistantRoom && m.sender === assistantId && m.body === request
-		);
-		if (asked === undefined) throw new Error('no question');
-		const buttons = await client.waitForReactions(assistantRoom, asked.eventId, assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 
@@ -243,7 +231,7 @@ describe('a deployment that speaks French', () => {
 				"Ton assistant a écrit :\n> J'envoie le budget à paul@test.local.",
 				"C'est la première fois que j'ai besoin de modifier tes données dans Twake Mail, et les actions comme celle-ci demandent ton accord à chaque fois.\nÉcriture : envoyer et ranger tes mails\nTu m'autorises, à commencer par celle-ci, exactement comme ci-dessous ?",
 				JSON.stringify(mailTo('paul@test.local'), null, 2),
-				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
@@ -260,15 +248,9 @@ describe('a deployment that speaks French', () => {
 				"Ton assistant a écrit :\n> J'envoie le budget à anna@test.local.",
 				'Dans Twake Mail, les actions comme celle-ci demandent ton accord à chaque fois. Je fais celle-ci, exactement comme ci-dessous ?',
 				JSON.stringify(mailTo('anna@test.local'), null, 2),
-				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
-		const asked = client.messages.find(
-			(m) => m.roomId === assistantRoom && m.sender === assistantId && m.body === next
-		);
-		if (asked === undefined) throw new Error('no request');
-		const buttons = await client.waitForReactions(assistantRoom, asked.eventId, assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ OUI', '❌ NON']);
 		expect(h.apisix.contracts.calls).toHaveLength(1);
 	});
 
@@ -341,7 +323,7 @@ describe('a deployment that speaks French', () => {
 				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-first) vendredi de 9 h à 10 h ; tu es libre.",
 				"C'est la première fois que j'ai besoin de modifier tes données dans Twake Calendar, pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord.\nÉcriture : répondre à tes invitations et modifier tes événements\nTu m'autorises, à commencer par cette action, exactement comme ci-dessous ?",
 				JSON.stringify({ event_id: 'evt-fr-first' }, null, 2),
-				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
@@ -355,7 +337,7 @@ describe('a deployment that speaks French', () => {
 				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-next) vendredi de 9 h à 10 h ; tu es libre.",
 				"J'ai préparé ceci dans Twake Calendar pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord. Je le fais, exactement comme ci-dessous ?",
 				JSON.stringify({ event_id: 'evt-fr-next' }, null, 2),
-				'Réponds avec les boutons ci-dessous, ou par oui ou non.'
+				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(1);

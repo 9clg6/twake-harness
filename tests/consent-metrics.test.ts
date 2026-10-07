@@ -110,7 +110,7 @@ describe('an operator sees how consent behaves', () => {
 		const question = await r.nextQuestion(seen);
 		expect(await scraped(api, REQUESTS, firstRead('mail'), 1)).toBe(1);
 		const found = r.saying('Found:').length;
-		await r.client.react(r.room, question, '✅ YES');
+		await r.client.react(r.room, question, '✅');
 		await r.nextSaying('Found:', found);
 		const yes = { ...firstRead('mail'), answer: 'yes', via: 'reaction', outcome: 'decided' };
 		expect(await scraped(matrix, ANSWERS, yes, 1)).toBe(1);
@@ -192,7 +192,7 @@ describe('an operator sees how consent behaves', () => {
 		await r.nextQuestion(seen);
 		expect(await scraped(matrix, SUPERSESSIONS, firstRead('wiki'), 1)).toBe(1);
 		const notices = r.saying('A newer request').length;
-		await r.client.react(r.room, older, '✅ YES');
+		await r.client.react(r.room, older, '✅');
 		await r.nextSaying('A newer request', notices);
 		const late = { ...firstRead('wiki'), answer: 'yes', via: 'reaction', outcome: 'superseded' };
 		expect(await scraped(matrix, ANSWERS, late, 1)).toBe(1);
@@ -254,7 +254,7 @@ describe('an operator sees requests expire', () => {
 		const question = await r.nextQuestion(seen);
 		await sleep(1500);
 		const notices = r.saying('This request has expired').length;
-		await r.client.react(r.room, question, '✅ YES');
+		await r.client.react(r.room, question, '✅');
 		await r.nextSaying('This request has expired', notices);
 		expect(await scraped(matrix, EXPIRIES, firstRead('mail'), 1)).toBe(1);
 		const late = { ...firstRead('mail'), answer: 'yes', via: 'reaction', outcome: 'expired' };
@@ -273,9 +273,9 @@ describe('an operator sees requests expire', () => {
 		const read = (): number =>
 			r.h.logLines().filter((line) => line['msg'] === 'answer to a closed request').length;
 		const answers = read();
-		await r.client.react(r.room, question, '✅ YES');
+		await r.client.react(r.room, question, '✅');
 		await r.nextSaying('This request has expired', notices);
-		await r.client.react(r.room, question, '❌ NO');
+		await r.client.react(r.room, question, '❌');
 		// The matrix role read my second tap...
 		for (let i = 0; i < 120 && read() < answers + 2; i += 1) await sleep(250);
 		expect(read()).toBe(answers + 2);

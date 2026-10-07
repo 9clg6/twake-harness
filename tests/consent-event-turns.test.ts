@@ -23,11 +23,20 @@ const INVITED = 'com.twake.calendar.event.invited.v1';
 const MAIL_RECEIVED = 'com.twake.mail.received.v1';
 
 // The calendar contracts as the contracts service publishes them, and the owner's mail: reading
-// it, and sending in the owner's name, which is high-risk
+// it, sending in the owner's name, which is high-risk, and turning the vacation response off, which
+// takes no arguments
 const CATALOG = {
 	openapi: '3.1.0',
 	paths: {
 		...CALENDAR_CATALOG.paths,
+		'/contracts/v1/mail/vacation': {
+			delete: {
+				operationId: 'clear_vacation_response',
+				summary: "Turns the user's vacation response off",
+				tags: ['mail.vacation.set.v1'],
+				'x-twake-risk': 'low'
+			}
+		},
 		'/contracts/v1/mail/emails': {
 			get: {
 				operationId: 'search_emails',
@@ -143,15 +152,20 @@ function invitationModel(request: ChatRequest): ScriptedReply {
 }
 
 // How every request of the harness ends
-const HOW_TO_ANSWER = 'Answer with the buttons below, or reply yes or no.';
+const HOW_TO_ANSWER = 'Answer yes or no in your next message.';
 
 // A request as Alice's client shows it in plain text: what the model wrote, quoted under the
 // harness's label; the harness's question; the call whole, as the model wrote it; and how to answer
 function asked(question: string, args: unknown, said: string): string {
+	return askedAbout(question, JSON.stringify(args, null, 2), said);
+}
+
+// The same with what stands in the call's place, such as the tool of a call without arguments
+function askedAbout(question: string, shown: string, said: string): string {
 	return [
 		['Your assistant wrote:', ...said.split('\n').map((line) => `> ${line}`)].join('\n'),
 		question,
-		JSON.stringify(args, null, 2),
+		shown,
 		HOW_TO_ANSWER
 	].join('\n\n');
 }
@@ -170,7 +184,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 			ADMISSION_USER_PER_MINUTE: '100'
 		});
 		r.h.apisix.contracts.spec = CATALOG;
-		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(5);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(6);
 	}, 240_000);
 	afterAll(async () => {
 		if (r !== undefined) await r.close();
@@ -242,8 +256,6 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 				'Bob invites you to "Budget review" on Friday from 9:00 to 10:00. You are free then.'
 			)
 		);
-		const buttons = await r.client.waitForReactions(r.room, request.eventId, r.assistantId, 2);
-		expect(buttons.sort()).toEqual(['✅ YES', '❌ NO']);
 		// The harness read the invitation and my availability; the acceptance waits for me, though
 		// I let my assistant write in my calendar
 		expect(r.h.apisix.contracts.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
@@ -434,5 +446,54 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		expect(await r.nextSaying('All right', acknowledged)).toBe('All right, I will not do it.');
 		await sleep(1000);
 		expect(writes()).toEqual([]);
+	});
+
+	it('shows me which action it prepared for what arrived when the call has no arguments', async () => {
+		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'write');
+		const said =
+			'Anna writes that your vacation is over. I prepared turning your vacation response off.';
+		r.h.apisix.llm.script = (request) => {
+			const last = request.messages.at(-1);
+			if (last?.role === 'tool') return { content: `Turned off: ${last.content ?? ''}` };
+			return {
+				content: said,
+				toolCalls: [toolCall('call_clear_vacation', 'clear_vacation_response', {})]
+			};
+		};
+		let seen = requests().length;
+		await post('mail-back', MAIL_RECEIVED);
+		const request = await nextRequest(seen);
+		// The tool, as the harness names it, stands under the question in the call's place
+		expect(request.body).toBe(
+			askedAbout(
+				'I prepared this in mail for what just arrived, and I do it only with your yes. Shall I do it, exactly as below?',
+				'clear_vacation_response',
+				said
+			)
+		);
+		expect(lastWait()).toMatchObject({ reasons: ['event_turn'], tool: 'clear_vacation_response' });
+		// My ✅ runs that very call
+		const told = r.saying('Turned off:').length;
+		await r.client.react(r.room, request.eventId, '✅');
+		await r.nextSaying('Turned off:', told);
+		expect(writes()).toEqual(['/contracts/v1/mail/vacation']);
+
+		// Its first write in my mail for what arrives asks for both, about that same action
+		await withdrawConsent(r.h.db, 'alice@test.local', 'mail', 'write');
+		seen = requests().length;
+		await post('mail-back-again', MAIL_RECEIVED);
+		const first = await nextRequest(seen);
+		expect(first.body).toBe(
+			askedAbout(
+				'This is the first time I need to change your data in mail, for what just arrived, and I do it only with your yes. Do you allow it, starting with this action, exactly as below?',
+				'clear_vacation_response',
+				said
+			)
+		);
+		expect(lastWait()).toMatchObject({ reasons: ['consent', 'event_turn'] });
+		const acknowledged = r.saying('All right').length;
+		await r.client.react(r.room, first.eventId, '❌');
+		await r.nextSaying('All right', acknowledged);
+		expect(writes()).toEqual(['/contracts/v1/mail/vacation']);
 	});
 });

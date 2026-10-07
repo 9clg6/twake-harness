@@ -35,7 +35,7 @@ describe('a question I leave unanswered expires', () => {
 		const question = await r.nextQuestion(seen);
 		await sleep(1500);
 		let notices = r.saying('This request has expired').length;
-		await r.client.react(r.room, question, '✅ YES');
+		await r.client.react(r.room, question, '✅');
 		expect(await r.nextSaying('This request has expired', notices)).toBe(EXPIRED);
 
 		r.h.apisix.llm.script = modelUsing('search_drive', { q: 'plan' });
@@ -67,7 +67,7 @@ describe('a question I leave unanswered expires', () => {
 		expect(await r.callsTo('notes')).toEqual([{ status: 'expired', arguments: null }]);
 		// My answer, when it comes, gets the notice
 		const notices = r.saying('This request has expired').length;
-		await r.client.react(r.room, question, '✅ YES');
+		await r.client.react(r.room, question, '✅');
 		expect(await r.nextSaying('This request has expired', notices)).toBe(EXPIRED);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
