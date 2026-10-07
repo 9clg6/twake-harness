@@ -235,6 +235,16 @@ describe('a provisioned assistant', () => {
 			text.startsWith('Hello')
 		);
 		expect(welcome).toBe(WELCOME);
+		// It went through the homeserver encrypted, as everything in the room
+		const greeting = client.messages.find((m) => m.roomId === room && m.body === WELCOME);
+		const raw = await h.synapse.request(
+			vera,
+			'GET',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/messages?dir=b&limit=50`
+		);
+		const chunk = (raw.body['chunk'] ?? []) as { type: string; event_id: string }[];
+		expect(chunk.find((e) => e.event_id === greeting?.eventId)?.type).toBe('m.room.encrypted');
+		expect(chunk.filter((e) => e.type === 'm.room.message')).toEqual([]);
 	});
 
 	// The rooms where the owner's client read this greeting of their assistant
@@ -274,17 +284,25 @@ describe('a provisioned assistant', () => {
 		await membershipOf(owner, roomId, assistantId, 'leave');
 	}
 
+	// Resolves once the assistant took the room as one of its rooms, as many times as given
+	async function heldAsItsRoom(roomId: string, times = 1): Promise<void> {
+		const taken = await eventually(
+			() =>
+				h
+					.logLines()
+					.filter(
+						(l) => l['msg'] === 'assistant room opened by its owner' && l['roomId'] === roomId
+					).length >= times,
+			30_000
+		);
+		expect(taken).toBe(true);
+	}
+
 	// The owner opens a direct room with the assistant, which the assistant then holds as its own
 	async function openRoom(client: E2eeClient, assistantId: string): Promise<string> {
 		const room = await client.createDirectRoom(assistantId);
-		for (let i = 0; i < 120; i += 1) {
-			const opened = h
-				.logLines()
-				.some((l) => l['msg'] === 'assistant room opened by its owner' && l['roomId'] === room);
-			if (opened) return room;
-			await sleep(250);
-		}
-		throw new Error(`${assistantId} never took ${room} as its room`);
+		await heldAsItsRoom(room);
+		return room;
 	}
 
 	// Holds the owner's assistant row, as a busy database would keep the matrix role waiting on it;
@@ -364,6 +382,54 @@ describe('a provisioned assistant', () => {
 		const second = await openRoom(client, mine.userId);
 		await askForHelp(client, second, mine.userId);
 		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first]);
+	});
+
+	it('greets its owner once, whether they invite it again or leave for another room', async () => {
+		const lena = await h.synapse.registerUser('lena');
+		const omar = await h.synapse.registerUser('omar');
+		const client = await startE2eeClient(h.synapse.url, lena);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, lena.userId);
+		const room = await openRoom(client, mine.userId);
+		await client.waitForMessage(room, mine.userId, (text) => text === WELCOME);
+		const roomPath = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}`;
+
+		// Someone else comes in and the assistant leaves; the owner takes that invitation back, and
+		// invites the assistant again
+		await bringIn(lena, omar, room, mine.userId);
+		const revoked = await h.synapse.request(lena, 'POST', `${roomPath}/kick`, {
+			user_id: omar.userId
+		});
+		expect(revoked.status).toBe(200);
+		const invited = await h.synapse.request(lena, 'POST', `${roomPath}/invite`, {
+			user_id: mine.userId
+		});
+		expect(invited.status).toBe(200);
+		await heldAsItsRoom(room, 2);
+		await askForHelp(client, room, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([room]);
+
+		// The owner leaves the room, and opens another one with it
+		expect((await h.synapse.request(lena, 'POST', `${roomPath}/leave`, {})).status).toBe(200);
+		const other = await openRoom(client, mine.userId);
+		await askForHelp(client, other, mine.userId);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([room]);
+	});
+
+	it('greets its owner anew once they deleted it and their client asked for one again', async () => {
+		const mia = await h.synapse.registerUser('mia');
+		const client = await startE2eeClient(h.synapse.url, mia);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, mia.userId);
+		const first = await openRoom(client, mine.userId);
+		await client.waitForMessage(first, mine.userId, (text) => text === WELCOME);
+
+		expect((await h.api.delete('mia@test.local', '/v1/assistants/me')).status).toBe(204);
+		const again = await provisionUntilReady(h.api, mia.userId);
+		expect(again.userId).toBe(mine.userId);
+		const second = await openRoom(client, again.userId);
+		await client.waitForMessage(second, again.userId, (text) => text === WELCOME);
+		expect(greetedIn(client, mine.userId, WELCOME)).toEqual([first, second]);
 	});
 
 	it('greets the owner who created it in the room it opened only, even once a provisioner asked for it', async () => {
