@@ -100,8 +100,8 @@ function veventOf(text: unknown): ICAL.Component {
 		vevents = (Array.isArray(roots) ? roots : [])
 			.map((root: unknown) => new ICAL.Component(root as unknown[]))
 			.flatMap((root) => (root.name === 'vevent' ? [root] : root.getAllSubcomponents('vevent')));
-	} catch {
-		throw new DeadLetterError('an iCalendar that cannot be read');
+	} catch (err: unknown) {
+		throw new DeadLetterError('an iCalendar that cannot be read', { cause: err });
 	}
 	const vevent = vevents.find((candidate) => !candidate.hasProperty('recurrence-id')) ?? vevents[0];
 	if (vevent === undefined) throw new DeadLetterError('an iCalendar without VEVENT');
