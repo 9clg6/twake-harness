@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import {
+	invitationEvent,
+	INVITED,
+	startActivityExchange,
+	type ActivityExchange
+} from './helpers/activity.js';
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { CALENDAR_CATALOG } from './helpers/fake-apisix.js';
@@ -8,6 +14,7 @@ import { PROVISIONER, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
 describe('a deployment that speaks French', () => {
+	let activity: ActivityExchange;
 	let h: MatrixTestHarness;
 	let alice: MatrixUser;
 	let client: E2eeClient;
@@ -15,18 +22,21 @@ describe('a deployment that speaks French', () => {
 	let assistantRoom: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
+		activity = await startActivityExchange([INVITED]);
 		h = await startMatrixHarness({
 			env: {
+				...activity.settings,
 				ASSISTANT_LOCALE: 'fr',
-				EVENTS_CLIENT_IDS: 'dispatcher',
 				PROVISIONER_CLIENT_IDS: PROVISIONER
 			}
 		});
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		creatorRoom = await h.synapse.createDirectRoom(alice, h.role.creatorUserId);
+		await activity.listen(h);
 	}, 240_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (client !== undefined) await client.stop();
 		if (h !== undefined) await h.close();
 	});
@@ -291,12 +301,7 @@ describe('a deployment that speaks French', () => {
 			};
 		};
 		const invite = async (id: string): Promise<string> => {
-			const posted = await h.api.post('dispatcher', '/v1/events', {
-				owner: 'alice@test.local',
-				event_id: id,
-				type: 'com.twake.calendar.event.invited.v1'
-			});
-			expect(posted.status).toBe(202);
+			await activity.publish(invitationEvent(id, 'alice@test.local'));
 			return client.waitForMessage(assistantRoom, assistantId, (t) =>
 				t.includes(`> Bob t'invite à la revue du budget (${id})`)
 			);
