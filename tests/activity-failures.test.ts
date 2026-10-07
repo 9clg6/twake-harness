@@ -212,7 +212,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 			.filter((line) => line['msg'] === 'event handled');
 	}
 
-	// A fault every attempt meets, as a bug would be: the database refuses the wake-ups it matches
+	// A fault every attempt meets, as a bug would be: the database refuses the wake-ups it matches.
+	// A trigger on the wake-ups is the only way through the black box to a failure that is not
+	// transient: what the listener reads is checked before anything is written, and what it writes
+	// is its own.
 	async function refuseWakeups(when: string): Promise<void> {
 		await r.h.db.sql.unsafe(`create or replace function refuse_wakeup() returns trigger
 			language plpgsql as $$ begin raise exception 'wake-up refused'; end $$`);
