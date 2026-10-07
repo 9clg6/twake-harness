@@ -89,6 +89,21 @@ config:
   orgAgentMembers: ''
   # The service clients, by token subject, allowed to post events for an owner (comma separated)
   eventsClientIds: ''
+  # The activity exchange of RabbitMQ, which the worker role listens to, and it alone: each
+  # recipient of an event of the types below who has an assistant is told of it in their room
+  activityEnabled: false
+  # The Secret and key holding the AMQP URL, its vhost included, which carries the password of the
+  # instance's own RabbitMQ user; an empty name means the chart's own Secret (secretEnv or
+  # existingSecret)
+  activityAmqpUrlSecret: ''
+  activityAmqpUrlSecretKey: ACTIVITY_AMQP_URL
+  # The CloudEvent types that wake an assistant, each exactly (comma separated); empty means the
+  # harness default, com.twake.tasks.task.assigned.v1
+  activityTypes: ''
+  # What the names of the queues and exchanges the instance declares on RabbitMQ start with: its
+  # own, which its RabbitMQ user may configure and write; empty means the harness default,
+  # twake-harness
+  rabbitmqPrefix: ''
   # The service clients, by token subject, allowed to provision an owner's assistant through the
   # provisioning API, such as the identity server Twake Chat asks (comma separated)
   provisionerClientIds: ''
@@ -114,7 +129,8 @@ config:
 
 # Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY, and for the
 # matrix role MATRIX_HS_TOKEN (and MATRIX_AS_TOKEN when APISIX does not inject it)
-# and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards
+# and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards;
+# for the worker role that listens to RabbitMQ, ACTIVITY_AMQP_URL unless another Secret holds it
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''
@@ -136,6 +152,10 @@ networkPolicy:
   # The managed database, outside the cluster
   databaseCidrs: []
   databasePort: 5432
+  # The RabbitMQ broker's namespace and AMQP port, which the worker role alone reaches, when it
+  # listens to the activity exchange
+  rabbitmqNamespace: ''
+  rabbitmqPort: 5672
   # Extra egress rules, in NetworkPolicy syntax
   extraEgress: []
 
