@@ -50,6 +50,9 @@ export interface Config {
 		// How long a turn of an owner's message may go without an answer before its assistant posts
 		// a status message, which closes once the turn answered
 		readonly statusDelayMs: number;
+		// How long a turn an event woke may wait to start once admission first refused it: it is tried
+		// again until then, and given up past it
+		readonly eventMaxDelayMs: number;
 	};
 	readonly curation: {
 		readonly intervalMs: number;
@@ -122,6 +125,11 @@ export interface Config {
 	// The activity exchange, where the applications publish what happens to people as CloudEvents,
 	// which the worker role listens to when it is set
 	readonly activity: ActivitySource | null;
+	readonly wakeups: {
+		// How many times events from the broker may wake one owner's assistant in a rolling hour,
+		// whatever their source, counted in the database: past it, an event wakes that owner no more
+		readonly perHour: number;
+	};
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -166,6 +174,7 @@ const envSchema = z.object({
 	// messages and tool results, and an answer of up to LLM_MAX_TOKENS
 	TURN_HISTORY_MAX_CHARS: z.coerce.number().int().min(1).default(24_000),
 	TURN_STATUS_DELAY_MS: z.coerce.number().int().min(1000).default(3000),
+	TURN_EVENT_MAX_DELAY_MS: z.coerce.number().int().min(1000).default(3_600_000),
 	CURATION_INTERVAL_MS: z.coerce.number().int().min(0).default(86_400_000),
 	ADMISSION_MAX_INFLIGHT: z.coerce.number().int().min(1).default(32),
 	ADMISSION_USER_QUEUE: z.coerce.number().int().min(0).default(2),
@@ -207,6 +216,8 @@ const envSchema = z.object({
 	ACTIVITY_ENABLED: z.enum(['true', 'false']).default('false'),
 	ACTIVITY_AMQP_URL: z.string().default(''),
 	ACTIVITY_TYPES: z.string().default(TASK_ASSIGNED_EVENT_TYPE),
+	// As many as the dispatcher allowed before the activity exchange replaced it
+	WAKEUPS_PER_HOUR: z.coerce.number().int().min(1).default(20),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -337,7 +348,8 @@ export function loadConfig(env: Env): Config {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
 			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,
-			statusDelayMs: values.TURN_STATUS_DELAY_MS
+			statusDelayMs: values.TURN_STATUS_DELAY_MS,
+			eventMaxDelayMs: values.TURN_EVENT_MAX_DELAY_MS
 		},
 		curation: {
 			intervalMs: values.CURATION_INTERVAL_MS
@@ -386,6 +398,7 @@ export function loadConfig(env: Env): Config {
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
+		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},

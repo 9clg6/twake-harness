@@ -33,6 +33,10 @@ export interface MatrixTestHarness {
 	readonly api: TestClient;
 	readonly apps: readonly FastifyInstance[];
 	logLines(): Record<string, unknown>[];
+	// Stops the turn workers of the api replicas, as when the api role is down, and starts them
+	// again, as when it is back
+	stopTurnWorkers(): Promise<void>;
+	startTurnWorkers(): void;
 	// What the matrix role made of a message of an assistant's room, as it logged it: the line of
 	// the turn it queued, or of the message it ignored; null when it logged neither in time
 	decisionOn(eventId: string): Promise<Record<string, unknown> | null>;
@@ -106,21 +110,29 @@ export async function startMatrixHarness(
 			.map((line) => JSON.parse(line) as Record<string, unknown>);
 	// The api role, replicated as in the deployment: each replica has its own turn worker
 	const apps: FastifyInstance[] = [];
-	const workers: JobWorker[] = [];
 	for (let i = 0; i < TEST_REPLICAS; i += 1) {
 		const replica = await buildApp({ config, db, logStream });
 		await replica.ready();
 		apps.push(replica);
-		workers.push(
+	}
+	let workers: JobWorker[] = [];
+	const startTurnWorkers = (): void => {
+		workers = apps.map((replica) =>
 			startTurnWorker({
 				db,
 				agent: replica.agent,
 				log: replica.log,
 				locale: config.locale,
+				turn: config.turn,
 				pollIntervalMs: 100
 			})
 		);
-	}
+	};
+	const stopTurnWorkers = async (): Promise<void> => {
+		for (const worker of workers) await worker.stop();
+		workers = [];
+	};
+	startTurnWorkers();
 	const app = apps[0];
 	if (app === undefined) throw new Error('no replica started');
 	const startRole = (): Promise<MatrixRole> =>
@@ -225,6 +237,8 @@ export async function startMatrixHarness(
 		api,
 		apps,
 		logLines,
+		stopTurnWorkers,
+		startTurnWorkers,
 		decisionOn: async (eventId) => {
 			for (let i = 0; i < 120; i += 1) {
 				const decision = logLines().find(
@@ -237,7 +251,7 @@ export async function startMatrixHarness(
 		},
 		close: async () => {
 			if (process.env['CI'] !== undefined) await printDiagnostics();
-			for (const worker of workers) await worker.stop();
+			await stopTurnWorkers();
 			await role.stop();
 			for (const replica of apps) await replica.close();
 			await db.close();

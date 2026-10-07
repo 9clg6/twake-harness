@@ -1,23 +1,30 @@
-import { Writable } from 'node:stream';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent } from './helpers/consents.js';
-import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
-import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
+import {
+	ACTIVITY,
+	ASSIGNED,
+	HARNESS_PASSWORD,
+	HARNESS_USER,
+	lastUser,
+	logSink,
+	PREFIX,
+	silent,
+	startActivityBroker,
+	toldOf,
+	turnCalls
+} from './helpers/activity.js';
+import type { ChatRequest } from './helpers/fake-apisix.js';
+import type { TestBroker } from './helpers/rabbitmq.js';
 
-const ACTIVITY = 'activity';
-const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
 // Another type the deployment listens to, which has no sentence of its own
 const MENTIONED = 'com.twake.chat.message.mentioned.v1';
-// The instance's own names on the broker, and its own user there
-const PREFIX = 'twake-harness-test';
+// The instance's own queue on the broker, and its dead letters
 const QUEUE = `${PREFIX}.activity`;
 const DEAD_LETTERS = `${QUEUE}.dlq`;
-const HARNESS_USER = 'twake-harness-test';
-const HARNESS_PASSWORD = 'harness-test-password';
 
 // Who is who in Twake Tasks: its users by their entryUUID, the board and the task
 const ALICE_UUID = '6f1c2a4e-8b3d-4c5e-9f70-112233445566';
@@ -79,15 +86,6 @@ function activityEvent(options: EventOptions = {}): ActivityEvent {
 	};
 }
 
-function lastUser(request: ChatRequest | undefined): string {
-	return request?.messages.filter((m: ChatMessage) => m.role === 'user').at(-1)?.content ?? '';
-}
-
-// The model calls of the turn whose message names this event, in order
-function turnCalls(calls: readonly RecordedCall[], eventId: string): RecordedCall[] {
-	return calls.filter((call) => lastUser(call.request).includes(`(id ${eventId})`));
-}
-
 // Tasks' contracts behind the gateway: searching the owner's tasks, and commenting on one, a write
 const TASKS_CATALOG = {
 	openapi: '3.1.0',
@@ -115,35 +113,6 @@ const TASKS_CATALOG = {
 	}
 };
 
-// A log stream that keeps nothing, for a role whose logs a test does not read
-function silent(): Writable {
-	return new Writable({ write: (_chunk, _encoding, done) => done() });
-}
-
-// A log stream that keeps the lines a role writes, for a test to read them
-interface LogSink {
-	readonly stream: Writable;
-	lines(): Record<string, unknown>[];
-}
-
-function logSink(): LogSink {
-	const chunks: string[] = [];
-	return {
-		stream: new Writable({
-			write: (chunk: Buffer, _encoding, done) => {
-				chunks.push(chunk.toString('utf8'));
-				done();
-			}
-		}),
-		lines: () =>
-			chunks
-				.join('')
-				.split('\n')
-				.filter((line) => line.length > 0)
-				.map((line) => JSON.parse(line) as Record<string, unknown>)
-	};
-}
-
 // The event as the model was handed it: the line between the fences of the block
 const FENCED = /^<<<event-data ([0-9a-f]{12})\n(.+)\nevent-data \1>>>$/m;
 
@@ -153,16 +122,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 	let worker: WorkerRole;
 	const workerLogs = logSink();
 	beforeAll(async () => {
-		broker = await startTestBroker();
-		// The exchange the applications publish on, as the platform declares it, and the instance's
-		// user, as the platform creates it: it may declare and write its own names only, and read
-		// the activity exchange and its own queues
-		await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, {
-			configure: `^${PREFIX}\\.`,
-			write: `^${PREFIX}\\.`,
-			read: `^(${ACTIVITY}|${PREFIX}\\..+)$`
-		});
+		broker = await startActivityBroker();
 		r = await startConsentRoom({
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
@@ -288,16 +248,6 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		expect(turnCalls(r.h.apisix.llm.calls, byUuid.id)).toHaveLength(0);
 	});
 
-	// The model calls of the turns an event started, once there are that many
-	async function toldOf(event: ActivityEvent, count: number): Promise<RecordedCall[]> {
-		for (let i = 0; i < 120; i += 1) {
-			const calls = turnCalls(r.h.apisix.llm.calls, event.id);
-			if (calls.length >= count) return calls;
-			await new Promise((resolve) => setTimeout(resolve, 250));
-		}
-		throw new Error(`fewer than ${count} turns of ${event.id}`);
-	}
-
 	// Carol has an assistant too, Friday, and reads French: made once, for the tests that need a
 	// second owner
 	let carolsAssistant: Promise<void> | null = null;
@@ -318,7 +268,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		const event = activityEvent({ recipients: [ALICE, carol] });
 		await publish(event);
 		await answerTo(event);
-		const turns = await toldOf(event, 2);
+		const turns = await toldOf(r.h.apisix, event.id, 2);
 		// Each in their assistant's turn, in their language
 		const to = (name: string): string =>
 			lastUser(turns.find((call) => call.request.messages[0]?.content?.includes(name))?.request);
@@ -338,7 +288,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await publish(event);
 		await publish(next);
 		await answerTo(next);
-		await toldOf(next, 2);
+		await toldOf(r.h.apisix, next.id, 2);
 		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(2);
 	});
 
@@ -358,7 +308,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await publish(event);
 		await publish(next);
 		await answerTo(next);
-		await toldOf(next, 2);
+		await toldOf(r.h.apisix, next.id, 2);
 		const turns = turnCalls(r.h.apisix.llm.calls, event.id);
 		expect(turns).toHaveLength(1);
 		expect(turns[0]?.request.messages[0]?.content).toContain('"Jarvis"');

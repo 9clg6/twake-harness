@@ -76,6 +76,10 @@ config:
   # closes once the turn answered, in milliseconds (matrix role); at least 1000. Empty means the
   # harness default, 3000
   turnStatusDelayMs: ''
+  # How long a turn an event woke may wait to start once admission first refused it, in
+  # milliseconds (api role): it is tried again until then, never answering that it is busy, and
+  # given up past it; at least 1000. Empty means the harness default, 3600000 (an hour)
+  turnEventMaxDelayMs: ''
   # Whether an owner's words count only from a session their cross-signing identity signed
   # (matrix role): report, the harness default when empty, takes them all the same and logs and
   # tells the owner what enforce would not take; enforce does not take them
@@ -106,6 +110,10 @@ config:
   # own, which its RabbitMQ user may configure and write; empty means the harness default,
   # twake-harness
   rabbitmqPrefix: ''
+  # How many times events from the broker may wake one owner's assistant in a rolling hour,
+  # whatever their source (worker role); past it, an event wakes them no more. Empty means the
+  # harness default, 20
+  wakeupsPerHour: ''
   # The service clients, by token subject, allowed to provision an owner's assistant through the
   # provisioning API, such as the identity server Twake Chat asks (comma separated)
   provisionerClientIds: ''

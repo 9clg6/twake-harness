@@ -120,6 +120,13 @@ spec:
             - name: TURN_STATUS_DELAY_MS
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- /* The api role runs the turns, the events' among them */}}
+            {{- if eq .Values.role "api" }}
+            {{- with .Values.config.turnEventMaxDelayMs }}
+            - name: TURN_EVENT_MAX_DELAY_MS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Checked on every role, rendered on the matrix role, the only one that reads owner words */}}
             {{- with .Values.config.ownerDeviceTrust }}
             {{- if not (has . (list "report" "enforce")) }}
@@ -165,6 +172,13 @@ spec:
             {{- with .Values.config.rabbitmqPrefix }}
             - name: RABBITMQ_PREFIX
               value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- /* The worker role wakes the assistants for the events of every source it listens to */}}
+            {{- if eq .Values.role "worker" }}
+            {{- with .Values.config.wakeupsPerHour }}
+            - name: WAKEUPS_PER_HOUR
+              value: {{ . | int64 | quote }}
             {{- end }}
             {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}

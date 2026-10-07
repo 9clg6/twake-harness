@@ -32,7 +32,7 @@ export interface Wakeup {
 	};
 }
 
-export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored';
+export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped';
 
 export interface WakeDeps {
 	readonly config: Config;
@@ -67,7 +67,8 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 // Wakes the assistant of the person a wake-up is for, its owner: a turn of origin event in their
 // room, serialized with their other turns, which tells them of the event it carries. The owner is
 // the recipient by their email, which is their principal: only a person of the instance's mail
-// domain has one, and nobody is woken for their own action.
+// domain has one, nobody is woken for their own action, and nobody more often in an hour than the
+// deployment allows.
 export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome> {
 	const { config, db } = deps;
 	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
@@ -78,12 +79,27 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
 			return 'no_assistant' as const;
 		}
-		// Kept with the turn it queues, or not at all: an owner the event already woke is not woken
-		// again
-		const recorded = await tx.sql`
-			insert into wakeups (source, event_id, owner) values (${wakeup.source}, ${wakeup.id}, ${owner})
-			on conflict do nothing`;
-		if (recorded.count === 0) return 'duplicate' as const;
+		// One wake-up of an owner at a time, whatever source it comes from: what woke them is settled
+		// when it is read, and no two events take the last wake-up of their hour
+		await tx.sql`select pg_advisory_xact_lock(hashtext(${`wakeups:${owner}`}))`;
+		const [prior] = await tx.sql<{ seen: boolean; woken: number }[]>`
+			select
+				exists (
+					select 1 from wakeups
+					where source = ${wakeup.source} and event_id = ${wakeup.id} and owner = ${owner}
+				) as seen,
+				(
+					select count(*)::int from wakeups
+					where owner = ${owner} and woken_at > now() - interval '1 hour'
+				) as woken`;
+		// An owner the event already woke is not woken again
+		if (prior?.seen === true) return 'duplicate' as const;
+		// Nor past their hourly cap: a burst of events, a mass assignment or what piled up during an
+		// outage, drowns neither their room nor their quota
+		if ((prior?.woken ?? 0) >= config.wakeups.perHour) return 'capped' as const;
+		// Kept with the turn it queues, or not at all
+		await tx.sql`
+			insert into wakeups (source, event_id, owner) values (${wakeup.source}, ${wakeup.id}, ${owner})`;
 		const key = `event:${JSON.stringify([wakeup.source, wakeup.id, owner])}`;
 		const payload: TurnPayload = {
 			owner,
@@ -96,11 +112,9 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 		await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
 		return 'woken' as const;
 	});
-	if (outcome === 'woken') {
-		deps.log.info(
-			{ source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner },
-			'event queued'
-		);
-	}
+	const logged = { source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner };
+	if (outcome === 'woken') deps.log.info(logged, 'event queued');
+	// Taken all the same, for no turn: nothing tells the owner of an event past their cap
+	if (outcome === 'capped') deps.log.info(logged, 'event capped');
 	return outcome;
 }
