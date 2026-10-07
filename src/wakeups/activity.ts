@@ -113,19 +113,24 @@ export async function startActivityListener(
 		prefetch: 1
 	});
 	await client.init();
-	const [first = '', ...others] = source.types;
+	const queue = `${prefix}.${ACTIVITY_EXCHANGE}`;
+	const deadLetterExchange = `${prefix}.dlx`;
+	// The library binds the queue first to the exchange and key it is given, and keys the queue's
+	// dead letters after that key, which a quorum queue keeps as it was declared: bound first to its
+	// own dead letter exchange under its own name, the queue keeps the same key whatever types the
+	// deployment lists, and is bound to the activity exchange for those types alone
 	await client.subscribe(
-		ACTIVITY_EXCHANGE,
-		first,
-		`${prefix}.${ACTIVITY_EXCHANGE}`,
+		deadLetterExchange,
+		queue,
+		queue,
 		async (message) => {
 			const parsed = activityEventSchema.safeParse(message);
 			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
 			for (const wakeup of wakeupsOf(parsed.data)) await wake(deps, wakeup);
 		},
 		{
-			bindings: others.map((type) => ({ exchange: ACTIVITY_EXCHANGE, routingKey: type })),
-			deadLetterExchange: `${prefix}.dlx`,
+			bindings: source.types.map((type) => ({ exchange: ACTIVITY_EXCHANGE, routingKey: type })),
+			deadLetterExchange,
 			// The platform owns the exchange: its RabbitMQ user may not declare it, and the library
 			// only checks that it is there before it binds
 			passiveExchanges: [ACTIVITY_EXCHANGE],

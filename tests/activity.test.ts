@@ -221,4 +221,34 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		await answerTo(next);
 		expect(turnCalls(r.h.apisix.llm.calls, completed.id)).toHaveLength(0);
 	});
+
+	it('listens on the same queue once the types it listens to change', async () => {
+		// An instance of its own on the broker, whose types the deployment changes between two starts
+		const prefix = `${PREFIX}.retyped`;
+		const queue = `${prefix}.activity`;
+		const listening = (types: readonly string[]): Promise<WorkerRole> =>
+			startWorkerRole({
+				config: {
+					...r.h.config,
+					role: 'worker',
+					rabbitmq: { prefix },
+					activity: { amqpUrl: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD), types }
+				},
+				db: r.h.db,
+				logStream: new Writable({ write: (_chunk, _encoding, done) => done() })
+			});
+		try {
+			await (await listening([ASSIGNED])).stop();
+			const retyped = await listening([MENTIONED, ASSIGNED]);
+			await retyped.stop();
+			expect(
+				(await broker.bindingsOf(queue))
+					.filter((binding) => binding.source === ACTIVITY)
+					.map((binding) => binding.routingKey)
+					.sort()
+			).toEqual([MENTIONED, ASSIGNED]);
+		} finally {
+			await broker.channel.deleteQueue(queue);
+		}
+	});
 });
