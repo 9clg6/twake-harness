@@ -97,6 +97,17 @@ const recoveries = new Map<
 	{ readonly key: SecretStorageKey; readonly items: SecretStorageItems }
 >();
 
+// A step of a cross-signing operation, named in the error it may raise: the bindings' own errors say
+// nothing of where
+async function step<T>(name: string, run: () => Promise<T>): Promise<T> {
+	try {
+		return await run();
+	} catch (err: unknown) {
+		const message = err instanceof Error ? err.message : String(err);
+		throw new Error(`${name}: ${message}`, { cause: err });
+	}
+}
+
 function machineOf(client: MatrixClient): OlmMachine {
 	const crypto = client.crypto as unknown as { engine?: { machine?: OlmMachine } };
 	const machine = crypto.engine?.machine;
@@ -162,26 +173,32 @@ async function setUpIdentity(
 	client: MatrixClient
 ): Promise<void> {
 	const machine = machineOf(client);
-	const requests = await machine.bootstrapCrossSigning(true);
-	if (requests.uploadKeysReq !== undefined && requests.uploadKeysReq !== null) {
-		await send(client, machine, '/_matrix/client/v3/keys/upload', requests.uploadKeysReq);
-	}
-	await uploadSigningKeys(
-		homeserverUrl,
-		user,
-		JSON.parse(requests.uploadSigningKeysReq) as Record<string, unknown>
+	const requests = await step('bootstrapping the identity', () =>
+		machine.bootstrapCrossSigning(true)
 	);
-	await send(
-		client,
-		machine,
-		'/_matrix/client/v3/keys/signatures/upload',
-		requests.uploadSignaturesReq
-	);
+	// Kept before anything goes up: a key query the client's sync makes meanwhile may still answer
+	// with the identity being replaced, which makes the machine drop the new private keys
 	const key = SecretStorageKey.createRandomKey();
-	recoveries.set(`${homeserverUrl} ${user.userId}`, {
-		key,
-		items: await machine.exportSecretsForSecretStorage(key)
-	});
+	const items = await step('keeping the recovery', () =>
+		machine.exportSecretsForSecretStorage(key)
+	);
+	if (requests.uploadKeysReq !== undefined && requests.uploadKeysReq !== null) {
+		const upload = requests.uploadKeysReq;
+		await step('uploading the device keys', () =>
+			send(client, machine, '/_matrix/client/v3/keys/upload', upload)
+		);
+	}
+	await step('uploading the identity', () =>
+		uploadSigningKeys(
+			homeserverUrl,
+			user,
+			JSON.parse(requests.uploadSigningKeysReq) as Record<string, unknown>
+		)
+	);
+	await step('uploading the signatures', () =>
+		send(client, machine, '/_matrix/client/v3/keys/signatures/upload', requests.uploadSignaturesReq)
+	);
+	recoveries.set(`${homeserverUrl} ${user.userId}`, { key, items });
 }
 
 // Signs this session with the user's identity, unlocked with the recovery kept for them; a user
@@ -195,14 +212,20 @@ async function signWithRecovery(
 	if (recovery === undefined) return;
 	const machine = machineOf(client);
 	// The machine imports the private keys only once it knows the identity they belong to
-	await send(
-		client,
-		machine,
-		'/_matrix/client/v3/keys/query',
-		machine.queryKeysForUsers([new UserId(user.userId)])
+	await step('querying the identity', () =>
+		send(
+			client,
+			machine,
+			'/_matrix/client/v3/keys/query',
+			machine.queryKeysForUsers([new UserId(user.userId)])
+		)
 	);
-	const request = await machine.importSecretsFromSecretStorage(recovery.key, recovery.items);
-	await send(client, machine, '/_matrix/client/v3/keys/signatures/upload', request);
+	const request = await step('importing the identity', () =>
+		machine.importSecretsFromSecretStorage(recovery.key, recovery.items)
+	);
+	await step('uploading the signature', () =>
+		send(client, machine, '/_matrix/client/v3/keys/signatures/upload', request)
+	);
 }
 
 // The event a reaction annotates, and its key
