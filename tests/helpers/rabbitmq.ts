@@ -64,13 +64,26 @@ export interface TestBroker {
 	// its cause is fixed, with a shovel or the management UI: through the default exchange, under
 	// the name of the queue it goes to. Resolves to how many it moved.
 	replay(from: string, to: string): Promise<number>;
+	// Restarts the broker as a rolling upgrade does, letting it stop on its own, which drops every
+	// connection and may move its address, then opens the platform's own channel again; the other
+	// vhosts' channels stay closed. Killed instead, a broker can lose a quorum queue declared a
+	// moment before, which then never elects a leader again.
+	restart(): Promise<void>;
 	stop(): Promise<void>;
+}
+
+// The platform's own connection: a broker that goes down closes it with an error, which nobody
+// handles but the test that took the broker down
+async function connectAsPlatform(url: string): Promise<ChannelModel> {
+	const connection = await connect(url);
+	connection.on('error', () => undefined);
+	return connection;
 }
 
 export async function startTestBroker(): Promise<TestBroker> {
 	const container: StartedRabbitMQContainer = await new RabbitMQContainer(IMAGE).start();
-	const admin: ChannelModel = await connect(container.getAmqpUrl());
-	const channel = await admin.createConfirmChannel();
+	let admin: ChannelModel = await connectAsPlatform(container.getAmqpUrl());
+	let channel = await admin.createConfirmChannel();
 	// The platform's own connections to the other vhosts, closed with the broker
 	const vhosts: ChannelModel[] = [];
 
@@ -166,7 +179,9 @@ export async function startTestBroker(): Promise<TestBroker> {
 	}
 
 	return {
-		channel,
+		get channel() {
+			return channel;
+		},
 		urlFor: (user, password, vhost = '/') => urlOn(vhost, user, password),
 		address: () => ({ host: container.getHost(), port: container.getMappedPort(5672) }),
 		addUser: async (user, password, permissions) => {
@@ -194,7 +209,7 @@ export async function startTestBroker(): Promise<TestBroker> {
 			await rabbitmqctl('add_vhost', name);
 			// The default user the platform's channel connects as, which a new vhost grants nothing
 			await allowOn(name, 'guest', { configure: '.*', write: '.*', read: '.*' });
-			const connection = await connect(urlOn(name, 'guest', 'guest'));
+			const connection = await connectAsPlatform(urlOn(name, 'guest', 'guest'));
 			vhosts.push(connection);
 			return connection.createConfirmChannel();
 		},
@@ -213,8 +228,14 @@ export async function startTestBroker(): Promise<TestBroker> {
 				channel.ack(message);
 			}
 		},
+		restart: async () => {
+			await container.restart({ timeout: 30_000 });
+			admin = await connectAsPlatform(container.getAmqpUrl());
+			channel = await admin.createConfirmChannel();
+		},
 		stop: async () => {
-			for (const connection of vhosts) await connection.close();
+			// A restart closed those it found open
+			for (const connection of vhosts) await connection.close().catch(() => undefined);
 			await channel.close();
 			await admin.close();
 			await container.stop();

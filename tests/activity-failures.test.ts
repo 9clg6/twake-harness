@@ -104,9 +104,11 @@ describe('an event that fails holds back none of those after it, and is never lo
 	let broker: TestBroker;
 	let r: ConsentRoom;
 	let worker: WorkerRole;
-	// The worker reaches its database through a proxy the tests take down and bring back
+	// The worker reaches its database through a proxy the tests take down and bring back, and the
+	// broker through another, which follows the broker when a restart moves it
 	let database: TcpProxy;
 	let workerDb: Db;
+	let amqp: TcpProxy;
 	const logs = captureLogs();
 	beforeAll(async () => {
 		broker = await startTestBroker();
@@ -128,9 +130,20 @@ describe('an event that fails holds back none of those after it, and is never lo
 		proxied.hostname = '127.0.0.1';
 		proxied.port = String(database.port);
 		workerDb = makeDb(proxied.toString());
+		amqp = await startTcpProxy(() => broker.address());
+		const amqpUrl = new URL(broker.urlFor(HARNESS_USER, HARNESS_PASSWORD));
+		amqpUrl.hostname = '127.0.0.1';
+		amqpUrl.port = String(amqp.port);
+		const { activity } = r.h.config;
+		if (activity === null) throw new Error('the suite listens to the activity exchange');
 		// Every line the worker writes, down to its debug lines, is read for content
 		worker = await startWorkerRole({
-			config: { ...r.h.config, role: 'worker', logLevel: 'debug' },
+			config: {
+				...r.h.config,
+				role: 'worker',
+				logLevel: 'debug',
+				activity: { ...activity, amqpUrl: amqpUrl.toString() }
+			},
 			db: workerDb,
 			logStream: logs.stream,
 			retryDelayMs: RETRY_DELAY_MS
@@ -145,6 +158,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		if (worker !== undefined) await worker.stop();
 		if (workerDb !== undefined) await workerDb.close();
 		if (database !== undefined) await database.close();
+		if (amqp !== undefined) await amqp.close();
 		if (r !== undefined) await r.close();
 		if (broker !== undefined) await broker.stop();
 	});
@@ -462,6 +476,21 @@ describe('an event that fails holds back none of those after it, and is never lo
 			await away.stop();
 			await proxy.close();
 		}
+	});
+
+	// Last of the suite, since every connection to the broker drops
+	it('listens again by itself once the broker restarted, its health saying so meanwhile', async () => {
+		expect(await healthOf(worker)).toBe('connected');
+		const restarting = broker.restart();
+		try {
+			await until('disconnected', async () => (await healthOf(worker)) === 'disconnected');
+		} finally {
+			await restarting;
+		}
+		await until('connected again', async () => (await healthOf(worker)) === 'connected');
+		const event = activityEvent();
+		await publish(event);
+		await toldOf(event);
 	});
 });
 
