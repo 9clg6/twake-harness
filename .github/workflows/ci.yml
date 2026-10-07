@@ -148,6 +148,40 @@ jobs:
             grep -A1 CONTRACTS_OPENAPI_PATH /tmp/contracts-$role.yaml | grep -q '"\.\./contracts/openapi\.json"'
             kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/contracts-$role.yaml
           done
+      # The activity exchange is rendered on the worker role only, once config.activityEnabled is set:
+      # the AMQP URL from the chart's own Secret or another one, the types and the prefix when set,
+      # and an egress rule to the broker's namespace on its AMQP port alone
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set secretEnv.ACTIVITY_AMQP_URL=amqp://u:p@rabbitmq.dbs:5672/ --set config.activityTypes=com.twake.tasks.task.assigned.v1 --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs --set config.matrixServerName=example.org > /tmp/activity-worker.yaml
+          grep -A1 'name: ACTIVITY_ENABLED' /tmp/activity-worker.yaml | grep -q '"true"'
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-worker.yaml | grep -q 'name: agent-worker-env'
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-worker.yaml | grep -q 'key: ACTIVITY_AMQP_URL'
+          grep -A1 'name: ACTIVITY_TYPES' /tmp/activity-worker.yaml | grep -q '"com.twake.tasks.task.assigned.v1"'
+          grep -A1 'name: RABBITMQ_PREFIX' /tmp/activity-worker.yaml | grep -q '"twake-harness-b2b"'
+          grep -A3 'kubernetes.io/metadata.name: dbs' /tmp/activity-worker.yaml | grep -q 'port: 5672'
+          grep -A1 'name: MATRIX_SERVER_NAME' /tmp/activity-worker.yaml | grep -q '"example.org"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/activity-worker.yaml
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set config.activityAmqpUrlSecret=harness-rabbitmq --set config.activityAmqpUrlSecretKey=url --set config.matrixMailDomain=mail.example.org > /tmp/activity-secret.yaml
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-secret.yaml | grep -q 'name: harness-rabbitmq'
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-secret.yaml | grep -q 'key: url'
+          if grep -q -E 'name: (ACTIVITY_TYPES|RABBITMQ_PREFIX)|port: 5672' /tmp/activity-secret.yaml; then exit 1; fi
+          grep -A1 'name: MATRIX_MAIL_DOMAIN' /tmp/activity-secret.yaml | grep -q '"mail.example.org"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/activity-secret.yaml
+      # A worker that listens wakes the owners by their email on the mail domain: it is refused
+      # without config.matrixServerName or config.matrixMailDomain, which would make it wake nobody
+      - run: |
+          if helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true > /dev/null 2> /tmp/activity-domain.err; then exit 1; fi
+          grep -q 'config.matrixServerName or config.matrixMailDomain must be set' /tmp/activity-domain.err
+      # No other role listens, nor gets the broker's address or a way out to it, and neither does a
+      # worker that does not listen
+      - run: |
+          for role in api matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.activityEnabled=true --set config.activityTypes=com.twake.tasks.task.assigned.v1 --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/activity-$role.yaml
+            if grep -q -E 'ACTIVITY_|RABBITMQ_|port: 5672' /tmp/activity-$role.yaml; then exit 1; fi
+          done
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityTypes=com.twake.tasks.task.assigned.v1 --set networkPolicy.rabbitmqNamespace=dbs > /tmp/activity-off.yaml
+          if grep -q -E 'ACTIVITY_|RABBITMQ_|port: 5672' /tmp/activity-off.yaml; then exit 1; fi
 
   image:
     needs: [check, test, chart]

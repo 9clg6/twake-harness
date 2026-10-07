@@ -2,6 +2,7 @@ import { z } from 'zod';
 
 import { findTimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
+import { TASK_ASSIGNED_EVENT_TYPE } from './wakeups/event-types.js';
 
 const ROLES = ['api', 'matrix', 'worker'] as const;
 export type Role = (typeof ROLES)[number];
@@ -14,6 +15,13 @@ export type LogLevel = (typeof LOG_LEVELS)[number];
 // the owner what enforce would not take
 const OWNER_DEVICE_TRUST_MODES = ['report', 'enforce'] as const;
 export type OwnerDeviceTrust = (typeof OWNER_DEVICE_TRUST_MODES)[number];
+
+export interface ActivitySource {
+	// The broker, its vhost included
+	readonly amqpUrl: string;
+	// The CloudEvent types that wake an assistant: the only routing keys its queue is bound to
+	readonly types: readonly string[];
+}
 
 export interface Config {
 	readonly role: Role;
@@ -106,6 +114,14 @@ export interface Config {
 		// The service clients, by their token subject, allowed to provision an owner's assistant
 		readonly clientIds: readonly string[];
 	};
+	readonly rabbitmq: {
+		// What the names of the queues and exchanges this instance declares on the broker start
+		// with: its own, so that no two instances share a queue
+		readonly prefix: string;
+	};
+	// The activity exchange, where the applications publish what happens to people as CloudEvents,
+	// which the worker role listens to when it is set
+	readonly activity: ActivitySource | null;
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -184,6 +200,13 @@ const envSchema = z.object({
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
 	PROVISIONER_CLIENT_IDS: z.string().default(''),
+	RABBITMQ_PREFIX: z
+		.string()
+		.regex(/^[A-Za-z0-9][A-Za-z0-9_.-]*$/, 'a plain name, such as twake-harness-b2b')
+		.default('twake-harness'),
+	ACTIVITY_ENABLED: z.enum(['true', 'false']).default('false'),
+	ACTIVITY_AMQP_URL: z.string().default(''),
+	ACTIVITY_TYPES: z.string().default(TASK_ASSIGNED_EVENT_TYPE),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -204,6 +227,55 @@ export type Env = Record<string, string | undefined>;
 
 function isHttpsUrl(value: string): boolean {
 	return URL.canParse(value) && new URL(value).protocol === 'https:';
+}
+
+// The items of a comma separated setting, without the spaces around them nor the empty ones
+function listOf(value: string): string[] {
+	return value
+		.split(',')
+		.map((item) => item.trim())
+		.filter((item) => item.length > 0);
+}
+
+function isAmqpUrl(value: string): boolean {
+	return URL.canParse(value) && ['amqp:', 'amqps:'].includes(new URL(value).protocol);
+}
+
+// The activity exchange as the worker listens to it. The routing keys its queue is bound to are
+// CloudEvent types, each exactly, since a word * or # of a topic binding would let in events of
+// other types, or every event. The owners it wakes are the recipients whose email is on the mail
+// domain: without one, it would wake nobody, and say nothing.
+function activitySource(values: {
+	ACTIVITY_AMQP_URL: string;
+	ACTIVITY_TYPES: string;
+	MATRIX_SERVER_NAME: string;
+	MATRIX_MAIL_DOMAIN: string;
+}): {
+	amqpUrl: string;
+	types: string[];
+} {
+	// The address holds the password of the instance's user: a refusal never says it
+	if (!isAmqpUrl(values.ACTIVITY_AMQP_URL)) {
+		throw new Error(
+			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
+		);
+	}
+	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
+		throw new Error(
+			'invalid configuration: ACTIVITY_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
+		);
+	}
+	const types = listOf(values.ACTIVITY_TYPES);
+	if (types.length === 0) {
+		throw new Error('invalid configuration: ACTIVITY_TYPES lists no CloudEvent type');
+	}
+	const pattern = types.find((type) => type.split('.').some((word) => /[*#]/.test(word)));
+	if (pattern !== undefined) {
+		throw new Error(
+			`invalid configuration: ACTIVITY_TYPES lists the CloudEvent types that wake an assistant, never a pattern such as ${JSON.stringify(pattern)}`
+		);
+	}
+	return { amqpUrl: values.ACTIVITY_AMQP_URL, types };
 }
 
 export function loadConfig(env: Env): Config {
@@ -304,20 +376,16 @@ export function loadConfig(env: Env): Config {
 			localpart: values.ORG_AGENT_LOCALPART,
 			name: values.ORG_AGENT_NAME,
 			persona: values.ORG_AGENT_PERSONA,
-			members: values.ORG_AGENT_MEMBERS.split(',')
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
+			members: listOf(values.ORG_AGENT_MEMBERS)
 		},
 		events: {
-			clientIds: values.EVENTS_CLIENT_IDS.split(',')
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
+			clientIds: listOf(values.EVENTS_CLIENT_IDS)
 		},
 		provisioning: {
-			clientIds: values.PROVISIONER_CLIENT_IDS.split(',')
-				.map((id) => id.trim())
-				.filter((id) => id.length > 0)
+			clientIds: listOf(values.PROVISIONER_CLIENT_IDS)
 		},
+		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
+		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},
