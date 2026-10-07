@@ -17,6 +17,8 @@ export const ACTIVITY = 'activity';
 export const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
 // What an invitation is named there, where a team calendar may publish one
 export const INVITED = 'com.twake.calendar.event.invited.v1';
+// What Twake Mail publishes there when a mail arrives
+export const MAIL_RECEIVED = 'com.twake.mail.received.v1';
 
 // The instance's own names on the broker, and its own user there
 export const PREFIX = 'twake-harness-test';
@@ -184,5 +186,18 @@ export function invitationEvent(
 		source: 'twake://calendar',
 		reason: 'invited',
 		object: { type: 'event', id: `event-${id}`, title }
+	});
+}
+
+// A mail that arrived for the recipient, about the Q4 budget unless told otherwise, as Twake Mail
+// publishes it on the activity exchange
+export function mailEvent(id: string, recipient: string, subject = 'Q4 budget'): ActivityEvent {
+	return activityEvent({
+		id,
+		recipient,
+		type: MAIL_RECEIVED,
+		source: 'twake://mail',
+		reason: 'recipient',
+		object: { type: 'email', id: `email-${id}`, title: subject }
 	});
 }

@@ -4,6 +4,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../src/app.js';
 import { runMigrations } from '../src/db/migrate.js';
+import {
+	MAIL_RECEIVED,
+	mailEvent,
+	startActivityExchange,
+	type ActivityExchange
+} from './helpers/activity.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -57,16 +63,20 @@ function modelTelling(
 }
 
 describe('I ask my assistant what it may access, and take accesses back', () => {
+	let activity: ActivityExchange;
 	let r: ConsentRoom;
 	beforeAll(async () => {
+		activity = await startActivityExchange([MAIL_RECEIVED]);
 		r = await startConsentRoom({
-			ADMISSION_USER_PER_MINUTE: '100',
-			EVENTS_CLIENT_IDS: 'dispatcher'
+			...activity.settings,
+			ADMISSION_USER_PER_MINUTE: '100'
 		});
 		r.h.apisix.contracts.spec = CATALOG;
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(DOMAINS.length + 1);
+		await activity.listen(r.h);
 	}, 240_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (r !== undefined) await r.close();
 	});
 	beforeEach(() => {
@@ -224,12 +234,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		};
 		await allow('Search my notes');
 		const seen = r.saying('Told:').length;
-		const posted = await r.h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-withdraw',
-			type: 'com.twake.mail.received.v1'
-		});
-		expect(posted.status).toBe(202);
+		await activity.publish(mailEvent('evt-withdraw', 'alice@test.local', 'Stop using my notes'));
 		const refusal = (await r.nextSaying('Told:', seen)).slice('Told: '.length);
 		expect(JSON.parse(refusal)).toMatchObject({ error: 'needs_owner_approval' });
 		// My notes stay open to it
