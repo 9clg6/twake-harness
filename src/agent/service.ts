@@ -252,10 +252,6 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// answers each member in their own language, as it always did
 	const withLanguage = (persona: string, messages: Messages): string =>
 		withAddressing(`${persona} ${messages.language.speak}`, messages);
-	// The owner's own assistant may need an invitation the conversation does not hold; the
-	// organization agent has no calendar of its own to search
-	const withLookup = (persona: string, messages: Messages): string =>
-		`${persona} ${messages.lookup}`;
 	const llm =
 		deps.llm ??
 		makeLlmClient({
@@ -647,12 +643,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 											messages
 										)
 									: withLanguage(
-											withLookup(
-												input.assistantName === undefined
-													? DEFAULT_SYSTEM_PROMPT
-													: assistantPrompt(input.assistantName),
-												messages
-											),
+											input.assistantName === undefined
+												? DEFAULT_SYSTEM_PROMPT
+												: assistantPrompt(input.assistantName),
 											messages
 										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),

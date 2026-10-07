@@ -162,9 +162,6 @@ export interface Messages {
 	// How the model addresses the person writing to it, told in that language, when the language
 	// marks it: null when it does not
 	readonly addressing: string | null;
-	// How the owner's assistant finds an invitation the conversation does not hold, as after a
-	// restart or in a new session: it searches the events, then reads the one it found
-	readonly lookup: string;
 	// The owner's words came from a session of theirs that their cross-signing identity did not
 	// sign, or that another identity than the one their assistant holds for them signed
 	readonly ownerDevices: {
@@ -363,8 +360,6 @@ const ENGLISH: Messages = {
 			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.'
 		].join('\n'),
 	addressing: null,
-	lookup:
-		'To find an invitation that is not in this conversation, search for it with list_events, then read it with read_event before you speak of it or act on it.',
 	ownerDevices: {
 		refused: (via, reason) => {
 			const what =
@@ -578,8 +573,6 @@ const FRENCH: Messages = {
 		].join('\n'),
 	addressing:
 		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer.",
-	lookup:
-		"Pour retrouver une invitation qui n'est pas dans cette conversation, cherche-la avec list_events, puis lis-la avec read_event avant d'en parler ou d'agir.",
 	ownerDevices: {
 		refused: (via, reason) => {
 			const what =
