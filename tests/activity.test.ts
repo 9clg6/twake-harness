@@ -712,7 +712,8 @@ describe('the settings of the activity exchange', () => {
 	const listening = {
 		...base,
 		ACTIVITY_ENABLED: 'true',
-		ACTIVITY_AMQP_URL: 'amqp://twake-harness:s3cret-password@rabbitmq.dbs.svc:5672/'
+		ACTIVITY_AMQP_URL: 'amqp://twake-harness:s3cret-password@rabbitmq.dbs.svc:5672/',
+		MATRIX_SERVER_NAME: 'test.local'
 	};
 
 	// What a refused start says, which goes to the logs
@@ -743,6 +744,22 @@ describe('the settings of the activity exchange', () => {
 			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
 		);
 		expect(https).not.toContain('s3cret');
+	});
+
+	it('refuses to start listening without the mail domain it tells owners by', () => {
+		// The owners it wakes are the recipients whose email is on that domain: without it, it would
+		// wake nobody, and say nothing
+		const withoutDomain = Object.fromEntries(
+			Object.entries(listening).filter(([name]) => name !== 'MATRIX_SERVER_NAME')
+		);
+		const refused = refusal(withoutDomain);
+		expect(refused).toBe(
+			'invalid configuration: ACTIVITY_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
+		);
+		expect(refused).not.toContain('s3cret');
+		expect(
+			loadConfig({ ...withoutDomain, MATRIX_MAIL_DOMAIN: 'mail.test' }).activity
+		).not.toBeNull();
 	});
 
 	it('refuses a pattern among the types it listens to, and an empty list of them', () => {

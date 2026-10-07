@@ -241,9 +241,16 @@ function isAmqpUrl(value: string): boolean {
 	return URL.canParse(value) && ['amqp:', 'amqps:'].includes(new URL(value).protocol);
 }
 
-// The routing keys a queue is bound to on the activity exchange: CloudEvent types, each exactly,
-// since a word * or # of a topic binding would let in events of other types, or every event
-function activitySource(values: { ACTIVITY_AMQP_URL: string; ACTIVITY_TYPES: string }): {
+// The activity exchange as the worker listens to it. The routing keys its queue is bound to are
+// CloudEvent types, each exactly, since a word * or # of a topic binding would let in events of
+// other types, or every event. The owners it wakes are the recipients whose email is on the mail
+// domain: without one, it would wake nobody, and say nothing.
+function activitySource(values: {
+	ACTIVITY_AMQP_URL: string;
+	ACTIVITY_TYPES: string;
+	MATRIX_SERVER_NAME: string;
+	MATRIX_MAIL_DOMAIN: string;
+}): {
 	amqpUrl: string;
 	types: string[];
 } {
@@ -251,6 +258,11 @@ function activitySource(values: { ACTIVITY_AMQP_URL: string; ACTIVITY_TYPES: str
 	if (!isAmqpUrl(values.ACTIVITY_AMQP_URL)) {
 		throw new Error(
 			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
+		);
+	}
+	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
+		throw new Error(
+			'invalid configuration: ACTIVITY_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
 		);
 	}
 	const types = listOf(values.ACTIVITY_TYPES);
