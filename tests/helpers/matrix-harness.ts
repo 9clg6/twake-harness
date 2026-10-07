@@ -54,7 +54,8 @@ const MESSAGE_DECISIONS = new Set([
 	'turn queued',
 	'assistant ignored an unencrypted message',
 	'assistant ignored an unverified device',
-	'assistant ignored a copy of earlier words'
+	'assistant ignored a copy of earlier words',
+	'assistant command answered'
 ]);
 
 export async function startMatrixHarness(

@@ -249,4 +249,48 @@ describe('the organization agent', () => {
 			{ error: 'access denied' }
 		]);
 	});
+
+	it('stays in a room of several members when someone else joins, and answers the members there', async () => {
+		// The direct rooms rule holds for an owner's assistant only: the organization agent answers
+		// the organization's members together
+		const carol = await h.synapse.registerUser('carol');
+		const carolClient = await startE2eeClient(h.synapse.url, carol);
+		try {
+			const team = await aliceClient.client.createRoom({
+				preset: 'private_chat',
+				invite: [orgId, carol.userId],
+				initial_state: [
+					{
+						type: 'm.room.encryption',
+						state_key: '',
+						content: { algorithm: 'm.megolm.v1.aes-sha2' }
+					}
+				]
+			});
+			await carolClient.joinRoom(team);
+			await aliceClient.waitForMessage(team, orgId, (t) => t.includes('Twake Space'));
+			// Bob, who is no member, comes into the room
+			await aliceClient.client.inviteUser(bob.userId, team);
+			await bobClient.joinRoom(team);
+			await sleep(3000);
+			expect(await h.synapse.joinedMembers(alice, team)).toContain(orgId);
+			expect(
+				h
+					.logLines()
+					.some(
+						(l) => l['msg'] === 'assistant left a room no longer direct' && l['roomId'] === team
+					)
+			).toBe(false);
+			await aliceClient.sendText(team, 'hello everyone');
+			expect(
+				await aliceClient.waitForMessage(team, orgId, (t) => t.includes('hello everyone'))
+			).toBe('echo: [@alice:test.local] hello everyone');
+			await carolClient.sendText(team, 'and hello from carol');
+			expect(
+				await carolClient.waitForMessage(team, orgId, (t) => t.includes('hello from carol'))
+			).toBe('echo: [@carol:test.local] and hello from carol');
+		} finally {
+			await carolClient.stop();
+		}
+	});
 });

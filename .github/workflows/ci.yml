@@ -99,6 +99,8 @@ jobs:
           printf 'config:\n  turnHistoryMaxChars: 1000000\n' > /tmp/history.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/history.yaml > /tmp/history-rendered.yaml
           grep -A1 TURN_HISTORY_MAX_CHARS /tmp/history-rendered.yaml | grep -q '"1000000"'
+      # PROVISIONER_CLIENT_IDS carries the provisioners config.provisionerClientIds names
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.provisionerClientIds=tom-bots > /tmp/provisioning.yaml && grep -A1 PROVISIONER_CLIENT_IDS /tmp/provisioning.yaml | grep -q '"tom-bots"'
       # TURN_MAX_TOOL_CALLS is rendered only when config.turnMaxToolCalls is set, as an integer
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOOL_CALLS /tmp/default.yaml
       - run: |

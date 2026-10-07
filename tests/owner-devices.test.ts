@@ -120,8 +120,10 @@ async function clearRoom(r: ConsentRoom): Promise<string> {
 		if ((await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)) break;
 		await sleep(250);
 	}
+	// The harness records a room its owner invited the assistant to by itself, and may have already
 	await r.h.db.sql`
-		insert into assistant_rooms (room_id, owner, user_id) values (${room}, ${OWNER}, ${r.assistantId})`;
+		insert into assistant_rooms (room_id, owner, user_id) values (${room}, ${OWNER}, ${r.assistantId})
+		on conflict (room_id) do nothing`;
 	return room;
 }
 
@@ -416,6 +418,49 @@ describe('my assistant acts only on what the sessions my identity signed write',
 		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('Plan my week'))).toBe(
 			false
 		);
+	});
+
+	it('takes a command only from the words of the very event whose session it checked', async () => {
+		// A session I never verified sends my assistant's command, my verified session other words,
+		// both under one new id the homeserver never saw: the words checked are mine, so they start a
+		// turn, and no command is answered for the session it could not verify
+		const other = await unverifiedSession(r, sessions);
+		const id = `$command-${Date.now()}`;
+		const otherEvent = sealedEvent(r, id, await other.seal(r.room, '!help'));
+		const myEvent = sealedEvent(r, id, await r.client.seal(r.room, 'Good afternoon'));
+		const answered = r.saying('Heard:').length;
+		const helped = r.saying('I am your assistant.').length;
+		const releases: (() => void)[] = [];
+		const membersOfRoom = `/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/joined_members`;
+		r.h.apisix.matrixHold = (call) => {
+			const target = new URL(call.path, 'http://synapse');
+			const asUser = target.searchParams.get('user_id') ?? r.h.role.creatorUserId;
+			if (
+				releases.length >= 2 ||
+				target.pathname !== membersOfRoom ||
+				asUser !== r.h.role.creatorUserId
+			) {
+				return null;
+			}
+			return new Promise<void>((resolve) => releases.push(resolve));
+		};
+		try {
+			const first = push(r, [otherEvent]);
+			await until(() => releases.length === 1, 'the first push held up');
+			const second = push(r, [myEvent]);
+			await until(() => releases.length === 2, 'the second push held up');
+			releases[0]?.();
+			expect(await first).toBe(200);
+			releases[1]?.();
+			expect(await second).toBe(200);
+		} finally {
+			r.h.apisix.matrixHold = null;
+			for (const release of releases) release();
+		}
+		expect((await r.h.decisionOn(id))?.['msg']).toBe('turn queued');
+		expect(await r.nextSaying('Heard:', answered)).toBe('Heard: Good afternoon');
+		await sleep(1000);
+		expect(r.saying('I am your assistant.')).toHaveLength(helped);
 	});
 
 	it('acts on nothing written in clear in a room of mine that reads as clear', async () => {

@@ -21,6 +21,8 @@ export interface Messages {
 	readonly language: { readonly name: string; readonly speak: string };
 	// The assistant's first message in its room with the owner
 	welcome(name: string): string;
+	// The name of an assistant a provisioner creates, which its owner may change
+	readonly defaultAssistantName: string;
 	readonly creator: {
 		readonly helpHeader: string;
 		readonly commands: readonly CreatorCommand[];
@@ -47,11 +49,18 @@ export interface Messages {
 		// Any command that broke on the harness's side: the dialog starts over
 		readonly requestFailed: string;
 	};
+	// The commands an assistant answers itself in its owner's rooms, without the model: what the
+	// client shows of each after « / », and the answer
+	readonly assistantCommands: {
+		readonly help: { readonly description: string; readonly answer: string };
+	};
 	readonly notices: {
 		readonly turnFailed: string;
 		readonly busy: string;
 		readonly recovered: string;
 		readonly noEscrow: string;
+		// Why an assistant leaves a room where others than its owner are: everyone there reads it
+		readonly directRoomsOnly: string;
 		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
 		// owner: the actions it did, and how to have it carry on
 		callLimit(actions: number): string;
@@ -179,6 +188,7 @@ const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
 	welcome: (name) =>
 		`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`,
+	defaultAssistantName: 'Assistant',
 	creator: {
 		helpHeader: 'I create and manage your Twake Space assistant. Commands:',
 		commands: [
@@ -213,12 +223,25 @@ const ENGLISH: Messages = {
 		requestFailed:
 			'Something went wrong on my side and your request was not done. Please try again in a moment.'
 	},
+	assistantCommands: {
+		help: {
+			description: 'What I can do, and how to allow or take back my access to your apps',
+			answer: [
+				'I am your assistant. Write to me as you would to a person: I answer, I look things up in your Twake apps when you ask me to, and I remember what you ask me to remember.',
+				'The first time I need to read or change your data in an app, I ask you first: answer yes or no.',
+				'To know what I may access, or to take a permission back, just ask me, for instance « what may you read? » or « stop using my calendar ».',
+				'Commands: !help shows this message.'
+			].join('\n\n')
+		}
+	},
 	notices: {
 		turnFailed: 'Something went wrong on my side. Please try again in a moment.',
 		busy: 'I am busy right now and cannot take this message. Please send it again in a moment.',
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
+		directRoomsOnly:
+			'For now I work only in a private conversation with the person I assist, so I am leaving this room.',
 		callLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`
 	},
@@ -345,6 +368,7 @@ const FRENCH: Messages = {
 	language: { name: 'Français', speak: "Parle français avec la personne qui t'écrit." },
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
+	defaultAssistantName: 'Assistant',
 	creator: {
 		helpHeader: 'Je crée et je gère ton assistant Twake Space :',
 		commands: [
@@ -381,6 +405,18 @@ const FRENCH: Messages = {
 		requestFailed:
 			"Quelque chose s'est mal passé de mon côté : ta demande n'a pas abouti. Réessaie dans un instant."
 	},
+	assistantCommands: {
+		help: {
+			description:
+				"Ce que je sais faire, et comment m'autoriser ou me retirer l'accès à tes applications",
+			answer: [
+				'Je suis ton assistant. Écris-moi comme à une personne : je te réponds, je cherche dans tes applications Twake quand tu me le demandes, et je retiens ce que tu me demandes de retenir.',
+				"La première fois que j'ai besoin de lire ou de modifier tes données dans une application, je te demande d'abord ton accord : réponds oui ou non.",
+				"Pour savoir ce que je peux consulter, ou me retirer une autorisation, demande-le-moi simplement, par exemple « qu'as-tu le droit de lire ? » ou « arrête d'utiliser mon agenda ».",
+				'Commandes : !help affiche ce message.'
+			].join('\n\n')
+		}
+	},
 	notices: {
 		turnFailed: "Quelque chose s'est mal passé de mon côté. Réessaie dans un instant.",
 		busy: "J'ai trop de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.",
@@ -388,6 +424,8 @@ const FRENCH: Messages = {
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant.",
+		directRoomsOnly:
+			"Pour l'instant, je ne travaille que dans une conversation privée avec la personne que j'assiste : je quitte ce salon.",
 		// One action, or none, is singular in French
 		callLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`

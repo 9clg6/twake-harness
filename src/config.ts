@@ -102,6 +102,10 @@ export interface Config {
 		// The service clients, by their token subject, allowed to post events for an owner
 		readonly clientIds: readonly string[];
 	};
+	readonly provisioning: {
+		// The service clients, by their token subject, allowed to provision an owner's assistant
+		readonly clientIds: readonly string[];
+	};
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -179,6 +183,7 @@ const envSchema = z.object({
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
 	EVENTS_CLIENT_IDS: z.string().default(''),
+	PROVISIONER_CLIENT_IDS: z.string().default(''),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -305,6 +310,11 @@ export function loadConfig(env: Env): Config {
 		},
 		events: {
 			clientIds: values.EVENTS_CLIENT_IDS.split(',')
+				.map((id) => id.trim())
+				.filter((id) => id.length > 0)
+		},
+		provisioning: {
+			clientIds: values.PROVISIONER_CLIENT_IDS.split(',')
 				.map((id) => id.trim())
 				.filter((id) => id.length > 0)
 		},
