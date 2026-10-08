@@ -1,5 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { runTool } from '../src/agent/tools.js';
+import { ORGANIZATION_PRINCIPAL } from '../src/principals/principal.js';
 import {
 	modelFor,
 	QUESTION_CONTENT_KEY,
@@ -619,6 +621,109 @@ describe('my assistant asks me whether to answer for a whole series before it an
 			r.h.apisix.contracts.spec = INVITATION_ANSWERS_CATALOG;
 			for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
 		}
+	});
+
+	it('keeps the whole series I said yes to when the platform refuses the calendar telling what my first write there would do, and writes it once I give my permission and my consent', async () => {
+		await withdrawConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		// The platform's broker refuses the calendar's second preview of the answer for the whole
+		// series: Alice's permission for her assistant to act for her expired after her yes to the
+		// series, as the calendar was asked what her first write there would do
+		let seriesPreviews = 0;
+		r.h.apisix.contracts.handler = (c) => {
+			const previewed = c.headers['x-twake-preview'] !== undefined;
+			if (previewed && (c.body as { readonly series?: unknown }).series === true) {
+				seriesPreviews += 1;
+				if (seriesPreviews === 2) return PERMISSION_EXPIRED;
+			}
+			return calendar(c);
+		};
+		try {
+			const seen = questionsIn(r).length;
+			await r.client.sendText(r.room, 'Accept the standup');
+			await nextQuestionIn(r, seen);
+			const expired = r.saying(EXPIRED).length;
+			await r.client.sendText(r.room, 'yes');
+			await r.nextSaying(EXPIRED, expired);
+			const consents = r.questions().length;
+			await r.client.sendText(r.room, 'yes');
+			await r.nextQuestion(consents);
+			const found = r.saying('Found:').length;
+			await r.client.sendText(r.room, 'yes');
+			expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+			await sleep(1000);
+			// The call waited for that permission with the series I said yes to, which I was not asked
+			// about again, and the calendar wrote the answer for the whole series once
+			expect(questionsIn(r)).toHaveLength(seen + 1);
+			expect(calendarCalls()).toEqual([
+				['true', { uid: STANDUP }],
+				['true', { uid: STANDUP, series: true }],
+				['true', { uid: STANDUP, series: true }],
+				['true', { uid: STANDUP, series: true }],
+				[null, { uid: STANDUP, series: true }]
+			]);
+			expect(written).toEqual([{ uid: STANDUP, partstat: 'ACCEPTED' }]);
+		} finally {
+			r.h.apisix.contracts.handler = calendar;
+			await grantConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		}
+	});
+
+	it('takes the series out of a call I make through the API myself: an invitation that does not repeat is answered as an event, and a recurring one waits for my answer about the series', async () => {
+		const app = r.h.apps[0];
+		if (app === undefined) throw new Error('no replica');
+		const authorization = `Bearer ${await r.h.issuer.mint({ sub: 'alice@test.local' })}`;
+		const review = await app.inject({
+			method: 'POST',
+			url: '/v1/tool',
+			headers: { authorization },
+			payload: { tool: 'accept_invitation', arguments: { body: { uid: REVIEW, series: true } } }
+		});
+		expect(review.statusCode).toBe(200);
+		expect(calendarCalls()).toEqual([[null, { uid: REVIEW }]]);
+		r.h.apisix.contracts.calls.length = 0;
+		const standup = await app.inject({
+			method: 'POST',
+			url: '/v1/tool',
+			headers: { authorization },
+			payload: { tool: 'accept_invitation', arguments: { body: { uid: STANDUP, series: true } } }
+		});
+		expect(standup.statusCode).toBe(202);
+		expect(standup.json<{ pending_call: { reasons: string[] } }>().pending_call.reasons).toEqual([
+			'series'
+		]);
+		// The calendar got the answer without the series I set, refused it, then said what the answer
+		// for the whole series would do
+		expect(calendarCalls()).toEqual([
+			[null, { uid: STANDUP }],
+			['true', { uid: STANDUP, series: true }]
+		]);
+		expect(written).toEqual([{ uid: REVIEW, partstat: 'ACCEPTED' }]);
+	});
+
+	it('leaves the organization agent, which has nobody to ask, the series it sets, and the refusal of a recurring invitation as data', async () => {
+		const app = r.h.apps[0];
+		if (app === undefined) throw new Error('no replica');
+		const tool = app.agent.contracts.tools.find(
+			(t) => t.definition.function.name === 'accept_invitation'
+		);
+		if (tool === undefined) throw new Error('no tool');
+		const context = {
+			principalId: ORGANIZATION_PRINCIPAL,
+			actions: ['contracts.call', 'contracts.act'],
+			db: r.h.db,
+			log: app.log
+		};
+		const whole = await runTool(tool, { body: { uid: STANDUP, series: true } }, context);
+		expect(whole.pendingCallId).toBeUndefined();
+		expect(whole.result).toMatchObject({ status: 200, body: { partstat: 'ACCEPTED' } });
+		const one = await runTool(tool, { body: { uid: STANDUP } }, context);
+		expect(one.pendingCallId).toBeUndefined();
+		expect(one.final).toBeUndefined();
+		expect(one.result).toMatchObject({ status: 409, body: { code: 'recurring_invitation' } });
+		expect(calendarCalls()).toEqual([
+			[null, { uid: STANDUP, series: true }],
+			[null, { uid: STANDUP }]
+		]);
 	});
 
 	// Last: Alice speaks French with her assistant from then on
