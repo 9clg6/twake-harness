@@ -28,14 +28,14 @@ const DRIVE_SEARCH_CATALOG = {
 	}
 };
 
-// The system prompt the scripted model received for one chat turn of alice
-async function systemPromptOfTurn(h: TestHarness, message: string): Promise<string> {
+// The system prompt the scripted model received for one chat turn of this user
+async function systemPromptOfTurn(h: TestHarness, sub: string, message: string): Promise<string> {
 	h.apisix.llm.script = echoScript;
 	const before = h.apisix.llm.calls.length;
 	const res = await h.app.inject({
 		method: 'POST',
 		url: '/v1/chat',
-		headers: { authorization: `Bearer ${await h.issuer.mint({ sub: 'alice' })}` },
+		headers: { authorization: `Bearer ${await h.issuer.mint({ sub })}` },
 		payload: { message }
 	});
 	expect(res.statusCode).toBe(200);
@@ -58,6 +58,7 @@ describe('when none of its tools does what is asked', () => {
 
 		const prompt = await systemPromptOfTurn(
 			h,
+			'alice',
 			'Summarize the PDF I added to my Drive this morning'
 		);
 
@@ -72,6 +73,7 @@ describe('when none of its tools does what is asked', () => {
 
 		const prompt = await systemPromptOfTurn(
 			h,
+			'alice',
 			'Summarize the PDF I added to my Drive this morning'
 		);
 
