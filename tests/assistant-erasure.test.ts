@@ -237,6 +237,15 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		);
 	});
 
+	it('leaves every room it answered me in', async () => {
+		for (const room of [r.room, secondRoom]) {
+			await until(
+				`the assistant left ${room}`,
+				async () => !(await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)
+			);
+		}
+	});
+
 	it('gives me a new assistant under the same Matrix identifier, which greets me in a new room and remembers nothing', async () => {
 		expect(await answerTo('/newbot')).toBe('Which name do you want for your assistant?');
 		expect(await answerTo('Iris')).toContain(`Done. Your assistant Iris is ${r.assistantId}`);

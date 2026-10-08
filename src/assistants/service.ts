@@ -299,11 +299,17 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (record === null) return false;
 			if (createdAt !== undefined && record.createdAt.getTime() !== createdAt.getTime())
 				return false;
-			// The assistant leaves and goes dormant with its device, which the application service
-			// keeps: a device it no longer drives would fail every later transaction that names it.
-			if (record.roomId !== null) {
-				await admin.leaveRoom(record.userId, record.roomId);
+			// The assistant leaves every room it answered its owner in, as the account the index names
+			// there, before anything is erased: should the homeserver refuse, nothing is, and the owner
+			// may ask again. It goes dormant with its device, which the application service keeps: a
+			// device it no longer drives would fail every later transaction that names it.
+			const rooms = await db.sql<{ room_id: string; user_id: string }[]>`
+				select room_id, user_id from assistant_rooms where owner = ${owner}`;
+			const leaving = new Map(rooms.map((row) => [row.room_id, row.user_id]));
+			if (record.roomId !== null && !leaving.has(record.roomId)) {
+				leaving.set(record.roomId, record.userId);
 			}
+			for (const [roomId, userId] of leaving) await admin.leaveRoom(userId, roomId);
 			const erased = await withPrincipal(db, { id: owner }, (tx) => eraseAssistant(tx, record));
 			if (!erased) return false;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
