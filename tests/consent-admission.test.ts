@@ -272,6 +272,40 @@ describe('my yes while my assistant is busy for longer than a status waits', () 
 	});
 });
 
+describe('my yes while the platform is busy', () => {
+	// What my assistant tells me when admission refuses a message of mine for the platform's load
+	const PLATFORM_BUSY = 'The platform is receiving many requests right now';
+	let r: ConsentRoom;
+	beforeAll(async () => {
+		// One turn a minute on the whole platform, and a second for the turn my yes resumes to get
+		// through admission
+		r = await startMailRoom({
+			ADMISSION_GLOBAL_PER_MINUTE: '1',
+			ADMISSION_USER_PER_MINUTE: '100',
+			TURN_EVENT_MAX_DELAY_MS: '1000'
+		});
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it('asks me again once the platform kept it too long from doing what I allowed', async () => {
+		// The turn that asks me is the platform's one turn of the minute
+		await r.client.sendText(r.room, 'Find the budget in my mail');
+		const question = await r.nextQuestion(0);
+		await r.client.sendText(r.room, 'yes');
+		const notice = await nextMessage(r, HELD_TOO_LONG, 0);
+		expect(logged(r, 'resumed turn deferred')[0]).toMatchObject({ reason: 'global_rate' });
+		// The notice asks about the same request, which waits for my answer until the same end
+		expect(notice.content[QUESTION_CONTENT_KEY]).toEqual(
+			r.questions().find((m) => m.eventId === question)?.content[QUESTION_CONTENT_KEY]
+		);
+		await r.requestAskedIn(notice.eventId, 'mail');
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+		expect(r.saying(PLATFORM_BUSY)).toHaveLength(0);
+	});
+});
+
 describe('my yes held while my assistant asks me something newer', () => {
 	let r: ConsentRoom;
 	beforeAll(async () => {
