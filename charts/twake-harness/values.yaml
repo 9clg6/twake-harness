@@ -55,7 +55,8 @@ config:
   # starts a user's day of tokens; empty means UTC
   assistantTimezone: ''
   # The token broker's consent link, the same for every user, which an assistant shows when the
-  # broker lacks its owner's permission to act for them; an https URL, empty for none
+  # broker lacks its owner's permission to act for them, as do the worker role's reminders before
+  # that permission expires; an https URL, empty for none, and then the worker reminds nobody
   brokerConsentUrl: ''
   # Admission limits; each empty value keeps the harness default
   # Turns in flight on one replica; default 32
@@ -116,6 +117,10 @@ config:
   # How long the worker role keeps a wake-up, in milliseconds, so that an event delivered again or
   # replayed from its dead letter queue wakes nobody twice; empty means the harness default, 30 days
   wakeupsRetentionMs: ''
+  # The hour, 0 to 23 on the wall clock of assistantTimezone, at which the worker role reminds the
+  # owners whose permission for their assistant to act for them expires within five days; empty
+  # means the harness default, 9
+  delegationReminderHour: ''
   # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
   # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new
   # invitation who has an assistant is told of it in their room. The worker then needs

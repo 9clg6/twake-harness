@@ -269,6 +269,21 @@ jobs:
           # 0 is rendered, for the harness to refuse it, rather than left out for its default
           helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.wakeupsRetentionMs=0 > /tmp/retention-zero.yaml
           grep -A1 WAKEUPS_RETENTION_MS /tmp/retention-zero.yaml | grep -q '"0"'
+      # DELEGATION_REMINDER_HOUR is rendered on the worker role only, which reminds the owners, when
+      # config.delegationReminderHour is set, as an integer, 0 included: midnight is an hour. The
+      # worker role gets BROKER_CONSENT_URL too, the link its reminders show
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/reminder-default.yaml
+          if grep -q DELEGATION_REMINDER_HOUR /tmp/reminder-default.yaml; then exit 1; fi
+          printf 'config:\n  delegationReminderHour: 18\n  brokerConsentUrl: https://consent.example/consent\n' > /tmp/reminder.yaml
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/reminder.yaml > /tmp/reminder-worker.yaml
+          grep -A1 DELEGATION_REMINDER_HOUR /tmp/reminder-worker.yaml | grep -q '"18"'
+          grep -A1 BROKER_CONSENT_URL /tmp/reminder-worker.yaml | grep -q '"https://consent.example/consent"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/reminder-worker.yaml
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/reminder.yaml > /tmp/reminder-api.yaml
+          if grep -q DELEGATION_REMINDER_HOUR /tmp/reminder-api.yaml; then exit 1; fi
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.delegationReminderHour=0 > /tmp/reminder-zero.yaml
+          grep -A1 DELEGATION_REMINDER_HOUR /tmp/reminder-zero.yaml | grep -q '"0"'
 
   image:
     needs: [check, test, chart]

@@ -12,7 +12,7 @@ import { getMessages, type Locale } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
-import { makeOwnerConsentLink } from './consent-link.js';
+import { makeOptionalOwnerConsentLink } from './consent-link.js';
 import { labelOf, type DomainDescriptions } from './domains.js';
 import { toolParametersOf, type ContractDefinition } from './openapi.js';
 import {
@@ -48,7 +48,9 @@ export function joinPath(base: URL, ...segments: string[]): URL {
 	return new URL(kept.join('/'), root);
 }
 
-function parseBody(text: string): unknown {
+// The body of an answer through the gateway: its JSON, the text itself when it is no JSON, or
+// null when there is none
+export function parseBody(text: string): unknown {
 	if (text.length === 0) return null;
 	try {
 		return JSON.parse(text) as unknown;
@@ -320,7 +322,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			application.name,
 			contract.level,
 			code,
-			makeOwnerConsentLink(config.consent.brokerConsentUrl, context.principalId)
+			makeOptionalOwnerConsentLink(config.consent.brokerConsentUrl, context.principalId)
 		);
 		const pendingCallId = await freeze(values, context, ['delegation'], request, previewDigest);
 		return {

@@ -89,6 +89,9 @@ export interface Config {
 		// when the broker lacks an owner's permission for their assistant to act for them, or null
 		// when the deployment gives none
 		readonly brokerConsentUrl: string | null;
+		// The hour, from 0 to 23 on the wall clock of the assistants' time zone, of the worker role's
+		// daily pass that reminds the owners whose permission expires within five days
+		readonly delegationReminderHour: number;
 	};
 	readonly matrix: {
 		readonly serverName: string;
@@ -195,6 +198,7 @@ const envSchema = z.object({
 	CONTRACTS_TIMEOUT_MS: z.coerce.number().int().min(1000).default(30_000),
 	CONSENT_REQUEST_LIFETIME_MS: z.coerce.number().int().min(1000).default(86_400_000),
 	BROKER_CONSENT_URL: z.string().default(''),
+	DELEGATION_REMINDER_HOUR: z.coerce.number().int().min(0).max(23).default(9),
 	MATRIX_SERVER_NAME: z.string().default(''),
 	MATRIX_MAIL_DOMAIN: z.string().default(''),
 	MATRIX_APPSERVICE_ID: z.string().min(1).default('twake-harness'),
@@ -406,7 +410,8 @@ export function loadConfig(env: Env): Config {
 		},
 		consent: {
 			requestLifetimeMs: values.CONSENT_REQUEST_LIFETIME_MS,
-			brokerConsentUrl: values.BROKER_CONSENT_URL === '' ? null : values.BROKER_CONSENT_URL
+			brokerConsentUrl: values.BROKER_CONSENT_URL === '' ? null : values.BROKER_CONSENT_URL,
+			delegationReminderHour: values.DELEGATION_REMINDER_HOUR
 		},
 		matrix: {
 			serverName: values.MATRIX_SERVER_NAME,

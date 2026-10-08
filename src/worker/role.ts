@@ -1,10 +1,12 @@
 import type { Writable } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 
+import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { buildApp } from '../app.js';
 import type { Config } from '../config.js';
 import { startExpiryScheduler } from '../consents/expiry.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
+import { startReminderScheduler } from '../consents/reminder.js';
 import { startCurationScheduler } from '../curation/curation.js';
 import type { Db } from '../db/client.js';
 import { startActivityListener } from '../wakeups/activity.js';
@@ -12,12 +14,19 @@ import { startCalendarListener } from '../wakeups/calendar.js';
 import type { Listener } from '../wakeups/listener.js';
 import { startWakeupPurgeScheduler } from '../wakeups/retention.js';
 
+// How often the role looks whether the hour of the daily reminders has come
+const REMINDER_CHECK_MS = 60_000;
+
 export interface WorkerRoleOptions {
 	readonly config: Config;
 	readonly db: Db;
 	readonly logStream?: Writable;
 	// The first wait before the listener tries again, a message or to listen, a second unless set
 	readonly retryDelayMs?: number;
+	// The present the daily reminders read, the system clock unless set
+	readonly clock?: Clock;
+	// How often the role looks whether their hour has come, a minute unless set
+	readonly reminderCheckMs?: number;
 }
 
 export interface WorkerRole {
@@ -27,10 +36,11 @@ export interface WorkerRole {
 	stop(): Promise<void>;
 }
 
-// The daily curation, the hourly expiry of the requests nobody answered and the hourly purge of
-// the wake-ups past their retention, each starting with a pass at once; the expiries are counted
-// on the metrics the role serves. With the activity exchange or Calendar's fanout configured, the
-// role also listens to it, and connects to the broker for that alone, once for each.
+// The daily curation, the hourly expiry of the requests nobody answered, the hourly purge of the
+// wake-ups past their retention, each starting with a pass at once, and the daily reminders of
+// the permissions about to expire, at their hour; the expiries are counted on the metrics the role
+// serves. With the activity exchange or Calendar's fanout configured, the role also listens to it,
+// and connects to the broker for that alone, once for each.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const consentMetrics = makeConsentMetrics();
@@ -68,6 +78,10 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		consentMetrics
 	);
 	const purge = startWakeupPurgeScheduler(db, app.log, config.wakeups.retentionMs);
+	const reminders = startReminderScheduler(
+		{ ...deps, clock: options.clock ?? SYSTEM_CLOCK },
+		options.reminderCheckMs ?? REMINDER_CHECK_MS
+	);
 	return {
 		app,
 		stop: async () => {
@@ -75,6 +89,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			curation.stop();
 			expiry.stop();
 			purge.stop();
+			await reminders.stop();
 			await app.close();
 		}
 	};

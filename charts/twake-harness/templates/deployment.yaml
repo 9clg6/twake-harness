@@ -96,6 +96,7 @@ spec:
             - name: ASSISTANT_TIMEZONE
               value: {{ . | quote }}
             {{- end }}
+            {{- /* The api role shows it when the broker lacks an owner's permission, the worker role in its reminders before that permission expires */}}
             {{- with .Values.config.brokerConsentUrl }}
             - name: BROKER_CONSENT_URL
               value: {{ . | quote }}
@@ -194,6 +195,12 @@ spec:
             {{- if and (not (kindIs "invalid" $retention)) (ne (toString $retention) "") }}
             - name: WAKEUPS_RETENTION_MS
               value: {{ $retention | int64 | quote }}
+            {{- end }}
+            {{- /* The worker role reminds the owners whose permission is about to expire, at an hour read as an integer: 0, midnight, counts */}}
+            {{- $reminderHour := .Values.config.delegationReminderHour }}
+            {{- if and (not (kindIs "invalid" $reminderHour)) (ne (toString $reminderHour) "") }}
+            - name: DELEGATION_REMINDER_HOUR
+              value: {{ $reminderHour | int64 | quote }}
             {{- end }}
             {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
