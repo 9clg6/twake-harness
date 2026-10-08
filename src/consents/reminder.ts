@@ -2,8 +2,8 @@ import { daysFrom, describeMoment, wallDayAt, type Clock } from '../agent/clock.
 import { localeOf } from '../assistants/locale.js';
 import {
 	findAssistant,
-	listActiveAssistants,
-	type AssistantRecord
+	isActiveAssistant,
+	listActiveAssistants
 } from '../assistants/repository.js';
 import { makeOwnerConsentLink } from '../contracts/consent-link.js';
 import { withPrincipal } from '../db/client.js';
@@ -18,13 +18,6 @@ const REMINDER_DAYS = 5;
 // What the wake-ups need, and the present the reminders read
 export interface ReminderDeps extends WakeDeps {
 	readonly clock: Clock;
-}
-
-type ActiveAssistant = AssistantRecord & { readonly roomId: string };
-
-// An assistant its owner has not removed, in its room
-function isActive(assistant: AssistantRecord | null): assistant is ActiveAssistant {
-	return assistant !== null && assistant.deletedAt === null && assistant.roomId !== null;
 }
 
 // Whether a permission is due its reminder now: it has not expired, and it expires five days of
@@ -42,13 +35,13 @@ function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
 async function remindOwner(deps: ReminderDeps, link: string, owner: string): Promise<boolean> {
 	const { config, db, clock } = deps;
 	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-	if (!isActive(assistant)) return false;
+	if (!isActiveAssistant(assistant)) return false;
 	const delegation = await fetchDelegation(config, owner);
 	if (delegation === null || !isDue(delegation, clock.now(), config.timeZone)) return false;
 	const queued = await withPrincipal(db, { id: owner }, async (tx) => {
 		// Read again: the owner may have removed their assistant while the broker answered
 		const current = await findAssistant(tx, owner);
-		if (!isActive(current)) return false;
+		if (!isActiveAssistant(current)) return false;
 		const kept = await tx.sql`
 			insert into delegation_reminders (owner, consented_at)
 			values (${owner}, ${delegation.consentedAt})
