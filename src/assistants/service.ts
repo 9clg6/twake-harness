@@ -6,7 +6,7 @@ import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { announceCommands } from '../matrix/commands.js';
 import { assistantUserId } from '../matrix/registration.js';
-import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { matrixLocalpartOfPrincipal, matrixUserIdOfLocalpart } from '../principals/identity.js';
 import {
 	findAssistant,
 	markAssistantDeleted,
@@ -98,7 +98,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 	// « Assistant de <first name> », after the owner's Matrix name; after their localpart when they
 	// have none, or when the name it gives could not be an assistant's
 	async function defaultName(owner: string, ownerLocalpart: string): Promise<string> {
-		const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
+		const ownerUserId = matrixUserIdOfLocalpart(config, ownerLocalpart);
 		const ownerName = await admin.displayName(ownerUserId).catch(() => null);
 		const messages = await fetchOwnerMessages(db, owner, config.locale);
 		const named = ownerName === null ? null : shortened(messages.defaultAssistantName(ownerName));
@@ -164,7 +164,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
-			const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
+			const ownerUserId = matrixUserIdOfLocalpart(config, ownerLocalpart);
 			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
 			let saved = false;
 			let roomId: string | null = null;
