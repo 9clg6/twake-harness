@@ -35,6 +35,15 @@ const CATALOG = {
 					{ name: 'exclude', in: 'query', required: false, schema: { type: 'string' } }
 				]
 			}
+		},
+		'/contracts/v1/calendar/invitations/{event_id}/accept': {
+			post: {
+				operationId: 'accept_invitation',
+				summary: 'Accepts an invitation, once the user has said yes to this very invitation',
+				tags: ['calendar.invitation.accept.v1'],
+				'x-twake-risk': 'low',
+				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+			}
 		}
 	}
 };
@@ -54,7 +63,7 @@ describe('my assistant asks before it first uses an application', () => {
 	beforeAll(async () => {
 		h = await startMatrixHarness();
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -232,6 +241,75 @@ describe('my assistant asks before it first uses an application', () => {
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('asks every owner again before it writes in their calendar, now that writing there covers declining', async () => {
+		// Alice let her assistant write in her calendar through the API, and kept that when reading it
+		// was asked again above; Frank let his write there in the chat. Erin allows reading her
+		// calendar again, in the new words, and reading her mail.
+		await withPrincipal(
+			h.db,
+			{ id: 'frank@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('frank@test.local', 'calendar', 'write', 'chat')`
+		);
+		await withPrincipal(
+			h.db,
+			{ id: 'erin@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('erin@test.local', 'calendar', 'read', 'chat'),
+					('erin@test.local', 'mail', 'read', 'chat')`
+		);
+		// Dave, whose request to read his calendar still waits from above, was asked whether his
+		// assistant may accept an invitation there, in the words that meant accepting alone, and has
+		// not answered yet
+		h.apisix.llm.script = () => ({
+			toolCalls: call('accept_invitation', { event_id: 'uid-friday' })
+		});
+		const asked = await h.api.post<{ pending_call: { id: string } }>(
+			'dave@test.local',
+			'/v1/chat',
+			{
+				message: 'Accept the meeting on Friday'
+			}
+		);
+		const migration = '0068_consents_calendar_write_reask.sql';
+		await h.db.sql`delete from schema_migrations where name = ${migration}`;
+		expect((await runMigrations(h.db)).applied).toEqual([migration]);
+		const seen = async (owner: string): Promise<{ consents: string[]; waiting: string[] }> =>
+			withPrincipal(h.db, { id: owner }, async (tx) => {
+				const named = (rows: { domain: string; level: string }[]): string[] =>
+					rows.map((row) => `${row.domain} ${row.level}`);
+				return {
+					consents: named(
+						await tx.sql<{ domain: string; level: string }[]>`
+							select domain, level from consents order by domain, level`
+					),
+					waiting: named(
+						await tx.sql<{ domain: string; level: string }[]>`
+							select domain, level from pending_calls where status = 'open' order by domain, level`
+					)
+				};
+			});
+		// Calendar write went, whoever gave it, and so did the request to write there; reading it, and
+		// every other application, stay as their owners left them
+		expect(await seen('alice@test.local')).toEqual({ consents: [], waiting: ['mail read'] });
+		expect(await seen('frank@test.local')).toEqual({ consents: [], waiting: [] });
+		expect(await seen('dave@test.local')).toEqual({ consents: [], waiting: ['calendar read'] });
+		expect(await seen('erin@test.local')).toEqual({
+			consents: ['calendar read', 'mail read'],
+			waiting: []
+		});
+		// Dave's yes to it comes too late, and allows nothing
+		expect(
+			await h.api.post(
+				'dave@test.local',
+				`/v1/pending-calls/${asked.body.pending_call.id}/approve`,
+				{}
+			)
+		).toEqual({ status: 409, body: { error: 'pending call closed', state: 'expired' } });
+		expect(await seen('dave@test.local')).toEqual({ consents: [], waiting: ['calendar read'] });
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 });
