@@ -69,6 +69,17 @@ export async function enqueueJobReplacingFailed(
 	return result.count === 1;
 }
 
+// Queued at the back of its group, whose jobs that failed for good are dropped: the new one does
+// their work over again. No key keeps it out, so one queued while a job of its group runs still
+// runs after it, and sees what changed meanwhile.
+export async function enqueueJobDroppingFailed(
+	db: Db | Tx,
+	input: Omit<EnqueueInput, 'dedupKey'> & { readonly groupKey: string }
+): Promise<boolean> {
+	await db.sql`delete from jobs where group_key = ${input.groupKey} and status = 'failed'`;
+	return enqueueJob(db, input);
+}
+
 // Claims the oldest runnable job of the given kinds, skipping what other workers hold. A job
 // whose group has an earlier job still queued or running waits for it, so a group keeps its
 // order even when its jobs are spread over several replicas.
