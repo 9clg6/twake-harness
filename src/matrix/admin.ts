@@ -130,8 +130,7 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 				options.asToken,
 				userId
 			);
-			// Some homeservers refuse display-name changes: an assistant's rooms then show its name, in
-			// its member event there
+			// False when the homeserver refuses the change, as some do
 			return response.status === 200;
 		},
 		async displayName(userId) {
