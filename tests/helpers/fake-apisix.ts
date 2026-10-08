@@ -132,7 +132,19 @@ export interface FakeApisix {
 	matrixHoldReply: ((call: MatrixCall) => Promise<void> | null) | null;
 	// What went through the /matrix route, for diagnosis
 	readonly matrixCalls: { method: string; path: string; status: number; ms: number }[];
+	// The token broker's delegation route, which the gateway publishes under the contracts' mount
+	// once it is set: what the broker answers about the owner the caller names, as a contract call
+	// names them (x-twake-on-behalf-of), or null for a connection that drops
+	delegation: ((owner: string | null) => ContractReply | null) | null;
+	// The calls of that route, oldest first
+	readonly delegationCalls: DelegationCall[];
 	close(): Promise<void>;
+}
+
+export interface DelegationCall {
+	// The owner the caller named, if any
+	readonly owner: string | null;
+	readonly headers: Record<string, string>;
 }
 
 // What the owner said last in a request to the model, or nothing
@@ -290,6 +302,35 @@ export function brokerRefusal(
 	};
 }
 
+// What the token broker answers on its delegation route about an owner whose permission it holds,
+// whether it expired or not: when they gave it and when it expires, to the second, and its consent
+// link
+export function brokerDelegation(
+	consentedAt: string,
+	expiresAt: string,
+	consentUrl: string = BROKER_CONSENT_URL
+): ContractReply {
+	return {
+		status: 200,
+		body: { consented_at: consentedAt, expires_at: expiresAt, consent_url: consentUrl }
+	};
+}
+
+// What it answers there about an owner who never gave that permission, or revoked it
+export function brokerNoDelegation(consentUrl: string = BROKER_CONSENT_URL): ContractReply {
+	return {
+		status: 404,
+		body: {
+			type: 'urn:twake:problem:delegation_missing',
+			title: 'Delegation missing',
+			status: 404,
+			detail: 'The user has not let their agent act for them yet: they must open the consent link.',
+			code: 'delegation_missing',
+			consent_url: consentUrl
+		}
+	};
+}
+
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
@@ -298,9 +339,11 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		matrixAsToken: null as string | null,
 		matrixFault: null as FakeApisix['matrixFault'],
 		matrixHold: null as FakeApisix['matrixHold'],
-		matrixHoldReply: null as FakeApisix['matrixHoldReply']
+		matrixHoldReply: null as FakeApisix['matrixHoldReply'],
+		delegation: null as FakeApisix['delegation']
 	};
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
+	const delegationCalls: DelegationCall[] = [];
 	// One counter for the model and the contract calls, to tell which came first
 	let seq = 0;
 	const contracts: FakeApisix['contracts'] = {
@@ -435,6 +478,27 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			sendJson(res, 200, contracts.spec);
 			return;
 		}
+		const delegationPath = `/${[contracts.mount, 'delegation']
+			.map((segment) => segment.replace(/^\/+|\/+$/g, ''))
+			.filter((segment) => segment.length > 0)
+			.join('/')}`;
+		if (fake.delegation !== null && req.method === 'GET' && url.pathname === delegationPath) {
+			const headers: Record<string, string> = {};
+			for (const [name, value] of Object.entries(req.headers)) {
+				if (typeof value === 'string') headers[name] = value;
+			}
+			const owner = headers['x-twake-on-behalf-of'] ?? null;
+			delegationCalls.push({ owner, headers });
+			const reply = fake.delegation(owner);
+			if (reply === null) {
+				res.destroy();
+				return;
+			}
+			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
+			if (res.destroyed) return;
+			sendJson(res, reply.status, reply.body);
+			return;
+		}
 		const routed = contractRoutes(contracts.spec, contracts.mount).some(
 			(route) => route.method === (req.method ?? 'GET') && route.pattern.test(url.pathname)
 		);
@@ -550,6 +614,13 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			fake.matrixHoldReply = value;
 		},
 		matrixCalls,
+		get delegation() {
+			return fake.delegation;
+		},
+		set delegation(value: FakeApisix['delegation']) {
+			fake.delegation = value;
+		},
+		delegationCalls,
 		close: () =>
 			new Promise<void>((resolve, reject) => server.close((e) => (e ? reject(e) : resolve())))
 	};

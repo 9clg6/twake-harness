@@ -21,6 +21,9 @@ export function findTimeZone(zone: string): string | null {
 export interface Moment {
 	// The date and time in words, in the owner's language: "mardi 6 octobre 2026, 13:26"
 	readonly words: string;
+	// Its date and its time apart, for a sentence of its own: "mardi 6 octobre 2026" and "13:26"
+	readonly date: string;
+	readonly time: string;
 	// The same instant in ISO 8601 with the zone's offset at that instant, never Z:
 	// "2026-10-06T13:26:00+02:00"
 	readonly iso: string;
@@ -132,5 +135,21 @@ export function describeMoment(instant: Date, timeZone: string, locale: Locale):
 	}).format(instant);
 	const field = wallClock(instant, timeZone);
 	const iso = `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
-	return { words: `${date}, ${time}`, iso, timeZone };
+	return { words: `${date}, ${time}`, date, time, iso, timeZone };
+}
+
+// The day and the hour of a zone's wall clock at an instant: 2026-10-08 and 9 at nine in the
+// morning there
+export interface WallDay {
+	readonly date: string;
+	readonly hour: number;
+}
+
+export function wallDayAt(instant: Date, timeZone: string): WallDay {
+	return { date: dateIn(instant, timeZone), hour: Number(wallClock(instant, timeZone)('hour')) };
+}
+
+// How many days of the calendar go from one day to another, both as dateIn gives them
+export function daysFrom(from: string, to: string): number {
+	return Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
 }
