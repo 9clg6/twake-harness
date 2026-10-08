@@ -2,7 +2,13 @@ import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest';
 
 import { withPrincipal } from '../src/db/client.js';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import type { ChatRequest, ScriptedReply, ToolCall } from './helpers/fake-apisix.js';
+import {
+	A_HUNDRED_THOUSAND_TOKENS,
+	pastTheLimit,
+	type ChatRequest,
+	type ScriptedReply,
+	type ToolCall
+} from './helpers/fake-apisix.js';
 import {
 	eventually,
 	expectAnswered,
@@ -545,6 +551,35 @@ describe('a status message while my assistant works on a message', () => {
 		// The turn answered: the check mark comes on my message
 		const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
 		expect(check).toBeDefined();
+	});
+
+	it('closes the status of a turn that spent its tokens on a line of its own too', async () => {
+		let asked = '';
+		const account = 'I read your consents three times; more reads remain. Ask me to continue.';
+		// Each answer reads once and reports 100,000 tokens: past the third, the turn spent the 250,000
+		// it may, and I my day, which the test gives back
+		r.h.apisix.llm.script = pastTheLimit(
+			{ content: account },
+			A_HUNDRED_THOUSAND_TOKENS,
+			statusShown(() => asked)
+		);
+		const before = feedback.shown().length;
+		const callsBefore = r.h.apisix.llm.calls.length;
+		try {
+			asked = await r.client.sendText(r.room, 'Read them all, at length');
+			const status = await replySaying(asked, LIMITED);
+			expect(saidBy(status)[0]).toBe(WORKING);
+			expect(shownSince(before).map((m) => m.body)).toEqual([LIMITED, account]);
+			// The tokens ended the turn after three answers of one read each, short of the six calls a
+			// message may make: its last call, without tools, is told so
+			const calls = r.h.apisix.llm.calls.slice(callsBefore).map((c) => c.request);
+			expect(calls.map((c) => c.tools !== undefined)).toEqual([true, true, true, false]);
+			expect(calls.at(-1)?.messages[0]?.content).toMatch(/limit of 250000 tokens/);
+			const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
+			expect(check).toBeDefined();
+		} finally {
+			await spendToday(0);
+		}
 	});
 
 	it('keeps a question to me a message of its own, its status pointing to it', async () => {

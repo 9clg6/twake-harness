@@ -2,8 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Messages } from '../i18n/messages.js';
 
-// How a turn ended: answered, answered once it reached its limit of tool calls, or failed or was
-// refused, which alone earns no check mark
+// How a turn ended: answered, answered once it reached one of its limits, or failed or was refused,
+// which alone earns no check mark
 export type TurnOutcome = 'answered' | 'limited' | 'failed';
 
 // The owner's message a turn answers, in the room of the assistant that answers it
@@ -77,8 +77,8 @@ const DEFAULT_TYPING_MAX_MS = 5 * 60_000;
 const ACK_TTL_MS = 60 * 60_000;
 const STOP_GRACE_MS = 5_000;
 
-// The words a status ends on: the turn answered, answered at its limit of tool calls, or failed or
-// was refused, a question to its owner follows, or no answer came in time
+// The words a status ends on: the turn answered, answered at one of its limits, or failed or was
+// refused, a question to its owner follows, or no answer came in time
 type Closing = 'done' | 'limited' | 'notDone' | 'asking' | 'late';
 
 const CLOSINGS: Readonly<Record<TurnOutcome, Closing>> = {

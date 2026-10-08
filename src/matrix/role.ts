@@ -145,7 +145,7 @@ interface SendJob {
 	readonly identityQuestion?: PendingIdentityQuestion;
 	// The text as HTML, laid out by the harness itself
 	readonly html?: string;
-	// The turn answered once it reached its limit of tool calls
+	// The turn answered once it reached one of its limits
 	readonly atLimit?: true;
 }
 

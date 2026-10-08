@@ -76,9 +76,9 @@ export interface Messages {
 		readonly noEscrow: string;
 		// Why an assistant leaves a room where others than its owner are: everyone there reads it
 		readonly directRoomsOnly: string;
-		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
-		// owner: the actions it did, and how to have it carry on
-		callLimit(actions: number): string;
+		// A turn that reached one of its limits, whose model then wrote no words for its owner: the
+		// actions it did, and how to have it carry on
+		turnLimit(actions: number): string;
 		// The owner's permission for their assistant to act for them expires within days: on what
 		// date and at what time, and where to renew it. No question: nothing waits for an answer
 		delegationExpiring(date: string, time: string, link: string): string;
@@ -92,7 +92,7 @@ export interface Messages {
 		// The turn answered, or failed or was refused, its answer or notice a message of its own
 		readonly done: string;
 		readonly notDone: string;
-		// The turn answered once it reached its limit of tool calls: there is more to do
+		// The turn answered once it reached one of its limits: there is more to do
 		readonly limited: string;
 		// The turn ended on a question to the owner, which follows as a message of its own
 		readonly asking: string;
@@ -326,7 +326,7 @@ const ENGLISH: Messages = {
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
 		directRoomsOnly:
 			'For now I work only in a private conversation with the person I assist, so I am leaving this room.',
-		callLimit: (actions) =>
+		turnLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`,
 		delegationExpiring: (date, time, link) =>
 			`The permission to act on your behalf that you gave me expires on ${date} at ${time}. Renew it before then so that I can keep acting for you: ${link}`
@@ -570,7 +570,7 @@ const FRENCH: Messages = {
 		directRoomsOnly:
 			"Pour l'instant, je ne travaille que dans une conversation privée avec la personne que j'assiste : je quitte ce salon.",
 		// One action, or none, is singular in French
-		callLimit: (actions) =>
+		turnLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`,
 		delegationExpiring: (date, time, link) =>
 			`L'autorisation d'agir en ton nom que tu m'as donnée expire le ${date} à ${time}. Renouvelle-la d'ici là pour que je continue à agir pour toi : ${link}`

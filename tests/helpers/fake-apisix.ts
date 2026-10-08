@@ -32,6 +32,9 @@ export interface ScriptedReply {
 	// Why the model stopped: stop or tool_calls unless told otherwise, such as length when it ran
 	// out of tokens, in which case it reports the whole budget as spent
 	finishReason?: string;
+	// The tokens the model reports it read and wrote for this answer, over the fake's own, or null
+	// when it reports none
+	usage?: { readonly promptTokens: number; readonly completionTokens: number } | null;
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -162,6 +165,38 @@ export function lastUserContent(request: ChatRequest): string {
 export const echoScript: LlmScript = (request) => ({
 	content: `echo: ${lastUserContent(request)}`
 });
+
+// A read of the owner's consents, the call a model makes in each answer of pastTheLimit
+export function readCall(index: number): ToolCall {
+	return {
+		id: `read_${index}`,
+		type: 'function',
+		function: { name: 'consents_list', arguments: '{}' }
+	};
+}
+
+// What one answer of the model reports it read and wrote: three of them go past the tokens a turn
+// may spend when its deployment sets none
+export const A_HUNDRED_THOUSAND_TOKENS = { promptTokens: 90_000, completionTokens: 10_000 };
+
+// A model that makes one call after another for as long as it has tools, so that it goes past a
+// limit of its message, of tool calls or of the tokens each answer reports when they are given,
+// then gives the answer given once it has none. Each answer with tools waits for `hold` when it is
+// given, such as a status the test needs shown before the turn goes on
+export function pastTheLimit(
+	last: ScriptedReply,
+	usage?: ScriptedReply['usage'],
+	hold?: Promise<unknown>
+): LlmScript {
+	return (request, index) =>
+		request.tools === undefined
+			? last
+			: {
+					toolCalls: [readCall(index)],
+					...(usage === undefined ? {} : { usage }),
+					...(hold === undefined ? {} : { hold })
+				};
+}
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
@@ -629,6 +664,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			};
 			if (reply.reasoning !== undefined) message['reasoning_content'] = reply.reasoning;
 			if (reply.toolCalls !== undefined) message['tool_calls'] = reply.toolCalls;
+			const promptTokens = reply.usage?.promptTokens ?? 10;
+			const completionTokens =
+				reply.usage?.completionTokens ??
+				(reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5);
 			sendJson(res, 200, {
 				id: `chatcmpl-${llm.calls.length}`,
 				object: 'chat.completion',
@@ -641,11 +680,15 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 							reply.finishReason ?? (reply.toolCalls === undefined ? 'stop' : 'tool_calls')
 					}
 				],
-				usage: {
-					prompt_tokens: 10,
-					completion_tokens: reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5,
-					total_tokens: 15
-				}
+				...(reply.usage === null
+					? {}
+					: {
+							usage: {
+								prompt_tokens: promptTokens,
+								completion_tokens: completionTokens,
+								total_tokens: promptTokens + completionTokens
+							}
+						})
 			});
 			return;
 		}
