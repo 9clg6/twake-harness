@@ -59,6 +59,7 @@ import { makeLaidOutText, makeRichText } from './format.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
+import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
 import { makeAppserviceStorage } from './storage.js';
 
 // The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
@@ -124,6 +125,9 @@ interface SendJob {
 	readonly outcome?: 'answered' | 'failed';
 	// The text asks the owner about a frozen call: the event sent is remembered for their answer
 	readonly request?: PendingQuestion;
+	// The text asks the owner a question to answer yes or no, which its content marks for their
+	// client
+	readonly question?: YesNoQuestion;
 	// The text as HTML, laid out by the harness itself
 	readonly html?: string;
 	// The turn answered once it reached its limit of tool calls
@@ -188,6 +192,7 @@ function isSendJob(value: unknown): value is SendJob {
 			job['outcome'] === 'answered' ||
 			job['outcome'] === 'failed') &&
 		(job['request'] === undefined || isPendingQuestion(job['request'])) &&
+		(job['question'] === undefined || isYesNoQuestion(job['question'])) &&
 		(job['html'] === undefined || typeof job['html'] === 'string') &&
 		(job['atLimit'] === undefined || job['atLimit'] === true)
 	);
@@ -1390,10 +1395,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (turn !== null) {
 				await feedback.answerReady(turn, request === undefined ? 'answer' : 'question');
 			}
-			const { text, html } = job.payload;
+			const { text, html, question } = job.payload;
+			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
 			const sent = await intent.sendEvent(
 				job.payload.roomId,
-				html === undefined ? makeRichText(text) : makeLaidOutText(text, html)
+				question === undefined ? content : markQuestion(content, question)
 			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (request !== undefined) {

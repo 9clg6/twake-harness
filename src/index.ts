@@ -51,7 +51,8 @@ if (config.role === 'worker') {
 		agent,
 		log: app.log,
 		locale: config.locale,
-		turn: config.turn
+		turn: config.turn,
+		requestLifetimeMs: config.consent.requestLifetimeMs
 	});
 	const shutdown = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');

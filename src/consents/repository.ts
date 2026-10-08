@@ -549,6 +549,15 @@ export interface PendingCallView {
 	readonly expires_at: string;
 }
 
+// When the request about a call expires, its lifetime after the call froze: an answer from then on
+// runs nothing
+export function requestExpiry(
+	record: Pick<PendingCallRecord, 'createdAt'>,
+	lifetimeMs: number
+): Date {
+	return new Date(record.createdAt.getTime() + lifetimeMs);
+}
+
 export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number): PendingCallView {
 	return {
 		id: record.id,
@@ -561,6 +570,6 @@ export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number)
 		reasons: record.reasons,
 		request: record.request,
 		created_at: record.createdAt.toISOString(),
-		expires_at: new Date(record.createdAt.getTime() + lifetimeMs).toISOString()
+		expires_at: requestExpiry(record, lifetimeMs).toISOString()
 	};
 }

@@ -14,6 +14,16 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Where the content of a question to answer yes or no tells Alice's client which question it is
+export const QUESTION_KEY = 'app.twake.assistant.question';
+
+// A request that waits for Alice's answer, as the API shows her clients
+export interface WaitingRequest {
+	readonly id: string;
+	readonly domain: string;
+	readonly expires_at: string;
+}
+
 // One read contract per application, each named after the application it belongs to
 export function readCatalog(domains: readonly string[]): Record<string, unknown> {
 	const paths: Record<string, unknown> = {};
@@ -80,6 +90,9 @@ export interface ConsentRoom {
 	// The assistant's messages that start with a prefix, such as the model's answers
 	saying(prefix: string): DecryptedMessage[];
 	nextSaying(prefix: string, seen: number): Promise<string>;
+	// The one request about a call to an application that waits for Alice's answer, as the API shows
+	// it
+	waitingRequest(domain: string): Promise<WaitingRequest>;
 	// What the harness keeps of Alice's calls to an application, oldest first
 	callsTo(domain: string): Promise<{ status: string; arguments: unknown }[]>;
 	// The digests of the previews Alice was shown for her calls to an application, as the harness
@@ -139,6 +152,19 @@ export async function startConsentRoom(
 		nextQuestion,
 		saying,
 		nextSaying,
+		waitingRequest: async (domain) => {
+			const waiting = await h.api.get<{ pending_calls: WaitingRequest[] }>(
+				'alice@test.local',
+				'/v1/pending-calls'
+			);
+			expect(waiting.status).toBe(200);
+			const requests = waiting.body.pending_calls.filter((c) => c.domain === domain);
+			const [request] = requests;
+			if (requests.length !== 1 || request === undefined) {
+				throw new Error(`${requests.length} requests wait for Alice in ${domain}`);
+			}
+			return request;
+		},
 		callsTo: async (domain) => {
 			const rows = await withPrincipal(
 				h.db,

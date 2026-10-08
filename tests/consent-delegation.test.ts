@@ -4,6 +4,7 @@ import { loadConfig } from '../src/config.js';
 import {
 	call,
 	modelUsing,
+	QUESTION_KEY,
 	readCatalog,
 	startConsentRoom,
 	type ConsentRoom
@@ -12,7 +13,8 @@ import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import { BROKER_CONSENT_URL, brokerRefusal, type ContractReply } from './helpers/fake-apisix.js';
 
-const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'photos', 'boards'];
+const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'photos', 'boards', 'sheets'];
+const DAY_MS = 24 * 60 * 60 * 1000;
 // The deployment's consent link bound to Alice, the owner it is for, as the broker expects it
 const ALICE_CONSENT_URL = `${BROKER_CONSENT_URL}?owner=alice%40test.local`;
 // A link of its own that a contract, or anything else answering a call, could put in a refusal
@@ -259,6 +261,39 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 			{ q: 'roadmap' },
 			{ q: 'roadmap' }
 		]);
+	});
+
+	it('tells my client which request each question to try again is and until when, in words left unchanged', async () => {
+		r.h.apisix.llm.script = modelUsing('search_sheets', { q: 'budget' });
+		let seen = requestsIn(r).length;
+		const askedAt = Date.now();
+		await r.client.sendText(r.room, 'Find the budget in my sheets');
+		const first = await nextRequestIn(r, seen);
+		expect(first.body).toBe(MISSING('sheets'));
+		// The request as the API shows it waiting for me: the same id, and the same end, a day after
+		// I asked
+		const asked = await r.waitingRequest('sheets');
+		const expiresAt = Date.parse(asked.expires_at);
+		expect(first.content[QUESTION_KEY]).toEqual({ id: asked.id, expires_ts: expiresAt });
+		expect(Math.abs(expiresAt - (askedAt + DAY_MS))).toBeLessThan(60_000);
+		// I say yes before I gave the platform my permission: it asks me again, under a request of
+		// its own
+		seen = requestsIn(r).length;
+		await r.client.sendText(r.room, 'yes');
+		const second = await nextRequestIn(r, seen);
+		expect(second.body).toBe(MISSING('sheets'));
+		const askedAgain = await r.waitingRequest('sheets');
+		expect(askedAgain.id).not.toBe(asked.id);
+		expect(second.content[QUESTION_KEY]).toEqual({
+			id: askedAgain.id,
+			expires_ts: Date.parse(askedAgain.expires_at)
+		});
+		// My no in words answers it as before, and the notice that tells me so asks nothing
+		const acknowledged = r.saying('All right').length;
+		await r.client.sendText(r.room, 'non');
+		expect(await r.nextSaying('All right', acknowledged)).toBe('All right, I will not do it.');
+		expect(r.saying('All right').at(acknowledged)?.content).not.toHaveProperty([QUESTION_KEY]);
+		expect(r.h.apisix.contracts.calls).toHaveLength(2);
 	});
 
 	it('asks me in my own language', async () => {
