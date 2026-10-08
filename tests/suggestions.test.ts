@@ -208,7 +208,7 @@ describe('the assistant proposes from the messages of channels', () => {
 
 	it('proposes to the sender and to the author of the message before, in their Space only, and keeps no quote', async () => {
 		await say(alice, channel, 'On se voit quand ?');
-		const eventId = await say(bob, channel, 'ok on parle lundi');
+		await say(bob, channel, 'ok on parle lundi');
 		const calls = await until(() => (space.calls.length >= 2 ? space.calls : null));
 		const byUser = new Map(calls.map((c) => [c.body['matrixUserId'] as string, c]));
 		expect([...byUser.keys()].sort()).toEqual(['@alice:test.local', '@bob:test.local']);
@@ -241,18 +241,18 @@ describe('the assistant proposes from the messages of channels', () => {
 		expect(await h.db.sql`select 1 from sessions`).toHaveLength(0);
 		expect(await h.db.sql`select 1 from memory_entries`).toHaveLength(0);
 		await until(
-			async () => (await h.db.sql`select 1 from jobs where kind = 'suggest'`).length === 0,
-			1
+			async () => (await h.db.sql`select 1 from jobs where kind = 'suggest'`).length === 0
 		);
 		expect(JSON.stringify(await h.db.sql`select payload from jobs`)).not.toContain(
 			'ok on parle lundi'
 		);
-		// Nothing was written in the calendar, and the assistant never joined the channel
+		// Nothing was written in the calendar, and no assistant joined the channel, the listener alone
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
-		expect(await h.synapse.joinedMembers(bob, channel)).not.toContain(
-			expect.stringContaining('assistant')
-		);
-		void eventId;
+		expect(
+			(await h.synapse.joinedMembers(bob, channel)).filter((m) =>
+				m.startsWith('@twake-space-assistant')
+			)
+		).toEqual([]);
 		// The write waits for its owner whatever they allowed, asked in their room too once the
 		// question went out there: a yes from Space then resumes it in that room
 		type Waiting = { id: string; reasons: string[]; channel: string };
