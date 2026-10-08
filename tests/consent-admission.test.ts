@@ -17,9 +17,10 @@ import { eventually } from './helpers/feedback.js';
 // What my assistant tells me when admission refuses a message of mine for my turns at once
 const TOO_MANY = 'I received too many messages at once';
 
-// What my assistant tells me when admission kept it too long from doing what I allowed
+// What my assistant tells me when admission kept it too long from doing what I allowed, asking me
+// again as any request of my assistant asks me
 const HELD_TOO_LONG =
-	'Too many requests came in at once for me to do it in time, so I have not done it yet. Your request stays open: answer yes in your next message and I will try again.';
+	'Too many requests came in at once for me to do it in time, so I have not done it yet, and your request stays open.\nShall I try again? Answer yes or no in your next message.';
 
 // What my assistant tells me of a request a newer one replaced
 const SUPERSEDED = 'A newer request replaced this one, so I did nothing. Answer the latest one.';
@@ -27,9 +28,10 @@ const SUPERSEDED = 'A newer request replaced this one, so I did nothing. Answer 
 // How my assistant asks me in French before it first reads my data in an application
 const FRENCH_QUESTION = "C'est la première fois";
 
-// What my assistant tells me in French when my limit for the day kept it from doing what I allowed
+// What my assistant tells me in French when my limit for the day kept it from doing what I allowed,
+// asking me again
 const OPEN_UNTIL_MIDNIGHT =
-	"J'ai atteint ma limite du jour, je ne l'ai donc pas encore fait. Ta demande reste ouverte : après minuit, réponds oui dans ton prochain message et je le ferai.";
+	"J'ai atteint ma limite du jour, je ne l'ai donc pas encore fait, et ta demande reste ouverte.\nUne fois minuit passé, quand ma limite se lève, je le fais ? Réponds par oui ou non dans ton prochain message.";
 
 // The same, when my request ends before my limit lifts
 const ENDS_BEFORE_MIDNIGHT =
