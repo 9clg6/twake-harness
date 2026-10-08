@@ -16,23 +16,9 @@ interface StateEvent {
 	readonly content?: unknown;
 }
 
-function contentOf(event: StateEvent): Record<string, unknown> {
-	return typeof event.content === 'object' && event.content !== null
-		? (event.content as Record<string, unknown>)
-		: {};
-}
-
-// Why a room is no channel to listen to, or null when it is one: a space, or a room inside a
-// space, that is not encrypted
+// Why a room is no channel to listen to, or null when it is one: any room that is not encrypted
 export function whyNotAChannel(state: readonly StateEvent[]): string | null {
-	if (state.some((event) => event.type === 'm.room.encryption')) return 'encrypted';
-	const isSpace = state.some(
-		(event) => event.type === 'm.room.create' && contentOf(event)['type'] === 'm.space'
-	);
-	const hasParent = state.some(
-		(event) => event.type === 'm.space.parent' && Array.isArray(contentOf(event)['via'])
-	);
-	return isSpace || hasParent ? null : 'not_in_a_space';
+	return state.some((event) => event.type === 'm.room.encryption') ? 'encrypted' : null;
 }
 
 export interface InviteEvent {
@@ -54,8 +40,8 @@ export interface ChannelListener {
 	start(): Promise<void>;
 	// Whether the listener is in this room, which is a channel it was invited to
 	has(roomId: string): boolean;
-	// The listener was invited: it joins a space or a room inside one that is not encrypted, and
-	// declines anything else
+	// The listener was invited: it joins a room that is not encrypted, and declines a direct or an
+	// encrypted one
 	onInvite(roomId: string, event: InviteEvent): Promise<void>;
 	// The listener left a room, or was kicked or banned from it: that is the room's switch
 	onMember(roomId: string, event: { content?: Record<string, unknown> | undefined }): void;
@@ -113,7 +99,7 @@ export function makeChannelListener(deps: ChannelListenerDeps): ChannelListener 
 				return declined('encrypted');
 			}
 			await intent.joinRoom(roomId);
-			// Read once in, as the stripped state of an invite names no space parent
+			// Read again once in, in case the stripped state left the encryption out
 			let why: string | null;
 			try {
 				why = whyNotAChannel(await stateOf(roomId));

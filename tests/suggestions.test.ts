@@ -453,22 +453,25 @@ describe('the assistant proposes from the messages of channels', () => {
 		}
 		const matching = 'ok on parle lundi à 10h';
 
+		// The invite of a direct room carries is_direct; a direct room of Twake Chat is also
+		// encrypted, which the stripped state shows
 		it('declines an invite to a direct room', async () => {
-			const [one, two] = await pair();
-			const dm = await h.synapse.createDirectRoom(one, two.userId);
-			await h.synapse.joinRoom(two, dm);
-			await invite(one, dm);
+			const [one] = await pair();
+			const dm = await create(one, {
+				preset: 'trusted_private_chat',
+				is_direct: true,
+				invite: [LISTENER]
+			});
 			expect(await listenerStays(one, dm)).toBe(false);
-			expect(await heardBy(dm, [two, one], matching)).toBe(false);
 		});
 
-		it('declines an invite to a room with no space marker', async () => {
+		it('accepts a room outside any space, stays, and reads it', async () => {
 			const [one, two] = await pair();
 			const room = await create(one, { preset: 'public_chat', name: 'loose' });
 			await h.synapse.joinRoom(two, room);
 			await invite(one, room);
-			expect(await listenerStays(one, room)).toBe(false);
-			expect(await heardBy(room, [two, one], matching)).toBe(false);
+			expect(await listenerStays(one, room)).toBe(true);
+			expect(await heardBy(room, [two, one], matching)).toBe(true);
 		});
 
 		it('accepts a room inside a space, and reads it', async () => {
