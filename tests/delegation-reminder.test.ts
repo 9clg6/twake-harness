@@ -4,7 +4,11 @@ import { loadConfig, type Config } from '../src/config.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { logSink, until, type LogSink } from './helpers/activity.js';
 import { makeSettableClock } from './helpers/clock.js';
-import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
+import {
+	QUESTION_CONTENT_KEY,
+	startConsentRoom,
+	type ConsentRoom
+} from './helpers/consent-room.js';
 import {
 	BROKER_CONSENT_URL,
 	brokerDelegation,
@@ -123,7 +127,7 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(call?.owner).toBe(ALICE);
 		// It carries no marker of a question, and the harness takes no answer from my next words:
 		// they go to my assistant
-		expect(r.saying(REMINDER)[0]?.content).not.toHaveProperty(['app.twake.assistant.question']);
+		expect(r.saying(REMINDER)[0]?.content).not.toHaveProperty([QUESTION_CONTENT_KEY]);
 		await r.client.sendText(r.room, 'oui');
 		expect(await r.nextSaying('echo: ', 0)).toBe('echo: oui');
 	});
