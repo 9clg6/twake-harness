@@ -3,13 +3,23 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { eventually } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
-import { PROVISIONER, provisioningPath, provisionUntilReady } from './helpers/provisioning.js';
+import {
+	PROVISIONER,
+	provisioned,
+	provisioningPath,
+	provisionUntilReady,
+	type OwnedAssistant
+} from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
-interface AssistantView {
-	readonly userId: string;
-	readonly name: string;
-	readonly roomId: string | null;
+// Where a user's Matrix name is, on the homeserver's client API
+function profileName(userId: string): string {
+	return `/profile/${encodeURIComponent(userId)}/displayname`;
+}
+
+// Where a user's member event in a room is, on the homeserver's client API
+function memberEvent(roomId: string, userId: string): string {
+	return `/rooms/${encodeURIComponent(roomId)}/state/m.room.member/${encodeURIComponent(userId)}`;
 }
 
 describe('an assistant named after its owner, on a homeserver that refuses display-name changes', () => {
@@ -28,19 +38,6 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		if (h !== undefined) await h.close();
 	});
 
-	// The owner's assistant as a provisioner asks for it, then as its owner reads it
-	async function provisioned(
-		localpart: string,
-		displayName: string
-	): Promise<{ owner: MatrixUser; assistant: AssistantView }> {
-		const owner = await h.synapse.registerUser(localpart, displayName);
-		const asked = await h.api.put(PROVISIONER, provisioningPath(owner.userId), {});
-		expect([200, 503]).toContain(asked.status);
-		const mine = await h.api.get<AssistantView>(`${localpart}@test.local`, '/v1/assistants/me');
-		expect(mine.status).toBe(200);
-		return { owner, assistant: mine.body };
-	}
-
 	// The name the assistant goes by in the room, as its owner's client reads it: once it is the one
 	// expected, or else when the time is up
 	async function nameShown(
@@ -49,7 +46,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		assistantId: string,
 		expected: string
 	): Promise<unknown> {
-		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.member/${encodeURIComponent(assistantId)}`;
+		const path = `/_matrix/client/v3${memberEvent(roomId, assistantId)}`;
 		let shown: unknown = null;
 		await eventually(async () => {
 			shown = (await h.synapse.request(owner, 'GET', path)).body['displayname'];
@@ -58,24 +55,30 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		return shown;
 	}
 
+	// How many calls of the method on the path the gateway passed on to the homeserver
+	function calls(method: string, path: string): number {
+		return h.apisix.matrixCalls.filter((call) => call.method === method && call.path.includes(path))
+			.length;
+	}
+
 	it("takes its owner's first name, the words before the first one in capitals", async () => {
-		const { assistant } = await provisioned('michel', 'Michel-Marie MAUDET');
+		const { assistant } = await provisioned(h, 'michel', 'Michel-Marie MAUDET');
 		expect(assistant.name).toBe("Michel-Marie's assistant");
 	});
 
 	it('keeps the first 64 characters of a long name, none of them cut in half', async () => {
-		const { assistant } = await provisioned('ines', `Inès ${'😀'.repeat(70)}`);
+		const { assistant } = await provisioned(h, 'ines', `Inès ${'😀'.repeat(70)}`);
 		expect(assistant.name).toBe(`Inès ${'😀'.repeat(59)}`);
 	});
 
 	it("takes its owner's identifier when their name holds what a name of an assistant cannot", async () => {
 		// The technologist emoji joins its two halves with a format character
-		const { assistant } = await provisioned('zoe', 'Zoé 👩‍💻');
+		const { assistant } = await provisioned(h, 'zoe', 'Zoé 👩‍💻');
 		expect(assistant.name).toBe("zoe's assistant");
 	});
 
 	it('goes by its name in the room its owner opens with it', async () => {
-		const { owner, assistant } = await provisioned('nina', 'Nina SIMONE');
+		const { owner, assistant } = await provisioned(h, 'nina', 'Nina SIMONE');
 		const room = await h.synapse.createDirectRoom(owner, assistant.userId);
 		expect(await nameShown(owner, room, assistant.userId, "Nina's assistant")).toBe(
 			"Nina's assistant"
@@ -84,7 +87,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 
 	it('goes by the name its owner chose in the room it opens with them', async () => {
 		const owner = await h.synapse.registerUser('paul', 'Paul VALÉRY');
-		const created = await h.api.post<AssistantView>('paul@test.local', '/v1/assistants', {
+		const created = await h.api.post<OwnedAssistant>('paul@test.local', '/v1/assistants', {
 			name: 'Friday'
 		});
 		expect(created.status).toBe(201);
@@ -94,7 +97,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 	});
 
 	it('goes by its name in the room a provisioner makes its home', async () => {
-		const { owner, assistant } = await provisioned('rosa', 'Rosa PARKS');
+		const { owner, assistant } = await provisioned(h, 'rosa', 'Rosa PARKS');
 		// The homeserver is slow to take the name the assistant writes as it joins
 		let release = (): void => undefined;
 		const slow = new Promise<void>((resolve) => {
@@ -126,7 +129,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 	});
 
 	it('goes by each name its owner gives it in their room', async () => {
-		const { owner, assistant } = await provisioned('omar', 'Omar SY');
+		const { owner, assistant } = await provisioned(h, 'omar', 'Omar SY');
 		const room = await h.synapse.createDirectRoom(owner, assistant.userId);
 		expect(await nameShown(owner, room, assistant.userId, "Omar's assistant")).toBe(
 			"Omar's assistant"
@@ -169,30 +172,15 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		}
 	});
 
-	// What the gateway saw of the reads of a user's Matrix name
-	function nameReads(userId: string): number {
-		const path = `/profile/${encodeURIComponent(userId)}/displayname`;
-		return h.apisix.matrixCalls.filter((call) => call.method === 'GET' && call.path.includes(path))
-			.length;
-	}
-
-	// What the gateway saw of the reads of the assistant's member event in the room, which the role
-	// reads before it writes the assistant's name there
-	function memberReads(roomId: string, assistantId: string): number {
-		const path = `/rooms/${encodeURIComponent(roomId)}/state/m.room.member/${encodeURIComponent(assistantId)}`;
-		return h.apisix.matrixCalls.filter((call) => call.method === 'GET' && call.path.includes(path))
-			.length;
-	}
-
 	it("reads no owner's name when a provisioner asks again for their assistant", async () => {
-		const { owner } = await provisioned('wim', 'Wim WENDERS');
+		const { owner } = await provisioned(h, 'wim', 'Wim WENDERS');
 		const renamed = await h.api.put('wim@test.local', '/v1/assistants/me', { name: 'Assistant' });
 		expect(renamed.status).toBe(200);
-		const before = nameReads(owner.userId);
+		const before = calls('GET', profileName(owner.userId));
 
 		const again = await h.api.put(PROVISIONER, provisioningPath(owner.userId), {});
 		expect([200, 503]).toContain(again.status);
-		expect(nameReads(owner.userId)).toBe(before);
+		expect(calls('GET', profileName(owner.userId))).toBe(before);
 	});
 
 	it("takes its owner's first name as the matrix role starts, if it goes by a former default name", async () => {
@@ -210,7 +198,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		];
 		const opened: { owner: MatrixUser; assistantId: string; roomId: string; reads: number }[] = [];
 		for (const { localpart, name, given } of owners) {
-			const { owner, assistant } = await provisioned(localpart, name);
+			const { owner, assistant } = await provisioned(h, localpart, name);
 			const roomId = await h.synapse.createDirectRoom(owner, assistant.userId);
 			expect(await nameShown(owner, roomId, assistant.userId, assistant.name)).toBe(assistant.name);
 			const renamed = await h.api.put(`${localpart}@test.local`, '/v1/assistants/me', {
@@ -220,7 +208,8 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			expect(await nameShown(owner, roomId, assistant.userId, given)).toBe(given);
 			opened.push({ owner, assistantId: assistant.userId, roomId, reads: 0 });
 		}
-		for (const room of opened) room.reads = memberReads(room.roomId, room.assistantId);
+		for (const room of opened)
+			room.reads = calls('GET', memberEvent(room.roomId, room.assistantId));
 
 		await h.restartRole();
 
@@ -228,17 +217,16 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			const room = opened[i];
 			if (room === undefined) throw new Error('no room opened');
 			// Once the role went over the assistant's name at its start
-			expect(await eventually(() => memberReads(room.roomId, room.assistantId) > room.reads)).toBe(
-				true
-			);
+			const reads = (): number => calls('GET', memberEvent(room.roomId, room.assistantId));
+			expect(await eventually(() => reads() > room.reads)).toBe(true);
 			expect(await nameShown(room.owner, room.roomId, room.assistantId, expected)).toBe(expected);
-			const mine = await h.api.get<AssistantView>(`${localpart}@test.local`, '/v1/assistants/me');
+			const mine = await h.api.get<OwnedAssistant>(`${localpart}@test.local`, '/v1/assistants/me');
 			expect(mine.body.name).toBe(expected);
 		}
 	});
 
 	it('keeps the name its owner gives it while the matrix role names it after them', async () => {
-		const { owner, assistant } = await provisioned('vic', 'Vic CHESNUTT');
+		const { owner, assistant } = await provisioned(h, 'vic', 'Vic CHESNUTT');
 		const roomId = await h.synapse.createDirectRoom(owner, assistant.userId);
 		const renamed = await h.api.put('vic@test.local', '/v1/assistants/me', { name: 'Assistant' });
 		expect(renamed.status).toBe(200);
@@ -249,9 +237,10 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			release = resolve;
 		});
 		let held = 0;
-		const ownerName = `/profile/${encodeURIComponent(owner.userId)}/displayname`;
 		h.apisix.matrixHold = (call) => {
-			if (call.method !== 'GET' || !call.path.includes(ownerName) || held > 0) return null;
+			if (call.method !== 'GET' || !call.path.includes(profileName(owner.userId)) || held > 0) {
+				return null;
+			}
 			held += 1;
 			return slow;
 		};
@@ -266,7 +255,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		}
 
 		expect(await nameShown(owner, roomId, assistant.userId, 'Vision')).toBe('Vision');
-		const mine = await h.api.get<AssistantView>('vic@test.local', '/v1/assistants/me');
+		const mine = await h.api.get<OwnedAssistant>('vic@test.local', '/v1/assistants/me');
 		expect(mine.body.name).toBe('Vision');
 	});
 });
