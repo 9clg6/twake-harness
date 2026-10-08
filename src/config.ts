@@ -385,6 +385,16 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
+	// The namespace tells the listener from the creator and the assistants by its name alone
+	if (
+		values.SUGGESTIONS_ENABLED === 'true' &&
+		(values.SUGGESTIONS_USER_LOCALPART === values.MATRIX_SENDER_LOCALPART ||
+			values.SUGGESTIONS_USER_LOCALPART.startsWith(values.MATRIX_ASSISTANT_PREFIX))
+	) {
+		throw new Error(
+			`invalid configuration: SUGGESTIONS_USER_LOCALPART must not be MATRIX_SENDER_LOCALPART nor start with ${values.MATRIX_ASSISTANT_PREFIX}`
+		);
+	}
 	if (values.SPACE_API_URL !== '' && !URL.canParse(values.SPACE_API_URL)) {
 		throw new Error('invalid configuration: SPACE_API_URL is not a URL');
 	}
