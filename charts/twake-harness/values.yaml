@@ -116,6 +116,10 @@ config:
   # How long the worker role keeps a wake-up, in milliseconds, so that an event delivered again or
   # replayed from its dead letter queue wakes nobody twice; empty means the harness default, 30 days
   wakeupsRetentionMs: ''
+  # The hour, 0 to 23 on the wall clock of assistantTimezone, at which the worker role reminds the
+  # owners whose permission for their assistant to act for them expires within five days; empty
+  # means the harness default, 9
+  delegationReminderHour: ''
   # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
   # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new
   # invitation who has an assistant is told of it in their room. The worker then needs
