@@ -74,6 +74,14 @@ interface CreatedAssistant {
 	readonly roomId: string;
 }
 
+// An event of a room as the homeserver lists it
+interface TimelineEvent {
+	readonly type: string;
+	readonly sender: string;
+	readonly state_key?: string;
+	readonly content: Record<string, unknown>;
+}
+
 describe('deleting my assistant erases what the harness keeps of it', () => {
 	let activity: ActivityExchange;
 	let r: ConsentRoom;
@@ -492,10 +500,14 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 				hold: held
 			};
 		};
+		// The room of the assistant I create again while the turn waits
+		let next = '';
 		try {
 			await r.client.sendText(room, words);
 			await asked;
 			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+			expect((await r.h.api.post(ALICE, '/v1/assistants', { name: 'Iris' })).status).toBe(201);
+			next = await meetNewAssistant('Iris', [room]);
 		} finally {
 			release();
 		}
@@ -511,6 +523,27 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 			)
 		);
 		r.h.apisix.llm.script = literal;
+		// Nor does anything else reach the room it left or its new room, where it only greeted me
+		await new Promise((resolve) => setTimeout(resolve, 3000));
+		const timeline = await r.h.synapse.request(
+			r.alice,
+			'GET',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/messages?dir=b&limit=100`
+		);
+		const newestFirst = timeline.body['chunk'] as TimelineEvent[];
+		const left = newestFirst.findIndex(
+			(event) =>
+				event.type === 'm.room.member' &&
+				event.state_key === r.assistantId &&
+				event.content['membership'] === 'leave'
+		);
+		expect(left).toBeGreaterThanOrEqual(0);
+		expect(newestFirst.slice(0, left).filter((event) => event.sender === r.assistantId)).toEqual(
+			[]
+		);
+		expect(
+			r.client.messages.filter((m) => m.roomId === next && m.sender === r.assistantId)
+		).toHaveLength(1);
 	});
 });
 
