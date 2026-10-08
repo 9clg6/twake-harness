@@ -162,7 +162,8 @@ const NO_ASSISTANT = { error: 'no assistant' } as const;
 const NOT_A_MEMBER = { error: 'not a member' } as const;
 // Others are in that room: what the assistant writes its owner there would reach them too
 const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
-// The assistant's escrowed identity waits for its owner's recovery (POST /v1/assistants/me/recover)
+// The assistant's escrowed identity waits for its owner's recovery: POST /v1/assistants/me/recover
+// by the owner, or POST /v1/provisioning/assistants/:owner/recover by their provisioner
 const RECOVERY_NEEDED = { error: 'recovery_needed' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
