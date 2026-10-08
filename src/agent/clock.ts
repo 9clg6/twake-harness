@@ -145,9 +145,14 @@ export function describeMoment(instant: Date, timeZone: string, locale: Locale):
 		minute: '2-digit',
 		hourCycle: 'h23'
 	}).format(instant);
+	return { words: `${date}, ${time}`, date, time, iso: isoIn(instant, timeZone), timeZone };
+}
+
+// An instant in ISO 8601 with the zone's offset at that instant, never Z:
+// "2026-10-06T13:26:00+02:00"
+export function isoIn(instant: Date, timeZone: string): string {
 	const field = wallClock(instant, timeZone);
-	const iso = `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
-	return { words: `${date}, ${time}`, date, time, iso, timeZone };
+	return `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
 }
 
 // The day and the hour of a zone's wall clock at an instant: 2026-10-08 and 9 at nine in the
