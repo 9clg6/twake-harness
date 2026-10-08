@@ -1282,7 +1282,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (checked === null) return;
 			command = checked.text;
 		}
-		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner));
+		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner, log));
 		const toOwner = await fetchMessages(owner);
 		let turn: CreatorTurn;
 		try {

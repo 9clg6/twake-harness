@@ -1,3 +1,5 @@
+import type { FastifyBaseLogger } from 'fastify';
+
 import type { Db, Tx } from '../db/client.js';
 import { isLocale, type Locale } from '../i18n/messages.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
@@ -116,16 +118,23 @@ export type DialogState =
 	| { readonly step: 'awaiting_name' }
 	| { readonly step: 'confirming_deletion'; readonly question: YesNoQuestion };
 
-export async function findDialog(tx: Tx, owner: string): Promise<DialogState | null> {
+export async function findDialog(
+	tx: Tx,
+	owner: string,
+	log: FastifyBaseLogger
+): Promise<DialogState | null> {
 	const rows = await tx.sql<
 		{ state: string; question_id: string | null; expires_at: Date | null }[]
 	>`select state, question_id, expires_at from creator_dialogs where owner = ${owner}`;
 	const row = rows[0];
-	if (row?.state === 'awaiting_name') return { step: 'awaiting_name' };
-	if (row?.state === 'confirming_deletion' && row.question_id !== null && row.expires_at !== null) {
+	if (row === undefined) return null;
+	if (row.state === 'awaiting_name') return { step: 'awaiting_name' };
+	if (row.state === 'confirming_deletion' && row.question_id !== null && row.expires_at !== null) {
 		const question = { id: row.question_id, expiresTs: row.expires_at.getTime() };
 		return { step: 'confirming_deletion', question };
 	}
+	// A step this build does not know, as a later one may write, leaves the dialog where it starts
+	log.warn({ owner, state: row.state }, 'creator dialog unreadable');
 	return null;
 }
 
