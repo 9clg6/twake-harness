@@ -9,9 +9,12 @@ import { suggestGroup, type Quoted, type SuggestPayload } from './job.js';
 import { mayArrangeMeeting } from './prefilter.js';
 import { readSettings } from './repository.js';
 
-// A message stays context for the next one for this long; it lives in this process's memory only
+// A message stays context for the next one for this long; it lives in this process's memory only,
+// and goes once that time is over, whether a next one came or not
 const CONTEXT_TTL_MS = 15 * 60 * 1000;
 const MAX_ROOMS_IN_MEMORY = 2000;
+// How often the messages held past their time are looked for
+const SWEEP_INTERVAL_MS = 60 * 1000;
 
 interface Remembered extends Quoted {
 	readonly eventId: string;
@@ -29,6 +32,8 @@ export interface SuggestionIntake {
 	forget(roomId: string): void;
 	// A clear message of a channel the listener is in
 	onMessage(roomId: string, message: ChannelMessage): Promise<void>;
+	// The role stops: what is held goes, and nothing is looked for any more
+	stop(): void;
 }
 
 export interface IntakeDeps {
@@ -45,6 +50,7 @@ export interface IntakeDeps {
 export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 	const { config, db, log } = deps;
 	const now = deps.now ?? Date.now;
+	// Oldest first, as a message held again goes last
 	const recent = new Map<string, Remembered>();
 	function remember(roomId: string, message: Remembered): void {
 		recent.delete(roomId);
@@ -54,6 +60,15 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			if (oldest.done !== true) recent.delete(oldest.value);
 		}
 	}
+	function sweep(): void {
+		const end = now() - CONTEXT_TTL_MS;
+		for (const [roomId, message] of recent) {
+			if (message.at > end) return;
+			recent.delete(roomId);
+		}
+	}
+	const sweeping = setInterval(sweep, SWEEP_INTERVAL_MS);
+	sweeping.unref();
 
 	async function enabled(owner: string): Promise<boolean> {
 		return (await withPrincipal(db, { id: owner }, (tx) => readSettings(tx, owner))).enabled;
@@ -68,8 +83,13 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 		forget(roomId) {
 			recent.delete(roomId);
 		},
+		stop() {
+			clearInterval(sweeping);
+			recent.clear();
+		},
 		async onMessage(roomId, message) {
 			if (!config.suggestions.enabled) return;
+			sweep();
 			const sender = principalOfMatrixUser(config, message.sender);
 			if (sender === null) return;
 			const current: Remembered = {

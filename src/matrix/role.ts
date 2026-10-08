@@ -1730,6 +1730,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				// work above may still need it.
 				closing = true;
 				await drain();
+				suggestions.stop();
 				await sender.stop();
 				await feedback.stop();
 				appservice.stop();
