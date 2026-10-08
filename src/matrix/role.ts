@@ -35,7 +35,7 @@ import type { PendingQuestion } from '../consents/consent.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
 import { findRequest } from '../consents/repository.js';
 import { runRevocation } from '../consents/revocation.js';
-import { enqueueJob } from '../jobs/queue.js';
+import { enqueueJob, type JobKind, type RetryDelays } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
 import type { Config } from '../config.js';
@@ -88,6 +88,9 @@ export interface MatrixRoleOptions {
 	readonly port: number;
 	readonly bindAddress?: string;
 	readonly pollIntervalMs?: number;
+	// How long a job of the role that failed waits before each of its next tries, by kind, over the
+	// queue's: a test makes a revocation's short
+	readonly retryDelaysMs?: Partial<Record<JobKind, RetryDelays>>;
 	// How long the SDK may process a push before the role gives it up, PUSH_DEADLINE_MS by default
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up, as long as the
@@ -1443,6 +1446,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		kinds: ['send', 'recover', 'progress', 'prepare', 'name', 'revoke'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
+		...(options.retryDelaysMs === undefined ? {} : { retryDelaysMs: options.retryDelaysMs }),
 		handler: async (job) => {
 			if (job.kind === 'revoke') {
 				await runRevocation(config, log, job.payload);

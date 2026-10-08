@@ -21,6 +21,8 @@ import {
 const ALICE = 'alice@test.local';
 // When I gave the broker the permission for my assistant to act for me, long before any deletion
 const GIVEN_BEFORE = '2026-09-20T08:00:00Z';
+// The waits between the tries of a revocation: as many as the deployment's, each a moment
+const REVOKE_RETRY_DELAYS_MS = [300, 300, 300, 300, 300];
 // What my creator answers once it deleted my assistant
 const DELETED = 'Your assistant is deleted. Send /newbot when you want a new one.';
 
@@ -70,7 +72,7 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 	}
 
 	beforeAll(async () => {
-		r = await startConsentRoom();
+		r = await startConsentRoom({}, { retryDelaysMs: { revoke: REVOKE_RETRY_DELAYS_MS } });
 		// Forward-auth lets a call to my applications through while the broker holds my permission
 		r.h.apisix.contracts.spec = readCatalog(['drive']);
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(1);
@@ -216,24 +218,22 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 		expect(consentedAt).toBeNull();
 	});
 
-	it('gives the revocation up after three tries, and says so', async () => {
+	it('gives the revocation up after six tries, and says so', async () => {
 		await newAssistant('Iris');
 		r.h.apisix.revocation = (owner) => revoke(owner, brokerDriveUnavailable());
 		const seen = r.h.apisix.delegationCalls.length;
 		const logged = r.h.logLines().length;
 		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
-		await until('the third try failed', () => failedTries(logged).length === 3);
+		await until('the sixth try failed', () => failedTries(logged).length === 6);
 		const error = 'the delegation route answered 502 to the revocation';
-		expect(failedTries(logged)).toEqual([
-			{ attempts: 1, error },
-			{ attempts: 2, error },
-			{ attempts: 3, error }
-		]);
+		expect(failedTries(logged)).toEqual(
+			[1, 2, 3, 4, 5, 6].map((attempts) => ({ attempts, error }))
+		);
 		// My Drive instance answers again, and nobody asks the broker any more, longer than the wait
-		// before a fourth try would be
+		// before a seventh try would be
 		r.h.apisix.revocation = (owner) => revoke(owner);
-		await sleep(9_000);
-		expect(methodsSince(seen)).toEqual(['GET', 'DELETE', 'GET', 'DELETE', 'GET', 'DELETE']);
+		await sleep(3_000);
+		expect(methodsSince(seen)).toEqual(Array.from({ length: 6 }, () => ['GET', 'DELETE']).flat());
 	});
 
 	it('still asks the broker for a deletion of mine once I deleted my next assistant, which erased my jobs', async () => {
