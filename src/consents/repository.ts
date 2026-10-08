@@ -557,9 +557,15 @@ function requestExpiry(record: PendingCallRecord, lifetimeMs: number): Date {
 }
 
 // The question the request about a call asks its owner, as their client tells it from other
-// messages: the id and the end of validity the API shows
-export function toYesNoQuestion(record: PendingCallRecord, lifetimeMs: number): YesNoQuestion {
-	return { id: record.id, expiresTs: requestExpiry(record, lifetimeMs).getTime() };
+// messages: the id and the end of validity the API shows. None once the call no longer waits for
+// an answer, decided from another client or closed unanswered, so that no client offers one.
+export function toYesNoQuestion(
+	record: PendingCallRecord,
+	lifetimeMs: number
+): YesNoQuestion | null {
+	return record.state === 'open'
+		? { id: record.id, expiresTs: requestExpiry(record, lifetimeMs).getTime() }
+		: null;
 }
 
 export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number): PendingCallView {

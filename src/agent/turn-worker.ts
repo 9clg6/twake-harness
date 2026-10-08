@@ -166,7 +166,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 
 	// What the assistant sends back for a turn: its answer, or the fixed notice of a refused or
 	// failed turn, and the question it asks when the turn froze a call, marked for the owner's
-	// client unless the call is no longer stored, as no answer could find it
+	// client while the call still waits for their answer
 	async function replyTo(
 		result: OwnerTurnResult,
 		assistant: AssistantRecord,
@@ -179,6 +179,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			pendingCallId === undefined
 				? null
 				: await withPrincipal(db, { id: owner }, (tx) => findPendingCall(tx, owner, pendingCallId));
+		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
 		return {
 			asUserId: assistant.userId,
 			roomId,
@@ -190,7 +191,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 						: notices.turnFailed,
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
 			...(pendingCallId === undefined ? {} : { request: { pendingCallId, owner } }),
-			...(call === null ? {} : { questionMarker: toYesNoQuestion(call, requestLifetimeMs) }),
+			...(questionMarker === null ? {} : { questionMarker }),
 			// The harness's own request, laid out by the harness as HTML too
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
