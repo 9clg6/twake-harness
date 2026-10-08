@@ -1,5 +1,8 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { findTimeZone } from '../src/agent/clock.js';
+import { withPrincipal } from '../src/db/client.js';
+import { findOwnerTimeZone, saveOwnerTimeZone } from '../src/settings/repository.js';
 import {
 	activityEvent,
 	lastUser,
@@ -31,6 +34,10 @@ const PROPOSAL = {
 	description: 'How Alice plans her Mondays',
 	content: '# Monday plan\nTasks first.'
 };
+
+// The zone a read of my calendar returned, which the harness keeps for me rather than for my
+// assistant
+const ZONE = 'Asia/Tokyo';
 
 // What the harness asks me the first time my assistant needs to read an application
 function firstRead(domain: string): string {
@@ -181,12 +188,18 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 	}
 
 	// The accounts whose sends failed for good, as the queue keeps them, each payload the JSON text
-	// of its fields: no route shows them, so this is the one place a test reads the database
+	// of its fields: no route shows them, so the test reads them in the database
 	async function failedSends(): Promise<string[]> {
 		const rows = await r.h.db.sql<{ as_user_id: string }[]>`
 			select (payload #>> '{}')::jsonb ->> 'asUserId' as as_user_id from jobs
 			where status = 'failed' and kind = 'send' order by id`;
 		return rows.map((row) => row.as_user_id);
+	}
+
+	// The zone of my calendar as the harness keeps it, which no route shows either: read under my
+	// principal, as my turns read it
+	async function myZone(): Promise<string | null> {
+		return withPrincipal(r.h.db, { id: ALICE }, (tx) => findOwnerTimeZone(tx, ALICE));
 	}
 
 	// Everything my owner routes show of what I told my assistant and kept for it
@@ -272,6 +285,11 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(routes['consents']).toHaveLength(1);
 		pinned = (await r.h.api.get(ALICE, '/v1/assistants/me/owner-identity')).body['pinned'];
 		expect(pinned).toMatchObject({ pinned_by: 'first_use' });
+		// The zone a read of my calendar returned, kept as such a read keeps it
+		const zone = findTimeZone(ZONE);
+		if (zone === null) throw new Error(`the runtime does not know ${ZONE}`);
+		await withPrincipal(r.h.db, { id: ALICE }, (tx) => saveOwnerTimeZone(tx, ALICE, zone));
+		expect(await myZone()).toBe(ZONE);
 	});
 
 	it('tells me once that a session of mine is not verified, while I have it', async () => {
@@ -361,10 +379,11 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		await r.client.waitForMessage(irisRoom, r.assistantId, (t) => t === UNVERIFIED_REPORT);
 	});
 
-	it('keeps the identity it holds of me', async () => {
+	it('keeps the identity it holds of me, and the zone of my calendar', async () => {
 		expect((await r.h.api.get(ALICE, '/v1/assistants/me/owner-identity')).body['pinned']).toEqual(
 			pinned
 		);
+		expect(await myZone()).toBe(ZONE);
 	});
 
 	it('wakes my new assistant for no event it already told me of, however often the event comes again', async () => {

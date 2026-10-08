@@ -10,11 +10,12 @@ import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 // with their answer, and the jobs that would still run for it. Its record stays, marked deleted,
 // with the language its owner chose, and its rooms leave the index. What a new assistant needs or
 // must not lose stays: the Matrix account, its device and keys, as a Matrix identifier is never
-// reused, the owner's quota counters, the identity the harness pinned for them and the one it saw
-// last, and what keeps the next assistant from taking anything twice: the wake-ups, which keep
-// an event replayed later from waking it, the owner's words received, which keep a copy of them
-// from counting, and when it first read each session their words came from, which keeps the words
-// of a session older than those it remembers from counting.
+// reused, the owner's quota counters, the zone of their calendar, a setting of theirs and not of
+// their assistant, the identity the harness pinned for them and the one it saw last, and what
+// keeps the next assistant from taking anything twice: the wake-ups, which keep an event replayed
+// later from waking it, the owner's words received, which keep a copy of them from counting, and
+// when it first read each session their words came from, which keeps the words of a session older
+// than those it remembers from counting.
 // False when the live assistant is no longer the one created at that time.
 export async function eraseAssistant(
 	tx: Tx,
