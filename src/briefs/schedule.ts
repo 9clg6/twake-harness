@@ -3,8 +3,8 @@ import { createHash } from 'node:crypto';
 import { wallDayAt, type Clock } from '../agent/clock.js';
 import {
 	findAssistant,
-	listActiveAssistants,
-	type AssistantRecord
+	isActiveAssistant,
+	listActiveAssistants
 } from '../assistants/repository.js';
 import { withPrincipal } from '../db/client.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
@@ -24,11 +24,6 @@ export interface BriefDeps extends WakeDeps {
 // The date of each owner's brief a scheduler is done with, sent, skipped, or not to send: its next
 // passes look no further at that owner until their next date
 export type SettledBriefs = Map<string, string>;
-
-// An assistant its owner has not removed, in its room
-function isActive(assistant: AssistantRecord | null): boolean {
-	return assistant !== null && assistant.deletedAt === null && assistant.roomId !== null;
-}
 
 // Monday to Friday, for a date as dateIn gives it
 function isWorkingDay(date: string): boolean {
@@ -57,14 +52,14 @@ async function wasWoken(deps: BriefDeps, owner: string, id: string): Promise<boo
 // assistant is woken for the brief of that date, which wake() keeps from going twice, as it keeps
 // any wake-up, and counts in their hourly wake-ups. One their cap held back is tried again at the
 // next pass. Three hours past eight, the day is theirs no more: a brief that never went is skipped,
-// which a line says.
+// which a line says. Their wall clock is read first, as it is all most passes need of them.
 async function briefOwner(deps: BriefDeps, owner: string, settled: SettledBriefs): Promise<void> {
 	const { config, db, clock, log } = deps;
-	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-	if (!isActive(assistant)) return;
 	const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 	const { date, hour } = wallDayAt(clock.now(), timeZone);
 	if (settled.get(owner) === date || !isWorkingDay(date) || hour < BRIEF_HOUR) return;
+	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+	if (!isActiveAssistant(assistant)) return;
 	const id = briefId(owner, date);
 	if (hour >= BRIEF_HOUR + BRIEF_WINDOW_HOURS) {
 		settled.set(owner, date);
