@@ -78,18 +78,12 @@ describe('when none of its tools does what is asked', () => {
 		expect(prompt).toContain(WITH_FILE_SEARCH);
 	});
 
-	it('and so is the organization agent', () => {
+	it('and so is the organization agent, never with the file example: it acts for no user', () => {
 		const prompt = organizationPrompt('Twake Space', 'You help the members of Linagora.', [
-			'read_freebusy'
+			'search_files'
 		]);
 
 		expect(prompt).toContain(WHEN_TOOLS_FALL_SHORT);
 		expect(prompt).not.toContain('a version of a file');
-	});
-
-	it('and so is the organization agent that can search the files', () => {
-		expect(
-			organizationPrompt('Twake Space', 'You help the members of Linagora.', ['search_files'])
-		).toContain(WITH_FILE_SEARCH);
 	});
 });

@@ -42,7 +42,8 @@ export function assistantPrompt(name: string, tools: readonly string[]): string 
 }
 
 // The organization agent speaks to the members of the organization, each named in front of
-// their message so it knows who is writing
+// their message so it knows who is writing. It acts for no user, and the Drive answers for a user
+// only: the file search is never among the tools it can use.
 export function organizationPrompt(
 	name: string,
 	persona: string,
@@ -53,7 +54,7 @@ export function organizationPrompt(
 		`You are ${name}, the organization agent.`,
 		'Each message starts with the Matrix identifier of the member writing to you, in brackets; answer that member.',
 		'Answer in the language of the member, concisely and factually.',
-		...toolRules(tools),
+		...toolRules(tools.filter((tool) => tool !== FILE_SEARCH)),
 		'Your reasoning is logged for audit and is never shown to the member.'
 	].join(' ');
 }
