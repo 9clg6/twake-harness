@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
-import { findTimeZone } from '../agent/clock.js';
+import { findTimeZone, type TimeZone } from '../agent/clock.js';
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { WaitReason } from '../consents/consent.js';
@@ -11,7 +11,7 @@ import { makeOwnerRequest, requestText } from '../consents/request.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
-import { keepOwnerTimeZone } from '../settings/repository.js';
+import { saveOwnerTimeZone } from '../settings/repository.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
 import { makeOptionalOwnerConsentLink } from './consent-link.js';
@@ -116,7 +116,7 @@ function loggedArguments(toolName: string, url: URL): Record<string, string> {
 
 // The zone an answer names in time_zone, by its canonical name: null when it names none the runtime
 // knows
-function zoneOf(body: unknown): string | null {
+function zoneOf(body: unknown): TimeZone | null {
 	if (typeof body !== 'object' || body === null) return null;
 	const zone = (body as Record<string, unknown>)['time_zone'];
 	return typeof zone === 'string' ? findTimeZone(zone) : null;
@@ -522,7 +522,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			const zone =
 				succeeded && OWNER_ZONE_READS.includes(contract.toolName) ? zoneOf(answered.body) : null;
 			if (zone !== null && owner !== ORGANIZATION_PRINCIPAL) {
-				await withPrincipal(context.db, { id: owner }, (tx) => keepOwnerTimeZone(tx, owner, zone));
+				await withPrincipal(context.db, { id: owner }, (tx) => saveOwnerTimeZone(tx, owner, zone));
 			}
 			return { result: answered.result };
 		}

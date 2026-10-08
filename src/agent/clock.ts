@@ -8,10 +8,15 @@ export interface Clock {
 
 export const SYSTEM_CLOCK: Clock = { now: () => new Date() };
 
+// The canonical name of an IANA time zone the runtime knows, as only findTimeZone gives one: a zone
+// read elsewhere, in a setting or a contract's answer, becomes one there
+export type TimeZone = string & { readonly __brand: 'TimeZone' };
+
 // The canonical name of an IANA time zone the runtime knows, or null for any other name
-export function findTimeZone(zone: string): string | null {
+export function findTimeZone(zone: string): TimeZone | null {
 	try {
-		return new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions().timeZone;
+		const { timeZone } = new Intl.DateTimeFormat('en-US', { timeZone: zone }).resolvedOptions();
+		return timeZone as TimeZone;
 	} catch {
 		return null;
 	}

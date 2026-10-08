@@ -28,7 +28,7 @@ import {
 	saveSessionMessages,
 	type SessionRecord
 } from '../sessions/repository.js';
-import { findOwnerTimeZone } from '../settings/repository.js';
+import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
@@ -632,9 +632,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// Read at the start of every turn, never kept: a session can span days. It is told in the
 			// zone of the owner's calendar once a read of it named one, the call their yes just ran
 			// included, and in the deployment's until then.
-			const timeZone =
-				(await withPrincipal(db, principal, (tx) => findOwnerTimeZone(tx, principal.id))) ??
-				config.timeZone;
+			const timeZone = await fetchOwnerTimeZone(db, principal.id, config.timeZone);
 			const moment = describeMoment(clock.now(), timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);

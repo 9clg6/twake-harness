@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { findTimeZone } from './agent/clock.js';
+import { findTimeZone, type TimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './wakeups/event-types.js';
 import { HOUR_MS } from './wakeups/retention.js';
@@ -159,8 +159,9 @@ export interface Config {
 	};
 	// The language of the fixed texts of the assistants and the creator
 	readonly locale: Locale;
-	// The IANA time zone the assistants read the present in, such as Europe/Paris
-	readonly timeZone: string;
+	// The IANA time zone the assistants read the present in, such as Europe/Paris, until a read of
+	// their owner's calendar names its zone, and at whose midnight a user's day of tokens starts
+	readonly timeZone: TimeZone;
 	readonly logLevel: LogLevel;
 }
 
