@@ -37,7 +37,8 @@ function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
 
 // Reminds one owner, when their permission is due its reminder and they were never reminded of
 // the one they gave on that date, with the deployment's consent link bound to them: the reminder
-// is kept with the message it queues, or not at all. Resolves to whether it queued one.
+// is kept with the message it queues, or not at all, in place of the one of the permission they
+// gave before, an owner having one kept at most. Resolves to whether it queued one.
 async function remindOwner(deps: ReminderDeps, link: string, owner: string): Promise<boolean> {
 	const { config, db, clock } = deps;
 	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
@@ -53,6 +54,9 @@ async function remindOwner(deps: ReminderDeps, link: string, owner: string): Pro
 			values (${owner}, ${delegation.consentedAt})
 			on conflict do nothing`;
 		if (kept.count === 0) return false;
+		await tx.sql`
+			delete from delegation_reminders
+			where owner = ${owner} and consented_at <> ${delegation.consentedAt}`;
 		const locale = localeOf(current, config.locale);
 		const expiry = describeMoment(delegation.expiresAt, config.timeZone, locale);
 		await enqueueJob(tx, {

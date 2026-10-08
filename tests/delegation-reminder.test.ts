@@ -164,6 +164,10 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(await r.nextSaying(REMINDER, seen + 1)).toContain(
 			'expire le jeudi 17 décembre 2026 à 10:00.'
 		);
+		// The harness keeps the reminder of the permission I hold now, and none of those before
+		const kept = await r.h.db.sql<{ consented_at: Date }[]>`
+			select consented_at from delegation_reminders where owner = ${ALICE}`;
+		expect(kept.map((row) => row.consented_at.toISOString())).toEqual(['2026-11-17T09:00:00.000Z']);
 	});
 
 	it('runs during the hour the deployment sets only, on the wall clock of its time zone: started after it, it waits for the next day', async () => {
