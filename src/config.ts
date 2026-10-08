@@ -89,8 +89,8 @@ export interface Config {
 		// when the broker lacks an owner's permission for their assistant to act for them, or null
 		// when the deployment gives none
 		readonly brokerConsentUrl: string | null;
-		// The hour, from 0 to 23 on the wall clock of the assistants' time zone, of the worker role's
-		// daily pass that reminds the owners whose permission expires within five days
+		// The hour, from 0 to 23 on the wall clock of ASSISTANT_TIMEZONE, the deployment's zone, of the
+		// worker role's daily pass that reminds the owners whose permission expires within five days
 		readonly delegationReminderHour: number;
 	};
 	readonly matrix: {

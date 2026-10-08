@@ -114,7 +114,7 @@ export interface ReminderScheduler {
 }
 
 // Looks at once whether the day's pass is due, then every checkMs. It is due once a day, during the
-// reminders' hour on the wall clock of the assistants' zone, and then only: a pass that failed
+// reminders' hour on the wall clock of ASSISTANT_TIMEZONE, and then only: a pass that failed
 // runs again at the next look within that hour, and a role started after it, or a pass that failed
 // throughout it, waits for the next day's, which misses nobody, a permission being reminded of
 // from five days before it expires. Kept by owner and by date of consent, a reminder goes out
