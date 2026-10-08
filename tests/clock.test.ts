@@ -49,8 +49,12 @@ async function readCalendar(
 	args: Record<string, unknown>
 ): Promise<void> {
 	h.apisix.llm.script = modelUsing(tool, args);
-	const res = await makeClient(h).post(sub, '/v1/chat', { message: 'Que dit mon agenda ?' });
+	const res = await makeClient(h).post<{ answer: string }>(sub, '/v1/chat', {
+		message: 'Que dit mon agenda ?'
+	});
 	expect(res.status).toBe(200);
+	// The literal model tells what it found only once the contract answered the read with success
+	expect(res.body.answer).toMatch(/^Found: /);
 }
 
 // The block of the system prompt that states the present: the prompt's parts are separated by
