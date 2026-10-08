@@ -1,23 +1,18 @@
-import type { FastifyBaseLogger } from 'fastify';
-
-import type { MatrixAdmin } from './admin.js';
+import type { AnnounceDeps } from './commands.js';
 import { isRecord } from './json.js';
 
 const MEMBER_EVENT_TYPE = 'm.room.member';
 
-export interface NamingDeps {
-	readonly admin: MatrixAdmin;
-	readonly log: FastifyBaseLogger;
-}
-
-// The name an assistant goes by in a room, which its member event there carries: clients show it
-// over the name of its profile, which a homeserver may keep from changing. It is written when it
-// differs, in a room the assistant is in, over the rest of its membership; a refusal is thrown.
+// The name an assistant goes by in a room, which its member event there carries. Clients show it
+// over the name of its profile, which a homeserver may keep from changing, as the platform's does:
+// the rooms are where its owner sees the name they gave it, or the one it took after them. It is
+// written when it differs, in a room the assistant is in, over the rest of its membership; a
+// refusal is thrown.
 export async function nameInRoom(
-	deps: NamingDeps,
+	deps: AnnounceDeps,
 	room: { readonly roomId: string; readonly assistantUserId: string },
 	name: string
-): Promise<'named' | 'unchanged' | 'not_joined'> {
+): Promise<'written' | 'unchanged' | 'not_joined'> {
 	const { roomId, assistantUserId } = room;
 	const current = await deps.admin.readState(
 		assistantUserId,
@@ -33,5 +28,5 @@ export async function nameInRoom(
 		displayname: name
 	});
 	deps.log.info({ roomId, userId: assistantUserId }, 'assistant named in its room');
-	return 'named';
+	return 'written';
 }

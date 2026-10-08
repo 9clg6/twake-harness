@@ -143,25 +143,25 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, qara.userId);
 		// The homeserver refuses the name in the room twice, then takes it
+		const member = `/state/m.room.member/${encodeURIComponent(mine.userId)}`;
 		let refused = 0;
 		h.apisix.matrixFault = (call) => {
-			if (call.method !== 'PUT' || !call.path.includes('/state/m.room.member/') || refused >= 2) {
-				return null;
-			}
+			if (call.method !== 'PUT' || !call.path.includes(member) || refused >= 2) return null;
 			refused += 1;
 			return 403;
 		};
+		const before = h.logLines().length;
 		try {
 			const room = await client.createDirectRoom(mine.userId);
 			await client.waitForMessage(room, mine.userId, (text) => text.startsWith('Hello'));
 			expect(await nameShown(qara, room, mine.userId, "Qara's assistant")).toBe("Qara's assistant");
 			expect(refused).toBe(2);
-			const logged = h
+			// Each refusal fails the naming job, which the queue tries again
+			const failed = h
 				.logLines()
-				.filter(
-					(line) => line['msg'] === 'assistant not named in its room' && line['roomId'] === room
-				);
-			expect(logged).toHaveLength(2);
+				.slice(before)
+				.filter((line) => line['msg'] === 'job failed' && line['kind'] === 'name');
+			expect(failed).toHaveLength(2);
 		} finally {
 			h.apisix.matrixFault = null;
 		}

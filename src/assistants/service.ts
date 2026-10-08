@@ -60,9 +60,8 @@ export interface AssistantService {
 	// name, takes it; a name its owner gives it meanwhile stays. Failed when the owner's name could
 	// not be read, which leaves the former name.
 	nameAfterOwner(owner: string): Promise<'renamed' | 'kept' | 'failed'>;
-	// The owner's assistant goes by its name: in its profile, where the homeserver lets it change,
-	// and in each of its rooms with its owner. A room that refuses it fails the call, to be tried
-	// again.
+	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
+	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
 	showName(owner: string): Promise<void>;
 	// Deletes the live assistant, only when it is the one created at that time if one is given
 	remove(owner: string, createdAt?: Date): Promise<boolean>;
@@ -322,18 +321,9 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			} catch (err: unknown) {
 				log.warn({ owner, userId, err }, 'assistant profile not named');
 			}
-			// Clients show the name of the room over the name of the profile, which a homeserver may
-			// keep from changing
-			let refused = 0;
 			for (const roomId of await listAssistantRoomIds(db, owner, userId)) {
-				try {
-					await nameInRoom({ admin, log }, { roomId, assistantUserId: userId }, name);
-				} catch (err: unknown) {
-					refused += 1;
-					log.warn({ owner, userId, roomId, err }, 'assistant not named in its room');
-				}
+				await nameInRoom({ admin, log }, { roomId, assistantUserId: userId }, name);
 			}
-			if (refused > 0) throw new Error(`the name of the assistant was refused in ${refused} rooms`);
 		},
 		async remove(owner, createdAt) {
 			const record = await current(owner);
