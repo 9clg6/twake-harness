@@ -271,27 +271,6 @@ describe('a provisioned assistant', () => {
 		expect((await h.api.get('max@test.local', '/v1/assistants/me')).status).toBe(404);
 	});
 
-	it('has its recovery queued anew after one that failed for good, whoever asks for it', async () => {
-		const ned = await h.synapse.registerUser('ned');
-		const fay = await h.synapse.registerUser('fay');
-		await provisionUntilReady(h.api, ned.userId);
-		await provisionUntilReady(h.api, fay.userId);
-		// A recovery whose job failed for good, as the queue leaves it after its last attempt
-		for (const owner of ['ned@test.local', 'fay@test.local']) {
-			await h.db.sql`
-				insert into jobs (kind, payload, dedup_key, status, attempts, last_error, finished_at)
-				values ('recover', ${JSON.stringify({ owner })}::jsonb, ${`recover:${owner}`}, 'failed', 3,
-					'the homeserver was unreachable', now())`;
-		}
-
-		const queued = { status: 202, body: { queued: true } };
-		// Its provisioner asks for it on the owner's behalf, or the owner themselves
-		expect(await h.api.post(PROVISIONER, `${provisioningPath(ned.userId)}/recover`, {})).toEqual(
-			queued
-		);
-		expect(await h.api.post('fay@test.local', '/v1/assistants/me/recover', {})).toEqual(queued);
-	});
-
 	it('becomes ready after a failed preparation, without its provisioner calling again', async () => {
 		const kim = await h.synapse.registerUser('kim');
 		// The homeserver refuses the first upload of the assistant's identity
@@ -967,5 +946,46 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 		expect(after['deviceId']).not.toBe(before['deviceId']);
 		const readAfter = await h.api.get(PROVISIONER, provisioningPath(rita.userId));
 		expect(readAfter).toEqual({ status: 200, body: after });
+	});
+
+	it('has its recovery queued again after one that failed for good, whoever asks for it', async () => {
+		const ned = await h.synapse.registerUser('ned');
+		const fay = await h.synapse.registerUser('fay');
+		const before = [await provisionUntil(ned.userId, 200), await provisionUntil(fay.userId, 200)];
+		// Both identities are escrowed, then the role loses its store
+		const escrowed = ['ned@test.local', 'fay@test.local'].map(
+			(owner) => `twake-harness/assistants/${owner}`
+		);
+		for (let i = 0; i < 120; i += 1) {
+			if (escrowed.every((path) => h.apisix.openbao.store.has(path))) break;
+			await sleep(250);
+		}
+		await h.restartRole({ wipeCryptoStore: true });
+		await provisionUntil(ned.userId, 409);
+		await provisionUntil(fay.userId, 409);
+
+		// Its provisioner asks for it on the owner's behalf, or the owner themselves
+		const askedByProvisioner = `${provisioningPath(ned.userId)}/recover`;
+		const queued = { status: 202, body: { queued: true } };
+		// The homeserver refuses the signature of the recovered device: both recoveries fail for good
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/signatures/upload')
+				? 500
+				: null;
+		try {
+			expect(await h.api.post(PROVISIONER, askedByProvisioner, {})).toEqual(queued);
+			expect(await h.api.post('fay@test.local', '/v1/assistants/me/recover', {})).toEqual(queued);
+			await sleep(12_000);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+
+		// Asked again, each recovery is queued anew and brings the identity back
+		expect(await h.api.post(PROVISIONER, askedByProvisioner, {})).toEqual(queued);
+		expect(await h.api.post('fay@test.local', '/v1/assistants/me/recover', {})).toEqual(queued);
+		const after = [await provisionUntil(ned.userId, 200), await provisionUntil(fay.userId, 200)];
+		expect(after.map((identity) => identity['masterKey'])).toEqual(
+			before.map((identity) => identity['masterKey'])
+		);
 	});
 });
