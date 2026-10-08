@@ -22,8 +22,6 @@ import type { Locale, Messages } from '../i18n/messages.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
 import type { Refusal, RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
-import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
-import type { Config as HarnessConfig } from '../config.js';
 import { matrixUserIdOfPrincipal } from '../principals/identity.js';
 import {
 	suggestPayloadSchema,
@@ -33,6 +31,7 @@ import {
 import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
 import type { SpaceNotifications } from '../suggestions/space.js';
 import { proposalSentence } from '../suggestions/text.js';
+import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
 const turnPayload = z.object({
 	owner: z.string().min(1),
@@ -132,7 +131,7 @@ export interface TurnWorkerOptions {
 	readonly requestLifetimeMs: number;
 	// Takes the jobs that propose actions from the messages of channels; none without it
 	readonly suggestions?: {
-		readonly config: HarnessConfig;
+		readonly config: Config;
 		// Twake Space's notifications, or null to post in the assistant's room alone
 		readonly space: SpaceNotifications | null;
 	};
@@ -370,7 +369,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// What an owner's assistant proposes from the quotes of a job: the quotes are used here, sent
-	// to the model, and gone with the job. This never throws, so that a failed job never keeps them.
+	// to the model, and gone with the job. Its handler catches what this throws, so that a failed
+	// job never keeps them.
 	async function suggest(payload: SuggestPayload): Promise<void> {
 		const settings = options.suggestions;
 		if (settings === undefined) return;
