@@ -60,6 +60,7 @@ import { buildRegistration, creatorUserId, isAssistantUserId } from './registrat
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
 import { makeLaidOutText, makeRichText } from './format.js';
+import { makeIdentityQuestions } from './identity-questions.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
@@ -1034,6 +1035,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		};
 	}
 
+	// The question an assistant asks its owner about a new identity of theirs, while the deployment
+	// only reports, and the owner's answers to it
+	const identityQuestions = makeIdentityQuestions({
+		db,
+		log,
+		mode: config.matrix.ownerDeviceTrust,
+		fetchMessages,
+		lifetimeMs: config.consent.requestLifetimeMs
+	});
+
 	// An owner's words count only from a device their cross-signing identity signed, in enforce
 	// mode; in report mode they count all the same, and the devices that fall short are reported
 	const ownerDevices = makeOwnerDeviceGate({
@@ -1041,7 +1052,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		mode: config.matrix.ownerDeviceTrust,
 		fetchMessages,
-		questionLifetimeMs: config.consent.requestLifetimeMs,
+		questions: identityQuestions,
 		decrypt: decryptChecked,
 		queryKeys: async (assistantUserId, ownerUserId) => {
 			const intent = appservice.getIntentForUserId(assistantUserId);
@@ -1233,7 +1244,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					// The owner's words answer the newest question of the room: the one about their
 					// identity, or a request
 					const requestRoom = { roomId, owner, assistantUserId: room.userId };
-					if (await ownerDevices.answered(requestRoom, eventId, checked.text)) return;
+					if (await identityQuestions.wrote(requestRoom, eventId, checked.text)) return;
 					if (await requests.wrote(requestRoom, eventId, checked.text)) return;
 				}
 			}

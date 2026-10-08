@@ -2,23 +2,16 @@ import { createHash } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { OwnerDeviceTrust } from '../config.js';
-import { wordAnswer, type Answer } from '../consents/answers.js';
-import { closeRequestsToWords, isRequestOpenToWordsSince } from '../consents/repository.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import type { DeviceShortfall, Messages, OwnerWordsKind } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
-import type { RequestRoom } from './consent-requests.js';
+import type { IdentityQuestions } from './identity-questions.js';
 import {
-	acceptSeenIdentity,
-	askIdentityQuestion,
 	claimDeviceNotice,
 	clearSeen,
-	closeIdentityQuestion,
 	findOwnerCrossSigning,
-	isIdentityAnswerEvent,
 	pinFirstSeen,
 	receiveWords,
-	recordIdentityAnswer,
 	recordSeen,
 	seeSession,
 	type DeviceNoticeReason
@@ -121,8 +114,8 @@ export interface OwnerDeviceGateDeps {
 	// The homeserver's answer to a keys query for the owner, made as their assistant
 	queryKeys(assistantUserId: string, ownerUserId: string): Promise<unknown>;
 	fetchMessages(owner: string): Promise<Messages>;
-	// How long the question about an identity the owner may have reset waits for their answer
-	readonly questionLifetimeMs: number;
+	// Where the owner is asked whether they reset their identity themselves
+	readonly questions: Pick<IdentityQuestions, 'ask'>;
 }
 
 export interface OwnerDeviceGate {
@@ -133,11 +126,6 @@ export interface OwnerDeviceGate {
 	// Whether the owner's words that came in clear count: never in enforce mode, where the owner is
 	// told, and as before in report mode; the reason says where they came in clear
 	admitUnencrypted(words: OwnerWords, reason: UnencryptedReason): Promise<boolean>;
-	// Whether the owner's words, admitted in their assistant's room, answered the question about
-	// their identity asked there: when they say yes or no right after it, unless a request was asked
-	// in the room since, the newest question, which takes them then. Words after the question close
-	// it to typed answers either way, but for the words that raised it.
-	answered(room: RequestRoom, eventId: string, text: string): Promise<boolean>;
 }
 
 export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate {
@@ -205,80 +193,15 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		}
 	}
 
-	// Asks the owner in the room, in a question marked for their client, whether they reset their
-	// identity themselves: once per identity, and again once the question expired unanswered.
+	// Asks the owner in the room their words came to whether they reset their identity themselves.
 	// Whether they could be asked never changes whether their words count.
-	async function ask(words: OwnerWords, masterPublicKey: string): Promise<void> {
-		const { owner, roomId, eventId } = words;
+	async function ask(words: OwnerWords, newIdentity: string): Promise<void> {
+		const { roomId, owner, eventId, assistantUserId } = words;
 		try {
-			const question = await withPrincipal(db, { id: owner }, async (tx) => {
-				const asked = await askIdentityQuestion(tx, owner, {
-					masterPublicKey,
-					roomId,
-					eventId,
-					lifetimeMs: deps.questionLifetimeMs
-				});
-				if (asked === null) return null;
-				const messages = await deps.fetchMessages(owner);
-				await enqueueJob(tx, {
-					kind: 'send',
-					payload: {
-						asUserId: words.assistantUserId,
-						roomId,
-						text: messages.ownerDevices.identityQuestion,
-						questionMarker: { id: asked.id, expiresTs: asked.expiresAt.getTime() }
-					},
-					dedupKey: `identity-question:${eventId}`,
-					groupKey: `send:${roomId}`
-				});
-				return asked;
-			});
-			if (question !== null) {
-				log.info(
-					{ roomId, owner, eventId, mode, questionId: question.id },
-					'owner asked about their identity'
-				);
-			}
+			await deps.questions.ask({ roomId, owner, assistantUserId }, eventId, newIdentity);
 		} catch (err: unknown) {
 			log.error({ roomId, owner, eventId, mode, err }, 'owner identity question failed');
 		}
-	}
-
-	// The owner's yes or no to the question about their identity, once it is the newest question of
-	// the room: a yes holds the identity it asks about, as the API does; a no keeps the one held.
-	// Either way the assistant tells them what comes of it. Resolves to the answer taken, 'again'
-	// for words that took it already, or null when the words answer nothing.
-	async function answerIdentityQuestion(
-		room: RequestRoom,
-		eventId: string,
-		says: Answer | null
-	): Promise<{ readonly questionId: string; readonly says: Answer } | 'again' | null> {
-		const { roomId, owner, assistantUserId } = room;
-		return withPrincipal(db, { id: owner }, async (tx) => {
-			if (says !== null && (await isIdentityAnswerEvent(tx, owner, eventId))) return 'again';
-			const question = await closeIdentityQuestion(tx, owner, roomId, eventId);
-			if (question === null || says === null) return null;
-			// The owner answers the newest question of the room, as their client shows it
-			if (await isRequestOpenToWordsSince(tx, owner, roomId, question.askedAt)) return null;
-			await recordIdentityAnswer(tx, owner, question.id, says, eventId);
-			await closeRequestsToWords(tx, owner, roomId);
-			if (says === 'yes') {
-				const { pinned } = await acceptSeenIdentity(tx, owner, question.masterPublicKey, 'chat');
-				if (pinned === null) throw new Error('the identity asked about is no longer the one seen');
-			}
-			const { ownerDevices } = await deps.fetchMessages(owner);
-			await enqueueJob(tx, {
-				kind: 'send',
-				payload: {
-					asUserId: assistantUserId,
-					roomId,
-					text: says === 'yes' ? ownerDevices.identityAdopted : ownerDevices.identityRejected
-				},
-				dedupKey: `identity-answer:${eventId}`,
-				groupKey: `send:${roomId}`
-			});
-			return { questionId: question.id, says };
-		});
 	}
 
 	return {
@@ -357,12 +280,12 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				log.info(fields, 'owner device unverified');
 				// The identity that signed the session may be one the owner reset themselves: their
 				// assistant asks them, and their answer may adopt it
-				const asked =
+				const newIdentity =
 					shortfall === 'changed' && verdict.signed && words.conversation === 'assistant'
 						? verdict.masterKey
 						: null;
-				if (asked !== null) {
-					await ask(words, asked);
+				if (newIdentity !== null) {
+					await ask(words, newIdentity);
 					return admitted;
 				}
 				await tell(words, verdict.device, reason, true, (m) => m.ownerDevices.reported(shortfall));
@@ -384,24 +307,6 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			log.info(fields, 'assistant ignored an unencrypted message');
 			await tell(words, '*', 'unencrypted', false, (m) => m.ownerDevices.unencrypted);
 			return false;
-		},
-		answered: async (room, eventId, text) => {
-			// Only report mode asks: no message ever makes an enforcing harness hold an identity
-			if (mode !== 'report') return false;
-			const { roomId, owner } = room;
-			let answer: Awaited<ReturnType<typeof answerIdentityQuestion>>;
-			try {
-				answer = await answerIdentityQuestion(room, eventId, wordAnswer(text));
-			} catch (err: unknown) {
-				// The owner's words count all the same, for a request or a turn
-				log.error({ roomId, owner, eventId, mode, err }, 'owner identity answer failed');
-				return false;
-			}
-			if (answer === null) return false;
-			if (answer !== 'again') {
-				log.info({ roomId, owner, eventId, ...answer }, 'owner answered the identity question');
-			}
-			return true;
 		}
 	};
 }

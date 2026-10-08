@@ -1,5 +1,6 @@
 import type { Answer } from '../consents/answers.js';
 import type { Tx } from '../db/client.js';
+import type { YesNoQuestion } from './questions.js';
 
 // How the harness came to hold an owner's identity: the first one it saw published, the one the
 // owner accepted through the API, or the one they said yes to when their assistant asked them
@@ -148,11 +149,15 @@ export async function acceptSeenIdentity(
 	return { held, pinned: await pinAccepted(tx, owner, masterPublicKey, by) };
 }
 
+interface IdentityQuestionRow {
+	question_id: string;
+	question_expires_at: Date;
+}
+
 // The question that asks the owner whether they reset their identity themselves, as their client
-// is told it: its id, and until when it waits for their answer
-export interface AskedIdentityQuestion {
-	readonly id: string;
-	readonly expiresAt: Date;
+// tells it from other messages: its id, and until when it waits for their answer
+function toYesNoQuestion(row: IdentityQuestionRow): YesNoQuestion {
+	return { id: row.question_id, expiresTs: row.question_expires_at.getTime() };
 }
 
 // Asks the owner, in the room their words came to, whether they reset their identity themselves:
@@ -168,9 +173,9 @@ export async function askIdentityQuestion(
 		readonly eventId: string;
 		readonly lifetimeMs: number;
 	}
-): Promise<AskedIdentityQuestion | null> {
+): Promise<YesNoQuestion | null> {
 	const { masterPublicKey, roomId, eventId, lifetimeMs } = asked;
-	const rows = await tx.sql<{ question_id: string; question_expires_at: Date }[]>`
+	const rows = await tx.sql<IdentityQuestionRow[]>`
 		update owner_cross_signing set
 			question_id = gen_random_uuid(),
 			question_master_public_key = ${masterPublicKey},
@@ -190,7 +195,7 @@ export async function askIdentityQuestion(
 			)
 		returning question_id, question_expires_at`;
 	const row = rows[0];
-	return row === undefined ? null : { id: row.question_id, expiresAt: row.question_expires_at };
+	return row === undefined ? null : toYesNoQuestion(row);
 }
 
 // The question about their identity open to the owner's words: asked in the room, about the
