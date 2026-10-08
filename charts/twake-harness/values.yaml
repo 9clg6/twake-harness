@@ -36,8 +36,11 @@ autoscaling:
 config:
   authJwksUrl: ''
   authIssuer: ''
-  # The audience of the access tokens; several may be listed, comma separated
   authAudience: ''
+  # The other audiences whose tokens may answer a call that waits for its owner, comma separated,
+  # such as twakespace for Twake Space's buttons: on the approve and refuse routes of the pending
+  # calls, and on no other route; empty for none
+  authAnswerAudiences: ''
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
   # Where the contracts sit under that address: the prefix of their calls and the path of their

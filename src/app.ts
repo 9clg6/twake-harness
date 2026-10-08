@@ -128,6 +128,13 @@ const refuseBodySchema = z
 
 const NOT_USEFUL_MUTE_MS = 7 * 24 * 60 * 60 * 1000;
 
+// The routes where a token of one of AUTH_ANSWER_AUDIENCES is accepted: the owner's yes or no to a
+// call that waits for them, from buttons another application shows them, and nothing else
+const ANSWER_ROUTES: ReadonlySet<string> = new Set([
+	'/v1/pending-calls/:id/approve',
+	'/v1/pending-calls/:id/refuse'
+]);
+
 const suggestionSettingsSchema = z
 	.object({
 		enabled: z.boolean(),
@@ -221,6 +228,14 @@ function principalOf(request: FastifyRequest): Principal {
 export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	const { config, db } = options;
 	const authenticate = options.authenticator ?? makeJwtAuthenticator(config.auth);
+	const authenticateAnswer =
+		options.authenticator ??
+		(config.auth.answerAudiences.length === 0
+			? authenticate
+			: makeJwtAuthenticator({
+					...config.auth,
+					audience: [config.auth.audience, ...config.auth.answerAudiences]
+				}));
 
 	async function loadPrincipal(principal: Principal): Promise<PrincipalRecord> {
 		return withPrincipal(db, principal, (tx) => ensurePrincipal(tx, principal));
@@ -537,7 +552,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		async (scope) => {
 			// Identity is settled before any other work: a refused token never reaches the database.
 			scope.addHook('preHandler', async (request: FastifyRequest, reply) => {
-				const result = await authenticate(request.headers.authorization);
+				const answering = ANSWER_ROUTES.has(request.routeOptions.url ?? '');
+				const result = await (answering ? authenticateAnswer : authenticate)(
+					request.headers.authorization
+				);
 				if (!result.ok) {
 					request.log.info({ reason: result.reason }, 'request refused');
 					return reply.code(401).send({ error: 'invalid token' });

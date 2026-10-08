@@ -37,8 +37,11 @@ export interface Config {
 	readonly auth: {
 		readonly jwksUrl: URL;
 		readonly issuer: string;
-		// The audiences the access tokens may carry: any one of them is accepted
-		readonly audience: readonly string[];
+		readonly audience: string;
+		// The other audiences a token may carry to answer a call that waits for its owner, such as
+		// those of Twake Space's buttons: accepted on /v1/pending-calls/:id/approve and /refuse, and
+		// on no other route
+		readonly answerAudiences: readonly string[];
 	};
 	readonly apisix: {
 		readonly baseUrl: URL;
@@ -186,6 +189,7 @@ const envSchema = z.object({
 	AUTH_JWKS_URL: z.url(),
 	AUTH_ISSUER: z.string().min(1),
 	AUTH_AUDIENCE: z.string().min(1),
+	AUTH_ANSWER_AUDIENCES: z.string().default(''),
 	APISIX_BASE_URL: z.url(),
 	APISIX_CONSUMER_KEY: z.string().min(1),
 	LLM_MODEL: z.string().min(1).default('qwen3.8'),
@@ -380,9 +384,6 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
-	if (listOf(values.AUTH_AUDIENCE).length === 0) {
-		throw new Error('invalid configuration: AUTH_AUDIENCE lists no audience');
-	}
 	if (values.SPACE_API_URL !== '' && !URL.canParse(values.SPACE_API_URL)) {
 		throw new Error('invalid configuration: SPACE_API_URL is not a URL');
 	}
@@ -403,7 +404,8 @@ export function loadConfig(env: Env): Config {
 		auth: {
 			jwksUrl: new URL(values.AUTH_JWKS_URL),
 			issuer: values.AUTH_ISSUER,
-			audience: listOf(values.AUTH_AUDIENCE)
+			audience: values.AUTH_AUDIENCE,
+			answerAudiences: listOf(values.AUTH_ANSWER_AUDIENCES)
 		},
 		apisix: {
 			baseUrl: new URL(values.APISIX_BASE_URL),

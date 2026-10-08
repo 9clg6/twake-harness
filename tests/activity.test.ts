@@ -658,7 +658,7 @@ describe('an assignment published on the activity exchange wakes the assignee’
 				DATABASE_URL: config.databaseUrl,
 				AUTH_JWKS_URL: config.auth.jwksUrl.toString(),
 				AUTH_ISSUER: config.auth.issuer,
-				AUTH_AUDIENCE: config.auth.audience.join(','),
+				AUTH_AUDIENCE: config.auth.audience,
 				APISIX_BASE_URL: config.apisix.baseUrl.toString(),
 				APISIX_CONSUMER_KEY: config.apisix.consumerKey
 			}),
