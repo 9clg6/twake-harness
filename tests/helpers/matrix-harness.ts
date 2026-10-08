@@ -124,6 +124,7 @@ export async function startMatrixHarness(
 				log: replica.log,
 				locale: config.locale,
 				turn: config.turn,
+				requestLifetimeMs: config.consent.requestLifetimeMs,
 				pollIntervalMs: 100
 			})
 		);

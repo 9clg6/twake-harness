@@ -62,6 +62,7 @@ async function startReplica(h: TestHarness): Promise<Replica> {
 		log: app.log,
 		locale: config.locale,
 		turn: config.turn,
+		requestLifetimeMs: config.consent.requestLifetimeMs,
 		pollIntervalMs: 100,
 		concurrency: 2
 	});
@@ -130,6 +131,7 @@ describe('two api replicas on one database', () => {
 			log: h.app.log,
 			locale: h.config.locale,
 			turn: h.config.turn,
+			requestLifetimeMs: h.config.consent.requestLifetimeMs,
 			pollIntervalMs: 100,
 			concurrency: 2
 		});
@@ -261,6 +263,7 @@ describe('two api replicas on one database', () => {
 			log: h.app.log,
 			locale: h.config.locale,
 			turn: h.config.turn,
+			requestLifetimeMs: h.config.consent.requestLifetimeMs,
 			pollIntervalMs: 100,
 			concurrency: 2
 		});
@@ -276,6 +279,7 @@ describe('two api replicas on one database', () => {
 			log: h.app.log,
 			locale: h.config.locale,
 			turn: h.config.turn,
+			requestLifetimeMs: h.config.consent.requestLifetimeMs,
 			pollIntervalMs: 100,
 			concurrency: 2
 		});

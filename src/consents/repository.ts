@@ -1,5 +1,6 @@
 import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
+import type { YesNoQuestion } from '../matrix/questions.js';
 import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
 
 export async function hasConsent(
@@ -549,6 +550,24 @@ export interface PendingCallView {
 	readonly expires_at: string;
 }
 
+// When the request about a call expires, its lifetime after the call froze: an answer from then on
+// runs nothing
+function requestExpiry(record: PendingCallRecord, lifetimeMs: number): Date {
+	return new Date(record.createdAt.getTime() + lifetimeMs);
+}
+
+// The question the request about a call asks its owner, as their client tells it from other
+// messages: the id and the end of validity the API shows. None once the call no longer waits for
+// an answer, decided from another client or closed unanswered, so that no client offers one.
+export function toYesNoQuestion(
+	record: PendingCallRecord,
+	lifetimeMs: number
+): YesNoQuestion | null {
+	return record.state === 'open'
+		? { id: record.id, expiresTs: requestExpiry(record, lifetimeMs).getTime() }
+		: null;
+}
+
 export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number): PendingCallView {
 	return {
 		id: record.id,
@@ -561,6 +580,6 @@ export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number)
 		reasons: record.reasons,
 		request: record.request,
 		created_at: record.createdAt.toISOString(),
-		expires_at: new Date(record.createdAt.getTime() + lifetimeMs).toISOString()
+		expires_at: requestExpiry(record, lifetimeMs).toISOString()
 	};
 }

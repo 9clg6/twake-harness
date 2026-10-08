@@ -3,12 +3,23 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
 	modelFor,
 	modelUsing,
+	QUESTION_CONTENT_KEY,
 	readCatalog,
 	startConsentRoom,
 	type ConsentRoom
 } from './helpers/consent-room.js';
 
-const DOMAINS = ['mail', 'drive', 'tasks', 'notes', 'photos', 'wiki', 'contacts', 'boards'];
+const DOMAINS = [
+	'mail',
+	'drive',
+	'tasks',
+	'notes',
+	'photos',
+	'wiki',
+	'contacts',
+	'boards',
+	'sheets'
+];
 
 describe('I answer the question in words', () => {
 	let r: ConsentRoom;
@@ -87,6 +98,31 @@ describe('I answer the question in words', () => {
 		// Twake Chat sends a tap on a reaction in the clear, which answers nothing: the assistant put
 		// no reaction under its question, which my client would have read before the answer
 		expect(await r.client.waitForReactions(r.room, question, r.assistantId, 1, 0)).toEqual([]);
+	});
+
+	it('tells my client which request its question is and until when, in words left unchanged', async () => {
+		r.h.apisix.llm.script = modelUsing('search_sheets', { q: 'budget' });
+		const seen = r.questions().length;
+		await r.client.sendText(r.room, 'Find the budget in my sheets');
+		const asked = await r.nextQuestion(seen);
+		const question = r.questions().find((m) => m.eventId === asked);
+		expect(question?.body).toBe(
+			[
+				'This is the first time I need to read your data in sheets. Do you allow it? I would start with this:',
+				JSON.stringify({ q: 'budget' }, null, 2),
+				'Answer yes or no in your next message.'
+			].join('\n\n')
+		);
+		await r.requestAskedIn(asked, 'sheets');
+		// My yes in words answers it as before
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'oui');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/sheets/items');
+		// Only its questions are marked: not its welcome, nor an answer or a notice
+		const marked = r.client.messages.filter(
+			(m) => m.roomId === r.room && m.sender === r.assistantId && QUESTION_CONTENT_KEY in m.content
+		);
+		expect(marked.map((m) => m.eventId)).toEqual(r.questions().map((m) => m.eventId));
 	});
 
 	it('takes anything else I write for a message, after which only a reaction answers', async () => {

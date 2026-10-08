@@ -14,6 +14,17 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Where the content of a question to answer yes or no tells Alice's client which question it is
+export const QUESTION_CONTENT_KEY = 'app.twake.assistant.question';
+
+// A request that waits for Alice's answer, as the API shows her clients
+export interface WaitingRequest {
+	readonly id: string;
+	readonly domain: string;
+	readonly created_at: string;
+	readonly expires_at: string;
+}
+
 // One read contract per application, each named after the application it belongs to
 export function readCatalog(domains: readonly string[]): Record<string, unknown> {
 	const paths: Record<string, unknown> = {};
@@ -80,6 +91,11 @@ export interface ConsentRoom {
 	// The assistant's messages that start with a prefix, such as the model's answers
 	saying(prefix: string): DecryptedMessage[];
 	nextSaying(prefix: string, seen: number): Promise<string>;
+	// The request about a call to an application that a question of the harness asks Alice, as her
+	// client tells it from the question's content: one that waits for her answer in the API, under
+	// the same id and until the same end, its lifetime after it was asked. The question went through
+	// the homeserver encrypted, what tells it included.
+	requestAskedIn(questionId: string, domain: string): Promise<WaitingRequest>;
 	// What the harness keeps of Alice's calls to an application, oldest first
 	callsTo(domain: string): Promise<{ status: string; arguments: unknown }[]>;
 	// The digests of the previews Alice was shown for her calls to an application, as the harness
@@ -93,6 +109,8 @@ export async function startConsentRoom(
 	options: Omit<MatrixStartOptions, 'env'> = {}
 ): Promise<ConsentRoom> {
 	const h = await startMatrixHarness({ ...options, env });
+	// How long a request waits for Alice's answer: the suite's setting, a day by default
+	const lifetimeMs = Number(env['CONSENT_REQUEST_LIFETIME_MS'] ?? 86_400_000);
 	const alice = await h.synapse.registerUser('alice');
 	const client = await startE2eeClient(h.synapse.url, alice);
 	const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -139,6 +157,31 @@ export async function startConsentRoom(
 		nextQuestion,
 		saying,
 		nextSaying,
+		requestAskedIn: async (questionId, domain) => {
+			const question = client.messages.find((m) => m.eventId === questionId);
+			if (question === undefined) throw new Error(`Alice's client has no message ${questionId}`);
+			const marker = question.content[QUESTION_CONTENT_KEY] as Record<string, unknown> | undefined;
+			const waiting = await h.api.get<{ pending_calls: WaitingRequest[] }>(
+				'alice@test.local',
+				'/v1/pending-calls'
+			);
+			expect(waiting.status).toBe(200);
+			const request = waiting.body.pending_calls.find((c) => c.id === marker?.['id']);
+			if (request === undefined) {
+				throw new Error(`no request waits for Alice under ${JSON.stringify(marker)}`);
+			}
+			expect(request.domain).toBe(domain);
+			expect(marker).toEqual({ id: request.id, expires_ts: Date.parse(request.expires_at) });
+			expect(Date.parse(request.expires_at) - Date.parse(request.created_at)).toBe(lifetimeMs);
+			const stored = await h.synapse.request(
+				alice,
+				'GET',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/event/${encodeURIComponent(questionId)}`
+			);
+			expect(stored.body['type']).toBe('m.room.encrypted');
+			expect(stored.body['content']).not.toHaveProperty([QUESTION_CONTENT_KEY]);
+			return request;
+		},
 		callsTo: async (domain) => {
 			const rows = await withPrincipal(
 				h.db,

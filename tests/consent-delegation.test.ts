@@ -4,6 +4,7 @@ import { loadConfig } from '../src/config.js';
 import {
 	call,
 	modelUsing,
+	QUESTION_CONTENT_KEY,
 	readCatalog,
 	startConsentRoom,
 	type ConsentRoom
@@ -12,7 +13,7 @@ import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import { BROKER_CONSENT_URL, brokerRefusal, type ContractReply } from './helpers/fake-apisix.js';
 
-const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'photos', 'boards'];
+const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'photos', 'boards', 'sheets'];
 // The deployment's consent link bound to Alice, the owner it is for, as the broker expects it
 const ALICE_CONSENT_URL = `${BROKER_CONSENT_URL}?owner=alice%40test.local`;
 // A link of its own that a contract, or anything else answering a call, could put in a refusal
@@ -218,7 +219,9 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		r.h.apisix.llm.script = modelUsing('search_notes', { q: 'minutes' });
 		const seen = requestsIn(r).length;
 		await r.client.sendText(r.room, 'Find the minutes in my notes');
-		expect((await nextRequestIn(r, seen)).body).toBe(EXPIRED('notes'));
+		const request = await nextRequestIn(r, seen);
+		expect(request.body).toBe(EXPIRED('notes'));
+		await r.requestAskedIn(request.eventId, 'notes');
 		const acknowledged = r.saying('All right').length;
 		const modelCalls = r.h.apisix.llm.calls.length;
 		await r.client.sendText(r.room, 'No');
@@ -261,6 +264,30 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		]);
 	});
 
+	it('tells my client which request each question to try again is and until when, in words left unchanged', async () => {
+		r.h.apisix.llm.script = modelUsing('search_sheets', { q: 'budget' });
+		let seen = requestsIn(r).length;
+		await r.client.sendText(r.room, 'Find the budget in my sheets');
+		const first = await nextRequestIn(r, seen);
+		expect(first.body).toBe(MISSING('sheets'));
+		const asked = await r.requestAskedIn(first.eventId, 'sheets');
+		// I say yes before I gave the platform my permission: it asks me again, under a request of
+		// its own
+		seen = requestsIn(r).length;
+		await r.client.sendText(r.room, 'yes');
+		const second = await nextRequestIn(r, seen);
+		expect(second.body).toBe(MISSING('sheets'));
+		expect((await r.requestAskedIn(second.eventId, 'sheets')).id).not.toBe(asked.id);
+		// My no in words answers it as before, and the notice that tells me so asks nothing
+		const acknowledged = r.saying('All right').length;
+		await r.client.sendText(r.room, 'non');
+		expect(await r.nextSaying('All right', acknowledged)).toBe('All right, I will not do it.');
+		expect(r.saying('All right').at(acknowledged)?.content).not.toHaveProperty([
+			QUESTION_CONTENT_KEY
+		]);
+		expect(r.h.apisix.contracts.calls).toHaveLength(2);
+	});
+
 	it('asks me in my own language', async () => {
 		r.h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
@@ -300,6 +327,7 @@ describe('my assistant tells me why it cannot act for me, even when the deployme
 	});
 
 	it('says why, shows no link, promises no step I could not take, and still tries again on my yes', async () => {
+		const asked: string[] = [];
 		for (const [code, expected] of [
 			['delegation_missing', MISSING_WITHOUT_LINK],
 			['delegation_expired', EXPIRED_WITHOUT_LINK]
@@ -310,7 +338,10 @@ describe('my assistant tells me why it cannot act for me, even when the deployme
 			const request = await nextRequestIn(r, seen);
 			expect(request.body).toBe(expected);
 			expect(shown(request)).not.toContain('http');
+			asked.push((await r.requestAskedIn(request.eventId, 'mail')).id);
 		}
+		// Each question names a request of its own
+		expect(new Set(asked).size).toBe(2);
 		// Alice gave her permission another way, and says yes
 		broker = null;
 		const found = r.saying('Found:').length;

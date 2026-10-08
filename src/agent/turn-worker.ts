@@ -8,8 +8,10 @@ import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
+import { findPendingCall, toYesNoQuestion } from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
+import type { YesNoQuestion } from '../matrix/questions.js';
 import type { RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
@@ -74,6 +76,9 @@ export interface SendPayload {
 	// The text asks the owner about a frozen call: the matrix role remembers the event it sent,
 	// which the owner's answer points to
 	readonly request?: PendingQuestion;
+	// The text asks the owner a question to answer yes or no: what the matrix role marks the
+	// message's content with, for their client to tell which one
+	readonly questionMarker?: YesNoQuestion;
 	// The text as HTML, when the harness laid it out itself rather than the model writing Markdown
 	readonly html?: string;
 	// The turn answered once it reached its limit of tool calls: there is more to do
@@ -99,6 +104,8 @@ export interface TurnWorkerOptions {
 	readonly locale: Locale;
 	// The deployment's settings of a turn
 	readonly turn: Config['turn'];
+	// How long the owner may answer a request, which its question tells their client
+	readonly requestLifetimeMs: number;
 	readonly pollIntervalMs?: number;
 	// How many turns this replica runs at once
 	readonly concurrency?: number;
@@ -106,7 +113,7 @@ export interface TurnWorkerOptions {
 
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
-	const { db, agent, log, locale, turn } = options;
+	const { db, agent, log, locale, turn, requestLifetimeMs } = options;
 
 	// The owner asked for no event's turn, so admission refusing one is not theirs to hear about: it
 	// is tried again later, each time twice as late up to a minute, or given up once it waited too
@@ -158,13 +165,21 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// What the assistant sends back for a turn: its answer, or the fixed notice of a refused or
-	// failed turn, and the question it asks when the turn froze a call
-	function replyTo(
+	// failed turn, and the question it asks when the turn froze a call, marked for the owner's
+	// client while the call still waits for their answer
+	async function replyTo(
 		result: OwnerTurnResult,
 		assistant: AssistantRecord,
 		roomId: string,
 		notices: Messages['notices']
-	): SendPayload {
+	): Promise<SendPayload> {
+		const { owner } = assistant;
+		const pendingCallId = result.kind === 'ok' ? result.pendingCallId : undefined;
+		const call =
+			pendingCallId === undefined
+				? null
+				: await withPrincipal(db, { id: owner }, (tx) => findPendingCall(tx, owner, pendingCallId));
+		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
 		return {
 			asUserId: assistant.userId,
 			roomId,
@@ -175,9 +190,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 						? notices.busy
 						: notices.turnFailed,
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
-			...(result.kind === 'ok' && result.pendingCallId !== undefined
-				? { request: { pendingCallId: result.pendingCallId, owner: assistant.owner } }
-				: {}),
+			...(pendingCallId === undefined ? {} : { request: { pendingCallId, owner } }),
+			...(questionMarker === null ? {} : { questionMarker }),
 			// The harness's own request, laid out by the harness as HTML too
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
@@ -219,7 +233,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		await enqueueJob(db, {
 			kind: 'send',
 			payload: {
-				...replyTo(result, assistant, roomId, notices),
+				...(await replyTo(result, assistant, roomId, notices)),
 				// What carries the owner's yes, which the matrix role marks as answered as it would a
 				// message: their words, or the assistant's own question they reacted to
 				...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
@@ -279,7 +293,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			await enqueueJob(db, {
 				kind: 'send',
 				payload: {
-					...replyTo(result, assistant, roomId, notices),
+					...(await replyTo(result, assistant, roomId, notices)),
 					// A turn woken by an event posted to the API answers no message of the room
 					...(eventId.startsWith('$') ? { replyTo: eventId } : {})
 				},
