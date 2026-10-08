@@ -2,9 +2,9 @@ import type { ContractDefinition } from './openapi.js';
 import type { PreviewAnswer } from './preview.js';
 import { problemCode } from './problem.js';
 
-// Whether the call answers the invitation for the whole series, as the model may write it of its
-// own accord: only its owner's yes to that lets it
-export function answersWholeSeries(
+// Whether the call answers the invitation for the whole series, as only its owner's yes to the
+// harness's question has it do
+function answersWholeSeries(
 	contract: ContractDefinition,
 	values: Record<string, unknown>
 ): boolean {
@@ -16,6 +16,21 @@ export function answersWholeSeries(
 		'series' in body &&
 		body.series === true
 	);
+}
+
+// The call without any series its body sets, whatever its value, for a contract whose body takes
+// series: the model cannot answer for a whole series itself, only its owner's yes to the harness's
+// question can
+export function withoutSeries(
+	contract: ContractDefinition,
+	values: Record<string, unknown>
+): Record<string, unknown> {
+	const body = values['body'];
+	if (!contract.takesSeries || typeof body !== 'object' || body === null || !('series' in body)) {
+		return values;
+	}
+	const { series: _series, ...fields } = body;
+	return { ...values, body: fields };
 }
 
 // A calendar contract answers an invitation that repeats, or whose copy holds several occurrences

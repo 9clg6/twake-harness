@@ -9,6 +9,7 @@ import {
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
+	brokerRefusal,
 	CALENDAR_CATALOG,
 	INVITATION_ANSWERS_CATALOG,
 	INVITATION_CANCELLED,
@@ -17,6 +18,10 @@ import {
 	type ContractCall,
 	type ContractReply
 } from './helpers/fake-apisix.js';
+
+// What the gateway relays from the platform's broker once Alice's permission for her assistant to
+// act for her expired
+const PERMISSION_EXPIRED = brokerRefusal('delegation_expired');
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,6 +65,9 @@ const PREVIEWED = { 'x-twake-preview': 'true' } as const;
 // catalog does, and how every request ends, in each language
 const SERIES = 'This is a series in calendar: shall I answer for the whole series?';
 const ANSWER = 'Answer yes or no in your next message.';
+// How it asks her to give that permission again, the deployment having no consent link to show
+const EXPIRED =
+	'To change your data in calendar, I need your permission to act on your behalf, and the one you gave me has expired.';
 const FRENCH_SERIES = "C'est une série dans calendar : je réponds pour toute la série ?";
 const FRENCH_ANSWER = 'Réponds par oui ou non dans ton prochain message.';
 
@@ -72,14 +80,22 @@ function quoted(label: string, text: string): string {
 // What Alice asks, and what the model calls for it
 const REQUESTS = {
 	'Accept the standup': { tool: 'accept_invitation', args: { body: { uid: STANDUP } } },
-	// The model answers for the whole series of its own accord
+	'Decline the standup': { tool: 'decline_invitation', args: { body: { uid: STANDUP } } },
+	'Accept the offsite': { tool: 'accept_invitation', args: { body: { uid: OFFSITE } } },
+	'Accept the review': { tool: 'accept_invitation', args: { body: { uid: REVIEW } } },
+	// The model answers for the whole series of its own accord, whether the invitation repeats or not
 	'Accept the standup, every Monday': {
 		tool: 'accept_invitation',
 		args: { body: { uid: STANDUP, series: true } }
 	},
-	'Decline the standup': { tool: 'decline_invitation', args: { body: { uid: STANDUP } } },
-	'Accept the offsite': { tool: 'accept_invitation', args: { body: { uid: OFFSITE } } },
-	'Accept the review': { tool: 'accept_invitation', args: { body: { uid: REVIEW } } },
+	'Accept the offsite, every quarter': {
+		tool: 'accept_invitation',
+		args: { body: { uid: OFFSITE, series: true } }
+	},
+	'Accept the review and the rest of its series': {
+		tool: 'accept_invitation',
+		args: { body: { uid: REVIEW, series: true } }
+	},
 	'Parle-moi en français': { tool: 'set_language', args: { language: 'fr' } },
 	'Accepte le standup': { tool: 'accept_invitation', args: { body: { uid: STANDUP } } }
 };
@@ -284,7 +300,7 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		expect(r.h.apisix.llm.calls).toHaveLength(modelCalls);
 	});
 
-	it('asks me about the whole series when the assistant answers for it of its own accord, and writes it once I say yes', async () => {
+	it('tries the answer for one occurrence first when the assistant answers for the whole series of its own accord, and asks me about the series once the calendar refuses it', async () => {
 		const seen = questionsIn(r).length;
 		await r.client.sendText(r.room, 'Accept the standup, every Monday');
 		const question = await nextQuestionIn(r, seen);
@@ -293,14 +309,20 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		);
 		await r.requestAskedIn(question.eventId, 'calendar');
 		await sleep(1000);
-		// The calendar only said what the answer would do
-		expect(calendarCalls()).toEqual([['true', { uid: STANDUP, series: true }]]);
+		// The calendar got the answer without the series the assistant set, refused it, then said
+		// what the answer for the whole series would do
+		expect(calendarCalls()).toEqual([
+			[null, { uid: STANDUP }],
+			['true', { uid: STANDUP, series: true }]
+		]);
 		expect(written).toEqual([]);
 		const found = r.saying('Found:').length;
 		await r.client.sendText(r.room, 'yes');
 		expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
 		await sleep(1000);
+		expect(questionsIn(r)).toHaveLength(seen + 1);
 		expect(calendarCalls()).toEqual([
+			[null, { uid: STANDUP }],
 			['true', { uid: STANDUP, series: true }],
 			[null, { uid: STANDUP, series: true }]
 		]);
@@ -349,7 +371,7 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		}
 	});
 
-	it('asks me about the whole series the assistant answers for of its own accord, then for my consent, once each, before it first writes in my calendar', async () => {
+	it('asks me about the whole series the assistant answered for of its own accord only once the calendar refused one occurrence, then for my consent, once each, before it first writes in my calendar', async () => {
 		await withdrawConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
 		try {
 			const seen = questionsIn(r).length;
@@ -372,9 +394,12 @@ describe('my assistant asks me whether to answer for a whole series before it an
 			await r.client.sendText(r.room, 'yes');
 			expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
 			await sleep(1000);
-			// Neither question came back once answered
+			// Neither question came back once answered, and the calendar was first asked what the
+			// answer without the series the assistant set would do
+			expect(questionsIn(r)).toHaveLength(seen + 1);
 			expect(r.questions()).toHaveLength(consents + 1);
 			expect(calendarCalls()).toEqual([
+				['true', { uid: STANDUP }],
 				['true', { uid: STANDUP, series: true }],
 				['true', { uid: STANDUP, series: true }],
 				[null, { uid: STANDUP, series: true }]
@@ -382,6 +407,93 @@ describe('my assistant asks me whether to answer for a whole series before it an
 			expect(written).toEqual([{ uid: STANDUP, partstat: 'ACCEPTED' }]);
 		} finally {
 			await grantConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		}
+	});
+
+	it('asks me about the whole series once when the platform refuses the answer I said yes to, and writes it once I give my permission again', async () => {
+		// The platform's broker refuses the answer for the whole series once: Alice's permission for
+		// her assistant to act for her expired after the calendar said what the answer would do
+		let refused = false;
+		r.h.apisix.contracts.handler = (c) => {
+			const previewed = c.headers['x-twake-preview'] !== undefined;
+			if (!refused && !previewed && (c.body as { readonly series?: unknown }).series === true) {
+				refused = true;
+				return PERMISSION_EXPIRED;
+			}
+			return calendar(c);
+		};
+		try {
+			const asked = askedIn(r).length;
+			const seen = questionsIn(r).length;
+			await r.client.sendText(r.room, 'Accept the standup');
+			await nextQuestionIn(r, seen);
+			const expired = r.saying(EXPIRED).length;
+			await r.client.sendText(r.room, 'yes');
+			expect(await r.nextSaying(EXPIRED, expired)).toBe(`${EXPIRED}\nShall I try again? ${ANSWER}`);
+			expect(written).toEqual([]);
+			const found = r.saying('Found:').length;
+			await r.client.sendText(r.room, 'yes');
+			expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+			await sleep(1000);
+			// My yes to the series held through the broker's refusal: the answer for the whole series
+			// went again as I allowed it, with the digest of what I was shown, and the series and that
+			// permission were each asked about once
+			expect(askedIn(r)).toHaveLength(asked + 2);
+			expect(questionsIn(r)).toHaveLength(seen + 1);
+			expect(calendarCalls()).toEqual([
+				[null, { uid: STANDUP }],
+				['true', { uid: STANDUP, series: true }],
+				[null, { uid: STANDUP, series: true }],
+				[null, { uid: STANDUP, series: true }]
+			]);
+			expect(r.h.apisix.contracts.calls.at(-1)?.headers['x-twake-preview-digest']).toBe(DIGEST);
+			expect(written).toEqual([{ uid: STANDUP, partstat: 'ACCEPTED' }]);
+		} finally {
+			r.h.apisix.contracts.handler = calendar;
+		}
+	});
+
+	it('asks me about the whole series after my yes to the platform, when the platform refused the calendar telling what the answer for the whole of it would do', async () => {
+		// The platform's broker refuses the calendar's preview of the answer for the whole series
+		// once: Alice's permission for her assistant to act for her expired after the calendar
+		// refused the answer for one occurrence
+		let refused = false;
+		r.h.apisix.contracts.handler = (c) => {
+			if (!refused && c.headers['x-twake-preview'] !== undefined) {
+				refused = true;
+				return PERMISSION_EXPIRED;
+			}
+			return calendar(c);
+		};
+		try {
+			const seen = questionsIn(r).length;
+			const expired = r.saying(EXPIRED).length;
+			await r.client.sendText(r.room, 'Accept the standup');
+			await r.nextSaying(EXPIRED, expired);
+			expect(questionsIn(r)).toHaveLength(seen);
+			// My yes to that permission says nothing about the series: I am asked about it next
+			await r.client.sendText(r.room, 'yes');
+			const question = await nextQuestionIn(r, seen);
+			expect(question.body).toBe(
+				[SERIES, quoted('calendar describes it as:', ACCEPT_SUMMARY), ANSWER].join('\n\n')
+			);
+			expect(written).toEqual([]);
+			const found = r.saying('Found:').length;
+			await r.client.sendText(r.room, 'yes');
+			expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+			await sleep(1000);
+			// The call waited for that permission without the series, which reached the calendar's
+			// writing only once I said yes to it
+			expect(calendarCalls()).toEqual([
+				[null, { uid: STANDUP }],
+				['true', { uid: STANDUP, series: true }],
+				[null, { uid: STANDUP }],
+				['true', { uid: STANDUP, series: true }],
+				[null, { uid: STANDUP, series: true }]
+			]);
+			expect(written).toEqual([{ uid: STANDUP, partstat: 'ACCEPTED' }]);
+		} finally {
+			r.h.apisix.contracts.handler = calendar;
 		}
 	});
 
@@ -472,6 +584,41 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		expect(await seriesRequests(r)).toBe(waited);
 		expect(calendarCalls()).toEqual([[null, { uid: REVIEW }]]);
 		expect(written).toEqual([{ uid: REVIEW, partstat: 'ACCEPTED' }]);
+	});
+
+	it('answers an invitation that does not repeat as an event when the assistant answers for its series of its own accord, asking nothing', async () => {
+		const asked = askedIn(r).length;
+		const waited = await seriesRequests(r);
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'Accept the review and the rest of its series');
+		expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+		await sleep(1000);
+		expect(askedIn(r)).toHaveLength(asked);
+		expect(await seriesRequests(r)).toBe(waited);
+		// The calendar got the answer without the series the assistant set
+		expect(calendarCalls()).toEqual([[null, { uid: REVIEW }]]);
+		expect(written).toEqual([{ uid: REVIEW, partstat: 'ACCEPTED' }]);
+	});
+
+	it('asks nothing about a series when the assistant answers for the whole of a cancelled one of its own accord, and the model reads why', async () => {
+		// A calendar that cannot say what an answer would do: nothing is asked of it before the call
+		r.h.apisix.contracts.spec = UNPREVIEWED_INVITATION_ANSWERS_CATALOG;
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
+		try {
+			const asked = askedIn(r).length;
+			const waited = await seriesRequests(r);
+			const heard = r.saying('Heard:').length;
+			await r.client.sendText(r.room, 'Accept the offsite, every quarter');
+			expect(await r.nextSaying('Heard:', heard)).toContain('"code":"invitation_cancelled"');
+			await sleep(1000);
+			expect(askedIn(r)).toHaveLength(asked);
+			expect(await seriesRequests(r)).toBe(waited);
+			expect(calendarCalls()).toEqual([[null, { uid: OFFSITE }]]);
+			expect(written).toEqual([]);
+		} finally {
+			r.h.apisix.contracts.spec = INVITATION_ANSWERS_CATALOG;
+			for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
+		}
 	});
 
 	// Last: Alice speaks French with her assistant from then on
