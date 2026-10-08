@@ -6,6 +6,7 @@ import { withPrincipal, type Db } from '../db/client.js';
 import type { DeviceShortfall, Messages, OwnerWordsKind } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
 import {
+	askIdentityQuestion,
 	claimDeviceNotice,
 	clearSeen,
 	findOwnerCrossSigning,
@@ -41,6 +42,10 @@ function sealOf(
 	return { sessionId, digest };
 }
 
+// Whom the owner's words went to: their assistant, in a room where it asks them questions to answer
+// yes or no, or the creator
+export type OwnerConversation = 'assistant' | 'creator';
+
 // The owner's words as they reached their assistant encrypted: a message, or a reaction that
 // answers one of the harness's questions
 export interface OwnerWords {
@@ -50,6 +55,7 @@ export interface OwnerWords {
 	readonly assistantUserId: string;
 	readonly eventId: string;
 	readonly via: OwnerWordsKind;
+	readonly conversation: OwnerConversation;
 	// The event as it arrived, still encrypted, null when it was not kept
 	readonly encrypted: Record<string, unknown> | null;
 }
@@ -73,6 +79,8 @@ interface DeviceVerdict {
 	// Whether the owner's identity, as published, signed the device
 	readonly signed: boolean;
 	readonly identity: IdentityState;
+	// The owner's identity as published, by its public master key, null when they publish none
+	readonly masterKey: string | null;
 }
 
 // An event the assistant's encryption engine decrypted for the check: who encrypted it, and what it
@@ -106,6 +114,8 @@ export interface OwnerDeviceGateDeps {
 	// The homeserver's answer to a keys query for the owner, made as their assistant
 	queryKeys(assistantUserId: string, ownerUserId: string): Promise<unknown>;
 	fetchMessages(owner: string): Promise<Messages>;
+	// How long the question about an identity the owner may have reset waits for their answer
+	readonly questionLifetimeMs: number;
 }
 
 export interface OwnerDeviceGate {
@@ -149,7 +159,8 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			deviceId: found.deviceId,
 			device: found.deviceId ?? sender.curve25519Key ?? 'unknown',
 			signed: found.signed,
-			identity
+			identity,
+			masterKey: keys.masterKey
 		};
 	}
 
@@ -179,6 +190,42 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			});
 		} catch (err: unknown) {
 			log.error({ roomId, owner, eventId, reason, mode, err }, 'owner device notice failed');
+		}
+	}
+
+	// Asks the owner in the room, in a question marked for their client, whether they reset their
+	// identity themselves: once per identity, and again once the question expired unanswered.
+	// Whether they could be asked never changes whether their words count.
+	async function ask(words: OwnerWords, masterPublicKey: string): Promise<void> {
+		const { owner, roomId, eventId } = words;
+		try {
+			const messages = await deps.fetchMessages(owner);
+			await withPrincipal(db, { id: owner }, async (tx) => {
+				const question = await askIdentityQuestion(tx, owner, {
+					masterPublicKey,
+					roomId,
+					eventId,
+					lifetimeMs: deps.questionLifetimeMs
+				});
+				if (question === null) return;
+				await enqueueJob(tx, {
+					kind: 'send',
+					payload: {
+						asUserId: words.assistantUserId,
+						roomId,
+						text: messages.ownerDevices.identityQuestion,
+						questionMarker: { id: question.id, expiresTs: question.expiresAt.getTime() }
+					},
+					dedupKey: `identity-question:${eventId}`,
+					groupKey: `send:${roomId}`
+				});
+				log.info(
+					{ roomId, owner, eventId, questionId: question.id },
+					'owner asked about their identity'
+				);
+			});
+		} catch (err: unknown) {
+			log.error({ roomId, owner, eventId, mode, err }, 'owner identity question failed');
 		}
 	}
 
@@ -256,6 +303,16 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			const reason = SHORTFALLS[shortfall];
 			if (mode === 'report') {
 				log.info(fields, 'owner device unverified');
+				// The identity that signed the session may be one the owner reset themselves: their
+				// assistant asks them, and their answer may adopt it
+				const asked =
+					shortfall === 'changed' && verdict.signed && words.conversation === 'assistant'
+						? verdict.masterKey
+						: null;
+				if (asked !== null) {
+					await ask(words, asked);
+					return admitted;
+				}
 				await tell(words, verdict.device, reason, true, (m) => m.ownerDevices.reported(shortfall));
 				return admitted;
 			}

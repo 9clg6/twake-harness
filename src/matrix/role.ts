@@ -1041,6 +1041,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log,
 		mode: config.matrix.ownerDeviceTrust,
 		fetchMessages,
+		questionLifetimeMs: config.consent.requestLifetimeMs,
 		decrypt: decryptChecked,
 		queryKeys: async (assistantUserId, ownerUserId) => {
 			const intent = appservice.getIntentForUserId(assistantUserId);
@@ -1086,6 +1087,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			assistantUserId: room.userId,
 			eventId,
 			via: 'answer',
+			conversation: 'assistant',
 			encrypted
 		};
 		const admission = await ownerDevices.admit(words);
@@ -1221,6 +1223,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						assistantUserId: room.userId,
 						eventId,
 						via: 'message',
+						conversation: 'assistant',
 						encrypted: encrypted.event
 					};
 					const checked = await checkedMessage(words);
@@ -1239,6 +1242,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					assistantUserId: room.userId,
 					eventId,
 					via: 'message',
+					conversation: 'assistant',
 					encrypted: null
 				};
 				if (await ignoredInClear(unencrypted)) return;
@@ -1304,6 +1308,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			assistantUserId: creator,
 			eventId: raw.event_id ?? `${roomId}:${Date.now()}`,
 			via: 'message',
+			conversation: 'creator',
 			encrypted: encrypted?.event ?? null
 		};
 		let command = text;

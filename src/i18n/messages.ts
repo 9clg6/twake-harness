@@ -200,6 +200,9 @@ export interface Messages {
 		// Not taken: the owner's client encrypted the words with a Megolm session it has used for longer
 		// than the harness keeps what it received, and how to have it start a new one
 		oldSession(via: OwnerWordsKind): string;
+		// Taken all the same, the deployment only reporting, from a session another identity than the
+		// one held signed: whether the owner reset their identity themselves, to answer yes or no
+		readonly identityQuestion: string;
 	};
 }
 
@@ -454,7 +457,8 @@ const ENGLISH: Messages = {
 					: 'I did not take your answer, so my question still waits';
 			const again = via === 'message' ? 'send it again' : 'answer again';
 			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then ${again}.`;
-		}
+		},
+		identityQuestion: `Your encryption identity is not the one I know. Did you reset your identity yourself? ${ENGLISH_HOW_TO_ANSWER}`
 	}
 };
 
@@ -687,7 +691,8 @@ const FRENCH: Messages = {
 			const encrypted = via === 'message' ? "l'a chiffré" : "l'a chiffrée";
 			const again = via === 'message' ? 'renvoie-le' : 'réponds à nouveau';
 			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Dans Twake Chat, envoie /discardsession dans cette conversation pour qu'elle en utilise de nouvelles ; puis ${again}.`;
-		}
+		},
+		identityQuestion: `Ton identité de chiffrement n'est pas celle que je connais. C'est toi qui as réinitialisé ton identité ? ${FRENCH_HOW_TO_ANSWER}`
 	}
 };
 

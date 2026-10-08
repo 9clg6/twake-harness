@@ -114,6 +114,51 @@ export async function pinAccepted(
 	return normalize(row);
 }
 
+// The question that asks the owner whether they reset their identity themselves, as their client
+// is told it: its id, and until when it waits for their answer
+export interface AskedIdentityQuestion {
+	readonly id: string;
+	readonly expiresAt: Date;
+}
+
+// Asks the owner, in the room their words came to, whether they reset their identity themselves:
+// about the identity seen for them, waiting for their answer for `lifetimeMs`. Unless a question
+// about that identity waits for their answer still, or they answered it already: resolves to the
+// question to ask then, and to null otherwise.
+export async function askIdentityQuestion(
+	tx: Tx,
+	owner: string,
+	asked: {
+		readonly masterPublicKey: string;
+		readonly roomId: string;
+		readonly eventId: string;
+		readonly lifetimeMs: number;
+	}
+): Promise<AskedIdentityQuestion | null> {
+	const { masterPublicKey, roomId, eventId, lifetimeMs } = asked;
+	const rows = await tx.sql<{ question_id: string; question_expires_at: Date }[]>`
+		update owner_cross_signing set
+			question_id = gen_random_uuid(),
+			question_master_public_key = ${masterPublicKey},
+			question_room_id = ${roomId},
+			question_event_id = ${eventId},
+			question_asked_at = now(),
+			question_expires_at = now() + make_interval(secs => ${lifetimeMs / 1000}),
+			question_closed_at = null,
+			question_answer = null,
+			question_answer_event_id = null
+		where owner = ${owner}
+			and seen_master_public_key = ${masterPublicKey}
+			and (
+				question_id is null
+				or question_master_public_key <> ${masterPublicKey}
+				or (question_answer is null and question_expires_at <= now())
+			)
+		returning question_id, question_expires_at`;
+	const row = rows[0];
+	return row === undefined ? null : { id: row.question_id, expiresAt: row.question_expires_at };
+}
+
 // Records when the check first decrypted words of an owner's Megolm session. Resolves to whether
 // that was longer ago than `keptMs`, the time the digests of those words are kept for.
 export async function seeSession(

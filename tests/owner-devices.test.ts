@@ -5,6 +5,7 @@ import { loadConfig } from '../src/config.js';
 import { withPrincipal } from '../src/db/client.js';
 import {
 	modelFor,
+	QUESTION_CONTENT_KEY,
 	readCatalog,
 	startConsentRoom,
 	type ConsentRoom
@@ -259,8 +260,8 @@ const OLD_SESSION_MESSAGE =
 	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
-const CHANGED_REPORT =
-	"Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity) so that I keep doing so.";
+const CHANGED_QUESTION =
+	'Your encryption identity is not the one I know. Did you reset your identity yourself? Answer yes or no in your next message.';
 
 describe('the setting of how my sessions are held to my identity', () => {
 	const base = {
@@ -842,7 +843,7 @@ describe('while the harness only reports the sessions it would not act on', () =
 		).toBe('Heard: Plain hello');
 	});
 
-	it('acts on my words after my identity changed all the same, and tells me how to accept it', async () => {
+	it('acts on my words after my identity changed all the same, and asks me whether I reset it', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
 		expect(after).not.toBe(before);
@@ -857,8 +858,10 @@ describe('while the harness only reports the sessions it would not act on', () =
 			matchesPin: false
 		});
 		expect(await r.nextSaying('Your encryption identity is not the one I know', 0)).toBe(
-			CHANGED_REPORT
+			CHANGED_QUESTION
 		);
+		const question = r.saying('Your encryption identity is not the one I know').at(-1);
+		expect(question?.content).toHaveProperty([QUESTION_CONTENT_KEY]);
 		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
 		expect(view.body).toMatchObject({
 			pinned: { master_key: before },
