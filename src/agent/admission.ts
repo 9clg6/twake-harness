@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { dateIn, type Clock } from './clock.js';
 
 export type RefusalReason = 'user_queue_full' | 'user_rate' | 'user_budget' | 'global_rate';
 
@@ -25,15 +26,19 @@ interface Waiter {
 	resolve(): void;
 }
 
-function today(): string {
-	return new Date().toISOString().slice(0, 10);
+export interface AdmissionDeps {
+	readonly config: Config;
+	readonly db: Db;
+	readonly log: FastifyBaseLogger;
+	readonly clock: Clock;
 }
 
 // Admission runs before any model call. Limits are per user, so one user cannot saturate the
 // replica for the others, and the queue of a full replica is served one user at a time rather
 // than first come first served. The turns per minute and the daily tokens are counted in the
 // database, so they hold across replicas; the turns in flight and the queue are this replica's.
-export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): Admission {
+export function makeAdmission(deps: AdmissionDeps): Admission {
+	const { config, db, log, clock } = deps;
 	const limits = config.admission;
 	let inflight = 0;
 	const running = new Map<string, number>();
@@ -45,6 +50,12 @@ export function makeAdmission(config: Config, db: Db, log: FastifyBaseLogger): A
 		user_budget: 0,
 		global_rate: 0
 	};
+
+	// The day a user's tokens count in, which starts at midnight in the IANA time zone the assistants
+	// read the present in
+	function today(): string {
+		return dateIn(clock.now(), config.timeZone);
+	}
 
 	async function tokensToday(principalId: string): Promise<number> {
 		const rows = await withPrincipal(

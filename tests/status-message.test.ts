@@ -25,7 +25,8 @@ const NOT_DONE = '❌ Not done';
 const ASKING = 'I need your answer to go on: see below.';
 const LATE = 'This is taking longer than expected. If no answer follows, ask me again.';
 const FAILED = 'Something went wrong on my side. Please try again in a moment.';
-const BUSY = 'I am busy right now and cannot take this message. Please send it again in a moment.';
+const DAY_SPENT =
+	'I have reached my limit for the day and cannot take this message. It lifts at midnight: please send it again then.';
 const LIMITED = '⏸️ Limit reached';
 
 // The delay the deployment gives a turn before its status shows, the default
@@ -430,8 +431,8 @@ describe('a status message while my assistant works on a message', () => {
 			expect(saidBy(status)).toEqual([WORKING, NOT_DONE]);
 			expect(saidBy(await replySaying(first, DONE))).toEqual([WORKING, DONE]);
 			// The notice follows, a message of its own, which Synapse notifies me of
-			expect(await shows(BUSY)).toBe(true);
-			const notice = shownSince(before).find((m) => m.body === BUSY);
+			expect(await shows(DAY_SPENT)).toBe(true);
+			const notice = shownSince(before).find((m) => m.body === DAY_SPENT);
 			expect(inReplyTo(notice?.original ?? {})).toBeNull();
 			expect(await notified()).toContain(notice?.eventId);
 			await expectSeenOnly(feedback, second);

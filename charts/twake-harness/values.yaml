@@ -51,7 +51,8 @@ config:
   logLevel: info
   # The language of the assistants' and the creator's fixed texts: en or fr; empty means en
   assistantLocale: ''
-  # The IANA time zone the assistants read the present in, such as Europe/Paris; empty means UTC
+  # The IANA time zone the assistants read the present in, such as Europe/Paris, and whose midnight
+  # starts a user's day of tokens; empty means UTC
   assistantTimezone: ''
   # The token broker's consent link, the same for every user, which an assistant shows when the
   # broker lacks its owner's permission to act for them; an https URL, empty for none
@@ -63,7 +64,7 @@ config:
   admissionUserQueue: ''
   # Turns one user may start per minute; default 10
   admissionUserPerMinute: ''
-  # Tokens one user may spend per day; default 200000
+  # Tokens one user may spend per day, from midnight in assistantTimezone; default 200000
   admissionUserDailyTokens: ''
   # Turns the whole harness may start per minute; default 400
   admissionGlobalPerMinute: ''

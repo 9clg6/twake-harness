@@ -187,7 +187,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				result.kind === 'ok'
 					? result.answer
 					: result.kind === 'busy'
-						? notices.busy
+						? notices.busy(result.reason)
 						: notices.turnFailed,
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
 			...(pendingCallId === undefined ? {} : { request: { pendingCallId, owner } }),

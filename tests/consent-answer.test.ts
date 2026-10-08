@@ -683,7 +683,9 @@ describe('my answer is admitted like any message', () => {
 		);
 		if (request === undefined) throw new Error('no request');
 		await client.react(room, request.eventId, '✅');
-		await client.waitForMessage(room, assistantId, (t) => t.startsWith('I am busy right now'));
+		await client.waitForMessage(room, assistantId, (t) =>
+			t.startsWith('I received too many messages at once')
+		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 });
