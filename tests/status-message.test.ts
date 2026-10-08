@@ -547,6 +547,41 @@ describe('a status message while my assistant works on a message', () => {
 		expect(check).toBeDefined();
 	});
 
+	it('closes the status of a turn that spent its tokens on a line of its own too', async () => {
+		let asked = '';
+		const account = 'I read your consents three times; more reads remain. Ask me to continue.';
+		// Each answer reads once and reports 100,000 tokens: past the third, the turn spent the 250,000
+		// it may, and I my day, which the test gives back
+		r.h.apisix.llm.script = (req: ChatRequest, index: number): ScriptedReply =>
+			req.tools === undefined
+				? { content: account }
+				: {
+						toolCalls: [
+							{
+								id: `tokens_${index}`,
+								type: 'function' as const,
+								function: { name: 'consents_list', arguments: '{}' }
+							}
+						],
+						usage: { promptTokens: 90_000, completionTokens: 10_000 },
+						hold: statusShown(() => asked)
+					};
+		const before = feedback.shown().length;
+		try {
+			asked = await r.client.sendText(r.room, 'Read them all, at length');
+			const status = await replySaying(asked, LIMITED);
+			expect(saidBy(status)[0]).toBe(WORKING);
+			expect(shownSince(before).map((m) => m.body)).toEqual([LIMITED, account]);
+			// The tokens ended the turn, three reads in, short of the six calls a message may make
+			const wrapUp = r.h.apisix.llm.calls.filter((c) => c.request.tools === undefined).at(-1);
+			expect(wrapUp?.request.messages[0]?.content).toMatch(/limit of 250000 tokens/);
+			const check = await eventually(() => feedback.reactionsOn(asked).find((x) => x.key === '✅'));
+			expect(check).toBeDefined();
+		} finally {
+			await spendToday(0);
+		}
+	});
+
 	it('keeps a question to me a message of its own, its status pointing to it', async () => {
 		let asked = '';
 		r.h.apisix.llm.script = (req: ChatRequest): ScriptedReply => {
