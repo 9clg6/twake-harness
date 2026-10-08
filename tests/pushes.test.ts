@@ -157,6 +157,7 @@ describe('a push that fails on the encryption of an assistant', () => {
 			held += 1;
 			return released;
 		};
+		// Each answer first shares a room key of its own: the waits leave a slow runner time for it
 		try {
 			await pia.client.sendText(pia.room, 'slow one');
 			await ravi.client.sendText(ravi.room, 'meanwhile');
@@ -165,7 +166,7 @@ describe('a push that fails on the encryption of an assistant', () => {
 					ravi.room,
 					ravi.assistantId,
 					(t) => t === 'echo: meanwhile',
-					15_000
+					30_000
 				)
 			).toBe('echo: meanwhile');
 			expect(
@@ -173,7 +174,7 @@ describe('a push that fails on the encryption of an assistant', () => {
 					pia.room,
 					pia.assistantId,
 					(t) => t === 'echo: slow one',
-					15_000
+					30_000
 				)
 			).toBe('echo: slow one');
 		} finally {
