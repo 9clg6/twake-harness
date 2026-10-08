@@ -1,16 +1,13 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { MatrixAdmin } from './admin.js';
+import { isRecord } from './json.js';
 
 const MEMBER_EVENT_TYPE = 'm.room.member';
 
 export interface NamingDeps {
 	readonly admin: MatrixAdmin;
 	readonly log: FastifyBaseLogger;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // The name an assistant goes by in a room, which its member event there carries: clients show it
