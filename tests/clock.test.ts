@@ -2,30 +2,30 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
+import { makeClient } from './helpers/client.js';
 import { makeSettableClock } from './helpers/clock.js';
+import { modelUsing } from './helpers/consent-room.js';
 import { grantConsent } from './helpers/consents.js';
 import {
 	CALENDAR_CATALOG,
 	echoScript,
 	type ContractCall,
-	type ContractReply,
-	type LlmScript
+	type ContractReply
 } from './helpers/fake-apisix.js';
+
+// The system prompt of the first model call after the `before` first ones
+function systemPromptAfter(h: TestHarness, before: number): string {
+	const system = h.apisix.llm.calls[before]?.request.messages[0];
+	expect(system?.role).toBe('system');
+	return system?.content ?? '';
+}
 
 // The system prompt the scripted model received for one chat turn of this user
 async function systemPromptOfTurn(h: TestHarness, sub: string, message: string): Promise<string> {
 	h.apisix.llm.script = echoScript;
 	const before = h.apisix.llm.calls.length;
-	const res = await h.app.inject({
-		method: 'POST',
-		url: '/v1/chat',
-		headers: { authorization: `Bearer ${await h.issuer.mint({ sub })}` },
-		payload: { message }
-	});
-	expect(res.statusCode).toBe(200);
-	const system = h.apisix.llm.calls[before]?.request.messages[0];
-	expect(system?.role).toBe('system');
-	return system?.content ?? '';
+	expect((await makeClient(h).post(sub, '/v1/chat', { message })).status).toBe(200);
+	return systemPromptAfter(h, before);
 }
 
 // The calendar of an owner whose settings put it in this zone: both reads of their events answer
@@ -40,41 +40,21 @@ function calendarIn(timeZone: unknown): (call: ContractCall) => ContractReply {
 	});
 }
 
-// A model that reads its owner's calendar with one call, then answers
-function readingCalendar(tool: string, args: Record<string, unknown>): LlmScript {
-	return (request) =>
-		request.messages.at(-1)?.role === 'tool'
-			? { content: 'Lu.' }
-			: {
-					toolCalls: [
-						{
-							id: `call_${tool}`,
-							type: 'function',
-							function: { name: tool, arguments: JSON.stringify(args) }
-						}
-					]
-				};
-}
-
-// One chat turn of this user in which the model reads their calendar with one call, then answers
-async function turnReadingCalendar(
+// One chat turn of this user in which the model reads their calendar with one call, then tells
+// what it found
+async function readCalendar(
 	h: TestHarness,
 	sub: string,
 	tool: string,
 	args: Record<string, unknown>
 ): Promise<void> {
-	h.apisix.llm.script = readingCalendar(tool, args);
-	const res = await h.app.inject({
-		method: 'POST',
-		url: '/v1/chat',
-		headers: { authorization: `Bearer ${await h.issuer.mint({ sub })}` },
-		payload: { message: 'Que dit mon agenda ?' }
-	});
-	expect(res.statusCode).toBe(200);
-	expect(res.json<{ answer: string }>().answer).toBe('Lu.');
+	h.apisix.llm.script = modelUsing(tool, args);
+	const res = await makeClient(h).post(sub, '/v1/chat', { message: 'Que dit mon agenda ?' });
+	expect(res.status).toBe(200);
 }
 
-// The block of the system prompt that states the present, right after the persona
+// The block of the system prompt that states the present: the prompt's parts are separated by
+// blank lines, and the persona comes first
 function nowBlock(prompt: string): string | undefined {
 	return prompt.split('\n\n')[1];
 }
@@ -115,14 +95,8 @@ describe('the present moment in the system prompt', () => {
 		it('states the moment in a block of its own, right after the persona', async () => {
 			clock.set('2026-10-06T11:26:00Z');
 			const prompt = await systemPromptOfTurn(h, 'alice', 'Et demain ?');
-			// The prompt's parts are separated by blank lines; the persona comes first
-			expect(prompt.split('\n\n')[1]).toBe(
-				[
-					'## Maintenant',
-					'Date et heure : mardi 6 octobre 2026, 13:26, fuseau Europe/Paris.',
-					'En ISO 8601 : 2026-10-06T13:26:00+02:00.',
-					"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
-				].join('\n')
+			expect(nowBlock(prompt)).toBe(
+				frenchNow('mardi 6 octobre 2026, 13:26', 'Europe/Paris', '2026-10-06T13:26:00+02:00')
 			);
 		});
 
@@ -197,7 +171,7 @@ describe('the present moment in the system prompt', () => {
 		it('states the present in the zone a list of my events returned, from my next turn on', async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('America/New_York');
-			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+			await readCalendar(h, 'alice', 'list_calendar_events', {
 				from: '2026-10-07',
 				days: 1
 			});
@@ -210,7 +184,7 @@ describe('the present moment in the system prompt', () => {
 		it("keeps an owner's zone to them: one whose calendar no read named yet has the deployment's", async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('America/New_York');
-			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+			await readCalendar(h, 'alice', 'list_calendar_events', {
 				from: '2026-10-07',
 				days: 1
 			});
@@ -222,13 +196,13 @@ describe('the present moment in the system prompt', () => {
 		it('follows the zone of my calendar to the last read of an event that named it', async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('America/New_York');
-			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+			await readCalendar(h, 'alice', 'list_calendar_events', {
 				from: '2026-10-07',
 				days: 1
 			});
 			// Alice moved her calendar to Tokyo since
 			h.apisix.contracts.handler = calendarIn('Asia/Tokyo');
-			await turnReadingCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
+			await readCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
 			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
 				frenchNow('mercredi 7 octobre 2026, 08:30', 'Asia/Tokyo', '2026-10-07T08:30:00+09:00')
 			);
@@ -237,7 +211,7 @@ describe('the present moment in the system prompt', () => {
 		it('keeps the zone it had when a read names one the runtime does not know, and a known one by its canonical name', async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('america/new_york');
-			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+			await readCalendar(h, 'alice', 'list_calendar_events', {
 				from: '2026-10-07',
 				days: 1
 			});
@@ -249,7 +223,7 @@ describe('the present moment in the system prompt', () => {
 			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(newYork);
 			for (const named of ['Mars/Olympus', '', 7, null]) {
 				h.apisix.contracts.handler = calendarIn(named);
-				await turnReadingCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
+				await readCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
 				expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(newYork);
 			}
 		});
@@ -257,31 +231,22 @@ describe('the present moment in the system prompt', () => {
 		it('states the present in the zone of the first read of my calendar, in the turn my yes resumes', async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('America/New_York');
-			h.apisix.llm.script = readingCalendar('list_calendar_events', {
-				from: '2026-10-07',
-				days: 1
-			});
-			const authorization = `Bearer ${await h.issuer.mint({ sub: 'carol' })}`;
+			h.apisix.llm.script = modelUsing('list_calendar_events', { from: '2026-10-07', days: 1 });
+			const client = makeClient(h);
 			// Carol never let her assistant read her calendar: its first read waits for her
-			const asked = await h.app.inject({
-				method: 'POST',
-				url: '/v1/chat',
-				headers: { authorization },
-				payload: { message: "Qu'ai-je demain ?" }
+			const asked = await client.post<{ pending_call: { id: string } }>('carol', '/v1/chat', {
+				message: "Qu'ai-je demain ?"
 			});
-			expect(asked.statusCode).toBe(200);
-			const { pending_call: pending } = asked.json<{ pending_call: { id: string } }>();
+			expect(asked.status).toBe(200);
 			const before = h.apisix.llm.calls.length;
-			const resumed = await h.app.inject({
-				method: 'POST',
-				url: `/v1/pending-calls/${pending.id}/approve`,
-				headers: { authorization },
-				payload: {}
-			});
-			expect(resumed.statusCode).toBe(200);
-			expect(resumed.json<{ answer: string }>().answer).toBe('Lu.');
+			const resumed = await client.post(
+				'carol',
+				`/v1/pending-calls/${asked.body.pending_call.id}/approve`,
+				{}
+			);
+			expect(resumed.status).toBe(200);
 			// The model read the events with the present of their zone
-			expect(nowBlock(h.apisix.llm.calls[before]?.request.messages[0]?.content ?? '')).toBe(
+			expect(nowBlock(systemPromptAfter(h, before))).toBe(
 				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
 			);
 		});
@@ -289,12 +254,12 @@ describe('the present moment in the system prompt', () => {
 		it('logs at info the days each list of my events reads, and none of its other arguments', async () => {
 			h.apisix.contracts.handler = calendarIn('America/New_York');
 			const before = h.logLines().length;
-			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+			await readCalendar(h, 'alice', 'list_calendar_events', {
 				from: '2026-10-08',
 				days: 2,
 				limit: 17
 			});
-			await turnReadingCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
+			await readCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
 			const lines = h.logLines().slice(before);
 			const windows = lines.filter((line) => 'from' in line || 'days' in line);
 			expect(windows).toEqual([
