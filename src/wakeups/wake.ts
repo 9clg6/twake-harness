@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Clock } from '../agent/clock.js';
 import { carriesInvitation, type Invitation } from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
@@ -48,6 +49,8 @@ export interface WakeDeps {
 	readonly config: Config;
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
+	// The present the daily reminders and the briefs read
+	readonly clock: Clock;
 }
 
 export interface WakeOptions {

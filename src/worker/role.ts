@@ -69,7 +69,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			),
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
-	const deps = { config, db, log: app.log };
+	const deps = { config, db, log: app.log, clock };
 	const listening =
 		options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs };
 	if (config.activity !== null) {
@@ -91,11 +91,8 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		app.log,
 		config.consent.requestLifetimeMs
 	);
-	const reminders = startReminderScheduler(
-		{ ...deps, clock },
-		options.reminderCheckMs ?? REMINDER_CHECK_MS
-	);
-	const briefs = startBriefScheduler({ ...deps, clock }, options.briefCheckMs ?? BRIEF_CHECK_MS);
+	const reminders = startReminderScheduler(deps, options.reminderCheckMs ?? REMINDER_CHECK_MS);
+	const briefs = startBriefScheduler(deps, options.briefCheckMs ?? BRIEF_CHECK_MS);
 	return {
 		app,
 		stop: async () => {

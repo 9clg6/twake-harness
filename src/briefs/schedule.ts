@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 
-import { wallDayAt, type Clock } from '../agent/clock.js';
+import { wallDayAt } from '../agent/clock.js';
 import {
 	findAssistant,
 	isActiveAssistant,
@@ -15,11 +15,6 @@ import { BRIEF_SOURCE, wake, type WakeDeps } from '../wakeups/wake.js';
 // hours a pass still sends it after that
 const BRIEF_HOUR = 8;
 const BRIEF_WINDOW_HOURS = 3;
-
-// What the wake-ups need, and the present the passes read
-export interface BriefDeps extends WakeDeps {
-	readonly clock: Clock;
-}
 
 // What a scheduler knows of each owner's brief between its passes: the date it is done with, sent,
 // skipped, or not to send, which its next passes look no further at until the owner's next date;
@@ -44,7 +39,7 @@ export function briefId(owner: string, date: string): string {
 }
 
 // Whether a pass woke the owner for that brief, which the wake-ups keep for two days at least
-async function wasWoken(deps: BriefDeps, owner: string, id: string): Promise<boolean> {
+async function wasWoken(deps: WakeDeps, owner: string, id: string): Promise<boolean> {
 	const rows = await deps.db.sql`
 		select 1 from wakeups where source = ${BRIEF_SOURCE} and event_id = ${id} and owner = ${owner}`;
 	return rows.length > 0;
@@ -56,7 +51,7 @@ async function wasWoken(deps: BriefDeps, owner: string, id: string): Promise<boo
 // next pass, the first one alone saying so. Three hours past eight, the day is theirs no more: a
 // brief that never went is skipped, which a line says. Their wall clock is read first, as it is all
 // most passes need of them.
-async function briefOwner(deps: BriefDeps, owner: string, settled: SettledBriefs): Promise<void> {
+async function briefOwner(deps: WakeDeps, owner: string, settled: SettledBriefs): Promise<void> {
 	const { config, db, clock, log } = deps;
 	const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 	const { date, hour } = wallDayAt(clock.now(), timeZone);
@@ -93,7 +88,7 @@ async function briefOwner(deps: BriefDeps, owner: string, settled: SettledBriefs
 // brief could not be looked at is skipped with a warning, and the pass goes on with the next one.
 // A pass told to stop stops before the next owner.
 export async function runBriefPass(
-	deps: BriefDeps,
+	deps: WakeDeps,
 	settled: SettledBriefs = new Map(),
 	stopping: () => boolean = () => false
 ): Promise<void> {
@@ -117,7 +112,7 @@ export interface BriefScheduler {
 // day goes out from eight in the zone of their calendar, the deployment's until a read of it named
 // one. Kept by owner and date, as any wake-up, a brief goes out once, whether a pass runs again
 // after a restart or on another replica.
-export function startBriefScheduler(deps: BriefDeps, checkMs: number): BriefScheduler {
+export function startBriefScheduler(deps: WakeDeps, checkMs: number): BriefScheduler {
 	if (!deps.config.brief.enabled) {
 		deps.log.info({ setting: 'BRIEF_ENABLED' }, 'morning briefs off');
 		return { stop: () => Promise.resolve() };

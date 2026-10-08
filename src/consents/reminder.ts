@@ -1,4 +1,4 @@
-import { daysFrom, describeMoment, wallDayAt, type Clock } from '../agent/clock.js';
+import { daysFrom, describeMoment, wallDayAt } from '../agent/clock.js';
 import { localeOf } from '../assistants/locale.js';
 import {
 	findAssistant,
@@ -16,11 +16,6 @@ import { DelegationRouteMissingError, fetchDelegation, type Delegation } from '.
 // How many days of the calendar before a permission expires its owner is reminded of it
 const REMINDER_DAYS = 5;
 
-// What the wake-ups need, and the present the reminders read
-export interface ReminderDeps extends WakeDeps {
-	readonly clock: Clock;
-}
-
 // Whether a permission is due its reminder now: it has not expired, and it expires five days of
 // the calendar after today at most, both days as the wall clock of the owner's zone reads them
 function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
@@ -35,7 +30,7 @@ function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
 // gave before, an owner having one kept at most. Their days are counted, and the expiry dated, in
 // the zone of their calendar, the deployment's until a read of it named one. Resolves to whether
 // it queued one.
-async function remindOwner(deps: ReminderDeps, link: string, owner: string): Promise<boolean> {
+async function remindOwner(deps: WakeDeps, link: string, owner: string): Promise<boolean> {
 	const { config, db, clock } = deps;
 	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 	if (!isActiveAssistant(assistant)) return false;
@@ -84,7 +79,7 @@ async function remindOwner(deps: ReminderDeps, link: string, owner: string): Pro
 // when that is why, and the pass goes on with the next one. A pass told to stop stops before the
 // next owner.
 async function remindExpiringDelegations(
-	deps: ReminderDeps,
+	deps: WakeDeps,
 	link: string,
 	stopping: () => boolean
 ): Promise<void> {
@@ -121,7 +116,7 @@ export interface ReminderScheduler {
 // once, whether a pass runs again after a restart or on another replica. Without the deployment's
 // consent link, which tells an owner where to renew, nobody is reminded, as the role says once at
 // its start.
-export function startReminderScheduler(deps: ReminderDeps, checkMs: number): ReminderScheduler {
+export function startReminderScheduler(deps: WakeDeps, checkMs: number): ReminderScheduler {
 	const link = deps.config.consent.brokerConsentUrl;
 	if (link === null) {
 		deps.log.warn({ missing: 'BROKER_CONSENT_URL' }, 'delegation reminders off');
