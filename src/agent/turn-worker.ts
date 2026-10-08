@@ -17,7 +17,7 @@ import {
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
-import type { RefusalReason } from './admission.js';
+import type { Refusal, RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
@@ -217,13 +217,22 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		job: Job,
 		request: ResumeRequest,
 		assistant: AssistantRecord,
-		refusal: Extract<OwnerTurnResult, { kind: 'busy' }>,
+		refusal: Refusal,
 		turnLog: FastifyBaseLogger
 	): Promise<Deferral | null> {
 		const { owner, roomId, pendingCallId } = request;
-		const daySpent = refusal.reason === 'user_budget';
-		const liftsInMs = daySpent ? (refusal.liftsInMs ?? 0) : 0;
 		const { consent } = await fetchOwnerMessages(db, owner, locale);
+		// When the refusal lifts, and what the assistant says once the request waits again or closed: a
+		// spent day lifts at midnight, and a turn kept waiting too long for room may run at once
+		const held =
+			refusal.reason === 'user_budget'
+				? {
+						liftsInMs: refusal.liftsInMs,
+						reopened: consent.heldUntilMidnight,
+						expired: consent.endsBeforeMidnight
+					}
+				: { liftsInMs: 0, reopened: consent.heldTooLong, expired: consent.expired };
+		const { liftsInMs } = held;
 		const state = await withPrincipal(db, { id: owner }, async (tx) => {
 			const reopened = await reopenRequest(tx, owner, pendingCallId, requestLifetimeMs, liftsInMs);
 			if (!reopened && !(await expireHeldRequest(tx, owner, pendingCallId))) {
@@ -237,13 +246,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				payload: {
 					asUserId: assistant.userId,
 					roomId,
-					text: reopened
-						? daySpent
-							? consent.heldUntilMidnight
-							: consent.heldTooLong
-						: daySpent
-							? consent.endsBeforeMidnight
-							: consent.expired,
+					text: reopened ? held.reopened : held.expired,
 					outcome: 'failed',
 					...(reopened ? { request: { pendingCallId, owner } } : {}),
 					...(questionMarker === null ? {} : { questionMarker }),
@@ -257,7 +260,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		// The matrix role records a yes after it queued its job: a job refused in between waits for the
 		// yes as a turn waits for room, and once given up, leaves the call open to the owner's answer
 		if (state === 'unanswered') {
-			return daySpent ? deferOrAbandon(job, refusal.reason, turnLog, owner, 'resumed') : null;
+			return deferOrAbandon(job, refusal.reason, turnLog, owner, 'resumed');
 		}
 		if (state === null) {
 			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');

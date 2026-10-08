@@ -28,7 +28,7 @@ import {
 	saveSessionMessages,
 	type SessionRecord
 } from '../sessions/repository.js';
-import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
+import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -210,7 +210,7 @@ export type OwnerTurnResult =
 	// The call to resume no longer waited: another answer came first
 	| { readonly kind: 'decided' }
 	// Admission refused the turn; for a user whose day is spent, until the next one starts
-	| { readonly kind: 'busy'; readonly reason: RefusalReason; readonly liftsInMs?: number }
+	| ({ readonly kind: 'busy' } & Refusal)
 	| { readonly kind: 'failed'; readonly error: string };
 
 export interface AgentService {
@@ -472,10 +472,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const { principal } = input;
 		// Admitted before anything else runs; the slot is held until the turn ends
 		const decision = await admission.admit(principal.id);
-		if (!decision.ok) {
-			const { reason, liftsInMs } = decision;
-			return { kind: 'busy', reason, ...(liftsInMs === undefined ? {} : { liftsInMs }) };
-		}
+		if (!decision.ok) return { kind: 'busy', ...decision.refusal };
 		try {
 			return await gate.run(principal.id, () => runAdmittedTurn(input));
 		} finally {
