@@ -122,7 +122,8 @@ export interface FakeApisix {
 	// The application service token the /matrix route sets on every request it forwards, as the
 	// real route does with its secret header: whatever token the caller sent, Synapse sees this one
 	matrixAsToken: string | null;
-	// A failure the /matrix route answers instead of forwarding, for the calls it returns a status for
+	// A status the /matrix route answers instead of forwarding, for the calls it returns one for: a
+	// failure, or a 200 for a call the homeserver never saw, as one lost on the way
 	matrixFault: ((call: MatrixCall) => number | null) | null;
 	// A wait before the /matrix route forwards, for the calls it returns one for: a homeserver slow
 	// to answer them
@@ -348,7 +349,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const fault = fake.matrixFault?.(call) ?? null;
 			if (fault !== null) {
 				matrixCalls.push({ method: req.method ?? 'GET', path, status: fault, ms: 0 });
-				sendJson(res, fault, { errcode: 'M_UNKNOWN', error: 'Internal server error' });
+				// A success answers as the homeserver would, so that the caller takes the call for done
+				sendJson(
+					res,
+					fault,
+					fault === 200 ? {} : { errcode: 'M_UNKNOWN', error: 'Internal server error' }
+				);
 				return;
 			}
 			await fake.matrixHold?.(call);
