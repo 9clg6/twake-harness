@@ -179,7 +179,8 @@ const WAIT_REASONS: Readonly<Record<WaitReason, true>> = {
 	consent: true,
 	event_turn: true,
 	high_risk: true,
-	delegation: true
+	delegation: true,
+	series: true
 };
 
 function isWaitReason(value: string): value is WaitReason {

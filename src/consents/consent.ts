@@ -8,9 +8,10 @@ export function isConsentLevel(value: unknown): value is ConsentLevel {
 
 // Why a call waits for its owner: an application they never allowed at that level; a write that a
 // turn an event started prepared, or a high-risk write, which they confirm call by call whatever
-// they allowed; or the platform's own permission for their assistant to act for them, which its
-// broker lacks. One request asks about every reason that applies.
-export type WaitReason = 'consent' | 'event_turn' | 'high_risk' | 'delegation';
+// they allowed; the platform's own permission for their assistant to act for them, which its
+// broker lacks; or a recurring invitation, which its contract answers only for the whole series,
+// once they said so. One request asks about every reason that applies.
+export type WaitReason = 'consent' | 'event_turn' | 'high_risk' | 'delegation' | 'series';
 
 export type ConsentSource = 'chat' | 'api' | 'migration';
 

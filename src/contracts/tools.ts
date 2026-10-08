@@ -22,6 +22,7 @@ import {
 	type Preview,
 	type PreviewAnswer
 } from './preview.js';
+import { forWholeSeries } from './series.js';
 
 export interface ContractToolDeps {
 	readonly config: Config;
@@ -391,6 +392,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			if (answered.delegation !== null) {
 				return waitForDelegation(values, context, answered.delegation, null, locale);
 			}
+			// A recurring invitation its contract previews only for the whole series: its owner is
+			// asked about that first, and their yes asks again what still waits
+			const series = forWholeSeries(contract, values, answered);
+			if (series !== null) return ask(series, context, ['series']);
 			const reading = readPreview(answered);
 			if (reading.kind === 'acted') {
 				return actedOnPreview(answered, context, reading.problem, application.name, locale);
@@ -485,6 +490,12 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
 			}
+			// A recurring invitation its contract answers only for the whole series: the call for every
+			// occurrence waits for its owner, as any call does, the organization agent having nobody
+			// to ask
+			const series =
+				owner === ORGANIZATION_PRINCIPAL ? null : forWholeSeries(contract, values, answered);
+			if (series !== null) return ask(series, context, ['series']);
 			return { result: answered.result };
 		}
 	};
