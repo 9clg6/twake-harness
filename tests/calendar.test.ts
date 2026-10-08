@@ -3,6 +3,7 @@ import type { ConfirmChannel } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
+import { makeDb, type Db } from '../src/db/client.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import {
 	ACTIVITY,
@@ -15,8 +16,10 @@ import {
 	startActivityBroker,
 	toldOf,
 	turnCalls,
+	until,
 	whenListening
 } from './helpers/activity.js';
+import { TEST_DATABASE_URL } from './helpers/app.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
@@ -32,6 +35,7 @@ import {
 	type ToolCall
 } from './helpers/fake-apisix.js';
 import type { TestBroker } from './helpers/rabbitmq.js';
+import { startTcpProxy, upstreamOf, type TcpProxy } from './helpers/tcp-proxy.js';
 
 // Where Twake Calendar sends a notification per invitee of each change to a meeting, on its own
 // vhost
@@ -40,6 +44,11 @@ const FANOUT = 'calendar:event:notificationEmail:send';
 // The instance's own queue on Calendar's vhost, and its dead letters
 const QUEUE = `${PREFIX}.calendar`;
 const DEAD_LETTERS = `${QUEUE}.dlq`;
+// The first wait of the worker's retries, doubled after each attempt: shorter than a deployment's
+// second
+const RETRY_DELAY_MS = 50;
+// What an organizer wrote, which no log line may carry
+const CONFIDENTIAL = 'Salary review of Bob, who leaves in June';
 
 // The id the calendar producer gave an invitation, which the gateway's audit records carry: the hex
 // SHA-256 of its UID, its invitee, its SEQUENCE and, for an occurrence, its RECURRENCE-ID, joined
@@ -310,6 +319,9 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 	let calendar: ConfirmChannel;
 	let r: ConsentRoom;
 	let worker: WorkerRole;
+	// The worker reaches its database through a proxy the tests take down and bring back
+	let database: TcpProxy;
+	let workerDb: Db;
 	const workerLogs = logSink();
 	beforeAll(async () => {
 		// The platform's broker, its activity exchange and the instance's user, then Calendar's vhost
@@ -337,18 +349,23 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			WAKEUPS_PER_HOUR: '1000',
 			BROKER_CONSENT_URL
 		});
+		database = await startTcpProxy(() => upstreamOf(TEST_DATABASE_URL));
+		workerDb = makeDb(database.through(TEST_DATABASE_URL));
 		// At its most verbose, so that every line it could write about an invitation is read
 		worker = await whenListening(
 			await startWorkerRole({
 				config: { ...r.h.config, role: 'worker', logLevel: 'debug' },
-				db: r.h.db,
-				logStream: workerLogs.stream
+				db: workerDb,
+				logStream: workerLogs.stream,
+				retryDelayMs: RETRY_DELAY_MS
 			})
 		);
 		r.h.apisix.llm.script = invitationModel;
 	}, 240_000);
 	afterAll(async () => {
 		if (worker !== undefined) await worker.stop();
+		if (workerDb !== undefined) await workerDb.close();
+		if (database !== undefined) await database.close();
 		if (r !== undefined) await r.close();
 		if (broker !== undefined) await broker.stop();
 	});
@@ -407,6 +424,19 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 	// What the model was first told of the invitation of this id, once its turn came
 	async function toldOfInvitation(id: string): Promise<string> {
 		return lastUser((await toldOf(r.h.apisix, id, 1))[0]?.request);
+	}
+
+	// The lines the worker wrote once it was done with a message, from a mark in its logs on
+	function handledSince(mark: number): Record<string, unknown>[] {
+		return workerLogs
+			.lines()
+			.slice(mark)
+			.filter((line) => line['msg'] === 'event handled');
+	}
+
+	// Nothing the organizer wrote reaches a log line of the worker or of the turns, at any level
+	function expectNoContentInLogs(): void {
+		expect(JSON.stringify([...workerLogs.lines(), ...r.h.logLines()])).not.toContain('Salary');
 	}
 
 	it('tells me of a new invitation from an organizer outside the platform, as the calendar wrote it', async () => {
@@ -1138,19 +1168,26 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		});
 	});
 
-	it('sets aside a notification it cannot use in its dead letter queue', async () => {
+	it('sets aside at once a notification it cannot use, saying why and nothing of what it says', async () => {
 		const before = (await broker.queue(DEAD_LETTERS, CALENDAR))?.messages ?? 0;
+		const mark = workerLogs.lines().length;
 		// As the calendar producer's tests sent them, an iCalendar without VEVENT and a VEVENT
-		// without UID; then an iCalendar that cannot be read, and a notification that is no JSON
-		await publish(notification({ uid: 'no-vevent', event: vcalendar() }));
+		// without UID; then an iCalendar that cannot be read, and a notification that is no JSON:
+		// each holds what the organizer wrote, which a parse error would quote
+		await publish(notification({ uid: 'no-vevent', event: vcalendar(`X-NOTE:${CONFIDENTIAL}`) }));
 		await publish(
 			notification({
 				uid: 'no-uid',
-				event: vcalendar('BEGIN:VEVENT', 'SUMMARY:No UID', 'DTSTART:20261006T150000Z', 'END:VEVENT')
+				event: vcalendar(
+					'BEGIN:VEVENT',
+					`SUMMARY:${CONFIDENTIAL}`,
+					'DTSTART:20261006T150000Z',
+					'END:VEVENT'
+				)
 			})
 		);
-		await publish(notification({ uid: 'unreadable', event: 'not an iCalendar' }));
-		calendar.publish(FANOUT, '', Buffer.from('not json'), { persistent: true });
+		await publish(notification({ uid: 'unreadable', event: CONFIDENTIAL }));
+		calendar.publish(FANOUT, '', Buffer.from(`${CONFIDENTIAL} {`), { persistent: true });
 		await calendar.waitForConfirms();
 		// Then a new invitation: once Alice is told of it, the queue, read in order, has set aside
 		// every notification before it
@@ -1158,19 +1195,109 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		await answerTo('uid-after-unusable');
 		await broker.waitForMessages(QUEUE, 0, CALENDAR);
 		await broker.waitForMessages(DEAD_LETTERS, before + 4, CALENDAR);
+		// Each at its first delivery, with no attempt that failed, its line saying why
+		expect(
+			handledSince(mark).map(({ source, type, outcome, reason }) => ({
+				source,
+				type,
+				outcome,
+				reason
+			}))
+		).toEqual([
+			{
+				source: 'twake://calendar',
+				type: INVITED,
+				outcome: 'dead_lettered',
+				reason: 'an iCalendar without VEVENT'
+			},
+			{
+				source: 'twake://calendar',
+				type: INVITED,
+				outcome: 'dead_lettered',
+				reason: 'an invitation without UID'
+			},
+			{
+				source: 'twake://calendar',
+				type: INVITED,
+				outcome: 'dead_lettered',
+				reason: 'an iCalendar that cannot be read'
+			},
+			{ source: undefined, type: undefined, outcome: 'dead_lettered', reason: 'not JSON' },
+			{ source: 'twake://calendar', type: INVITED, outcome: 'woken', reason: undefined }
+		]);
+		expect(
+			workerLogs
+				.lines()
+				.slice(mark)
+				.filter((line) => line['msg'] === 'event failed')
+		).toEqual([]);
+		expectNoContentInLogs();
+	});
+
+	it('tries an invitation again while the database is down, then tells me of it once, never dead-lettering it', async () => {
+		const before = (await broker.queue(DEAD_LETTERS, CALENDAR))?.messages ?? 0;
+		const mark = workerLogs.lines().length;
+		const id = idOf('uid-outage');
+		const failures = (): Record<string, unknown>[] =>
+			workerLogs.lines().filter((line) => line['msg'] === 'event failed' && line['eventId'] === id);
+		database.cut();
+		try {
+			await publish(
+				notification({
+					uid: 'uid-outage',
+					lines: [
+						`SUMMARY:${CONFIDENTIAL}`,
+						'DTSTART:20261006T150000Z',
+						'DTEND:20261006T160000Z',
+						'ORGANIZER;CN=Bob:mailto:bob@test.local'
+					]
+				})
+			);
+			// Tried more than the five times a lasting failure gets, each failure transient, and held
+			await until('seven failed attempts', () => failures().length >= 7);
+			expect(new Set(failures().map((line) => line['transient']))).toEqual(new Set([true]));
+			await broker.waitForMessages(QUEUE, 1, CALENDAR);
+		} finally {
+			database.restore();
+		}
+		expect(await answerTo('uid-outage')).toContain(`invites you to "${CONFIDENTIAL}"`);
+		expect(turnCalls(r.h.apisix.llm.calls, id)).toHaveLength(1);
+		expect(
+			handledSince(mark).map(({ source, eventId, type, outcome }) => ({
+				source,
+				eventId,
+				type,
+				outcome
+			}))
+		).toEqual([{ source: 'twake://calendar', eventId: id, type: INVITED, outcome: 'woken' }]);
+		await broker.waitForMessages(QUEUE, 0, CALENDAR);
+		await broker.waitForMessages(DEAD_LETTERS, before, CALENDAR);
+		expectNoContentInLogs();
 	});
 
 	it('keeps nothing of a notification for someone off the mail domain, even one it cannot use', async () => {
 		// The fanout carries every tenant's invitations: one for another domain's invitee, whose
-		// iCalendar cannot be read, is taken without effect rather than set aside
+		// iCalendar cannot be read, is taken without effect rather than set aside, and so is one that
+		// names no invitee; neither gives a line
 		const before = (await broker.queue(DEAD_LETTERS, CALENDAR))?.messages ?? 0;
+		const mark = workerLogs.lines().length;
 		await publish(
-			notification({ uid: 'elsewhere', recipient: 'bob@elsewhere.test', event: 'not an iCalendar' })
+			notification({ uid: 'elsewhere', recipient: 'bob@elsewhere.test', event: CONFIDENTIAL })
 		);
+		const { recipientEmail: _invitee, ...noInvitee } = notification({
+			uid: 'no-invitee',
+			event: CONFIDENTIAL
+		});
+		await publish(noInvitee);
 		await publish(notification({ uid: 'uid-after-elsewhere' }));
 		await answerTo('uid-after-elsewhere');
 		await broker.waitForMessages(QUEUE, 0, CALENDAR);
 		await broker.waitForMessages(DEAD_LETTERS, before, CALENDAR);
+		expect(handledSince(mark).map((line) => line['eventId'])).toEqual([
+			idOf('uid-after-elsewhere')
+		]);
+		expect(JSON.stringify(workerLogs.lines().slice(mark))).not.toContain('elsewhere.test');
+		expectNoContentInLogs();
 	});
 
 	it('reads a quorum queue of its own on Calendar’s vhost, one message at a time, its dead letters apart', async () => {
@@ -1179,13 +1306,15 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		// The worker holds one message at a time, which it takes once what it wakes is written
 		expect(await broker.prefetchOf(QUEUE, CALENDAR)).toEqual([1]);
 		// The same guarantees as the activity queue: dead letters into the instance's own exchange
-		// on this vhost, kept until its dead letter queue takes them, and five returns at most
+		// on this vhost, kept until its dead letter queue takes them, five returns at most, and a
+		// day before the broker takes back a message the worker holds
 		expect(queue?.arguments).toMatchObject({
 			'x-dead-letter-exchange': `${PREFIX}.dlx`,
 			'x-dead-letter-strategy': 'at-least-once',
 			'x-overflow': 'reject-publish',
 			'x-single-active-consumer': true,
-			'x-delivery-limit': 5
+			'x-delivery-limit': 5,
+			'x-consumer-timeout': 86_400_000
 		});
 		expect(await broker.bindingsOf(DEAD_LETTERS, CALENDAR)).toEqual([
 			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }
