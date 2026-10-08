@@ -1,5 +1,6 @@
 import type { Db, Tx } from '../db/client.js';
 import { isLocale, type Locale } from '../i18n/messages.js';
+import type { YesNoQuestion } from '../matrix/questions.js';
 
 export interface AssistantRecord {
 	readonly owner: string;
@@ -108,14 +109,24 @@ export async function markAssistantDeleted(tx: Tx, owner: string): Promise<boole
 	return result.count === 1;
 }
 
-export type DialogState = 'awaiting_name';
+// Where the creator conversation of an owner stands: waiting for the name of the assistant it
+// creates, or for the owner's answer to the question that asks them to confirm the deletion of
+// theirs
+export type DialogState =
+	| { readonly step: 'awaiting_name' }
+	| { readonly step: 'confirming_deletion'; readonly question: YesNoQuestion };
 
 export async function findDialog(tx: Tx, owner: string): Promise<DialogState | null> {
 	const rows = await tx.sql<
-		{ state: string }[]
-	>`select state from creator_dialogs where owner = ${owner}`;
-	const state = rows[0]?.state;
-	return state === 'awaiting_name' ? state : null;
+		{ state: string; question_id: string | null; expires_at: Date | null }[]
+	>`select state, question_id, expires_at from creator_dialogs where owner = ${owner}`;
+	const row = rows[0];
+	if (row?.state === 'awaiting_name') return { step: 'awaiting_name' };
+	if (row?.state === 'confirming_deletion' && row.question_id !== null && row.expires_at !== null) {
+		const question = { id: row.question_id, expiresTs: row.expires_at.getTime() };
+		return { step: 'confirming_deletion', question };
+	}
+	return null;
 }
 
 export async function saveDialog(tx: Tx, owner: string, state: DialogState | null): Promise<void> {
@@ -123,9 +134,20 @@ export async function saveDialog(tx: Tx, owner: string, state: DialogState | nul
 		await tx.sql`delete from creator_dialogs where owner = ${owner}`;
 		return;
 	}
+	const question = state.step === 'confirming_deletion' ? state.question : null;
 	await tx.sql`
-		insert into creator_dialogs (owner, state) values (${owner}, ${state})
-		on conflict (owner) do update set state = excluded.state, updated_at = now()`;
+		insert into creator_dialogs (owner, state, question_id, expires_at)
+		values (
+			${owner},
+			${state.step},
+			${question?.id ?? null},
+			${question === null ? null : new Date(question.expiresTs)}
+		)
+		on conflict (owner) do update set
+			state = excluded.state,
+			question_id = excluded.question_id,
+			expires_at = excluded.expires_at,
+			updated_at = now()`;
 }
 
 // The identifiers of every live assistant, from the room index that carries no user content

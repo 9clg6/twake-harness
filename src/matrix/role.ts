@@ -14,6 +14,7 @@ import { RoomId, ShieldStateCode, StoreType } from '@matrix-org/matrix-sdk-crypt
 import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
+import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
@@ -83,6 +84,8 @@ export interface MatrixRoleOptions {
 	// How long a status message waits for its turn's answer before it gives up, as long as the
 	// typing by default
 	readonly statusMaxMs?: number;
+	// The present as the creator reads it; the system clock unless a test sets its own
+	readonly clock?: Clock;
 }
 
 export interface MatrixRole {
@@ -258,6 +261,7 @@ function errcodeOf(err: unknown): string | null {
 
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
 	const { config, db, log } = options;
+	const clock = options.clock ?? SYSTEM_CLOCK;
 	const messages = getMessages(config.locale);
 	const fetchMessages = (owner: string): Promise<Messages> =>
 		fetchOwnerMessages(db, owner, config.locale);
@@ -1282,7 +1286,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const toOwner = await fetchMessages(owner);
 		let turn: CreatorTurn;
 		try {
-			turn = await runCreatorTurn({ owner, text: command, state }, assistants, toOwner);
+			turn = await runCreatorTurn(
+				{ owner, text: command, state, now: clock.now() },
+				assistants,
+				toOwner
+			);
 		} catch (err: unknown) {
 			// The owner is told, and the dialog starts over: one left waiting for a name would take
 			// their next message for one
@@ -1291,7 +1299,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
-		await appservice.botIntent.sendEvent(roomId, makeRichText(turn.reply));
+		// A question to answer yes or no goes out marked, as the assistants' do, encrypted with the
+		// rest of the reply when the room is
+		const reply = makeRichText(turn.reply);
+		await appservice.botIntent.sendEvent(
+			roomId,
+			turn.question === undefined ? reply : markQuestion(reply, turn.question)
+		);
 	}
 
 	// Answers computed by the api role, sent as the assistant through its intent, which encrypts

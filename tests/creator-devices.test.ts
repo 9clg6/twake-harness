@@ -203,8 +203,11 @@ describe('the creator takes my commands only from the sessions my identity signe
 	});
 
 	it('takes the name it asked me for only from my verified session', async () => {
-		const deleted = r.saying('Your assistant is deleted').length;
+		const confirm = r.saying('Delete Jeeves?').length;
 		await r.client.sendText(r.room, '/delete');
+		await r.nextSaying('Delete Jeeves?', confirm);
+		const deleted = r.saying('Your assistant is deleted').length;
+		await r.client.sendText(r.room, 'yes');
 		await r.nextSaying('Your assistant is deleted', deleted);
 		const asked = r.saying('Which name').length;
 		await r.client.sendText(r.room, '/newbot');
