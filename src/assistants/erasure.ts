@@ -1,4 +1,5 @@
 import type { Tx } from '../db/client.js';
+import { deleteJobsOf } from '../jobs/queue.js';
 import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 
 // Erases, in the transaction given under the owner's principal, what the harness keeps of their
@@ -31,15 +32,6 @@ export async function eraseAssistant(
 	await tx.sql`delete from consents where owner = ${owner}`;
 	await tx.sql`delete from pending_calls where owner = ${owner}`;
 	await tx.sql`delete from delegation_reminders where owner = ${owner}`;
-	// The owner's turns, an event's included, whether queued, deferred or running, which then keeps
-	// nothing; what the assistant was to send, answers and status counts; and the recoveries and
-	// preparations that failed for good, which no route shows. A turn names its owner, a send the
-	// account it goes out as, each in a payload the queue keeps as the JSON text of its fields.
-	await tx.sql`
-		delete from jobs where
-			kind in ('turn', 'resume') and (payload #>> '{}')::jsonb ->> 'owner' = ${owner}
-			or kind in ('send', 'progress') and (payload #>> '{}')::jsonb ->> 'asUserId' = ${userId}
-			or kind in ('recover', 'prepare') and status = 'failed'
-				and (payload #>> '{}')::jsonb ->> 'owner' = ${owner}`;
+	await deleteJobsOf(tx, owner, userId);
 	return true;
 }
