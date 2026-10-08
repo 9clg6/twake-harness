@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { eraseAssistant } from './erasure.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { announceCommands } from '../matrix/commands.js';
@@ -70,7 +71,8 @@ export interface AssistantService {
 	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
 	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
 	showName(owner: string): Promise<void>;
-	// Deletes the live assistant, only when it is the one created at that time if one is given
+	// Deletes the live assistant and erases what the harness keeps of it, only when it is the one
+	// created at that time if one is given
 	remove(owner: string, createdAt?: Date): Promise<boolean>;
 }
 
@@ -302,9 +304,8 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (record.roomId !== null) {
 				await admin.leaveRoom(record.userId, record.roomId);
 			}
-			await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
-			await db.sql`delete from assistant_rooms where owner = ${owner}`;
-			await db.sql`delete from assistant_provisioned where owner = ${owner}`;
+			const erased = await withPrincipal(db, { id: owner }, (tx) => eraseAssistant(tx, record));
+			if (!erased) return false;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
 		}
