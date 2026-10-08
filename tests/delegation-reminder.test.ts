@@ -83,6 +83,13 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 			.filter((line) => line['owner'] === owner && line['level'] === WARN)
 			.map((line) => ({ msg: line['msg'], path: line['path'] }));
 
+	// The passes the role started last made so far, by how many owners each reminded
+	const passes = (): unknown[] =>
+		logs
+			.lines()
+			.filter((line) => line['msg'] === 'delegation reminders passed')
+			.map((line) => line['reminded']);
+
 	async function stopWorker(): Promise<void> {
 		await worker?.stop();
 		worker = null;
@@ -145,6 +152,24 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(logs.lines().filter((line) => line['msg'] === 'delegation reminders off')).toEqual([
 			expect.objectContaining({ level: WARN, missing: 'BROKER_CONSENT_URL' })
 		]);
+	});
+
+	it('reminds me five days before it expires, not six', async () => {
+		const seen = r.saying(REMINDER).length;
+		r.h.apisix.delegation = (owner) =>
+			owner === ALICE ? brokerDelegation('2026-10-05T10:00:00Z', '2026-11-04T10:00:00Z') : null;
+		// Nine in Paris on Thursday 29 October, six days before it expires: the pass reminds nobody
+		clock.set('2026-10-29T08:00:00Z');
+		await startWorker();
+		await until('the pass of that day ended', () => passes().length === 1);
+		expect(passes()).toEqual([0]);
+		// Nine the next day, five days before
+		clock.set('2026-10-30T08:00:00Z');
+		expect(await r.nextSaying(REMINDER, seen)).toContain(
+			'expire le mercredi 4 novembre 2026 à 11:00.'
+		);
+		await until('the pass of the next day ended', () => passes().length === 2);
+		expect(passes()).toEqual([0, 1]);
 	});
 
 	it('reminds me once of the permission I gave, however often the pass runs, and once of the one I give next', async () => {
