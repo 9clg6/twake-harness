@@ -105,12 +105,14 @@ export interface ReminderScheduler {
 	stop(): Promise<void>;
 }
 
-// Looks at once whether the day's pass is due, then every checkMs. It is due once a day from the
-// reminders' hour on, on the wall clock of the assistants' zone, so that a role started later that
-// day runs it all the same; a pass that failed runs again at the next look. Kept by owner and by
-// date of consent, a reminder goes out once, whether a pass runs again after a restart or on
-// another replica. Without the deployment's consent link, which tells an owner where to renew,
-// nobody is reminded, as the role says once at its start.
+// Looks at once whether the day's pass is due, then every checkMs. It is due once a day, during the
+// reminders' hour on the wall clock of the assistants' zone, and then only: a pass that failed
+// runs again at the next look within that hour, and a role started after it, or a pass that failed
+// throughout it, waits for the next day's, which misses nobody, a permission being reminded of
+// from five days before it expires. Kept by owner and by date of consent, a reminder goes out
+// once, whether a pass runs again after a restart or on another replica. Without the deployment's
+// consent link, which tells an owner where to renew, nobody is reminded, as the role says once at
+// its start.
 export function startReminderScheduler(deps: ReminderDeps, checkMs: number): ReminderScheduler {
 	const link = deps.config.consent.brokerConsentUrl;
 	if (link === null) {
@@ -133,7 +135,7 @@ export function startReminderScheduler(deps: ReminderDeps, checkMs: number): Rem
 	const tick = (): void => {
 		if (running !== null || stopped) return;
 		const today = wallDayAt(deps.clock.now(), deps.config.timeZone);
-		if (today.date === doneOn || today.hour < deps.config.consent.delegationReminderHour) return;
+		if (today.date === doneOn || today.hour !== deps.config.consent.delegationReminderHour) return;
 		running = pass(today.date);
 	};
 	tick();

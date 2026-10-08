@@ -154,18 +154,18 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		);
 	});
 
-	it('runs at the hour the deployment sets, on the wall clock of its time zone', async () => {
+	it('runs during the hour the deployment sets only, on the wall clock of its time zone: started after it, it waits for the next day', async () => {
 		const seen = r.saying(REMINDER).length;
 		r.h.apisix.delegation = (owner) =>
 			owner === ALICE ? brokerDelegation('2026-12-20T12:00:00Z', '2027-01-15T12:00:00Z') : null;
 		const before = asked(ALICE);
-		// 17:59 in Paris on Monday 11 January, a minute before the hour set
-		clock.set('2027-01-11T16:59:00Z');
+		// 19:00 in Paris on Monday 11 January, an hour after the hour set
+		clock.set('2027-01-11T18:00:00Z');
 		await startWorker({ delegationReminderHour: 18 });
 		await sleep(500);
 		expect(asked(ALICE)).toBe(before);
-		// 18:00 in Paris, 17:00 in UTC
-		clock.set('2027-01-11T17:00:00Z');
+		// 18:00 in Paris the next day, 17:00 in UTC
+		clock.set('2027-01-12T17:00:00Z');
 		expect(await r.nextSaying(REMINDER, seen)).toContain(
 			'expire le vendredi 15 janvier 2027 à 13:00.'
 		);
