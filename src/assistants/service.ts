@@ -12,7 +12,8 @@ import {
 	defaultNameFor,
 	formerDefaultNames,
 	isValidAssistantName,
-	requestNaming
+	requestNaming,
+	type Namesake
 } from './naming.js';
 import {
 	findAssistant,
@@ -78,6 +79,13 @@ export interface AssistantServiceDeps {
 	readonly log: FastifyBaseLogger;
 }
 
+// The default name of an owner's assistant, after their first name, with the default names it had
+// before, null when they are unknown
+interface DefaultNames {
+	readonly name: string;
+	readonly former: readonly string[] | null;
+}
+
 function matrixLink(userId: string): string {
 	return `https://matrix.to/#/${userId}`;
 }
@@ -94,20 +102,21 @@ function toView(record: Pick<AssistantRecord, 'userId' | 'name' | 'roomId'>): As
 export function makeAssistantService(deps: AssistantServiceDeps): AssistantService {
 	const { config, db, admin, log } = deps;
 
-	// The owner's Matrix name; null when they have none
-	function ownerNameOf(ownerLocalpart: string): Promise<string | null> {
-		return admin.displayName(matrixUserIdOfLocalpart(config, ownerLocalpart));
-	}
-
-	// The default name of a new assistant, after its owner's localpart when the homeserver fails to
-	// give their Matrix name
-	async function defaultName(owner: string, ownerLocalpart: string): Promise<string> {
-		const ownerName = await ownerNameOf(ownerLocalpart).catch((err: unknown) => {
-			log.warn({ owner, err }, 'owner name not read');
-			return null;
-		});
+	// The default names of the owner's assistant, after the Matrix name the homeserver gives for the
+	// owner; after their localpart when it fails to give it, which leaves the former ones unknown
+	async function defaultNamesOf(owner: string, ownerLocalpart: string): Promise<DefaultNames> {
+		const namesake = await admin.displayName(matrixUserIdOfLocalpart(config, ownerLocalpart)).then(
+			(name): Namesake => ({ name, localpart: ownerLocalpart }),
+			(err: unknown) => {
+				log.warn({ owner, err }, 'owner name not read');
+				return null;
+			}
+		);
 		const messages = await fetchOwnerMessages(db, owner, config.locale);
-		return defaultNameFor(messages, ownerName, ownerLocalpart);
+		return {
+			name: defaultNameFor(messages, namesake ?? { name: null, localpart: ownerLocalpart }),
+			former: namesake === null ? null : formerDefaultNames(namesake)
+		};
 	}
 
 	async function current(owner: string): Promise<AssistantRecord | null> {
@@ -206,7 +215,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
 			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
-			const name = await defaultName(owner, ownerLocalpart);
+			const { name } = await defaultNamesOf(owner, ownerLocalpart);
 			try {
 				// The account is registered once and kept, as for an assistant the owner creates
 				await admin.registerUser(localpart);
@@ -253,23 +262,15 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			const record = await current(owner);
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (record === null || ownerLocalpart === null) return 'kept';
-			try {
-				const ownerName = await ownerNameOf(ownerLocalpart);
-				const former = formerDefaultNames(ownerName, ownerLocalpart);
-				if (!former.includes(record.name)) return 'kept';
-				const messages = await fetchOwnerMessages(db, owner, config.locale);
-				const name = defaultNameFor(messages, ownerName, ownerLocalpart);
-				if (name === record.name) return 'kept';
-				const renamed = await withPrincipal(db, { id: owner }, (tx) =>
-					renameAssistantFrom(tx, owner, former, name)
-				);
-				if (!renamed) return 'kept';
-				log.info({ owner, userId: record.userId }, 'assistant named after its owner');
-				return 'renamed';
-			} catch (err: unknown) {
-				log.warn({ owner, userId: record.userId, err }, 'assistant not named after its owner');
-				return 'failed';
-			}
+			const { name, former } = await defaultNamesOf(owner, ownerLocalpart);
+			if (former === null) return 'failed';
+			if (!former.includes(record.name) || name === record.name) return 'kept';
+			const renamed = await withPrincipal(db, { id: owner }, (tx) =>
+				renameAssistantFrom(tx, owner, former, name)
+			);
+			if (!renamed) return 'kept';
+			log.info({ owner, userId: record.userId }, 'assistant named after its owner');
+			return 'renamed';
 		},
 		async showName(owner) {
 			const record = await current(owner);

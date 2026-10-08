@@ -19,29 +19,33 @@ function shortened(name: string): string {
 	return [...name].slice(0, MAX_NAME_LENGTH).join('').trim();
 }
 
+// The owner an assistant is named after: their Matrix name, null when they have none, and their
+// localpart
+export interface Namesake {
+	readonly name: string | null;
+	readonly localpart: string;
+}
+
 // « Assistant de <first name> », after the owner's Matrix name; after their localpart when they
 // have none, or when the name it gives could not be an assistant's
-export function defaultNameFor(
-	messages: Messages,
-	ownerName: string | null,
-	ownerLocalpart: string
-): string {
-	const named = ownerName === null ? null : shortened(messages.defaultAssistantName(ownerName));
-	return named !== null && isValidAssistantName(named)
-		? named
-		: shortened(messages.defaultAssistantName(ownerLocalpart));
+export function defaultNameFor(messages: Messages, owner: Namesake): string {
+	const fromName =
+		owner.name === null ? null : shortened(messages.defaultAssistantName(owner.name));
+	return fromName !== null && isValidAssistantName(fromName)
+		? fromName
+		: shortened(messages.defaultAssistantName(owner.localpart));
 }
 
 // The default names an assistant had before it took its owner's first name: « Assistant », then
 // the owner's whole Matrix name, or their localpart, in either language, cut as they were
-export function formerDefaultNames(ownerName: string | null, ownerLocalpart: string): string[] {
-	const owners = ownerName === null ? [ownerLocalpart] : [ownerName, ownerLocalpart];
-	const named = LOCALES.flatMap((locale) =>
-		owners.map((owner) =>
-			getMessages(locale).formerDefaultAssistantName(owner).slice(0, MAX_NAME_LENGTH)
+export function formerDefaultNames(owner: Namesake): string[] {
+	const names = owner.name === null ? [owner.localpart] : [owner.name, owner.localpart];
+	const fromOwner = LOCALES.flatMap((locale) =>
+		names.map((name) =>
+			getMessages(locale).formerDefaultAssistantName(name).slice(0, MAX_NAME_LENGTH)
 		)
 	);
-	return [FORMER_DEFAULT_NAME, ...named];
+	return [FORMER_DEFAULT_NAME, ...fromOwner];
 }
 
 // Asks the matrix role to show the owner's assistant under its name: the job reads the name when it
