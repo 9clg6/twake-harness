@@ -71,6 +71,12 @@ function forgetSdkSetup(intent: Intent): void {
 // room key of its own instead, shared anew with every device of the room's members, so that a lost
 // key leaves that one message unreadable. The SDK reads the rotation from the room's encryption
 // state as it prepares each message, whoever opened the room.
+// The Rust SDK keeps a room key it already started until it expires by its own rotation, or until
+// the history visibility, the algorithm or the devices it goes to change: a new rotation alone
+// would leave every room on the key it had. The assistant also encrypts for a history visible to
+// the joined members only, which its rooms lose nothing by, as they hold the owner and the assistant
+// alone, and which retires at the first message every room key started for the shared history
+// that the rooms' preset sets.
 type PrepareEncrypt = (roomId: string, roomInfo: Record<string, unknown>) => Promise<void>;
 
 function rotateEachMessage(intent: Intent): void {
@@ -80,7 +86,11 @@ function rotateEachMessage(intent: Intent): void {
 	const prepare = engine?.prepareEncrypt;
 	if (engine === undefined || prepare === undefined) return;
 	engine.prepareEncrypt = (roomId, roomInfo) =>
-		prepare.call(engine, roomId, { ...roomInfo, rotation_period_msgs: 1 });
+		prepare.call(engine, roomId, {
+			...roomInfo,
+			rotation_period_msgs: 1,
+			historyVisibility: 'joined'
+		});
 }
 
 // The HTTP status of a failed request, which the SDK carries on what it throws
