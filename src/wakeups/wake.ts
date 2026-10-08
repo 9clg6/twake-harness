@@ -33,7 +33,14 @@ export interface Wakeup {
 	};
 	// For an invitation, what its turn checks before the model speaks
 	readonly invitation?: Invitation;
+	// For the brief of its owner's working day, the date in their zone it is the brief of: only the
+	// worker role's scheduler sets it, and a turn is a brief's for that alone, never for its type
+	readonly brief?: { readonly date: string };
 }
+
+// The source of the wake-ups the worker role's scheduler makes, the briefs, which no other wake-up
+// may take: a source may publish any name, this one included
+export const BRIEF_SOURCE = 'schedule';
 
 export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped';
 
@@ -48,8 +55,10 @@ function eventData(wakeup: Wakeup): string {
 	return fenced('event-data', { ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
 }
 
-// What the owner's assistant is told, in its owner's language: what arrived, then the event
+// What the owner's assistant is told, in its owner's language: what arrived, then the event, or
+// that their day starts, for a brief, whose turn reads the rest
 function told(wakeup: Wakeup, messages: Messages): string {
+	if (wakeup.brief !== undefined) return messages.brief.intro(wakeup.id);
 	if (carriesInvitation(wakeup)) return messages.events.invited(wakeup.id, eventData(wakeup));
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
 		? messages.events.taskAssigned(wakeup.id, eventData(wakeup))
@@ -66,7 +75,8 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 }
 
 // Wakes the assistant of the person a wake-up is for, its owner: a turn of origin event in their
-// room, serialized with their other turns, which tells them of the event it carries. The owner is
+// room, serialized with their other turns, which tells them of the event it carries, or of origin
+// brief for the brief the scheduler asks for. The owner is
 // the recipient by their email, which is their principal: only a person of the instance's mail
 // domain has one, nobody is woken for their own action, and nobody more often in an hour than the
 // deployment allows.
@@ -75,6 +85,9 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
 	if (owner === null || matrixLocalpartOfPrincipal(config, owner) === null) return 'ignored';
 	if (isOwnAction(wakeup)) return 'ignored';
+	// A brief comes from the scheduler's source, and that source brings nothing else: an event
+	// published under it is nobody's brief, and takes none of their wake-ups
+	if ((wakeup.source === BRIEF_SOURCE) !== (wakeup.brief !== undefined)) return 'ignored';
 	const outcome = await withPrincipal(db, { id: owner }, async (tx) => {
 		const assistant = await findAssistant(tx, owner);
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
@@ -107,12 +120,13 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 			roomId: assistant.roomId,
 			eventId: key,
 			text: told(wakeup, getMessages(localeOf(assistant, config.locale))),
-			origin: 'event',
+			origin: wakeup.brief === undefined ? 'event' : 'brief',
 			event: {
 				id: wakeup.id,
 				type: wakeup.type,
 				...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
-			}
+			},
+			...(wakeup.brief === undefined ? {} : { brief: wakeup.brief })
 		};
 		await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
 		return 'woken' as const;

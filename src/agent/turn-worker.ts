@@ -19,6 +19,7 @@ import {
 } from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
+import type { BriefMarker } from '../matrix/brief.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
 import type { Refusal, RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
@@ -31,27 +32,33 @@ import {
 import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
 import type { SpaceNotifications } from '../suggestions/space.js';
 import { proposalSentence } from '../suggestions/text.js';
-import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
+import type { AgentService, OwnerTurnResult } from './service.js';
 
 const turnPayload = z.object({
 	owner: z.string().min(1),
 	roomId: z.string().min(1),
 	eventId: z.string().min(1),
 	text: z.string().min(1),
-	// Who started the turn: the owner's message, or an event the harness took from the broker
-	origin: z.enum(['owner', 'event']).optional(),
+	// Who started the turn: the owner's message, an event the harness took from the broker, or the
+	// worker role's scheduler, for the brief of the owner's working day
+	origin: z.enum(['owner', 'event', 'brief']).optional(),
 	// The event, when the turn is an event's: its id and CloudEvent type, as its source published
-	// them, and for an invitation, what the harness checks before the model speaks
+	// them, and for an invitation, what the harness checks before the model speaks. A brief is
+	// keyed as an event is, by the id the scheduler gave it.
 	event: z
 		.object({
 			id: z.string().min(1),
 			type: z.string().min(1),
 			invitation: invitationSchema.optional()
 		})
-		.optional()
+		.optional(),
+	// For a brief, the date in the owner's zone it is the brief of
+	brief: z.object({ date: z.iso.date() }).optional()
 });
 
 export type TurnPayload = z.infer<typeof turnPayload>;
+
+type PayloadOrigin = NonNullable<TurnPayload['origin']>;
 
 // The prefix that keys a turn an event woke, in its payload and its jobs' dedup keys
 const EVENT_KEY_PREFIX = 'event:';
@@ -64,9 +71,10 @@ const REFUSED_TURN_RETRY_MAX_MS = 60_000;
 
 // What links a turn's contract calls and log lines to their cause: the Matrix id of the owner's
 // message, or, for a turn an event woke, the bare id the event's source gave it, so that the
-// gateway's audit records match it exactly. The prefixed form stays the turn's internal key.
-function correlationIdOf(payload: TurnPayload, origin: TurnOrigin): string {
-	if (origin !== 'event') return payload.eventId;
+// gateway's audit records match it exactly, and for a brief, the id the scheduler gave it, which
+// names no owner. The prefixed form stays the turn's internal key.
+function correlationIdOf(payload: TurnPayload, origin: PayloadOrigin): string {
+	if (origin === 'owner') return payload.eventId;
 	if (payload.event !== undefined) return payload.event.id;
 	return payload.eventId.startsWith(EVENT_KEY_PREFIX)
 		? payload.eventId.slice(EVENT_KEY_PREFIX.length)
@@ -100,6 +108,9 @@ export interface SendPayload {
 	readonly html?: string;
 	// The turn answered once it reached one of its limits: there is more to do
 	readonly atLimit?: true;
+	// The text is the brief of the owner's working day: what the matrix role marks the message's
+	// content with, for their client to tell it and its date
+	readonly brief?: BriefMarker;
 }
 
 // The actions a turn has done so far, which the matrix role shows its owner in the turn's status
@@ -154,7 +165,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		reason: RefusalReason,
 		turnLog: FastifyBaseLogger,
 		owner: string,
-		kind: 'event' | 'resumed'
+		kind: 'event' | 'resumed' | 'brief'
 	): Deferral | null {
 		const leftMs = turn.eventMaxDelayMs - job.deferredForMs;
 		if (leftMs <= 0) {
@@ -448,6 +459,47 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		});
 	}
 
+	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
+	// a message of its own, marked as the brief of its date. Refused by admission, it waits as a turn
+	// an event woke does, and the line that says so says why.
+	async function sendBrief(
+		job: Job,
+		payload: TurnPayload,
+		assistant: AssistantRecord,
+		correlationId: string,
+		turnLog: FastifyBaseLogger
+	): Promise<Deferral | null> {
+		const { owner, roomId, eventId, text, brief } = payload;
+		if (brief === undefined) throw new Error('turn payload is malformed');
+		const result = await agent.runBrief({
+			principal: { id: owner },
+			roomId,
+			told: text,
+			date: brief.date,
+			log: turnLog,
+			correlationId,
+			assistantName: assistant.name
+		});
+		if (result.kind === 'busy') return deferOrAbandon(job, result.reason, turnLog, owner, 'brief');
+		if (result.kind !== 'ok') {
+			turnLog.warn({ result: result.kind }, 'brief dropped');
+			return null;
+		}
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId,
+				text: result.text,
+				...(result.html === undefined ? {} : { html: result.html }),
+				brief: { date: brief.date }
+			} satisfies SendPayload,
+			dedupKey: `send:${eventId}`,
+			groupKey: `send:${roomId}`
+		});
+		return null;
+	}
+
 	return startJobWorker({
 		db,
 		log,
@@ -489,6 +541,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			}
 			const correlationId = correlationIdOf(parsed.data, origin);
 			const turnLog = log.child({ reqId: correlationId, roomId });
+			if (origin === 'brief') {
+				return sendBrief(job, parsed.data, assistant, correlationId, turnLog);
+			}
 			// A turn woken by an event posted to the API answers no message of the room
 			const actionsDone = eventId.startsWith('$')
 				? reportActions(turnLog, { asUserId: assistant.userId, roomId, replyTo: eventId })

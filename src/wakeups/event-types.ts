@@ -6,3 +6,7 @@ export const TASK_ASSIGNED_EVENT_TYPE = 'com.twake.tasks.task.assigned.v1';
 // The CloudEvent type of an invitation, as the calendar producer named it: what a new invitation in
 // Calendar wakes its invitee's assistant as
 export const INVITED_EVENT_TYPE = 'com.twake.calendar.event.invited.v1';
+
+// The type of the wake-up by which the worker role's scheduler asks an owner's assistant for the
+// brief of their working day: the harness's own, which no source publishes
+export const BRIEF_EVENT_TYPE = 'com.twake.harness.brief.v1';
