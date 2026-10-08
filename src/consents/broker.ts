@@ -5,19 +5,17 @@ import { joinPath, parseBody } from '../contracts/tools.js';
 import { readProblemCode } from './delegation.js';
 
 // An owner's permission for their assistant to act for them, as the platform's token broker holds
-// it: when they gave it and when it expires, and the broker's consent link, where they renew it
+// it: when they gave it and when it expires
 export interface Delegation {
 	readonly consentedAt: Date;
 	readonly expiresAt: Date;
-	readonly consentUrl: string;
 }
 
-// The broker's answer about a permission it holds, expired or not: its dates in RFC 3339, and a
-// link the harness shows its owner, so an https URL only
+// The broker's answer about a permission it holds, expired or not: its dates in RFC 3339. Its
+// consent link is never read: the harness shows its owner the deployment's own.
 const heldSchema = z.object({
 	consented_at: z.iso.datetime({ offset: true }),
-	expires_at: z.iso.datetime({ offset: true }),
-	consent_url: z.url({ protocol: /^https$/ })
+	expires_at: z.iso.datetime({ offset: true })
 });
 
 // Whether an answer is the broker's own word that it holds no permission of the owner: an RFC
@@ -48,7 +46,6 @@ export async function fetchDelegation(config: Config, owner: string): Promise<De
 	if (!held.success) throw new Error('the delegation route answered no permission it could read');
 	return {
 		consentedAt: new Date(held.data.consented_at),
-		expiresAt: new Date(held.data.expires_at),
-		consentUrl: held.data.consent_url
+		expiresAt: new Date(held.data.expires_at)
 	};
 }

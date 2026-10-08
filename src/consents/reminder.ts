@@ -36,9 +36,9 @@ function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
 }
 
 // Reminds one owner, when their permission is due its reminder and they were never reminded of
-// the one they gave on that date: the reminder is kept with the message it queues, or not at all.
-// Resolves to whether it queued one.
-async function remindOwner(deps: ReminderDeps, owner: string): Promise<boolean> {
+// the one they gave on that date, with the deployment's consent link bound to them: the reminder
+// is kept with the message it queues, or not at all. Resolves to whether it queued one.
+async function remindOwner(deps: ReminderDeps, link: string, owner: string): Promise<boolean> {
 	const { config, db, clock } = deps;
 	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 	if (!isActive(assistant)) return false;
@@ -55,13 +55,16 @@ async function remindOwner(deps: ReminderDeps, owner: string): Promise<boolean> 
 		if (kept.count === 0) return false;
 		const locale = localeOf(current, config.locale);
 		const expiry = describeMoment(delegation.expiresAt, config.timeZone, locale);
-		const link = makeOwnerConsentLink(delegation.consentUrl, owner);
 		await enqueueJob(tx, {
 			kind: 'send',
 			payload: {
 				asUserId: current.userId,
 				roomId: current.roomId,
-				text: getMessages(locale).notices.delegationExpiring(expiry.date, expiry.time, link)
+				text: getMessages(locale).notices.delegationExpiring(
+					expiry.date,
+					expiry.time,
+					makeOwnerConsentLink(link, owner)
+				)
 			},
 			dedupKey: `delegation-reminder:${JSON.stringify([owner, delegation.consentedAt.toISOString()])}`,
 			groupKey: `send:${current.roomId}`
@@ -79,6 +82,7 @@ async function remindOwner(deps: ReminderDeps, owner: string): Promise<boolean> 
 // pass told to stop stops before the next owner.
 async function remindExpiringDelegations(
 	deps: ReminderDeps,
+	link: string,
 	stopping: () => boolean
 ): Promise<void> {
 	const owners = [...new Set((await listActiveAssistants(deps.db)).map(({ owner }) => owner))].sort(
@@ -88,7 +92,7 @@ async function remindExpiringDelegations(
 	for (const owner of owners) {
 		if (stopping()) break;
 		try {
-			if (await remindOwner(deps, owner)) reminded += 1;
+			if (await remindOwner(deps, link, owner)) reminded += 1;
 		} catch (err: unknown) {
 			deps.log.warn({ owner, err }, 'delegation reminder skipped');
 		}
@@ -105,14 +109,20 @@ export interface ReminderScheduler {
 // reminders' hour on, on the wall clock of the assistants' zone, so that a role started later that
 // day runs it all the same; a pass that failed runs again at the next look. Kept by owner and by
 // date of consent, a reminder goes out once, whether a pass runs again after a restart or on
-// another replica.
+// another replica. Without the deployment's consent link, which tells an owner where to renew,
+// nobody is reminded, as the role says once at its start.
 export function startReminderScheduler(deps: ReminderDeps, checkMs: number): ReminderScheduler {
+	const link = deps.config.consent.brokerConsentUrl;
+	if (link === null) {
+		deps.log.warn({ missing: 'BROKER_CONSENT_URL' }, 'delegation reminders off');
+		return { stop: () => Promise.resolve() };
+	}
 	let doneOn: string | null = null;
 	let running: Promise<void> | null = null;
 	let stopped = false;
 	const pass = async (date: string): Promise<void> => {
 		try {
-			await remindExpiringDelegations(deps, () => stopped);
+			await remindExpiringDelegations(deps, link, () => stopped);
 			doneOn = date;
 		} catch (err: unknown) {
 			deps.log.error({ err }, 'delegation reminders failed');

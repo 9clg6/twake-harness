@@ -14,8 +14,11 @@ import {
 
 const ALICE = 'alice@test.local';
 const BOB = 'bob@test.local';
-// The broker's consent link bound to Alice, as the harness binds every consent link it shows her
+// The deployment's consent link bound to Alice, as the harness binds every consent link it shows
+// her
 const ALICE_CONSENT_URL = `${BROKER_CONSENT_URL}?owner=alice%40test.local`;
+// The consent link the broker's answers carry, which no reminder shows
+const ANSWERED_CONSENT_URL = 'https://agent-consent.test.local/elsewhere';
 // How a reminder starts, in French, the language of the suite
 const REMINDER = "L'autorisation d'agir en ton nom";
 
@@ -77,7 +80,11 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		r.h.apisix.delegationCalls.filter((call) => call.owner === owner).length;
 
 	beforeAll(async () => {
-		r = await startConsentRoom({ ASSISTANT_LOCALE: 'fr', ASSISTANT_TIMEZONE: 'Europe/Paris' });
+		r = await startConsentRoom({
+			ASSISTANT_LOCALE: 'fr',
+			ASSISTANT_TIMEZONE: 'Europe/Paris',
+			BROKER_CONSENT_URL
+		});
 	}, 240_000);
 	afterEach(stopWorker);
 	afterAll(async () => {
@@ -86,10 +93,13 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 
 	it('tells me at nine, five days before it expires, when it expires and where to renew it, and asks me nothing', async () => {
 		r.h.apisix.delegation = (owner) =>
-			owner === ALICE ? brokerDelegation('2026-09-13T14:23:51Z', '2026-10-13T14:23:51Z') : null;
+			owner === ALICE
+				? brokerDelegation('2026-09-13T14:23:51Z', '2026-10-13T14:23:51Z', ANSWERED_CONSENT_URL)
+				: null;
 		// Nine in Paris, on Thursday 8 October
 		clock.set('2026-10-08T07:00:00Z');
 		await startWorker();
+		// The link is the deployment's, never the one the broker's answer carries
 		expect(await r.nextSaying(REMINDER, 0)).toBe(
 			`L'autorisation d'agir en ton nom que tu m'as donnée expire le mardi 13 octobre 2026 à 16:23. Renouvelle-la d'ici là pour que je continue à agir pour toi : ${ALICE_CONSENT_URL}`
 		);
@@ -102,6 +112,17 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(r.saying(REMINDER)[0]?.content).not.toHaveProperty(['app.twake.assistant.question']);
 		await r.client.sendText(r.room, 'oui');
 		expect(await r.nextSaying('echo: ', 0)).toBe('echo: oui');
+	});
+
+	it('reminds me of nothing when the deployment gives no consent link to show me', async () => {
+		r.h.apisix.delegation = (owner) =>
+			owner === ALICE ? brokerDelegation('2026-09-14T08:00:00Z', '2026-10-14T08:00:00Z') : null;
+		const before = asked(ALICE);
+		// Nine in Paris on Friday 9 October, five days before it expires
+		clock.set('2026-10-09T07:00:00Z');
+		await startWorker({ brokerConsentUrl: null });
+		await sleep(500);
+		expect(asked(ALICE)).toBe(before);
 	});
 
 	it('reminds me once of the permission I gave, however often the pass runs, and once of the one I give next', async () => {
