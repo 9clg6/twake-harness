@@ -48,6 +48,8 @@ export interface MatrixTestHarness {
 export interface MatrixStartOptions {
 	// Settings of this harness, over the defaults
 	readonly env?: Record<string, string>;
+	// Settings of its homeserver, over the suites' own
+	readonly synapse?: Readonly<Record<string, unknown>>;
 	// How long the role lets the SDK process a push before it gives the push up
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
@@ -95,9 +97,10 @@ export async function startMatrixHarness(
 		TURN_STATUS_DELAY_MS: '600000',
 		...(options.env ?? {})
 	});
-	const synapse = await startTestSynapse({
-		file: buildRegistrationFile(config, `http://host.docker.internal:${port}`)
-	});
+	const synapse = await startTestSynapse(
+		{ file: buildRegistrationFile(config, `http://host.docker.internal:${port}`) },
+		options.synapse
+	);
 	apisix.matrixUpstream = synapse.url;
 	apisix.matrixAsToken = asToken;
 	const db = makeDb(config.databaseUrl);

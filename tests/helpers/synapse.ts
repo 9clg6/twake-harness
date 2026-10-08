@@ -31,7 +31,8 @@ export interface MatrixReply {
 
 export interface TestSynapse {
 	readonly url: string;
-	registerUser(localpart: string): Promise<MatrixUser>;
+	// A new account, its display name the one given or else its localpart, as Synapse gives it
+	registerUser(localpart: string, displayName?: string): Promise<MatrixUser>;
 	// A new session of a registered user, as a client opened anew: a new device with its own token
 	login(localpart: string): Promise<MatrixUser>;
 	request(
@@ -131,7 +132,11 @@ async function generateConfig(dir: string): Promise<string> {
 	return dir;
 }
 
-export async function startTestSynapse(registration: AppserviceRegistration): Promise<TestSynapse> {
+// The settings given go over the suites' own, as for a homeserver that refuses display-name changes
+export async function startTestSynapse(
+	registration: AppserviceRegistration,
+	settings: Readonly<Record<string, unknown>> = {}
+): Promise<TestSynapse> {
 	const generated = await generatedConfig();
 	const dir = await mkdtemp(join(tmpdir(), 'synapse-'));
 	for (const file of GENERATED_FILES) await copyFile(join(generated, file), join(dir, file));
@@ -151,7 +156,8 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		rc_registration: GENEROUS,
 		rc_login: { address: GENEROUS, account: GENEROUS, failed_attempts: GENEROUS },
 		rc_joins: { local: GENEROUS, remote: GENEROUS },
-		rc_invites: { per_room: GENEROUS, per_user: GENEROUS, per_issuer: GENEROUS }
+		rc_invites: { per_room: GENEROUS, per_user: GENEROUS, per_issuer: GENEROUS },
+		...settings
 	});
 	await writeFile(configPath, dump(config));
 	await writeFile(join(dir, 'harness.yaml'), dump(registration.file));
@@ -196,7 +202,7 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		};
 	}
 
-	async function registerUser(localpart: string): Promise<MatrixUser> {
+	async function registerUser(localpart: string, displayName?: string): Promise<MatrixUser> {
 		const nonce = (await request(null, 'GET', '/_synapse/admin/v1/register')).body[
 			'nonce'
 		] as string;
@@ -204,12 +210,14 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		const mac = createHmac('sha1', SHARED_SECRET)
 			.update(`${nonce}\0${localpart}\0${password}\0notadmin`)
 			.digest('hex');
+		// Given at the registration, which a homeserver refusing display-name changes still takes
 		const res = await request(null, 'POST', '/_synapse/admin/v1/register', {
 			nonce,
 			username: localpart,
 			password,
 			admin: false,
-			mac
+			mac,
+			...(displayName === undefined ? {} : { displayname: displayName })
 		});
 		if (res.status !== 200) {
 			throw new Error(`registration of ${localpart} failed: ${JSON.stringify(res.body)}`);
