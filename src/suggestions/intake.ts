@@ -7,22 +7,15 @@ import { enqueueJob } from '../jobs/queue.js';
 import { principalOfMatrixUser } from '../principals/identity.js';
 import { suggestGroup, type Quoted, type SuggestPayload } from './job.js';
 import { mayArrangeMeeting } from './prefilter.js';
-import { noteRoom, readRoom, readSettings, type RoomFlags } from './repository.js';
+import { readSettings } from './repository.js';
 
 // A message stays context for the next one for this long; it lives in this process's memory only
 const CONTEXT_TTL_MS = 15 * 60 * 1000;
 const MAX_ROOMS_IN_MEMORY = 2000;
-const FLAGS_TTL_MS = 60 * 1000;
 
 interface Remembered extends Quoted {
 	readonly eventId: string;
 	readonly at: number;
-}
-
-export interface StateEvent {
-	readonly type?: string | undefined;
-	readonly state_key?: string | undefined;
-	readonly content?: Record<string, unknown> | undefined;
 }
 
 export interface ChannelMessage {
@@ -32,11 +25,9 @@ export interface ChannelMessage {
 }
 
 export interface SuggestionIntake {
-	// An event of a room reached the application service encrypted
-	noteEncrypted(roomId: string): Promise<void>;
-	// A state event Synapse pushed: what marks a room as a channel, as encrypted, or as switched off
-	noteState(roomId: string, event: StateEvent): Promise<void>;
-	// A clear message of a room the assistants are not in
+	// The listener left a room: the last message held of it is dropped
+	forget(roomId: string): void;
+	// A clear message of a channel the listener is in
 	onMessage(roomId: string, message: ChannelMessage): Promise<void>;
 }
 
@@ -47,29 +38,14 @@ export interface IntakeDeps {
 	readonly now?: () => number;
 }
 
-// The messages of channels the assistants have not joined come to the matrix role because the
-// registration asks for the rooms of the homeserver. Nothing here reads a room: a message is
-// looked at for the time it takes to decide, the last one of each room is held in memory as
+// The messages of the channels the listener was invited to come to the matrix role, and of no
+// other room but the assistants' and the creator's. A message is looked at for the time it takes
+// to decide, the last one of each room is held in memory as
 // context for the next, and a job per member who may be offered something carries the quotes.
 export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 	const { config, db, log } = deps;
 	const now = deps.now ?? Date.now;
 	const recent = new Map<string, Remembered>();
-	const flags = new Map<string, { readonly flags: RoomFlags; readonly until: number }>();
-
-	// A room is read only if Synapse pushed what makes it a channel (it is a space, or inside one),
-	// and nothing that takes it out: encryption, or the room's own switch. Anything else is ignored,
-	// a room that existed before the registration included, until such a state event is pushed.
-	async function analysable(roomId: string): Promise<boolean> {
-		let known = flags.get(roomId);
-		if (known === undefined || known.until <= now()) {
-			known = { flags: await readRoom(db, roomId), until: now() + FLAGS_TTL_MS };
-			flags.set(roomId, known);
-		}
-		const { channel, encrypted, disabled } = known.flags;
-		return channel && !encrypted && !disabled;
-	}
-
 	function remember(roomId: string, message: Remembered): void {
 		recent.delete(roomId);
 		recent.set(roomId, message);
@@ -89,44 +65,13 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 	}
 
 	return {
-		async noteEncrypted(roomId) {
-			if (!config.suggestions.enabled) return;
+		forget(roomId) {
 			recent.delete(roomId);
-			flags.delete(roomId);
-			await noteRoom(db, roomId, { encrypted: true });
-		},
-		async noteState(roomId, event) {
-			if (!config.suggestions.enabled || event.state_key === undefined) return;
-			const content = event.content ?? {};
-			let seen: Parameters<typeof noteRoom>[2] | null = null;
-			// A space is a channel; so is a room that names a space as its parent (a parent removed
-			// has an empty content)
-			if (
-				event.type === 'm.room.create' &&
-				event.state_key === '' &&
-				content['type'] === 'm.space'
-			) {
-				seen = { channel: true };
-			} else if (event.type === 'm.space.parent' && Array.isArray(content['via'])) {
-				seen = { channel: true };
-			} else if (event.type === 'm.room.encryption' && event.state_key === '') {
-				seen = { encrypted: true };
-			} else if (event.type === 'app.twake.chat.suggestions' && event.state_key === '') {
-				seen = { disabled: content['enabled'] === false };
-			}
-			if (seen === null) return;
-			if (seen.encrypted === true) recent.delete(roomId);
-			flags.delete(roomId);
-			await noteRoom(db, roomId, seen);
 		},
 		async onMessage(roomId, message) {
 			if (!config.suggestions.enabled) return;
 			const sender = principalOfMatrixUser(config, message.sender);
 			if (sender === null) return;
-			if (!(await analysable(roomId))) {
-				recent.delete(roomId);
-				return;
-			}
 			const current: Remembered = {
 				author: message.sender,
 				email: sender,

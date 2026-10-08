@@ -11,7 +11,8 @@ export type Authenticator = (authorization: string | undefined) => Promise<AuthR
 export interface JwtOptions {
 	readonly jwksUrl: URL;
 	readonly issuer: string;
-	readonly audience: string;
+	// Any one of them is accepted
+	readonly audience: string | readonly string[];
 }
 
 const BEARER_PREFIX = /^Bearer\s+(.+)$/i;
@@ -26,7 +27,7 @@ export function makeJwtAuthenticator(options: JwtOptions): Authenticator {
 		try {
 			const { payload } = await jwtVerify(match[1], jwks, {
 				issuer: options.issuer,
-				audience: options.audience,
+				audience: typeof options.audience === 'string' ? options.audience : [...options.audience],
 				algorithms: ['RS256'],
 				requiredClaims: ['sub', 'iat', 'exp']
 			});

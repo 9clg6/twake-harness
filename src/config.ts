@@ -37,7 +37,8 @@ export interface Config {
 	readonly auth: {
 		readonly jwksUrl: URL;
 		readonly issuer: string;
-		readonly audience: string;
+		// The audiences the access tokens may carry: any one of them is accepted
+		readonly audience: readonly string[];
 	};
 	readonly apisix: {
 		readonly baseUrl: URL;
@@ -164,6 +165,8 @@ export interface Config {
 		// Whether the assistants propose actions from the messages of channels that are not
 		// encrypted: it makes the registration ask Synapse for the rooms of the homeserver
 		readonly enabled: boolean;
+		// The localpart of the one visible user that reads the channels it is invited to
+		readonly userLocalpart: string;
 		// Twake Space's notifications, which receive a suggestion for its user; null for none
 		readonly space: { readonly apiUrl: URL; readonly apiToken: string } | null;
 	};
@@ -262,6 +265,7 @@ const envSchema = z.object({
 		.string()
 		.min(1)
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
+	SUGGESTIONS_USER_LOCALPART: z.string().min(1).default('twake-assistant'),
 	SUGGESTIONS_ENABLED: z.enum(['true', 'false']).default('true'),
 	SPACE_API_URL: z.string().default(''),
 	SPACE_API_TOKEN: z.string().default(''),
@@ -376,6 +380,9 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
+	if (listOf(values.AUTH_AUDIENCE).length === 0) {
+		throw new Error('invalid configuration: AUTH_AUDIENCE lists no audience');
+	}
 	if (values.SPACE_API_URL !== '' && !URL.canParse(values.SPACE_API_URL)) {
 		throw new Error('invalid configuration: SPACE_API_URL is not a URL');
 	}
@@ -396,7 +403,7 @@ export function loadConfig(env: Env): Config {
 		auth: {
 			jwksUrl: new URL(values.AUTH_JWKS_URL),
 			issuer: values.AUTH_ISSUER,
-			audience: values.AUTH_AUDIENCE
+			audience: listOf(values.AUTH_AUDIENCE)
 		},
 		apisix: {
 			baseUrl: new URL(values.APISIX_BASE_URL),
@@ -476,6 +483,7 @@ export function loadConfig(env: Env): Config {
 		},
 		suggestions: {
 			enabled: values.SUGGESTIONS_ENABLED === 'true',
+			userLocalpart: values.SUGGESTIONS_USER_LOCALPART,
 			space:
 				values.SPACE_API_URL === ''
 					? null

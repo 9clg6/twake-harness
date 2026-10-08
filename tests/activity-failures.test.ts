@@ -232,7 +232,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			DATABASE_URL: TEST_DATABASE_URL,
 			AUTH_JWKS_URL: config.auth.jwksUrl.toString(),
 			AUTH_ISSUER: config.auth.issuer,
-			AUTH_AUDIENCE: config.auth.audience,
+			AUTH_AUDIENCE: config.auth.audience.join(','),
 			APISIX_BASE_URL: config.apisix.baseUrl.toString(),
 			APISIX_CONSUMER_KEY: config.apisix.consumerKey,
 			MATRIX_SERVER_NAME: config.matrix.serverName,

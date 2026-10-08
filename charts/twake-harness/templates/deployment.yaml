@@ -107,6 +107,10 @@ spec:
               value: {{ .Values.config.suggestionsEnabled | toString | quote }}
             {{- end }}
             {{- end }}
+            {{- with .Values.config.suggestionsUserLocalpart }}
+            - name: SUGGESTIONS_USER_LOCALPART
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.spaceApiUrl }}
             - name: SPACE_API_URL
               value: {{ . | quote }}

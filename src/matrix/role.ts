@@ -72,6 +72,7 @@ import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
 import { makeAppserviceStorage } from './storage.js';
 import { makeSuggestionIntake } from '../suggestions/intake.js';
+import { listenerUserId, makeChannelListener } from '../suggestions/listener.js';
 
 // The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
 // however busy the user is. The old intent is never released: its encryption stays subscribed to the
@@ -357,8 +358,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log,
 			storage,
 			ensureEncryption,
-			deadlineMs: options.pushDeadlineMs ?? PUSH_DEADLINE_MS,
-			dropsEncrypted: (roomId) => dropsEncrypted(roomId)
+			deadlineMs: options.pushDeadlineMs ?? PUSH_DEADLINE_MS
 		}
 	);
 	routeEncryptionSetups(appservice, ensureEncryption);
@@ -455,9 +455,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// The creator answers only in rooms it was invited to; a message can arrive before its join
 	// of a fresh invitation has settled, so an invitation counts as presence.
-	// The rooms the creator is in, which stay so, and for a moment those it is not in. The creator
-	// never joins a room by itself: with the registration asking for every room, most of what is
-	// pushed is channels it was never invited to, and it must stay out of them.
+	// The rooms the creator is in, which stay so, and for a moment those it is not in: the channels
+	// the listener is in are pushed too, and the creator is in none of them
 	const creatorRooms = new Map<string, true | number>();
 	const NOT_CREATOR_ROOM_MS = 30_000;
 	async function creatorIsInRoom(roomId: string): Promise<boolean> {
@@ -477,16 +476,17 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return isIn;
 	}
 
-	// Suggestions from the messages of channels no assistant is in (see Suggestions in the README)
+	// Suggestions from the messages of the channels the listener is in
 	const suggestions = makeSuggestionIntake({ config, db, log });
 
-	// An encrypted event of a room no assistant and not the creator is in is not for the SDK to
-	// decrypt: the room is noted as encrypted, which suggestions never read
-	async function dropsEncrypted(roomId: string): Promise<boolean> {
-		if ((await assistantRoom(roomId)) !== null || (await creatorIsInRoom(roomId))) return false;
-		await suggestions.noteEncrypted(roomId);
-		return true;
-	}
+	// The one visible user that reads the channels it is invited to (see Suggestions in the README)
+	const listener = makeChannelListener({
+		config,
+		admin,
+		intent: appservice.getIntentForUserId(listenerUserId(config)),
+		log,
+		forget: (roomId) => suggestions.forget(roomId)
+	});
 
 	// The to-device events Synapse pushes, mostly the owners' key shares: which device they target
 	appservice.on('ephemeral.event', (event: Record<string, unknown>) => {
@@ -703,6 +703,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			'invite',
 			async (roomId: string, event: RoomEvent) => {
 				const invited = event.state_key ?? '';
+				if (config.suggestions.enabled && invited === listenerUserId(config)) {
+					await listener.onInvite(roomId, event);
+					return;
+				}
 				if (orgUserId !== null && invited === orgUserId) {
 					// The organization agent joins the members of the organization and nobody else
 					const inviter = event.sender ?? '';
@@ -1240,13 +1244,17 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
-	// The state events that make a room a channel, take it out, or switch suggestions off in it
+	// The listener's rooms: an invite to a channel, its removal from one, a room that turns encrypted
 	appservice.on(
 		'room.event',
 		guard(
-			'suggestion room state',
+			'channel listener',
 			async (roomId: string, event: RoomEvent) => {
-				await suggestions.noteState(roomId, event);
+				if (event.type === 'm.room.encryption') await listener.onEncrypted(roomId);
+				if (event.type === 'm.room.encrypted') await listener.onEncrypted(roomId);
+				if (event.type === 'm.room.member' && event.state_key === listenerUserId(config)) {
+					listener.onMember(roomId, event);
+				}
 			},
 			(roomId: string, event: RoomEvent) => ({ roomId, eventId: event.event_id })
 		)
@@ -1361,13 +1369,14 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			backupInBackground(room.userId, owner);
 			return;
 		}
-		if (!(await creatorIsInRoom(roomId))) {
-			// A channel: no assistant is in it, and none joins
+		if (listener.has(roomId)) {
+			// A channel the listener was invited to: no assistant is in it, and none joins
 			if (raw.event_id !== undefined) {
 				await suggestions.onMessage(roomId, { sender, eventId: raw.event_id, text });
 			}
 			return;
 		}
+		if (!(await creatorIsInRoom(roomId))) return;
 		const owner = principalOfMatrixUser(config, sender);
 		if (owner === null) {
 			log.info({ roomId, sender }, 'creator ignored a foreign sender');
@@ -1592,6 +1601,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	});
 
+	if (config.suggestions.enabled) {
+		try {
+			await listener.start();
+		} catch (err: unknown) {
+			log.error({ err }, 'channel listener setup failed');
+		}
+	}
 	if (config.org.enabled) {
 		try {
 			await ensureOrgAgent({ config, db, admin, log });

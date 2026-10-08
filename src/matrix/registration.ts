@@ -10,20 +10,12 @@ export function assistantUserRegex(config: Config): string {
 	return `@${escapeRegex(config.matrix.assistantPrefix)}.*:${escapeRegex(config.matrix.serverName)}`;
 }
 
-// One namespace for the assistants and the creator: Synapse pushes the events of a room only
+// One namespace for the assistants, the creator and the user that listens to channels: Synapse pushes the events of a room only
 // when a member matches a namespace, and the creator must hear what it is told. The SDK accepts
 // a single user namespace, hence the alternation.
 function namespaceUserRegex(config: Config): string {
 	const server = escapeRegex(config.matrix.serverName);
-	return `@(?:${escapeRegex(config.matrix.assistantPrefix)}.*|${escapeRegex(config.matrix.senderLocalpart)}):${server}`;
-}
-
-// With suggestions on, Synapse pushes the events of every room of the homeserver, without the
-// application service joining any of them: the namespace is not exclusive and holds no user
-function roomNamespaces(config: Config): { exclusive: boolean; regex: string }[] {
-	return config.suggestions.enabled
-		? [{ exclusive: false, regex: `!.*:${escapeRegex(config.matrix.serverName)}` }]
-		: [];
+	return `@(?:${escapeRegex(config.matrix.assistantPrefix)}.*|${escapeRegex(config.matrix.senderLocalpart)}|${escapeRegex(config.suggestions.userLocalpart)}):${server}`;
 }
 
 // The registration Synapse loads: the harness owns the assistants' identifiers exclusively and
@@ -37,7 +29,7 @@ export function buildRegistration(config: Config, url: string): IAppserviceRegis
 		sender_localpart: config.matrix.senderLocalpart,
 		namespaces: {
 			users: [{ exclusive: true, regex: namespaceUserRegex(config) }],
-			rooms: roomNamespaces(config),
+			rooms: [],
 			aliases: []
 		},
 		rate_limited: false,

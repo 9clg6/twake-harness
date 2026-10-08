@@ -36,6 +36,7 @@ autoscaling:
 config:
   authJwksUrl: ''
   authIssuer: ''
+  # The audience of the access tokens; several may be listed, comma separated
   authAudience: ''
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
@@ -59,9 +60,11 @@ config:
   # that permission expires; an https URL, empty for none, and then the worker reminds nobody
   brokerConsentUrl: ''
   # Whether the assistants propose actions from the messages of channels that are not encrypted
-  # (see Suggestions in the README): on unless false. Turning it off also takes the rooms out of
-  # the registration, which must then be applied on Synapse again
+  # (see Suggestions in the README): on unless false
   suggestionsEnabled: ''
+  # The localpart of the channel listener, the visible user room admins invite to channels they
+  # want suggestions from; empty means twake-assistant. It must be in the registration
+  suggestionsUserLocalpart: ''
   # Twake Space's API, where a suggestion is posted to the notifications of its user; empty means
   # a suggestion reaches the assistant's room alone. Its token, a tws_ API token with the scope
   # notifications:write, goes in secretEnv as SPACE_API_TOKEN. The harness reaches the outside

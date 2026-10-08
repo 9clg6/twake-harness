@@ -1,4 +1,4 @@
-import type { Db, Tx } from '../db/client.js';
+import type { Tx } from '../db/client.js';
 
 // A member's own switch and the rooms they get nothing from: in force while the mute has no end or
 // has not reached it
@@ -122,31 +122,4 @@ export async function mayReceive(
 		where owner = ${owner} and room_id = ${roomId} and attempt = 0
 			and created_at > now() - make_interval(secs => ${ROOM_WINDOW_MS / 1000})`;
 	return Number(room[0]?.n ?? 0) > 0 ? 'room_window' : null;
-}
-
-export interface RoomFlags {
-	readonly channel: boolean;
-	readonly encrypted: boolean;
-	readonly disabled: boolean;
-}
-
-// What was seen of a room; encrypted stays once set, since encryption is never turned off
-export async function noteRoom(
-	db: Db,
-	roomId: string,
-	seen: { channel?: true; encrypted?: true; disabled?: boolean }
-): Promise<void> {
-	await db.sql`
-		insert into suggestion_rooms (room_id, channel, encrypted, disabled)
-		values (${roomId}, ${seen.channel === true}, ${seen.encrypted === true}, ${seen.disabled === true})
-		on conflict (room_id) do update set
-			channel = suggestion_rooms.channel or excluded.channel,
-			encrypted = suggestion_rooms.encrypted or excluded.encrypted,
-			disabled = ${seen.disabled === undefined ? db.sql`suggestion_rooms.disabled` : seen.disabled}`;
-}
-
-export async function readRoom(db: Db, roomId: string): Promise<RoomFlags> {
-	const rows = await db.sql<RoomFlags[]>`
-		select channel, encrypted, disabled from suggestion_rooms where room_id = ${roomId}`;
-	return rows[0] ?? { channel: false, encrypted: false, disabled: false };
 }

@@ -47,18 +47,6 @@ create policy suggestions_owner on suggestions
 	using (owner = current_setting('app.principal', true))
 	with check (owner = current_setting('app.principal', true));
 
--- What the application service has seen pushed of a room, which decides whether it is read. A room
--- is read only if it is a channel (a space, or a room with an m.space.parent) AND has never been
--- seen encrypted AND has not switched suggestions off (app.twake.chat.suggestions). Nothing else is
--- read. Flags only, never a message; no owner policy, as for the jobs.
-create table suggestion_rooms (
-	room_id text primary key,
-	channel boolean not null default false,
-	encrypted boolean not null default false,
-	disabled boolean not null default false,
-	seen_at timestamptz not null default now()
-);
-
 alter table pending_calls drop constraint pending_calls_origin_check;
 alter table pending_calls
 	add constraint pending_calls_origin_check check (origin in ('owner', 'event', 'suggestion'));
