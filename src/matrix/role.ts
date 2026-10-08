@@ -656,13 +656,15 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				// What the SDK hands here is the encrypted event itself
 				const encrypted = event as unknown as Record<string, unknown>;
 				takeEncrypted(event.event_id);
-				const room = await assistantRoom(roomId);
-				if (room === null) return;
+				// One of a channel, which the listener leaves as it turns encrypted, is none of the
+				// harness's to read
+				if (listener.has(roomId)) return;
 				log.error(
 					{ roomId, sender: event.sender, eventId: event.event_id, err },
 					'decryption failed'
 				);
-				if (event.sender === room.userId) return;
+				const room = await assistantRoom(roomId);
+				if (room === null || event.sender === room.userId) return;
 				try {
 					const fetched = await fetchMissedKeyShares(room.userId, roomId);
 					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
