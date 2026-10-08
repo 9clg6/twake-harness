@@ -101,6 +101,13 @@ jobs:
           grep -A1 TURN_HISTORY_MAX_CHARS /tmp/history-rendered.yaml | grep -q '"1000000"'
       # PROVISIONER_CLIENT_IDS carries the provisioners config.provisionerClientIds names
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.provisionerClientIds=tom-bots > /tmp/provisioning.yaml && grep -A1 PROVISIONER_CLIENT_IDS /tmp/provisioning.yaml | grep -q '"tom-bots"'
+      # No role gets EVENTS_CLIENT_IDS, as the harness takes no event over HTTP, and a release that
+      # still sets config.eventsClientIds renders as before
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.eventsClientIds=dispatcher > /tmp/events-$role.yaml
+            if grep -q EVENTS_CLIENT_IDS /tmp/events-$role.yaml; then exit 1; fi
+          done
       # TURN_MAX_TOOL_CALLS is rendered only when config.turnMaxToolCalls is set, as an integer
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOOL_CALLS /tmp/default.yaml
       - run: |

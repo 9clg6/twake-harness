@@ -21,9 +21,6 @@ function sleep(ms: number): Promise<void> {
 
 const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'wiki', 'boards', 'contacts', 'forms'];
 
-// The reading of the assistant's own feed of events, which every listing shows as built in
-const FEED = { domain: 'events', level: 'read', granted_by: 'built_in', granted_at: null };
-
 // The harness's question about a first read, all the API shows of its request
 function question(domain: string): string {
 	return `This is the first time I need to read your data in ${domain}. Do you allow it? I would start with this:`;
@@ -180,7 +177,7 @@ describe('my consents through the API', () => {
 	it('lists, grants and withdraws my consents with my own token, and my assistant follows', async () => {
 		expect(await c.get('alice', '/v1/consents')).toEqual({
 			status: 200,
-			body: { consents: [FEED] }
+			body: { consents: [] }
 		});
 		const granted = await c.put('alice', '/v1/consents/mail/read', {});
 		expect(granted).toEqual({
@@ -189,7 +186,7 @@ describe('my consents through the API', () => {
 		});
 		expect((await c.put('alice', '/v1/consents/mail/read', {})).status).toBe(200);
 		expect((await c.get('alice', '/v1/consents')).body).toEqual({
-			consents: [FEED, granted.body]
+			consents: [granted.body]
 		});
 		// My assistant reads my mail without asking me first
 		const read = await c.post<{ answer: string }>('alice', '/v1/chat', {
@@ -210,7 +207,7 @@ describe('my consents through the API', () => {
 	});
 	it("keeps my consents out of everyone else's reach", async () => {
 		expect((await c.put('alice', '/v1/consents/drive/read', {})).status).toBe(201);
-		expect((await c.get('bob', '/v1/consents')).body).toEqual({ consents: [FEED] });
+		expect((await c.get('bob', '/v1/consents')).body).toEqual({ consents: [] });
 		expect((await c.delete('bob', '/v1/consents/drive/read')).status).toBe(404);
 		expect((await c.put('bob', '/v1/consents/notes/read', {})).status).toBe(201);
 		const mine = await c.get<{ consents: { domain: string; level: string }[] }>(
@@ -218,8 +215,7 @@ describe('my consents through the API', () => {
 			'/v1/consents'
 		);
 		expect(mine.body.consents.map((consent) => `${consent.domain} ${consent.level}`)).toEqual([
-			'drive read',
-			'events read'
+			'drive read'
 		]);
 		// Without my token, nothing is listed
 		const anonymous = await h.app.inject({ method: 'GET', url: '/v1/consents' });
@@ -250,24 +246,20 @@ describe('my consents through the API', () => {
 		expect((await c.get('frank', '/v1/consents')).status).toBe(200);
 	});
 
-	it('shows the feed of events as built in, and grants only what the catalog offers', async () => {
-		expect(await c.put('alice', '/v1/consents/events/read', {})).toEqual({
-			status: 200,
-			body: FEED
-		});
-		expect(await c.delete('alice', '/v1/consents/events/read')).toEqual({
-			status: 409,
-			body: { error: 'consent built in' }
-		});
-		// No application of the catalog is called photos, no mail contract writes, and admin is no
-		// level
-		for (const path of ['photos/read', 'mail/write', 'mail/admin']) {
+	it('grants only what the catalog offers, and builds nothing in, the reading of events no more', async () => {
+		// No application of the catalog is called photos or events, no mail contract writes, and
+		// admin is no level
+		for (const path of ['photos/read', 'events/read', 'mail/write', 'mail/admin']) {
 			expect(await c.put('alice', `/v1/consents/${path}`, {})).toEqual({
 				status: 404,
 				body: { error: 'resource unavailable' }
 			});
 		}
 		expect((await c.delete('alice', '/v1/consents/mail/admin')).status).toBe(404);
+		expect(await c.delete('alice', '/v1/consents/events/read')).toEqual({
+			status: 404,
+			body: { error: 'resource unavailable' }
+		});
 	});
 	it('returns the pending call of a turn through the API, and the gateway receives nothing', async () => {
 		const turn = await h.app.inject({

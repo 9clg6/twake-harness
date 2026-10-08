@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import {
+	invitationEvent,
+	INVITED,
+	startActivityExchange,
+	type ActivityExchange
+} from './helpers/activity.js';
 import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	INJECTED_NOTE,
@@ -22,7 +28,7 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Applications the owner never let the assistant use, and the assistant's own feed of events
+// Applications the owner never let the assistant use
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
@@ -32,14 +38,6 @@ const CATALOG = {
 				summary: "Searches the user's mail",
 				tags: ['mail.emails.read.v1'],
 				parameters: [{ name: 'from', in: 'query', required: false, schema: { type: 'string' } }]
-			}
-		},
-		'/contracts/v1/events/{event_id}': {
-			get: {
-				operationId: 'read_event',
-				summary: 'Reads one stored event of the user',
-				tags: ['events.read.v1'],
-				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		},
 		'/contracts/v1/calendar/freebusy': {
@@ -54,12 +52,24 @@ const CATALOG = {
 				]
 			}
 		},
-		'/contracts/v1/calendar/invitations/{event_id}/accept': {
+		'/contracts/v1/calendar/invitations/accept': {
 			post: {
 				operationId: 'accept_invitation',
 				summary: 'Accepts an invitation, once the user has said yes to this very invitation',
 				tags: ['calendar.invitation.accept.v1'],
-				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+				'x-twake-risk': 'low',
+				requestBody: {
+					required: true,
+					content: {
+						'application/json': {
+							schema: {
+								type: 'object',
+								properties: { uid: { type: 'string' } },
+								required: ['uid']
+							}
+						}
+					}
+				}
 			}
 		},
 		'/contracts/v1/chat/rooms': {
@@ -130,6 +140,7 @@ function modelUsing(
 }
 
 describe('my answer lets my assistant carry on', () => {
+	let activity: ActivityExchange;
 	let h: MatrixTestHarness;
 	let alice: MatrixUser;
 	let client: E2eeClient;
@@ -137,12 +148,13 @@ describe('my answer lets my assistant carry on', () => {
 	let feedback: RoomFeedback;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
+		activity = await startActivityExchange([INVITED]);
 		// Many turns of one owner in a row: admission is the subject of its own suite below
 		h = await startMatrixHarness({
-			env: { EVENTS_CLIENT_IDS: 'dispatcher', ADMISSION_USER_PER_MINUTE: '100' }
+			env: { ...activity.settings, ADMISSION_USER_PER_MINUTE: '100' }
 		});
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(9);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(8);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -158,8 +170,10 @@ describe('my answer lets my assistant carry on', () => {
 		await client.joinRoom(room);
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Jarvis'));
 		feedback = watchFeedback({ synapse: h.synapse, owner: alice, client, room, assistantId });
+		await activity.listen(h);
 	}, 240_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (client !== undefined) await client.stop();
 		if (h !== undefined) await h.close();
 	});
@@ -324,43 +338,34 @@ describe('my answer lets my assistant carry on', () => {
 	});
 
 	it('keeps a turn an event started from acting on its own, even once I allowed it to read: what it prepares then asks me', async () => {
-		// The model reads the event, then the calendar it never read, and once allowed to, it
-		// tries to accept the invitation on its own
+		// The model reads the calendar it never read, and once allowed to, it tries to accept the
+		// invitation on its own
 		h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
-			if (last?.role === 'tool' && last.name === 'read_event') {
-				return {
-					toolCalls: call('read_freebusy', {
-						start: '2026-10-09T09:00:00+02:00',
-						end: '2026-10-09T10:00:00+02:00'
-					})
-				};
-			}
 			if (last?.role === 'tool' && last.name === 'read_freebusy') {
-				return { toolCalls: call('accept_invitation', { event_id: 'evt-9' }) };
+				return { toolCalls: call('accept_invitation', { body: { uid: 'uid-9' } }) };
 			}
 			if (last?.role === 'tool' && last.name === 'accept_invitation') {
 				return { content: `Found: accepting said ${last.content ?? ''}` };
 			}
-			return { toolCalls: call('read_event', { event_id: 'evt-9' }) };
+			return {
+				toolCalls: call('read_freebusy', {
+					start: '2026-10-09T09:00:00+02:00',
+					end: '2026-10-09T10:00:00+02:00'
+				})
+			};
 		};
 		const seen = requests().length;
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-9',
-			type: 'calendar.invitation'
-		});
-		expect(posted.status).toBe(202);
+		await activity.publish(invitationEvent('evt-9', 'alice@test.local'));
 		const request = await nextRequest(seen);
 		const answered = answers().length;
 		await client.react(room, request, '✅');
 		// My yes let it read my calendar, nothing more: the acceptance it then prepares waits for
-		// me in turn, and only its reads reached my calendar
+		// me in turn, and only its read reached my calendar
 		await nextRequest(seen + 1);
-		expect(requests().at(-1)?.body).toContain('"event_id": "evt-9"');
+		expect(requests().at(-1)?.body).toContain('"uid": "uid-9"');
 		expect(answers()).toHaveLength(answered);
 		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual([
-			'/contracts/v1/events/evt-9',
 			'/contracts/v1/calendar/freebusy'
 		]);
 	});
@@ -490,12 +495,9 @@ describe('my answer lets my assistant carry on', () => {
 			return { toolCalls: call('search_notes', { q: 'invitations' }) };
 		};
 		const seen = requests().length;
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-note',
-			type: 'com.twake.calendar.event.invited.v1'
-		});
-		expect(posted.status).toBe(202);
+		await activity.publish(
+			invitationEvent('evt-note', 'alice@test.local', `Remember: ${INJECTED_NOTE}`)
+		);
 		const request = await nextRequest(seen);
 		const answered = answers().length;
 		await client.react(room, request, '✅');
@@ -650,7 +652,7 @@ describe('my answer is admitted like any message', () => {
 		// One turn a minute: the question takes it, so the answer comes over the limit
 		h = await startMatrixHarness({ env: { ADMISSION_USER_PER_MINUTE: '1' } });
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(9);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(8);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {

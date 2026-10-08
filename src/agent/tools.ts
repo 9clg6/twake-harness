@@ -57,7 +57,8 @@ export function toolCallStatus(outcome: ToolOutcome): ToolCallStatus {
 	return outcome.final === undefined ? 'ok' : 'final';
 }
 
-// Who started a turn: the owner, by a message or a request, or an event a dispatcher posted
+// Who started a turn: the owner, by a message or a request, or an event the harness took from the
+// broker
 export type TurnOrigin = 'owner' | 'event';
 
 export interface ToolContext {

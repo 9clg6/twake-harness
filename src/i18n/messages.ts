@@ -143,8 +143,6 @@ export interface Messages {
 	// it, the owner never does. An invitation's acceptance is prepared, never sent: it waits for
 	// the owner's yes to the harness's own request, which shows the model's words.
 	readonly events: {
-		// An event a dispatcher posted, which the model reads through the contracts
-		other(type: string, eventId: string): string;
 		// An event the harness took from the activity exchange, handed over fenced as data, as its
 		// application published it: a task assigned to the owner, or any other event of a type the
 		// deployment listens to
@@ -325,8 +323,6 @@ const ENGLISH: Messages = {
 	orgGreeting: (name) =>
 		`Hello, I am ${name}, the organization agent. Ask me about the organization; I answer its members only.`,
 	events: {
-		other: (type, eventId) =>
-			`[event] A new event of type "${type}" has arrived (id ${eventId}). Read it with the contracts and tell me what it is about.`,
 		taskAssigned: (eventId, eventData) =>
 			[
 				`[event] A task has been assigned to me (id ${eventId}). ${EN_EVENT_DATA}`,
@@ -537,8 +533,6 @@ const FRENCH: Messages = {
 	orgGreeting: (name) =>
 		`Bonjour, je m'appelle ${name} et je réponds au nom de l'organisation. Pose-moi tes questions sur elle : je ne réponds qu'à ses membres.`,
 	events: {
-		other: (type, eventId) =>
-			`[événement] Un nouvel événement de type « ${type} » est arrivé (id ${eventId}). Lis-le avec les contrats et dis-moi de quoi il s'agit.`,
 		taskAssigned: (eventId, eventData) =>
 			[
 				`[événement] Une tâche m'a été assignée (id ${eventId}). ${FR_EVENT_DATA}`,

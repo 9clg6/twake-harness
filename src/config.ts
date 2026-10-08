@@ -114,10 +114,6 @@ export interface Config {
 		// The Matrix identifiers of the members it answers
 		readonly members: readonly string[];
 	};
-	readonly events: {
-		// The service clients, by their token subject, allowed to post events for an owner
-		readonly clientIds: readonly string[];
-	};
 	readonly provisioning: {
 		// The service clients, by their token subject, allowed to provision an owner's assistant
 		readonly clientIds: readonly string[];
@@ -215,7 +211,6 @@ const envSchema = z.object({
 			'You are the organization agent of Twake Space. You answer the members of the organization about the organization, its usage and its practices.'
 		),
 	ORG_AGENT_MEMBERS: z.string().default(''),
-	EVENTS_CLIENT_IDS: z.string().default(''),
 	PROVISIONER_CLIENT_IDS: z.string().default(''),
 	RABBITMQ_PREFIX: z
 		.string()
@@ -420,9 +415,6 @@ export function loadConfig(env: Env): Config {
 			name: values.ORG_AGENT_NAME,
 			persona: values.ORG_AGENT_PERSONA,
 			members: listOf(values.ORG_AGENT_MEMBERS)
-		},
-		events: {
-			clientIds: listOf(values.EVENTS_CLIENT_IDS)
 		},
 		provisioning: {
 			clientIds: listOf(values.PROVISIONER_CLIENT_IDS)

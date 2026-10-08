@@ -12,7 +12,6 @@ import { z } from 'zod';
 import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
-import type { TurnPayload } from './agent/turn-worker.js';
 import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
 import { readIdentity, requestPreparation } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
@@ -21,7 +20,7 @@ import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import type { Answer } from './consents/answers.js';
 import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
-import { isBuiltInConsent, isConsentLevel, type ResumeRequest } from './consents/consent.js';
+import { isConsentLevel, type ResumeRequest } from './consents/consent.js';
 import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
 import {
 	answerPendingCall,
@@ -167,8 +166,6 @@ const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
 const RECOVERY_NEEDED = { error: 'recovery_needed' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
-// The harness builds the consent in: no owner withdraws it
-const CONSENT_BUILT_IN = { error: 'consent built in' } as const;
 
 // An answer to a call no longer waiting: answered already, expired, or replaced by a newer
 // question in its room
@@ -177,12 +174,6 @@ function pendingCallClosed(state: RequestState): { error: string; state: Request
 }
 
 const PENDING_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-const eventSchema = z.object({
-	owner: z.string().min(1).max(128),
-	event_id: z.string().min(1).max(200),
-	type: z.string().min(1).max(100)
-});
 
 const SESSION_ID = /^[0-9a-f]{32}$/;
 
@@ -347,55 +338,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	}
 
 	app.get('/health', async () => ({ status: 'ok', ...options.health?.() }));
-
-	// An event the dispatcher posts for an owner wakes their assistant: the turn runs in the
-	// owner's room, reads the event through the contracts and tells the owner, and whatever it
-	// prepares to write waits for the owner's yes. Only the service clients named in the settings
-	// may post one, never a user.
-	app.post('/v1/events', async (request, reply) => {
-		const auth = await authenticate(request.headers.authorization);
-		if (!auth.ok) {
-			request.log.info({ reason: auth.reason }, 'event refused');
-			return reply.code(401).send({ error: 'invalid token' });
-		}
-		const client = auth.principal.id;
-		if (!config.events.clientIds.includes(client)) {
-			request.log.info({ client, reason: 'not_a_dispatcher' }, 'event refused');
-			return reply.code(403).send(FORBIDDEN);
-		}
-		const parsed = eventSchema.safeParse(request.body);
-		if (!parsed.success) return reply.code(400).send({ error: 'invalid event' });
-		const { owner, event_id: eventId, type } = parsed.data;
-		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
-			request.log.info({ client, owner, eventId, reason: 'no_assistant' }, 'event refused');
-			return reply.code(404).send({ error: 'no assistant' });
-		}
-		const seen = await db.sql`
-			insert into events_seen (event_id, owner) values (${eventId}, ${owner}) on conflict (event_id) do nothing`;
-		if (seen.count === 0) {
-			request.log.info({ client, owner, eventId, type }, 'event duplicate');
-			return reply.code(200).send({ queued: false, duplicate: true });
-		}
-		const payload: TurnPayload = {
-			owner,
-			roomId: assistant.roomId,
-			eventId: `event:${eventId}`,
-			// Told as it is for most events; an invitation is read and checked by the harness first,
-			// and only its owner's yes to the harness's own request can accept it
-			text: getMessages(localeOf(assistant, config.locale)).events.other(type, eventId),
-			origin: 'event',
-			event: { id: eventId, type }
-		};
-		await enqueueJob(db, {
-			kind: 'turn',
-			payload,
-			dedupKey: `event:${eventId}`,
-			groupKey: `turn:${owner}`
-		});
-		request.log.info({ client, owner, eventId, type }, 'event queued');
-		return reply.code(202).send({ queued: true, duplicate: false });
-	});
 
 	// A provisioner, such as the identity server the Twake Chat clients ask for their assistant,
 	// acts for the owner it names after authenticating them itself. Only the service clients named
@@ -778,8 +720,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			});
 
 			// The owner's consents, which a settings page lists, grants and withdraws with the owner's
-			// own token. The reading of the assistant's own feed of events is built in: it is listed,
-			// never granted nor withdrawn.
+			// own token
 			scope.get('/consents', async (request, reply) => {
 				const principal = principalOf(request);
 				const record = await loadPrincipal(principal);
@@ -800,13 +741,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					const { domain, level } = request.params;
 					const offered =
 						isConsentLevel(level) &&
-						(isBuiltInConsent(domain, level) ||
-							agent.contracts.contracts.some((c) => c.domain === domain && c.level === level));
+						agent.contracts.contracts.some((c) => c.domain === domain && c.level === level);
 					if (!offered) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const { created, consent } = await withPrincipal(db, principal, async (tx) => {
-						const created =
-							!isBuiltInConsent(domain, level) &&
-							(await grantConsent(tx, principal.id, domain, level, 'api'));
+						const created = await grantConsent(tx, principal.id, domain, level, 'api');
 						const consents = await listConsents(tx, principal.id);
 						return {
 							created,
@@ -831,7 +769,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					}
 					const { domain, level } = request.params;
 					if (!isConsentLevel(level)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
-					if (isBuiltInConsent(domain, level)) return reply.code(409).send(CONSENT_BUILT_IN);
 					// A level the owner never allowed is no consent to withdraw, and changes nothing
 					const withdrawal = await withPrincipal(db, principal, async (tx) => {
 						const allowed = await listConsents(tx, principal.id);

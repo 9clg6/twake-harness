@@ -1,5 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import {
+	MAIL_RECEIVED,
+	mailEvent,
+	startActivityExchange,
+	type ActivityExchange
+} from './helpers/activity.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
@@ -8,8 +14,6 @@ import type { ContractCall, ContractReply, ToolCall } from './helpers/fake-apisi
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-const MAIL_RECEIVED = 'com.twake.mail.received.v1';
 
 // The owner's mail: reading it, sending in the owner's name, which is high-risk, and turning the
 // vacation response off, which takes no arguments
@@ -84,17 +88,21 @@ function askedAbout(question: string, shown: string, said: string): string {
 }
 
 describe('my assistant acts on what arrives for me only on my yes, and asks me with its context', () => {
+	let activity: ActivityExchange;
 	let r: ConsentRoom;
 	beforeAll(async () => {
+		activity = await startActivityExchange([MAIL_RECEIVED]);
 		// Many turns of one owner in a row: admission is the subject of its own suite
 		r = await startConsentRoom({
-			EVENTS_CLIENT_IDS: 'dispatcher',
+			...activity.settings,
 			ADMISSION_USER_PER_MINUTE: '100'
 		});
 		r.h.apisix.contracts.spec = CATALOG;
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		await activity.listen(r.h);
 	}, 240_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (r !== undefined) await r.close();
 	});
 	beforeEach(() => {
@@ -116,15 +124,6 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 			await sleep(250);
 		}
 		throw new Error('no new request from the harness');
-	}
-
-	async function post(eventId: string, type: string): Promise<void> {
-		const posted = await r.h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: eventId,
-			type
-		});
-		expect(posted.status).toBe(202);
 	}
 
 	// The info line of the latest call that waited for Alice
@@ -160,7 +159,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 			};
 		};
 		const seen = requests().length;
-		await post('mail-1', MAIL_RECEIVED);
+		await activity.publish(mailEvent('mail-1', 'alice@test.local'));
 		// Its first read of my mail asks as it would in our conversation, and reads nothing yet
 		const read = await nextRequest(seen);
 		expect(read.body).toBe(
@@ -210,7 +209,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 			};
 		};
 		let seen = requests().length;
-		await post('mail-back', MAIL_RECEIVED);
+		await activity.publish(mailEvent('mail-back', 'alice@test.local'));
 		const request = await nextRequest(seen);
 		// The tool, as the harness names it, stands under the question in the call's place
 		expect(request.body).toBe(
@@ -230,7 +229,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		// Its first write in my mail for what arrives asks for both, about that same action
 		await withdrawConsent(r.h.db, 'alice@test.local', 'mail', 'write');
 		seen = requests().length;
-		await post('mail-back-again', MAIL_RECEIVED);
+		await activity.publish(mailEvent('mail-back-again', 'alice@test.local'));
 		const first = await nextRequest(seen);
 		expect(first.body).toBe(
 			askedAbout(
