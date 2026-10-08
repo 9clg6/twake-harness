@@ -2,7 +2,13 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { MAX_RETRY_TOKENS } from '../src/agent/turn.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
-import { echoScript, pastTheLimit, readCall, type LlmScript } from './helpers/fake-apisix.js';
+import {
+	A_HUNDRED_THOUSAND_TOKENS,
+	echoScript,
+	pastTheLimit,
+	readCall,
+	type LlmScript
+} from './helpers/fake-apisix.js';
 
 interface ChatReply {
 	readonly answer?: string;
@@ -137,10 +143,6 @@ describe('a deployment already at the ceiling', () => {
 		expect(h.apisix.llm.calls).toHaveLength(1);
 	});
 });
-
-// What one answer of the model reports it read and wrote: three of them go past the tokens a turn
-// may spend when its deployment sets none
-const A_HUNDRED_THOUSAND_TOKENS = { promptTokens: 90_000, completionTokens: 10_000 };
 
 describe('the token budget of a turn', () => {
 	let h: TestHarness;

@@ -175,14 +175,27 @@ export function readCall(index: number): ToolCall {
 	};
 }
 
+// What one answer of the model reports it read and wrote: three of them go past the tokens a turn
+// may spend when its deployment sets none
+export const A_HUNDRED_THOUSAND_TOKENS = { promptTokens: 90_000, completionTokens: 10_000 };
+
 // A model that makes one call after another for as long as it has tools, so that it goes past a
 // limit of its message, of tool calls or of the tokens each answer reports when they are given,
-// then gives the answer given once it has none
-export function pastTheLimit(last: ScriptedReply, usage?: ScriptedReply['usage']): LlmScript {
+// then gives the answer given once it has none. Each answer with tools waits for `hold` when it is
+// given, such as a status the test needs shown before the turn goes on
+export function pastTheLimit(
+	last: ScriptedReply,
+	usage?: ScriptedReply['usage'],
+	hold?: Promise<unknown>
+): LlmScript {
 	return (request, index) =>
 		request.tools === undefined
 			? last
-			: { toolCalls: [readCall(index)], ...(usage === undefined ? {} : { usage }) };
+			: {
+					toolCalls: [readCall(index)],
+					...(usage === undefined ? {} : { usage }),
+					...(hold === undefined ? {} : { hold })
+				};
 }
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
