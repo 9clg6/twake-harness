@@ -1,3 +1,4 @@
+import { isRecord } from './json.js';
 import { isSignedBy } from './signed-json.js';
 
 // A device of a user as the homeserver publishes it, its signatures checked
@@ -34,10 +35,6 @@ export interface SenderDevice {
 	readonly deviceId: string | null;
 	// Whether the user's cross-signing identity, as published, signed that device
 	readonly signed: boolean;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // The one public key of a cross-signing key for a usage, its id naming it as Matrix requires

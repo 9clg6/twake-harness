@@ -22,9 +22,11 @@ export interface Messages {
 	readonly language: { readonly name: string; readonly speak: string };
 	// The assistant's first message in its room with the owner
 	welcome(name: string): string;
-	// The name of an assistant a provisioner creates, after its owner's Matrix name, which its
-	// owner may change
-	defaultAssistantName(owner: string): string;
+	// The name of an assistant a provisioner creates, after the first name in its owner's Matrix
+	// name, which its owner may change
+	defaultAssistantName(ownerName: string): string;
+	// The default name such an assistant had before, after its owner's whole Matrix name
+	formerDefaultAssistantName(ownerName: string): string;
 	readonly creator: {
 		readonly helpHeader: string;
 		readonly commands: readonly CreatorCommand[];
@@ -210,6 +212,21 @@ function firstUse(asked: string, level: string, covers: string | null, question:
 		: [asked, `${level} ${covers}`, question].join('\n');
 }
 
+// The words of a name before its first word in capitals, the family name in « Michel-Marie
+// MAUDET »; the whole name when no word comes before one
+function firstNameOf(name: string): string {
+	const words = name.trim().split(/\s+/u);
+	const family = words.findIndex((word) => /\p{Lu}/u.test(word) && !/\p{Ll}/u.test(word));
+	return family > 0 ? words.slice(0, family).join(' ') : name.trim();
+}
+
+// The name after « de », or after « d' » before a vowel or an h, accented or not: « d'Hélène »,
+// « d'Émile », « de Michel »
+function withDeOrDApostrophe(name: string): string {
+	const initial = name.normalize('NFD').charAt(0).toLowerCase();
+	return /[aeiouyhæœ]/u.test(initial) ? `d'${name}` : `de ${name}`;
+}
+
 // How an owner answers a request, the sentence every request ends with, in each language: in
 // words, as a request carries no buttons, and in their next message, the only one that answers it
 const ENGLISH_HOW_TO_ANSWER = 'Answer yes or no in your next message.';
@@ -225,7 +242,8 @@ const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
 	welcome: (name) =>
 		`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`,
-	defaultAssistantName: (owner) => `${owner}'s assistant`,
+	defaultAssistantName: (ownerName) => `${firstNameOf(ownerName)}'s assistant`,
+	formerDefaultAssistantName: (ownerName) => `${ownerName}'s assistant`,
 	creator: {
 		helpHeader: 'I create and manage your Twake Space assistant. Commands:',
 		commands: [
@@ -446,7 +464,8 @@ const FRENCH: Messages = {
 	language: { name: 'Français', speak: "Parle français avec la personne qui t'écrit." },
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
-	defaultAssistantName: (owner) => `Assistant de ${owner}`,
+	defaultAssistantName: (ownerName) => `Assistant ${withDeOrDApostrophe(firstNameOf(ownerName))}`,
+	formerDefaultAssistantName: (ownerName) => `Assistant de ${ownerName}`,
 	creator: {
 		helpHeader: 'Je crée et je gère ton assistant Twake Space :',
 		commands: [

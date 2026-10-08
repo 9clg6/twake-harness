@@ -13,6 +13,7 @@ import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
+import { requestNaming } from './assistants/naming.js';
 import { readIdentity, requestPreparation, requestRecovery } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
@@ -456,8 +457,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			await tx.sql`
 				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${assistant.userId})
 				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
+			// Its name shows there by a job, as at the join, in case the room refused it for good then
+			await requestNaming(tx, owner);
 		});
-		request.log.info({ client, owner, userId: assistant.userId, roomId }, 'assistant room named');
+		request.log.info(
+			{ client, owner, userId: assistant.userId, roomId },
+			'assistant home room set'
+		);
 		// Announced at the join already, unless the room refused it then
 		await announceCommands(
 			{ admin: matrixAdmin, log: request.log },

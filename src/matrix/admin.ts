@@ -5,7 +5,7 @@ import { randomUUID } from 'node:crypto';
 export interface MatrixAdmin {
 	registerUser(localpart: string): Promise<void>;
 	setDisplayName(userId: string, name: string): Promise<boolean>;
-	// The display name of a user of the homeserver; null when they have none
+	// The display name of a user of the homeserver; null when they have none, or no profile at all
 	displayName(userId: string): Promise<string | null>;
 	createDirectRoom(asUserId: string, inviteUserId: string): Promise<string>;
 	sendText(asUserId: string, roomId: string, text: string): Promise<void>;
@@ -130,7 +130,7 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 				options.asToken,
 				userId
 			);
-			// Some homeservers refuse display name changes; the name then lives in the harness only
+			// False when the homeserver refuses the change, as some do
 			return response.status === 200;
 		},
 		async displayName(userId) {
@@ -140,10 +140,10 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 				undefined,
 				options.asToken
 			);
+			if (response.status === 404) return null;
+			if (response.status !== 200) fail('display name', response);
 			const name = response.body['displayname'];
-			return response.status === 200 && typeof name === 'string' && name.trim() !== ''
-				? name
-				: null;
+			return typeof name === 'string' && name.trim() !== '' ? name : null;
 		},
 		async createDirectRoom(asUserId, inviteUserId) {
 			// Encrypted from the first event: the keys of the room are only ever shared with the

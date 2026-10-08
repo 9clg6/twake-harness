@@ -5,16 +5,27 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { announceCommands } from '../matrix/commands.js';
+import { nameInRoom } from '../matrix/naming.js';
 import { assistantUserId } from '../matrix/registration.js';
-import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { matrixLocalpartOfPrincipal, matrixUserIdOfLocalpart } from '../principals/identity.js';
+import {
+	defaultNameFor,
+	formerDefaultNames,
+	isValidAssistantName,
+	requestNaming,
+	type Namesake
+} from './naming.js';
 import {
 	findAssistant,
+	isFlaggedToRenameIfFormerDefault,
+	listAssistantRoomIds,
 	markAssistantDeleted,
 	renameAssistant,
 	saveAssistant,
 	saveAssistantRoom,
 	saveProvisioned,
 	setAssistantRoomId,
+	settleRenameIfFormerDefault,
 	type AssistantRecord
 } from './repository.js';
 
@@ -51,6 +62,14 @@ export interface AssistantService {
 	find(owner: string): Promise<AssistantView | null>;
 	identify(owner: string): Promise<AssistantIdentity | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
+	// The owner's assistant, flagged to take its owner's first name, takes it if it still goes by a
+	// default name it had before; renamed or not, its name is then settled, and no longer flagged.
+	// A name its owner gives it meanwhile stays. Failed when the owner's name could not be read,
+	// which leaves it flagged for the next start.
+	renameIfFormerDefault(owner: string): Promise<'renamed' | 'kept' | 'failed'>;
+	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
+	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
+	showName(owner: string): Promise<void>;
 	// Deletes the live assistant, only when it is the one created at that time if one is given
 	remove(owner: string, createdAt?: Date): Promise<boolean>;
 }
@@ -62,13 +81,11 @@ export interface AssistantServiceDeps {
 	readonly log: FastifyBaseLogger;
 }
 
-const NAME = /^[^\p{C}]{1,64}$/u;
-
-// The name every provisioned assistant had before it took its owner's
-const LEGACY_DEFAULT_NAME = 'Assistant';
-
-export function isValidAssistantName(name: string): boolean {
-	return NAME.test(name.trim()) && name.trim().length > 0;
+// The default name of an owner's assistant, after their first name, with the default names it had
+// before, null when they are unknown
+interface DefaultNames {
+	readonly name: string;
+	readonly former: readonly string[] | null;
 }
 
 function matrixLink(userId: string): string {
@@ -87,30 +104,21 @@ function toView(record: Pick<AssistantRecord, 'userId' | 'name' | 'roomId'>): As
 export function makeAssistantService(deps: AssistantServiceDeps): AssistantService {
 	const { config, db, admin, log } = deps;
 
-	// « Assistant de <owner> », after the owner's Matrix name, their localpart when they have none
-	async function defaultName(owner: string, ownerLocalpart: string): Promise<string> {
-		const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
-		const ownerName = (await admin.displayName(ownerUserId).catch(() => null)) ?? ownerLocalpart;
+	// The default names of the owner's assistant, after the Matrix name the homeserver gives for the
+	// owner; after their localpart when it fails to give it, which leaves the former ones unknown
+	async function defaultNamesOf(owner: string, ownerLocalpart: string): Promise<DefaultNames> {
+		const namesake = await admin.displayName(matrixUserIdOfLocalpart(config, ownerLocalpart)).then(
+			(name): Namesake => ({ name, localpart: ownerLocalpart }),
+			(err: unknown) => {
+				log.warn({ owner, err }, 'owner name not read');
+				return null;
+			}
+		);
 		const messages = await fetchOwnerMessages(db, owner, config.locale);
-		return messages.defaultAssistantName(ownerName).slice(0, 64);
-	}
-
-	// An assistant provisioned under the former default name takes its owner's, once. Best effort:
-	// a failure keeps the former name until the next call
-	async function nameAfterOwner(
-		owner: string,
-		userId: string,
-		ownerLocalpart: string
-	): Promise<void> {
-		try {
-			const name = await defaultName(owner, ownerLocalpart);
-			// Kept under the former name while the homeserver refuses it, so the next call tries again
-			if (!(await admin.setDisplayName(userId, name))) return;
-			await withPrincipal(db, { id: owner }, (tx) => renameAssistant(tx, owner, name));
-			log.info({ owner, userId }, 'assistant named after its owner');
-		} catch (err: unknown) {
-			log.warn({ owner, userId, err }, 'assistant not named after its owner');
-		}
+		return {
+			name: defaultNameFor(messages, namesake ?? { name: null, localpart: ownerLocalpart }),
+			former: namesake === null ? null : formerDefaultNames(namesake)
+		};
 	}
 
 	async function current(owner: string): Promise<AssistantRecord | null> {
@@ -152,7 +160,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
-			const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
+			const ownerUserId = matrixUserIdOfLocalpart(config, ownerLocalpart);
 			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
 			let saved = false;
 			let roomId: string | null = null;
@@ -170,7 +178,8 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				const opened = await admin.createDirectRoom(userId, ownerUserId);
 				roomId = opened;
 				// The greeting waits for the owner to join: the matrix role then encrypts it for their
-				// devices. The room and its index land together or not at all.
+				// devices. The room and its index land together or not at all, with the job that shows
+				// the assistant's name there.
 				// A first assistant greets in the deployment's language; one created again, in the
 				// language its owner chose for the one before
 				const toOwner = await fetchOwnerMessages(db, owner, config.locale);
@@ -178,6 +187,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				await withPrincipal(db, { id: owner }, async (tx) => {
 					await setAssistantRoomId(tx, owner, opened);
 					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
+					await requestNaming(tx, owner);
 				});
 				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
 				// As in every room of the assistant: the client offers them after « / »
@@ -197,19 +207,18 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			}
 		},
 		async provision(owner) {
+			// A live assistant keeps its name: one flagged for it takes its owner's first name as the
+			// matrix role starts, not here
 			const live = await current(owner);
-			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (live !== null) {
-				if (live.name === LEGACY_DEFAULT_NAME && ownerLocalpart !== null) {
-					await nameAfterOwner(owner, live.userId, ownerLocalpart);
-				}
 				await saveProvisioned(db, { owner, userId: live.userId, owesWelcome: false });
 				return { ok: true, userId: live.userId };
 			}
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
 			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
-			const name = await defaultName(owner, ownerLocalpart);
+			const { name } = await defaultNamesOf(owner, ownerLocalpart);
 			try {
 				// The account is registered once and kept, as for an assistant the owner creates
 				await admin.registerUser(localpart);
@@ -241,12 +250,47 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (!isValidAssistantName(name)) return null;
 			const record = await current(owner);
 			if (record === null) return null;
-			await admin.setDisplayName(record.userId, name);
-			await withPrincipal(db, { id: owner }, (tx) => renameAssistant(tx, owner, name));
+			const named = await admin.setDisplayName(record.userId, name);
+			// Its rooms show the name too, by a job that tries again when they refuse it
+			await withPrincipal(db, { id: owner }, async (tx) => {
+				await renameAssistant(tx, owner, name);
+				await requestNaming(tx, owner);
+			});
 			// The name is the owner's own text: only debug carries it, as with conversations
-			log.info({ owner, userId: record.userId }, 'assistant renamed');
+			log.info({ owner, userId: record.userId, named }, 'assistant renamed');
 			log.debug({ owner, userId: record.userId, name }, 'assistant renamed');
 			return toView({ ...record, name });
+		},
+		async renameIfFormerDefault(owner) {
+			const flagged = await withPrincipal(db, { id: owner }, (tx) =>
+				isFlaggedToRenameIfFormerDefault(tx, owner)
+			);
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
+			if (!flagged || ownerLocalpart === null) return 'kept';
+			const { name, former } = await defaultNamesOf(owner, ownerLocalpart);
+			if (former === null) return 'failed';
+			const renamed = await withPrincipal(db, { id: owner }, (tx) =>
+				settleRenameIfFormerDefault(tx, owner, former, name)
+			);
+			if (!renamed) return 'kept';
+			log.info({ owner }, 'assistant named after its owner');
+			return 'renamed';
+		},
+		async showName(owner) {
+			const record = await current(owner);
+			if (record === null) return;
+			const { userId, name } = record;
+			try {
+				if ((await admin.displayName(userId)) !== name) {
+					const named = await admin.setDisplayName(userId, name);
+					log.info({ owner, userId, named }, 'assistant profile named');
+				}
+			} catch (err: unknown) {
+				log.warn({ owner, userId, err }, 'assistant profile not named');
+			}
+			for (const roomId of await listAssistantRoomIds(db, owner, userId)) {
+				await nameInRoom({ admin, log }, { roomId, assistantUserId: userId }, name);
+			}
 		},
 		async remove(owner, createdAt) {
 			const record = await current(owner);

@@ -16,6 +16,7 @@ import { z } from 'zod';
 
 import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
+import { requestNaming } from '../assistants/naming.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
 	claimDialogQuestion,
@@ -23,6 +24,7 @@ import {
 	clearAssistantRoomId,
 	findAssistant,
 	findDialog,
+	isFlaggedToRenameIfFormerDefault,
 	listActiveAssistants,
 	listProvisionedWithoutRoom,
 	saveDialog,
@@ -140,6 +142,12 @@ interface SendJob {
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
 const preparePayload = z.object({ owner: z.string().min(1) });
+// With renameIfFormerDefault, the assistant takes its owner's first name if still under a former
+// default name
+const namePayload = z.object({
+	owner: z.string().min(1),
+	renameIfFormerDefault: z.boolean().optional()
+});
 // The actions a turn has done so far, for its status message
 const progressPayload = z.object({
 	asUserId: z.string().min(1),
@@ -794,6 +802,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await tx.sql`
 				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${invited})
 				on conflict (room_id) do nothing`;
+			// Its name shows there by a job of its own, which the greeting does not wait for
+			await requestNaming(tx, owner);
 			if (assistant.roomId !== null) return false;
 			await setAssistantRoomId(tx, owner, roomId);
 			if (!(await claimProvisionedWelcome(tx, owner, invited))) return false;
@@ -1396,7 +1406,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send', 'recover', 'progress', 'prepare'],
+		kinds: ['send', 'recover', 'progress', 'prepare', 'name'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (job.kind === 'recover') {
@@ -1409,6 +1419,17 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const parsed = preparePayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('prepare payload is malformed');
 				await prepare(parsed.data.owner);
+				return null;
+			}
+			if (job.kind === 'name') {
+				const parsed = namePayload.safeParse(job.payload);
+				if (!parsed.success) throw new Error('name payload is malformed');
+				const { owner, renameIfFormerDefault } = parsed.data;
+				const renamed =
+					renameIfFormerDefault === true ? await assistants.renameIfFormerDefault(owner) : 'kept';
+				// Its rooms show its name even when the owner's could not be read, which is tried again
+				await assistants.showName(owner);
+				if (renamed === 'failed') throw new Error('the assistant was not named after its owner');
 				return null;
 			}
 			if (job.kind === 'progress') {
@@ -1500,6 +1521,22 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				}
 			)
 		);
+	}
+	// An assistant flagged when the harness started naming assistants after their owner's first name
+	// takes it, if it still goes by a default name it had before, and goes by its name in its rooms.
+	// Once: its naming job clears the flag once the name is settled, and keeps it for the next start
+	// when the owner's name cannot be read.
+	const owners = new Set(assistantsAtStart.map(({ owner }) => owner));
+	owners.delete(ORGANIZATION_PRINCIPAL);
+	try {
+		for (const owner of owners) {
+			const flagged = await withPrincipal(db, { id: owner }, (tx) =>
+				isFlaggedToRenameIfFormerDefault(tx, owner)
+			);
+			if (flagged) await requestNaming(db, owner, { renameIfFormerDefault: true });
+		}
+	} catch (err: unknown) {
+		log.warn({ err }, 'assistant names not requested at start');
 	}
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
 	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts
