@@ -131,6 +131,6 @@ export function describeMoment(instant: Date, timeZone: string, locale: Locale):
 		hourCycle: 'h23'
 	}).format(instant);
 	const field = wallClock(instant, timeZone);
-	const iso = `${field('year')}-${field('month')}-${field('day')}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
+	const iso = `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
 	return { words: `${date}, ${time}`, iso, timeZone };
 }
