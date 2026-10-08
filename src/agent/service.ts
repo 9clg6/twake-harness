@@ -209,7 +209,8 @@ export type OwnerTurnResult =
 	| { readonly kind: 'missing' }
 	// The call to resume no longer waited: another answer came first
 	| { readonly kind: 'decided' }
-	| { readonly kind: 'busy'; readonly reason: RefusalReason }
+	// Admission refused the turn; for a user whose day is spent, until the next one starts
+	| { readonly kind: 'busy'; readonly reason: RefusalReason; readonly liftsInMs?: number }
 	| { readonly kind: 'failed'; readonly error: string };
 
 export interface AgentService {
@@ -471,7 +472,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const { principal } = input;
 		// Admitted before anything else runs; the slot is held until the turn ends
 		const decision = await admission.admit(principal.id);
-		if (!decision.ok) return { kind: 'busy', reason: decision.reason };
+		if (!decision.ok) {
+			const { reason, liftsInMs } = decision;
+			return { kind: 'busy', reason, ...(liftsInMs === undefined ? {} : { liftsInMs }) };
+		}
 		try {
 			return await gate.run(principal.id, () => runAdmittedTurn(input));
 		} finally {
