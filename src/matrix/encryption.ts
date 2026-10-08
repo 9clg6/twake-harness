@@ -1,5 +1,7 @@
+import { randomUUID } from 'node:crypto';
+
 import type { FastifyBaseLogger } from 'fastify';
-import { Intent, type Appservice, type UserDevice } from 'matrix-bot-sdk';
+import { Intent, type Appservice, type MatrixClient, type UserDevice } from 'matrix-bot-sdk';
 
 import { describeRejection } from './last-resort.js';
 
@@ -63,6 +65,24 @@ function forgetSdkSetup(intent: Intent): void {
 	Reflect.deleteProperty(intent, 'cryptoSetupPromise');
 }
 
+// Synapse keys the transactions of an application service by their path and the service, never by
+// the user the service speaks for, and the SDK names a to-device transaction by the millisecond and
+// a counter of its own per user, which every start of the matrix role sets back to nothing. Two
+// users of the service sending to devices in the same millisecond, as assistants sharing their room
+// keys after a restart, could name the same transaction: Synapse took the second send for a repeat of
+// the first and dropped it, a room key with it, which left every later answer unreadable on the
+// devices it was for. Each to-device send names its transaction apart instead.
+export function uniqueToDeviceTransactions(client: MatrixClient): void {
+	// The SDK hands what the homeserver answers to the crypto engine, which marks the request sent
+	client.sendToDevices = (type, messages) =>
+		client.doRequest(
+			'PUT',
+			`/_matrix/client/v3/sendToDevice/${encodeURIComponent(type)}/${randomUUID()}`,
+			null,
+			{ messages }
+		) as Promise<void>;
+}
+
 // The HTTP status of a failed request, which the SDK carries on what it throws
 function statusOf(err: unknown): number | null {
 	if (typeof err !== 'object' || err === null) return null;
@@ -79,6 +99,7 @@ export function makeEnsureEncryption(deps: EncryptionSetupDeps): EnsureEncryptio
 			await ensureDeviceToSpeakFor(deps, intent);
 			// The SDK's own setup, which routeEncryptionSetups puts this one in front of
 			await Intent.prototype.enableEncryption.call(intent);
+			uniqueToDeviceTransactions(intent.underlyingClient);
 		})().catch((err: unknown) => {
 			setups.delete(intent);
 			forgetSdkSetup(intent);
