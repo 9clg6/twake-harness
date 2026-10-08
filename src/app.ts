@@ -572,9 +572,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 			// The cross-signing identity the owner's assistant and the creator take their words with,
 			// and the one that signed the session their words last came from when it was another, such
-			// as after they reset theirs: only the owner, with their own token, makes the harness hold
-			// that one instead. The creator holds it before any assistant exists, and so does this
-			// route.
+			// as after they reset theirs. The owner makes the harness hold that one instead, here with
+			// their own token, or by a yes to their assistant's question while the deployment only
+			// reports: the identity then shows as pinned by the chat, and counts for nothing once the
+			// deployment enforces, until the owner confirms it here. The creator holds it before any
+			// assistant exists, and so does this route.
 			scope.get('/assistants/me/owner-identity', async (request, reply) => {
 				const principal = principalOf(request);
 				const record = await loadPrincipal(principal);

@@ -19,7 +19,8 @@ import {
 	receiveWords,
 	recordSeen,
 	seeSession,
-	type DeviceNoticeReason
+	type DeviceNoticeReason,
+	type OwnerCrossSigning
 } from './owner-cross-signing-repository.js';
 import { readPublishedKeys, senderDevice, type EventSender } from './owner-keys.js';
 
@@ -127,8 +128,9 @@ export interface OwnerDeviceGateDeps {
 
 export interface OwnerDeviceGate {
 	// Whether the owner's words count: in enforce mode only when the device that encrypted them is
-	// signed by the identity the harness holds for the owner, in report mode always. Either way the
-	// device is logged without the words, and the owner is told when it falls short.
+	// signed by the identity the harness holds for the owner, unless it holds that one by their yes
+	// in the chat alone; in report mode always. Either way the device is logged without the words,
+	// and the owner is told when it falls short.
 	admit(words: OwnerWords): Promise<Admission>;
 	// Whether the owner's words that came in clear count: never in enforce mode, where the owner is
 	// told, and as before in report mode; the reason says where they came in clear
@@ -138,6 +140,13 @@ export interface OwnerDeviceGate {
 export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate {
 	const { db, log, mode } = deps;
 
+	// Whether the identity held counts as the owner's: one they said yes to in the chat counts only
+	// while the deployment reports, as no message confirms an identity where it enforces; there it
+	// waits, as any other one, for the owner to accept it through the API
+	function counts(held: OwnerCrossSigning): boolean {
+		return mode === 'report' || held.pinnedBy !== 'chat';
+	}
+
 	async function judge(words: OwnerWords, sender: EventSender): Promise<DeviceVerdict> {
 		const { owner, ownerUserId } = words;
 		const keys = readPublishedKeys(
@@ -146,7 +155,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		);
 		const found = senderDevice(sender, keys, ownerUserId);
 		// The first identity seen is held. Another one is kept aside for the owner to accept, once it
-		// signed the session their words came from
+		// signed the session their words came from, and so is the one held when it does not count
 		const identity = await withPrincipal(db, { id: owner }, async (tx): Promise<IdentityState> => {
 			const held = await findOwnerCrossSigning(tx, owner);
 			if (held === null) {
@@ -155,7 +164,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				if (pinned.masterPublicKey === keys.masterKey) {
 					return pinned.pinnedNow ? 'first_seen' : 'pinned';
 				}
-			} else if (held.masterPublicKey === keys.masterKey) {
+			} else if (held.masterPublicKey === keys.masterKey && counts(held)) {
 				if (held.seen !== null) await clearSeen(tx, owner);
 				return 'pinned';
 			}

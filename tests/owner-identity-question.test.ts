@@ -8,6 +8,7 @@ import {
 	startConsentRoom,
 	type ConsentRoom
 } from './helpers/consent-room.js';
+import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 
 const OWNER = 'alice@test.local';
 const IDENTITY_ROUTE = '/v1/assistants/me/owner-identity';
@@ -29,6 +30,9 @@ const DENIED =
 const OLD_SESSION_START = "Je n'ai pas donné suite à ton dernier message : ton application";
 const OLD_SESSION =
 	"Je n'ai pas donné suite à ton dernier message : ton application l'a chiffré avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Envoie /discardsession dans ce salon pour qu'elle en utilise de nouvelles ; puis renvoie-le.";
+const CHANGED_REFUSAL_START = "Je n'ai pas donné suite à ton dernier message : ton identité";
+const CHANGED_REFUSAL =
+	"Je n'ai pas donné suite à ton dernier message : ton identité de chiffrement a changé, et je ne donne suite qu'à celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (PUT /v1/assistants/me/owner-identity) : par sécurité, aucun message ne le peut. Sinon, change ton mot de passe et préviens ton administrateur. D'ici là, je ne donne suite à aucun de tes messages.";
 // What a request about a first call to an application starts with, in French
 const REQUEST_START = "C'est la première fois";
 
@@ -106,6 +110,7 @@ async function storedEvent(r: ConsentRoom, eventId: string): Promise<Record<stri
 
 describe('my assistant asks me whether I reset my identity myself, while the harness only reports', () => {
 	let r: ConsentRoom;
+	const sessions: E2eeClient[] = [];
 	beforeAll(async () => {
 		// A deployment in French that sets nothing about my sessions
 		r = await startConsentRoom({ ASSISTANT_LOCALE: 'fr', ADMISSION_USER_PER_MINUTE: '100' });
@@ -121,6 +126,7 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Bonjour');
 	}, 240_000);
 	afterAll(async () => {
+		for (const session of sessions) await session.stop();
 		if (r !== undefined) await r.close();
 	});
 
@@ -251,6 +257,43 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 			await r.client.sendText(r.room, "Mots d'une vieille session");
 			expect(await r.nextSaying(OLD_SESSION_START, notices)).toBe(OLD_SESSION);
 		});
+	});
+
+	it('takes my yes for no confirmation once the deployment enforces, until I confirm my identity through the API', async () => {
+		// Another session of mine replaces my identity with a new one that signs it alone, and I
+		// answer yes from it when my assistant asks me about it
+		const other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'));
+		sessions.push(other);
+		const after = await other.resetIdentity();
+		const asked = r.saying(QUESTION_START).length;
+		let heard = r.saying('Heard:').length;
+		await other.sendText(r.room, 'Depuis ma nouvelle session');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Depuis ma nouvelle session');
+		expect(await r.nextSaying(QUESTION_START, asked)).toBe(QUESTION);
+		const adopted = r.saying(ADOPTED).length;
+		await other.sendText(r.room, 'oui');
+		expect(await r.nextSaying(ADOPTED, adopted)).toBe(ADOPTED);
+		// The deployment now enforces, where no message confirms an identity: my words from it are
+		// not acted on, and the API shows it as one for me to confirm
+		await r.h.restartRole({ env: { OWNER_DEVICE_TRUST: 'enforce' } });
+		const refused = r.saying(CHANGED_REFUSAL_START).length;
+		await other.sendText(r.room, 'Encore moi');
+		expect(await r.nextSaying(CHANGED_REFUSAL_START, refused)).toBe(CHANGED_REFUSAL);
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toMatchObject({
+			pinned: { master_key: after, pinned_by: 'chat' },
+			published: { master_key: after }
+		});
+		// Once I confirm it through the API, my words from it are acted on again
+		const confirmed = await r.h.api.put(OWNER, IDENTITY_ROUTE, { master_key: after });
+		expect(confirmed.status).toBe(200);
+		expect(confirmed.body).toEqual({
+			pinned: { master_key: after, pinned_by: 'api', pinned_at: expect.any(String) },
+			published: null
+		});
+		heard = r.saying('Heard:').length;
+		await other.sendText(r.room, 'Et maintenant ?');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Et maintenant ?');
+		expect(r.saying('Heard: Encore moi')).toHaveLength(0);
 	});
 });
 

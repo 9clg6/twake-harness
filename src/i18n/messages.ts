@@ -743,7 +743,8 @@ export function getMessages(locale: Locale): Messages {
 export type OwnerWordsKind = 'message' | 'answer';
 
 // Why a session of the owner falls short: their identity did not sign it, they have no identity,
-// or their identity is not the one their assistant holds
+// or their identity is not one their assistant counts: not the one it holds, or, where the
+// deployment enforces, one it holds by their yes in the chat alone
 export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
 
 // Why the owner is told about another identity than the one held rather than asked whether they
@@ -753,5 +754,6 @@ export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
 export type IdentityReport = 'unsigned' | 'assistant_asks' | 'no_assistant' | 'denied';
 
 // Where an owner confirms an identity they reset themselves while the deployment enforces their
-// sessions' identity, which no message in the chat can do then
+// sessions' identity: no message in the chat confirms one then, nor does a yes they gave their
+// assistant while it only reported
 const OWNER_IDENTITY_ROUTE = 'PUT /v1/assistants/me/owner-identity';
