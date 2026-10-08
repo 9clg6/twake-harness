@@ -242,6 +242,27 @@ describe('the token budget of a turn', () => {
 		});
 	});
 
+	it('still doubles the budget of the last call, without tools, whose answer ran out while thinking', async () => {
+		// Three reads at 100,000 tokens each take the turn past its limit; asked without tools, the
+		// model runs out while thinking, and asked again with twice the budget, tells where things stand
+		const progress = 'I read your consents three times; more reads remain. Ask me to continue.';
+		const reads = pastTheLimit({ content: progress }, A_HUNDRED_THOUSAND_TOKENS);
+		h.apisix.llm.script = (request, index) =>
+			index === 3 ? THINKS_TOO_LONG : reads(request, index);
+		const { status, body } = await chat(h, 'jack', 'Read them all', 'turn-tokens-last-retry');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(progress);
+		expect(
+			h.apisix.llm.calls.map((c) => [c.request.tools !== undefined, c.request.max_tokens])
+		).toEqual([
+			[true, 8192],
+			[true, 8192],
+			[true, 8192],
+			[false, 8192],
+			[false, 16384]
+		]);
+	});
+
 	it('logs them and what it spent when the answer that takes it past them goes past its tool calls too', async () => {
 		// One answer makes seven reads and reports 300,000 tokens: six run, the seventh is past the six
 		// tool calls of a message, and the turn is past its tokens
