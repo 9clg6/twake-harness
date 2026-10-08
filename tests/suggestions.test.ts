@@ -591,7 +591,7 @@ describe('the assistant proposes from the messages of channels', () => {
 	// D128 of Twake Chat: the owner of an encrypted direct conversation invites their assistant,
 	// warned first; it reads both sides for its owner alone and never writes there
 	describe('an assistant its owner invites into an encrypted direct conversation', () => {
-		it('stays, proposes to its owner alone, never writes, and stops once removed', async () => {
+		it('comes only on the yes of the other person, proposes to its owner alone, never writes, and leaves on a no', async () => {
 			const tag = Math.random().toString(36).slice(2, 7);
 			const owner = await becomeAssistantOwner(`o${tag}`);
 			const other = await becomeAssistantOwner(`t${tag}`);
@@ -608,6 +608,41 @@ describe('the assistant proposes from the messages of channels', () => {
 						select user_id from assistants where owner = ${principal}`
 				);
 				const assistant = rows[0]?.user_id ?? '';
+				const listened = async (): Promise<number> =>
+					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`).length;
+				// As Twake Chat writes them: each keyed by its sender, the assistant in the content
+				const ask = (): Promise<string> =>
+					ownerClient.client.sendStateEvent(
+						room,
+						'app.twake.chat.assistant_request',
+						owner.userId,
+						{
+							assistant_id: assistant,
+							requested: true,
+							ts: Date.now()
+						}
+					);
+				const answer = (accepted: boolean): Promise<string> =>
+					otherClient.client.sendStateEvent(
+						room,
+						'app.twake.chat.assistant_consent',
+						other.userId,
+						{
+							assistant_id: assistant,
+							accepted,
+							ts: Date.now()
+						}
+					);
+
+				// Invited before the other person said yes: it leaves without a word
+				await ask();
+				await ownerClient.client.inviteUser(assistant, room);
+				expect(await listenerStaysFor(owner, room, assistant)).toBe(false);
+				expect(await listened()).toBe(0);
+
+				// Asked, then accepted: it comes and stays
+				await ask();
+				await answer(true);
 				await ownerClient.client.inviteUser(assistant, room);
 				await until(async () =>
 					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`)
@@ -635,14 +670,17 @@ describe('the assistant proposes from the messages of channels', () => {
 						.filter((e) => e.type === 'm.room.message')
 				).toHaveLength(0);
 
-				// Removed by the other person: forgotten
-				await otherClient.client.kickUser(assistant, room);
+				// The other person says no: it leaves without a word, and the room is forgotten
+				await answer(false);
+				await until(async () => ((await listened()) === 0 ? true : null));
 				await until(async () =>
-					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`)
-						.length === 0
-						? true
-						: null
+					(await h.synapse.joinedMembers(owner, room)).includes(assistant) ? null : true
 				);
+				expect(
+					otherClient.events.filter(
+						(e) => e.roomId === room && e.sender === assistant && e.type === 'm.room.message'
+					)
+				).toHaveLength(0);
 			} finally {
 				await ownerClient.stop();
 				await otherClient.stop();

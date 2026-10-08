@@ -110,6 +110,11 @@ export interface MatrixRole {
 	stop(): Promise<void>;
 }
 
+// Twake Chat's request to bring an assistant into an encrypted direct conversation, and the other
+// member's answer (D132 there)
+const ASSISTANT_REQUEST_TYPE = 'app.twake.chat.assistant_request';
+const ASSISTANT_CONSENT_TYPE = 'app.twake.chat.assistant_consent';
+
 interface RoomEvent {
 	readonly type?: string;
 	readonly sender?: string;
@@ -837,9 +842,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			} catch (err: unknown) {
 				log.warn({ roomId, invited, err }, 'room not read');
 			}
+			if (listens && !(await otherMemberAccepted(intent, roomId, inviter, invited))) {
+				// The other person said no, or was never asked: it leaves without a word
+				log.info({ roomId, invited, reason: 'no_consent' }, 'assistant declined an invite');
+				try {
+					await intent.leaveRoom(roomId);
+				} catch (err: unknown) {
+					log.warn({ roomId, invited, err }, 'invite not declined');
+				}
+				return;
+			}
 			if (listens) {
-				// Invited by its owner, warned, into their encrypted conversation with someone: it reads
-				// it for its owner's suggestions, says nothing there, greets no one
+				// Invited by its owner, warned, into their encrypted conversation with someone who
+				// accepted it: it reads it for its owner's suggestions, says nothing there, greets no one
 				await db.sql`
 					insert into assistant_listened_rooms (room_id, owner, user_id)
 					values (${roomId}, ${owner}, ${invited})
@@ -970,6 +985,52 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			(member) => member.membershipFor !== ownerUserId && member.membershipFor !== assistantUserId
 		);
 		return others.length === 1;
+	}
+
+	// Twake Chat's request and answers (D132 there): every member but the owner answered yes after
+	// the owner's request. Each is keyed by its sender, which the homeserver enforces for a key that
+	// is a user id, and holds the assistant in `assistant_id`.
+	async function otherMemberAccepted(
+		intent: Intent,
+		roomId: string,
+		ownerUserId: string,
+		assistantUserId: string
+	): Promise<boolean> {
+		const state = (await intent.underlyingClient.getRoomState(roomId)) as (RoomEvent & {
+			origin_server_ts?: number;
+		})[];
+		const owned = (event: RoomEvent, type: string): boolean =>
+			event.type === type &&
+			event.state_key === event.sender &&
+			event.content?.['assistant_id'] === assistantUserId;
+		const request = state.find(
+			(event) =>
+				owned(event, ASSISTANT_REQUEST_TYPE) &&
+				event.sender === ownerUserId &&
+				event.content?.['requested'] === true
+		);
+		if (request === undefined) return false;
+		const others = state
+			.filter(
+				(event) =>
+					event.type === 'm.room.member' &&
+					['join', 'invite'].includes(String(event.content?.['membership'])) &&
+					event.state_key !== ownerUserId &&
+					event.state_key !== assistantUserId
+			)
+			.map((event) => event.state_key);
+		return (
+			others.length > 0 &&
+			others.every((member) =>
+				state.some(
+					(event) =>
+						owned(event, ASSISTANT_CONSENT_TYPE) &&
+						event.sender === member &&
+						event.content?.['accepted'] === true &&
+						(event.origin_server_ts ?? 0) > (request.origin_server_ts ?? 0)
+				)
+			)
+		);
 	}
 
 	// A room's encryption, as its assistant's device knows it: the SDK reads the room's
@@ -1302,7 +1363,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		guard(
 			'listened room',
 			async (roomId: string, event: RoomEvent) => {
-				if (event.type !== 'm.room.member') return;
+				const consent =
+					event.type === ASSISTANT_REQUEST_TYPE || event.type === ASSISTANT_CONSENT_TYPE;
+				if (event.type !== 'm.room.member' && !consent) return;
 				const listened = await listenedRoom(roomId);
 				if (listened === null) return;
 				const membership = event.content?.['membership'];
@@ -1311,15 +1374,21 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					suggestions.forget(roomId);
 					log.info({ roomId, owner: listened.owner, reason }, 'assistant stopped listening');
 				};
-				if (event.state_key === listened.userId) {
+				if (!consent && event.state_key === listened.userId) {
 					if (membership === 'leave' || membership === 'ban') await forget('removed');
 					return;
 				}
-				if (membership !== 'join' && membership !== 'invite') return;
+				if (!consent && membership !== 'join' && membership !== 'invite') return;
 				const intent = appservice.getIntentForUserId(listened.userId);
 				const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
-				if (await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId)) return;
-				await forget('not_a_pair');
+				// A third person, a withdrawn request or a no: it leaves without a word
+				if (
+					(await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId)) &&
+					(await otherMemberAccepted(intent, roomId, ownerUserId, listened.userId))
+				) {
+					return;
+				}
+				await forget(consent ? 'no_consent' : 'not_a_pair');
 				try {
 					await intent.leaveRoom(roomId);
 				} catch (err: unknown) {
