@@ -1,6 +1,11 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
-import { modelFor, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
+import {
+	modelFor,
+	QUESTION_CONTENT_KEY,
+	startConsentRoom,
+	type ConsentRoom
+} from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
@@ -17,6 +22,17 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// Every question of the harness to answer yes or no, whatever it asks, as Alice's client tells it
+// from its content
+function askedIn(r: ConsentRoom): DecryptedMessage[] {
+	return r.client.messages.filter(
+		(m) =>
+			m.roomId === r.room &&
+			m.sender === r.assistantId &&
+			m.content[QUESTION_CONTENT_KEY] !== undefined
+	);
+}
+
 // Alice's invitations, by the UID of their events: her weekly standup, which repeats every Monday;
 // the quarterly offsite, which repeated too until Paul cancelled it; and one Monday's review, which
 // Paul invited her to without the rest of its series
@@ -31,9 +47,6 @@ const DECLINE_SUMMARY =
 	'Decline the whole series "Standup", every Monday from 2026-10-12 at 09:00, organized by Paul\nCalendar tells the organizer';
 const FRENCH_ACCEPT_SUMMARY =
 	"Accepter toute la série « Standup », chaque lundi dès le 12/10/2026 à 09:00, organisée par Paul\nAgenda le dit à l'organisateur";
-// And answering the review, an event that does not repeat
-const REVIEW_SUMMARY =
-	'Accept "Review", Monday 2026-10-12 at 14:00, organized by Paul\nCalendar tells the organizer';
 // The digest of what that answer acts on
 const DIGEST = 'sha256:standup-1';
 // The answer for the whole series as the harness shows the call, where no summary stands in its
@@ -109,21 +122,19 @@ describe('my assistant asks me whether to answer for a whole series before it an
 	// Alice's calendar behind the gateway, as the contract answers: an invitation whose event was
 	// cancelled is refused before anything else; a recurring one, unless the call answers for the
 	// whole series; and the review, which her copy holds alone, is answered as an event either way.
-	// Asked, it says what an answer would do, and writes it otherwise.
+	// Asked what an answer would do, it tells of the answer for the standup's whole series, the only
+	// one previewed here; it writes an answer otherwise.
 	function calendar(c: ContractCall): ContractReply {
 		const body = c.body as { readonly uid?: unknown; readonly series?: unknown };
 		if (body.uid === OFFSITE) return INVITATION_CANCELLED;
 		if (body.uid === STANDUP && body.series !== true) return RECURRING_INVITATION;
 		const accepting = c.path.endsWith('/accept');
 		if (c.headers['x-twake-preview'] !== undefined) {
-			const summary =
-				body.uid === REVIEW
-					? REVIEW_SUMMARY
-					: !accepting
-						? DECLINE_SUMMARY
-						: c.headers['accept-language'] === 'fr'
-							? FRENCH_ACCEPT_SUMMARY
-							: ACCEPT_SUMMARY;
+			const summary = !accepting
+				? DECLINE_SUMMARY
+				: c.headers['accept-language'] === 'fr'
+					? FRENCH_ACCEPT_SUMMARY
+					: ACCEPT_SUMMARY;
 			return { status: 200, headers: PREVIEWED, body: { summary, digest: DIGEST } };
 		}
 		const answer = { uid: body.uid, partstat: accepting ? 'ACCEPTED' : 'DECLINED' };
@@ -438,23 +449,27 @@ describe('my assistant asks me whether to answer for a whole series before it an
 	});
 
 	it('asks nothing about a series when the organizer cancelled the invitation, and the model reads why', async () => {
-		const questions = r.questions().length;
+		const asked = askedIn(r).length;
+		const waited = await seriesRequests(r);
 		const heard = r.saying('Heard:').length;
 		await r.client.sendText(r.room, 'Accept the offsite');
 		expect(await r.nextSaying('Heard:', heard)).toContain('"code":"invitation_cancelled"');
 		await sleep(1000);
-		expect(r.questions()).toHaveLength(questions);
+		expect(askedIn(r)).toHaveLength(asked);
+		expect(await seriesRequests(r)).toBe(waited);
 		expect(calendarCalls()).toEqual([[null, { uid: OFFSITE }]]);
 		expect(written).toEqual([]);
 	});
 
 	it('answers an occurrence I was invited to without the rest of its series as an event, asking nothing', async () => {
-		const questions = r.questions().length;
+		const asked = askedIn(r).length;
+		const waited = await seriesRequests(r);
 		const found = r.saying('Found:').length;
 		await r.client.sendText(r.room, 'Accept the review');
 		expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
 		await sleep(1000);
-		expect(r.questions()).toHaveLength(questions);
+		expect(askedIn(r)).toHaveLength(asked);
+		expect(await seriesRequests(r)).toBe(waited);
 		expect(calendarCalls()).toEqual([[null, { uid: REVIEW }]]);
 		expect(written).toEqual([{ uid: REVIEW, partstat: 'ACCEPTED' }]);
 	});
