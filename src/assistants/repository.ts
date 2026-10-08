@@ -117,6 +117,18 @@ export async function listAssistantRooms(
 	return rows.map((row) => ({ roomId: row.room_id, userId: row.user_id }));
 }
 
+// Whether the owner's live assistant still answers in the room, its record held until the
+// transaction ends: its deletion, which locks that record first, waits for what the transaction
+// keeps in its name, then erases it too
+export async function holdAssistantInRoom(tx: Tx, owner: string, roomId: string): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from assistants a
+		where a.owner = ${owner} and a.deleted_at is null
+			and exists (select 1 from assistant_rooms r where r.room_id = ${roomId} and r.owner = ${owner})
+		for share of a`;
+	return rows.length === 1;
+}
+
 // A name its owner gives the assistant settles it: the matrix role's start no longer renames it
 export async function renameAssistant(tx: Tx, owner: string, name: string): Promise<boolean> {
 	const result = await tx.sql`

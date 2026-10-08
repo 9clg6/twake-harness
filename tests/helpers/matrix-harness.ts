@@ -36,9 +36,10 @@ export interface MatrixTestHarness {
 	readonly apps: readonly FastifyInstance[];
 	logLines(): Record<string, unknown>[];
 	// Stops the turn workers of the api replicas, as when the api role is down, and starts them
-	// again, as when it is back
+	// again, as when it is back: on the first replica alone when asked, the one `api` calls, so that
+	// a turn the queue runs waits for the owner's turn `api` runs, as on a single replica
 	stopTurnWorkers(): Promise<void>;
-	startTurnWorkers(): void;
+	startTurnWorkers(options?: { readonly firstReplicaOnly?: boolean }): void;
 	// What the matrix role made of a message of an assistant's room, as it logged it: the line of
 	// the turn it queued, or of the message it ignored; null when it logged neither in time
 	decisionOn(eventId: string): Promise<Record<string, unknown> | null>;
@@ -130,8 +131,8 @@ export async function startMatrixHarness(
 		apps.push(replica);
 	}
 	let workers: JobWorker[] = [];
-	const startTurnWorkers = (): void => {
-		workers = apps.map((replica) =>
+	const startTurnWorkers = (options: { readonly firstReplicaOnly?: boolean } = {}): void => {
+		workers = apps.slice(0, options.firstReplicaOnly === true ? 1 : apps.length).map((replica) =>
 			startTurnWorker({
 				db,
 				agent: replica.agent,

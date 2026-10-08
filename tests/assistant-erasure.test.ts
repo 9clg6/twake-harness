@@ -402,6 +402,66 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		);
 	});
 
+	it('keeps nothing of my words that waited for my turn before them while I deleted my assistant', async () => {
+		const room = (await r.h.api.get<CreatedAssistant>(ALICE, '/v1/assistants/me')).body.roomId;
+		// What the harness logs from my turn on
+		const logged = r.h.logLines().length;
+		const since = (): Record<string, unknown>[] => r.h.logLines().slice(logged);
+		let reached = (): void => undefined;
+		const asked = new Promise<void>((resolve) => {
+			reached = resolve;
+		});
+		let release = (): void => undefined;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		// The model keeps my turn through the API waiting
+		r.h.apisix.llm.script = (request) => {
+			if (lastUser(request) !== 'Plan my week') return literal(request);
+			reached();
+			return { content: 'Heard: Plan my week', hold: held };
+		};
+		// My words in the room run where my turn through the API runs, so that they wait for it
+		await r.h.stopTurnWorkers();
+		r.h.startTurnWorkers({ firstReplicaOnly: true });
+		try {
+			const chat = r.h.api.post(ALICE, '/v1/chat', { message: 'Plan my week' });
+			await asked;
+			await r.client.sendText(room, 'Remember that I moved to Nantes');
+			await until('my words waited for my turn', () =>
+				since().some((line) => line['msg'] === 'admission queued' && line['principal'] === ALICE)
+			);
+			expect(await answerTo('/delete')).toContain('Delete Iris?');
+			expect(await answerTo('yes')).toBe(
+				'Your assistant is deleted. Send /newbot when you want a new one.'
+			);
+			release();
+			await chat;
+			// What it would have answered my words as the assistant I deleted goes nowhere
+			await until('the answer to my words was dropped', () =>
+				since().some(
+					(line) =>
+						line['msg'] === 'send dropped: no assistant for this room' && line['roomId'] === room
+				)
+			);
+		} finally {
+			release();
+			r.h.apisix.llm.script = literal;
+			await r.h.stopTurnWorkers();
+			r.h.startTurnWorkers();
+		}
+		expect(await myRoutes()).toEqual(NOTHING);
+		expect(await answerTo('/newbot')).toBe('Which name do you want for your assistant?');
+		expect(await answerTo('Iris')).toContain(`Done. Your assistant Iris is ${r.assistantId}`);
+		const next = await meetNewAssistant('Iris', [room]);
+		expect(await ask(next, 'What do you remember?', (t) => t.startsWith('I remember:'))).toBe(
+			'I remember: nothing'
+		);
+		expect(
+			await ask(next, 'Search our conversations for Nantes', (t) => t.startsWith('Found:'))
+		).toBe('Found: {"sessions":[]}');
+	});
+
 	it('keeps nothing of a turn that ran while I deleted my assistant, and sends nothing as it', async () => {
 		const room = (await r.h.api.get<CreatedAssistant>(ALICE, '/v1/assistants/me')).body.roomId;
 		const words = 'Remember that I moved to Lyon';
