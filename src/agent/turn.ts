@@ -195,9 +195,21 @@ function spend(
 
 interface Asked {
 	readonly completion: LlmCompletion;
-	// The model ran out of budget while thinking once its turn had spent its tokens: past them, no
-	// call with tools is made, not even this one again
+	// The model ran out of budget while thinking, with tools, and its turn spent its tokens, on this
+	// call or on its retry: no call with tools follows
 	readonly cut: boolean;
+}
+
+// An answer to a call with tools that ran out of budget while thinking once its turn spent its
+// tokens: past them, no call with tools is made, neither the same again nor the next, and the turn
+// ends on its last call, without tools, rather than fail for want of an answer
+function cutShort(
+	deps: TurnDeps,
+	tools: readonly LlmToolDefinition[],
+	completion: LlmCompletion,
+	spent: Spent
+): boolean {
+	return tools.length > 0 && ranOutOfBudget(completion) && spent.tokens >= deps.maxTurnTokens;
 }
 
 // One model call, with the tools it may call, whose tokens its turn adds to those it spent: a call
@@ -218,8 +230,7 @@ async function askModel(
 	let completion = await deps.llm.complete(prompt, tools);
 	spend(deps.log, iteration, completion, spent);
 	logAnswer(deps.log, iteration, completion);
-	if (ranOutOfBudget(completion)) {
-		if (tools.length > 0 && spent.tokens >= deps.maxTurnTokens) return { completion, cut: true };
+	if (ranOutOfBudget(completion) && !cutShort(deps, tools, completion, spent)) {
 		const budget = deps.llm.maxTokens;
 		const retryBudget = Math.min(budget * 2, MAX_RETRY_TOKENS);
 		// Already at the ceiling, a second call would end the same way
@@ -233,7 +244,7 @@ async function askModel(
 			logAnswer(deps.log, iteration, completion);
 		}
 	}
-	return { completion, cut: false };
+	return { completion, cut: cutShort(deps, tools, completion, spent) };
 }
 
 // The model's answer to its owner, which ends the turn
