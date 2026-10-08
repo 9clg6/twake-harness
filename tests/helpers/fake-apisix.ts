@@ -345,6 +345,83 @@ export function brokerNoDelegation(consentUrl: string = BROKER_CONSENT_URL): Con
 	};
 }
 
+// The operation that gives the owner's answer to an invitation as the calendar contracts publish
+// it, accepting or declining, named by the UID of its event, and for the whole series of a
+// recurring one with series true: a low-risk write that tells what it would do, unless preview is
+// false
+function invitationAnswerOperation(
+	verb: 'accept' | 'decline',
+	preview: boolean
+): Record<string, unknown> {
+	return {
+		post: {
+			operationId: `${verb}_invitation`,
+			summary: `${verb === 'accept' ? 'Accept' : 'Decline'} an invitation on the user's behalf`,
+			tags: [`calendar.invitation.${verb}.v1`],
+			'x-twake-risk': 'low',
+			'x-twake-preview': preview,
+			requestBody: {
+				required: true,
+				content: {
+					'application/json': {
+						schema: {
+							type: 'object',
+							properties: { uid: { type: 'string' }, series: { type: 'boolean', default: false } },
+							required: ['uid'],
+							additionalProperties: false
+						}
+					}
+				}
+			}
+		}
+	};
+}
+
+// The catalog of both operations
+function invitationAnswersCatalog(preview: boolean): Record<string, unknown> {
+	return {
+		openapi: '3.1.0',
+		paths: {
+			'/contracts/v1/calendar/invitations/accept': invitationAnswerOperation('accept', preview),
+			'/contracts/v1/calendar/invitations/decline': invitationAnswerOperation('decline', preview)
+		}
+	};
+}
+
+export const INVITATION_ANSWERS_CATALOG = invitationAnswersCatalog(true);
+
+// The same answers from a calendar that cannot tell what they would do
+export const UNPREVIEWED_INVITATION_ANSWERS_CATALOG = invitationAnswersCatalog(false);
+
+// What a calendar contract answers a call about a recurring invitation, or a copy that holds
+// several occurrences of a series, that does not say it answers for the whole series, as the user
+// said: an RFC 9457 problem whose code says why
+export const RECURRING_INVITATION: ContractReply = {
+	status: 409,
+	body: {
+		type: 'urn:twake:problem:recurring_invitation',
+		title: 'Recurring invitation',
+		status: 409,
+		detail:
+			'The invitation repeats, or holds several occurrences of a series: once the user said yes to answering for the whole series, call again with series true; else they answer it in Calendar.',
+		code: 'recurring_invitation'
+	}
+};
+
+// What it answers about an invitation whose organizer cancelled the event, before anything is
+// checked of a series
+export const INVITATION_CANCELLED: ContractReply = {
+	status: 409,
+	body: {
+		type: 'urn:twake:problem:invitation_cancelled',
+		title: 'Invitation cancelled',
+		status: 409,
+		detail:
+			'The organizer cancelled the event, the whole series if it repeats, or each occurrence of it the user was invited to: there is nothing to answer.',
+		code: 'invitation_cancelled'
+	}
+};
+
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
 	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };

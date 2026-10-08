@@ -22,6 +22,7 @@ import {
 	type Preview,
 	type PreviewAnswer
 } from './preview.js';
+import { refusedAsRecurring, wholeSeriesValues, withoutSeries } from './series.js';
 
 export interface ContractToolDeps {
 	readonly config: Config;
@@ -136,7 +137,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	// header for nothing. The catalog's next load makes the tool again, previews included.
 	let previewing = contract.preview;
 
-	// Freezes the call as the model wrote it until its owner answers, with the turn's session, the
+	// Freezes the call as it would run until its owner answers, with the turn's session, the
 	// harness's question as its owner reads it and the digest of the preview they are shown, if
 	// any, counts it, and logs why it waits, never what it would send; resolves to the frozen call's
 	// id
@@ -362,9 +363,11 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		};
 	}
 
-	// The call waits for its owner: it is frozen as the model wrote it, and the turn ends with the
+	// The call waits for its owner: it is frozen as it would run, and the turn ends with the
 	// harness's own request. A contract that offers a preview is asked first what the call would
-	// do, without doing it, and the request shows its owner that, rather than the call.
+	// do, without doing it, and the request shows its owner that, rather than the call. The model
+	// cannot answer for a whole series itself: only the question about one asks with series, and
+	// only its owner's yes to that question runs the call so.
 	async function ask(
 		values: Record<string, unknown>,
 		context: ToolContext,
@@ -387,9 +390,18 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			if ('error' in built) return { result: { error: built.error } };
 			const answered = await send(built, context, { kind: 'preview', locale });
 			// The broker refuses a preview as it would the call: its owner gives that permission
-			// first, and sees the preview once it may be asked for
+			// first, and sees the preview once it may be asked for. The call for a whole series they
+			// were about to be asked about waits for it without the series, which only their yes to
+			// that question sets: once they gave it, the contract refuses the call for one occurrence
+			// again, and the question comes then.
 			if (answered.delegation !== null) {
-				return waitForDelegation(values, context, answered.delegation, null, locale);
+				const waiting = reasons.includes('series') ? withoutSeries(contract, values) : values;
+				return waitForDelegation(waiting, context, answered.delegation, null, locale);
+			}
+			// A recurring invitation its contract previews only for the whole series: its owner is
+			// asked about that first, and their yes asks again what still waits
+			if (refusedAsRecurring(contract, values, answered)) {
+				return ask(wholeSeriesValues(values), context, ['series']);
 			}
 			const reading = readPreview(answered);
 			if (reading.kind === 'acted') {
@@ -463,14 +475,23 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		argumentKeys,
 		requiredAction: contract.level === 'read' ? CALL_CONTRACTS : ACT_THROUGH_CONTRACTS,
 		run: async (args, context): Promise<ToolOutcome> => {
-			const values =
+			const written =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
-			// A call that waits is frozen as the model wrote it, and the turn ends with the harness's
-			// own request. The call its owner allowed runs as it was frozen, unless something their
-			// yes did not answer applies now, such as writing they took back since: it then waits
-			// again, and the request asks about everything that applies.
-			const reasons = await reasonsToWait(context);
+			const owner = context.principalId;
 			const answeredReasons = context.answeredReasons ?? [];
+			// The model cannot answer for a whole series itself: a new call loses any series its body
+			// sets, whatever its value, and goes on without it, so that only its owner's yes to the
+			// harness's question sets series. The call its owner allowed runs as it was frozen, series
+			// included, and the organization agent, which has nobody to ask, calls as it wrote.
+			const values =
+				owner === ORGANIZATION_PRINCIPAL || answeredReasons.length > 0
+					? written
+					: withoutSeries(contract, written);
+			// A call that waits is frozen, and the turn ends with the harness's own request. The call
+			// its owner allowed runs as it was frozen, unless something their yes did not answer
+			// applies now, such as writing they took back since: it then waits again, and the request
+			// asks about everything that applies.
+			const reasons = await reasonsToWait(context);
 			if (reasons.some((reason) => !answeredReasons.includes(reason))) {
 				return ask(values, context, reasons);
 			}
@@ -480,10 +501,15 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			const previewDigest = context.previewDigest ?? null;
 			const answered = await send(built, context, { kind: 'action', previewDigest });
 			// The organization agent acts for no user: nobody could give it that permission
-			const owner = context.principalId;
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
+			}
+			// A recurring invitation its contract answers only for the whole series: the call for every
+			// occurrence, the only one that sets series, waits for its owner, as any call does, the
+			// organization agent having nobody to ask
+			if (owner !== ORGANIZATION_PRINCIPAL && refusedAsRecurring(contract, values, answered)) {
+				return ask(wholeSeriesValues(values), context, ['series']);
 			}
 			return { result: answered.result };
 		}

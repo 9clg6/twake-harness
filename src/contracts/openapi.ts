@@ -33,6 +33,9 @@ export interface ContractDefinition {
 	// never promised one would take that call for the action itself, and a read before its owner
 	// allowed it would read their data
 	readonly preview: boolean;
+	// Whether a call can say it answers an invitation for the whole series: its body takes series,
+	// as the catalog shows it. One that cannot is refused for a recurring invitation all the same.
+	readonly takesSeries: boolean;
 	// What the model calls: the operationId, a verb such as read_freebusy, in the alphabet a model
 	// tool name allows
 	readonly toolName: string;
@@ -171,12 +174,15 @@ export function parseContracts(document: unknown): ParsedContracts {
 			if (!preview && previewed !== undefined && previewed !== false) {
 				ignoredPreviews.push({ contract: id, declared: previewed });
 			}
+			const properties = body?.['properties'];
 			contracts.push({
 				id,
 				domain: id.split('.')[0] ?? id,
 				level,
 				risk: level === 'read' ? null : declared === 'low' ? 'low' : 'high',
 				preview,
+				takesSeries:
+					typeof properties === 'object' && properties !== null && 'series' in properties,
 				toolName: toToolName(operation.data.operationId),
 				method,
 				pathTemplate,
