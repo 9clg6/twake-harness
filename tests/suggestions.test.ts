@@ -48,7 +48,7 @@ const proposeMonday = (request: ChatRequest): ScriptedReply => {
 	proposals += 1;
 	// Told that the user declined the slot, it chooses the next one
 	const declined = request.messages.some((m) => (m.content ?? '').includes('<<<declined-proposal'));
-	const other = [ALICE, BOB, CAROL, DAVE].find((p) => p !== owner && system.includes(p)) ?? BOB;
+	const other = (system.match(/[\w.-]+@test\.local/g) ?? []).find((p) => p !== owner) ?? BOB;
 	return {
 		content: 'Vous avez un créneau lundi.',
 		toolCalls: [
@@ -84,10 +84,19 @@ describe('the assistant proposes from the messages of channels', () => {
 	const llmCalls = (): number => h.apisix.llm.calls.length;
 	const say = (user: MatrixUser, room: string, text: string): Promise<string> =>
 		h.synapse.sendText(user, room, text);
+	let space_: string;
+	// A channel: a room inside a space, as Twake Chat writes it (m.space.parent on the room)
 	async function openChannel(owner: MatrixUser, members: MatrixUser[]): Promise<string> {
 		const created = await h.synapse.request(owner, 'POST', '/_matrix/client/v3/createRoom', {
 			preset: 'public_chat',
-			name: 'general'
+			name: 'general',
+			initial_state: [
+				{
+					type: 'm.space.parent',
+					state_key: space_,
+					content: { via: ['test.local'], canonical: true }
+				}
+			]
 		});
 		const room = created.body['room_id'] as string;
 		for (const member of members) await h.synapse.joinRoom(member, room);
@@ -121,6 +130,12 @@ describe('the assistant proposes from the messages of channels', () => {
 		h.apisix.llm.script = proposeMonday;
 		alice = await becomeAssistantOwner('alice');
 		bob = await becomeAssistantOwner('bob');
+		const parent = await h.synapse.request(bob, 'POST', '/_matrix/client/v3/createRoom', {
+			preset: 'public_chat',
+			name: 'space',
+			creation_content: { type: 'm.space' }
+		});
+		space_ = parent.body['room_id'] as string;
 		channel = await openChannel(bob, [alice]);
 		aliceClient = await startE2eeClient(h.synapse.url, alice);
 		bobClient = await startE2eeClient(h.synapse.url, bob);
@@ -387,6 +402,111 @@ describe('the assistant proposes from the messages of channels', () => {
 		}
 	});
 
+	describe('which rooms are read', () => {
+		let heard = 0;
+		async function heardBy(room: string, from: MatrixUser[], text: string): Promise<boolean> {
+			const calls = llmCalls();
+			for (const user of from)
+				await say(user, room, user === from.at(-1) ? text : 'On se voit quand ?');
+			await sleep(3500);
+			heard = llmCalls() - calls;
+			return heard > 0;
+		}
+		async function pair(): Promise<[MatrixUser, MatrixUser]> {
+			const tag = Math.random().toString(36).slice(2, 7);
+			return [await becomeAssistantOwner(`p${tag}`), await becomeAssistantOwner(`q${tag}`)];
+		}
+		const matching = 'ok on parle lundi à 10h';
+
+		it('ignores an unencrypted direct room', async () => {
+			const [one, two] = await pair();
+			const dm = await h.synapse.createDirectRoom(one, two.userId);
+			await h.synapse.joinRoom(two, dm);
+			expect(await heardBy(dm, [two, one], matching)).toBe(false);
+		});
+
+		it('ignores a room with no space marker', async () => {
+			const [one, two] = await pair();
+			const created = await h.synapse.request(one, 'POST', '/_matrix/client/v3/createRoom', {
+				preset: 'public_chat',
+				name: 'loose'
+			});
+			const room = created.body['room_id'] as string;
+			await h.synapse.joinRoom(two, room);
+			expect(await heardBy(room, [two, one], matching)).toBe(false);
+		});
+
+		it('reads a room inside a space', async () => {
+			const [one, two] = await pair();
+			const room = await openChannel(one, [two]);
+			expect(await heardBy(room, [two, one], matching)).toBe(true);
+		});
+
+		it('reads a space itself', async () => {
+			const [one, two] = await pair();
+			const created = await h.synapse.request(one, 'POST', '/_matrix/client/v3/createRoom', {
+				preset: 'public_chat',
+				creation_content: { type: 'm.space' }
+			});
+			const room = created.body['room_id'] as string;
+			await h.synapse.joinRoom(two, room);
+			expect(await heardBy(room, [two, one], matching)).toBe(true);
+		});
+
+		it('stops reading a room that turns encrypted', async () => {
+			const [one, two] = await pair();
+			const room = await openChannel(one, [two]);
+			await h.synapse.request(
+				one,
+				'PUT',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/m.room.encryption`,
+				{ algorithm: 'm.megolm.v1.aes-sha2' }
+			);
+			await sleep(1500);
+			expect(await heardBy(room, [two, one], matching)).toBe(false);
+		});
+
+		it('never reads an encrypted space, nor an encrypted room inside a space', async () => {
+			const [one, two] = await pair();
+			const encryption = {
+				type: 'm.room.encryption',
+				state_key: '',
+				content: { algorithm: 'm.megolm.v1.aes-sha2' }
+			};
+			const space = await h.synapse.request(one, 'POST', '/_matrix/client/v3/createRoom', {
+				preset: 'public_chat',
+				creation_content: { type: 'm.space' },
+				initial_state: [encryption]
+			});
+			const encryptedSpace = space.body['room_id'] as string;
+			await h.synapse.joinRoom(two, encryptedSpace);
+			expect(await heardBy(encryptedSpace, [two, one], matching)).toBe(false);
+			const inside = await h.synapse.request(one, 'POST', '/_matrix/client/v3/createRoom', {
+				preset: 'public_chat',
+				initial_state: [
+					{ type: 'm.space.parent', state_key: space_, content: { via: ['test.local'] } },
+					encryption
+				]
+			});
+			const encryptedRoom = inside.body['room_id'] as string;
+			await h.synapse.joinRoom(two, encryptedRoom);
+			expect(await heardBy(encryptedRoom, [two, one], matching)).toBe(false);
+		});
+
+		it('stops reading a room that switched suggestions off, and reads it again once on', async () => {
+			const [one, two] = await pair();
+			const room = await openChannel(one, [two]);
+			const state = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/app.twake.chat.suggestions`;
+			await h.synapse.request(one, 'PUT', state, { enabled: false });
+			await sleep(1500);
+			expect(await heardBy(room, [two, one], matching)).toBe(false);
+			await h.synapse.request(one, 'PUT', state, { enabled: true });
+			await sleep(1500);
+			expect(await heardBy(room, [two, one], 'on se voit mardi à 10h')).toBe(true);
+			void heard;
+		});
+	});
+
 	it('never reads an encrypted room, even a message that came in clear', async () => {
 		const room = (await bobClient.client.createRoom({
 			preset: 'private_chat',
@@ -404,7 +524,7 @@ describe('the assistant proposes from the messages of channels', () => {
 		await sleep(3000);
 		expect(llmCalls()).toBe(before);
 		expect(
-			(await h.db.sql`select 1 from suggestion_encrypted_rooms where room_id = ${room}`).length
+			(await h.db.sql`select 1 from suggestion_rooms where room_id = ${room} and encrypted`).length
 		).toBe(1);
 	});
 });

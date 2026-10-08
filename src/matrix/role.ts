@@ -1240,13 +1240,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
-	// A room that turns encrypted is never read for suggestions again
+	// The state events that make a room a channel, take it out, or switch suggestions off in it
 	appservice.on(
 		'room.event',
 		guard(
-			'room encryption',
+			'suggestion room state',
 			async (roomId: string, event: RoomEvent) => {
-				if (event.type === 'm.room.encryption') await suggestions.noteEncrypted(roomId);
+				await suggestions.noteState(roomId, event);
 			},
 			(roomId: string, event: RoomEvent) => ({ roomId, eventId: event.event_id })
 		)
