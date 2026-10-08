@@ -107,6 +107,16 @@ export async function saveAssistantRoom(
 			owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;
 }
 
+// The rooms the index names for the owner's assistant, each with the account it answers there as
+export async function listAssistantRooms(
+	db: Db | Tx,
+	owner: string
+): Promise<{ roomId: string; userId: string }[]> {
+	const rows = await db.sql<{ room_id: string; user_id: string }[]>`
+		select room_id, user_id from assistant_rooms where owner = ${owner}`;
+	return rows.map((row) => ({ roomId: row.room_id, userId: row.user_id }));
+}
+
 // A name its owner gives the assistant settles it: the matrix role's start no longer renames it
 export async function renameAssistant(tx: Tx, owner: string, name: string): Promise<boolean> {
 	const result = await tx.sql`

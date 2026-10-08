@@ -20,6 +20,7 @@ import {
 	findAssistant,
 	isFlaggedToRenameIfFormerDefault,
 	listAssistantRoomIds,
+	listAssistantRooms,
 	markAssistantDeleted,
 	renameAssistant,
 	saveAssistant,
@@ -303,9 +304,8 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			// there, before anything is erased: should the homeserver refuse, nothing is, and the owner
 			// may ask again. It goes dormant with its device, which the application service keeps: a
 			// device it no longer drives would fail every later transaction that names it.
-			const rooms = await db.sql<{ room_id: string; user_id: string }[]>`
-				select room_id, user_id from assistant_rooms where owner = ${owner}`;
-			const leaving = new Map(rooms.map((row) => [row.room_id, row.user_id]));
+			const rooms = await listAssistantRooms(db, owner);
+			const leaving = new Map(rooms.map((room) => [room.roomId, room.userId]));
 			if (record.roomId !== null && !leaving.has(record.roomId)) {
 				leaving.set(record.roomId, record.userId);
 			}
