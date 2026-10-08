@@ -11,8 +11,8 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Two applications as the contracts service names them: mail, which the owner never let the
-// assistant use, and calendar, which the pilot's assistants used before consents
+// Three applications as the contracts service names them: mail, which the owner never let the
+// assistant use, calendar, which the pilot's assistants used before consents, and tasks
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
@@ -44,6 +44,29 @@ const CATALOG = {
 				'x-twake-risk': 'low',
 				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
+		},
+		'/contracts/v1/tasks/mine': {
+			get: {
+				operationId: 'list_my_tasks',
+				summary: 'Lists the tasks assigned to the user',
+				tags: ['tasks.task.read.v1'],
+				parameters: [
+					{ name: 'zone', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }
+				]
+			}
+		},
+		'/contracts/v1/tasks/boards/{board_id}/tasks/{task_id}/complete': {
+			post: {
+				operationId: 'complete_task',
+				summary: 'Marks a task of a board as done',
+				tags: ['tasks.task.complete.v1'],
+				'x-twake-risk': 'low',
+				parameters: [
+					{ name: 'board_id', in: 'path', required: true, schema: { type: 'string' } },
+					{ name: 'task_id', in: 'path', required: true, schema: { type: 'string' } }
+				]
+			}
 		}
 	}
 };
@@ -63,7 +86,7 @@ describe('my assistant asks before it first uses an application', () => {
 	beforeAll(async () => {
 		h = await startMatrixHarness();
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(5);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -310,6 +333,109 @@ describe('my assistant asks before it first uses an application', () => {
 			)
 		).toEqual({ status: 409, body: { error: 'pending call closed', state: 'expired' } });
 		expect(await seen('dave@test.local')).toEqual({ consents: [], waiting: ['calendar read'] });
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('asks every owner again before it reads or writes their tasks, now that both cover more', async () => {
+		// Reading Tasks now lists the owner's projects too, and writing there creates projects, and
+		// assigns, comments on and deletes tasks. Alice let her assistant read her tasks through the API
+		// and write there in the chat; Frank let his write there through the API, and lets it write in
+		// his calendar again, in the new words; Erin let hers read her tasks in the chat.
+		await withPrincipal(
+			h.db,
+			{ id: 'alice@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('alice@test.local', 'tasks', 'read', 'api'),
+					('alice@test.local', 'tasks', 'write', 'chat')`
+		);
+		await withPrincipal(
+			h.db,
+			{ id: 'frank@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('frank@test.local', 'tasks', 'write', 'api'),
+					('frank@test.local', 'calendar', 'write', 'chat')`
+		);
+		await withPrincipal(
+			h.db,
+			{ id: 'erin@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('erin@test.local', 'tasks', 'read', 'chat')`
+		);
+		const seen = async (owner: string): Promise<{ consents: string[]; waiting: string[] }> =>
+			withPrincipal(h.db, { id: owner }, async (tx) => {
+				const named = (rows: { domain: string; level: string }[]): string[] =>
+					rows.map((row) => `${row.domain} ${row.level}`);
+				return {
+					consents: named(
+						await tx.sql<{ domain: string; level: string }[]>`
+							select domain, level from consents order by domain, level`
+					),
+					waiting: named(
+						await tx.sql<{ domain: string; level: string }[]>`
+							select domain, level from pending_calls where status = 'open' order by domain, level`
+					)
+				};
+			});
+		// Frank was asked whether his assistant may read his tasks, and Erin whether hers may write
+		// there, in the words of before, and neither has answered yet
+		h.apisix.llm.script = () => ({
+			toolCalls: call('list_my_tasks', { zone: 'Europe/Paris', limit: 5 })
+		});
+		const reading = await h.api.post<{ pending_call: { id: string } }>(
+			'frank@test.local',
+			'/v1/chat',
+			{ message: 'What are my tasks?' }
+		);
+		h.apisix.llm.script = () => ({
+			toolCalls: call('complete_task', { board_id: 'board-1', task_id: 'task-call-paul' })
+		});
+		const writing = await h.api.post<{ pending_call: { id: string } }>(
+			'erin@test.local',
+			'/v1/chat',
+			{ message: 'I called Paul, mark it as done' }
+		);
+		expect((await seen('frank@test.local')).waiting).toEqual(['tasks read']);
+		expect((await seen('erin@test.local')).waiting).toEqual(['tasks write']);
+		const migration = '0069_consents_tasks_reask.sql';
+		await h.db.sql`delete from schema_migrations where name = ${migration}`;
+		expect((await runMigrations(h.db)).applied).toEqual([migration]);
+		// Tasks read and write went, whoever gave them, and so did the requests to read or write there;
+		// Calendar, Mail and every other application stay as their owners left them
+		expect(await seen('alice@test.local')).toEqual({ consents: [], waiting: ['mail read'] });
+		expect(await seen('frank@test.local')).toEqual({ consents: ['calendar write'], waiting: [] });
+		expect(await seen('dave@test.local')).toEqual({ consents: [], waiting: ['calendar read'] });
+		expect(await seen('erin@test.local')).toEqual({
+			consents: ['calendar read', 'mail read'],
+			waiting: []
+		});
+		// A yes to either comes too late, and allows nothing
+		for (const [owner, asked] of [
+			['frank@test.local', reading],
+			['erin@test.local', writing]
+		] as const) {
+			expect(
+				await h.api.post(owner, `/v1/pending-calls/${asked.body.pending_call.id}/approve`, {})
+			).toEqual({ status: 409, body: { error: 'pending call closed', state: 'expired' } });
+		}
+		expect(await seen('frank@test.local')).toEqual({ consents: ['calendar write'], waiting: [] });
+		expect(await seen('erin@test.local')).toEqual({
+			consents: ['calendar read', 'mail read'],
+			waiting: []
+		});
+		// Erin's next read of her tasks waits for her answer, as a first read does
+		h.apisix.llm.script = () => ({
+			toolCalls: call('list_my_tasks', { zone: 'Europe/Paris', limit: 5 })
+		});
+		const res = await h.api.post<{ answer: string }>('erin@test.local', '/v1/chat', {
+			message: 'What are my tasks?'
+		});
+		expect(res.body.answer).toBe(
+			[
+				'This is the first time I need to read your data in tasks. Do you allow it? I would start with this:',
+				JSON.stringify({ zone: 'Europe/Paris', limit: 5 }, null, 2),
+				'Answer yes or no in your next message.'
+			].join('\n\n')
+		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
 });
