@@ -98,23 +98,19 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 
 	it('goes by its name in the room a provisioner makes its home', async () => {
 		const { owner, assistant } = await provisioned(h, 'rosa', 'Rosa PARKS');
-		// The homeserver is slow to take the name the assistant writes as it joins
-		let release = (): void => undefined;
-		const slow = new Promise<void>((resolve) => {
-			release = resolve;
-		});
-		let held = 0;
-		h.apisix.matrixHold = (call) => {
-			if (call.method !== 'PUT' || !call.path.includes('/state/m.room.member/') || held > 0) {
-				return null;
-			}
-			held += 1;
-			return slow;
+		// The homeserver refuses the name the assistant writes in the room it joins, each time the
+		// queue tries it
+		const member = `/state/m.room.member/${encodeURIComponent(assistant.userId)}`;
+		let refused = 0;
+		h.apisix.matrixFault = (call) => {
+			if (call.method !== 'PUT' || !call.path.includes(member) || refused >= 3) return null;
+			refused += 1;
+			return 403;
 		};
 		try {
 			const room = await h.synapse.createDirectRoom(owner, assistant.userId);
-			await h.synapse.waitForMember(owner, room, assistant.userId);
-			await eventually(() => held === 1);
+			expect(await eventually(() => refused === 3, 30_000)).toBe(true);
+
 			const home = await h.api.put(PROVISIONER, `${provisioningPath(owner.userId)}/home`, {
 				roomId: room
 			});
@@ -123,8 +119,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 				"Rosa's assistant"
 			);
 		} finally {
-			release();
-			h.apisix.matrixHold = null;
+			h.apisix.matrixFault = null;
 		}
 	});
 
@@ -147,7 +142,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		const client = await startE2eeClient(h.synapse.url, qara);
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, qara.userId);
-		// The homeserver refuses the name in the room twice: as the assistant joins, then once more
+		// The homeserver refuses the name in the room twice, then takes it
 		let refused = 0;
 		h.apisix.matrixFault = (call) => {
 			if (call.method !== 'PUT' || !call.path.includes('/state/m.room.member/') || refused >= 2) {
@@ -169,6 +164,35 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			expect(logged).toHaveLength(2);
 		} finally {
 			h.apisix.matrixFault = null;
+		}
+	});
+
+	it('greets its owner while the homeserver hangs on its name in their room', async () => {
+		const lea = await h.synapse.registerUser('lea', 'Léa SEYDOUX');
+		const client = await startE2eeClient(h.synapse.url, lea);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, lea.userId);
+		let release = (): void => undefined;
+		const hung = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const member = `/state/m.room.member/${encodeURIComponent(mine.userId)}`;
+		let held = 0;
+		h.apisix.matrixHold = (call) => {
+			if (call.method !== 'PUT' || !call.path.includes(member)) return null;
+			held += 1;
+			return hung;
+		};
+		try {
+			const room = await client.createDirectRoom(mine.userId);
+			expect(await eventually(() => held === 1)).toBe(true);
+			await client.waitForMessage(room, mine.userId, (text) => text.startsWith('Hello'));
+
+			release();
+			expect(await nameShown(lea, room, mine.userId, "Léa's assistant")).toBe("Léa's assistant");
+		} finally {
+			release();
+			h.apisix.matrixHold = null;
 		}
 	});
 

@@ -457,7 +457,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			await tx.sql`
 				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${assistant.userId})
 				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
-			// Named at the join already, unless the room refused it then
+			// Its name shows there by a job, as at the join, in case the room refused it for good then
 			await requestNaming(tx, owner);
 		});
 		request.log.info({ client, owner, userId: assistant.userId, roomId }, 'assistant room named');
