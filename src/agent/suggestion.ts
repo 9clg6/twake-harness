@@ -12,6 +12,7 @@ import { getMessages, type Locale } from '../i18n/messages.js';
 import { fenced } from '../llm/data.js';
 import { LlmError, type LlmClient } from '../llm/client.js';
 import { ensurePrincipal } from '../principals/repository.js';
+import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import type { SuggestPayload } from '../suggestions/job.js';
 import type { Proposal } from '../suggestions/text.js';
 import type { Admission } from './admission.js';
@@ -236,7 +237,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						: guardSlots(t, searched)
 				)
 		);
-		const moment = describeMoment(clock.now(), config.timeZone, locale);
+		const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
+		const moment = describeMoment(clock.now(), timeZone, locale);
 		const messages = getMessages(locale);
 		const decision = await admission.admit(owner);
 		if (!decision.ok) return { kind: 'busy' };
@@ -299,8 +301,6 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				const body =
 					frozen?.tool === CREATE_MEETING ? readMeeting(readJsonColumn(frozen.arguments)) : null;
 				if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
-				const timeZone =
-					(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? config.timeZone;
 				return {
 					kind: 'proposed',
 					pendingCallId,
@@ -310,7 +310,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						start: body.start,
 						end: body.end,
 						attendees: body.attendees,
-						timeZone
+						timeZone:
+							(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? timeZone
 					},
 					answer: turn.answer,
 					request: turn.request ?? null
