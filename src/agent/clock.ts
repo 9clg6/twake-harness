@@ -74,11 +74,21 @@ export function dateIn(instant: Date, timeZone: string): string {
 	return `${field('year')}-${field('month')}-${field('day')}`;
 }
 
+// The instant a day of the zone starts, at its midnight, daylight saving time included: the day as
+// ISO 8601 writes it, "2026-10-06"
+function startOfDayIn(day: string, timeZone: string): Date {
+	return new Date(wallTimeIn(`${day}T00:00:00`, timeZone) ?? `${day}T00:00:00Z`);
+}
+
+// The instant the day starts in the zone, at its midnight, daylight saving time included
+export function midnightIn(instant: Date, timeZone: string): Date {
+	return startOfDayIn(dateIn(instant, timeZone), timeZone);
+}
+
 // The instant the next day starts in the zone, at its midnight, daylight saving time included
 export function nextMidnightIn(instant: Date, timeZone: string): Date {
 	const today = Date.parse(`${dateIn(instant, timeZone)}T00:00:00Z`);
-	const tomorrow = new Date(today + 86_400_000).toISOString().slice(0, 10);
-	return new Date(wallTimeIn(`${tomorrow}T00:00:00`, timeZone) ?? `${tomorrow}T00:00:00Z`);
+	return startOfDayIn(new Date(today + 86_400_000).toISOString().slice(0, 10), timeZone);
 }
 
 // The zone's offset at that instant, in minutes, daylight saving time included, whatever the

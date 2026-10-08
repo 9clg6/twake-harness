@@ -47,6 +47,45 @@ export async function startActivityBroker(options: TestBrokerOptions = {}): Prom
 	return broker;
 }
 
+// Where Twake Calendar sends a notification per invitee of each change to a meeting, on its own
+// vhost
+export const CALENDAR_VHOST = 'calendar';
+export const CALENDAR_FANOUT = 'calendar:event:notificationEmail:send';
+
+export interface CalendarFanout {
+	// What the harness is set with to listen there, as the instance's own user
+	readonly settings: Readonly<Record<string, string>>;
+	// Publishes a notification as Calendar's side service does, persistent JSON, once the broker
+	// took it
+	publish(notification: Record<string, unknown>): Promise<void>;
+}
+
+// Calendar's vhost and fanout on the platform's broker, as the platform declares them: there too,
+// the instance's user may declare and write its own names only, and read the fanout and its own
+// queues
+export async function startCalendarFanout(broker: TestBroker): Promise<CalendarFanout> {
+	const channel = await broker.addVhost(CALENDAR_VHOST);
+	await channel.assertExchange(CALENDAR_FANOUT, 'fanout', { durable: true });
+	await broker.allow(HARNESS_USER, CALENDAR_VHOST, {
+		configure: `^${PREFIX}\\.`,
+		write: `^${PREFIX}\\.`,
+		read: `^(${CALENDAR_FANOUT}|${PREFIX}\\..+)$`
+	});
+	return {
+		settings: {
+			CALENDAR_ENABLED: 'true',
+			CALENDAR_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD, CALENDAR_VHOST)
+		},
+		publish: async (notification) => {
+			channel.publish(CALENDAR_FANOUT, '', Buffer.from(JSON.stringify(notification)), {
+				persistent: true,
+				contentType: 'application/json'
+			});
+			await channel.waitForConfirms();
+		}
+	};
+}
+
 // What the owner said last in a request to the model, or nothing, as the fake gateway reads it
 export function lastUser(request: ChatRequest | undefined): string {
 	return request === undefined ? '' : lastUserContent(request);
