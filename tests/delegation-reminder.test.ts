@@ -141,6 +141,10 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		await startWorker({ brokerConsentUrl: null });
 		await sleep(500);
 		expect(asked(ALICE)).toBe(before);
+		// The role says why once, at its start, however often it looks whether the hour has come
+		expect(logs.lines().filter((line) => line['msg'] === 'delegation reminders off')).toEqual([
+			expect.objectContaining({ level: WARN, missing: 'BROKER_CONSENT_URL' })
+		]);
 	});
 
 	it('reminds me once of the permission I gave, however often the pass runs, and once of the one I give next', async () => {
