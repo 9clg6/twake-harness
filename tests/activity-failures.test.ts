@@ -1,34 +1,45 @@
-import { PassThrough } from 'node:stream';
+import type { Writable } from 'node:stream';
 import { connect, type ConfirmChannel } from 'amqplib';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig } from '../src/config.js';
 import { makeDb, type Db } from '../src/db/client.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
+import {
+	ACTIVITY,
+	activityEvent,
+	ASSIGNED,
+	HARNESS_PASSWORD,
+	HARNESS_PERMISSIONS,
+	HARNESS_USER,
+	lastUser,
+	logSink,
+	PREFIX,
+	silent,
+	startActivityBroker,
+	turnCalls,
+	until,
+	whenListening,
+	type ActivityEvent,
+	type LogSink
+} from './helpers/activity.js';
 import { TEST_DATABASE_URL } from './helpers/app.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import type { ChatMessage, ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
-import { startTestBroker, type TestBroker } from './helpers/rabbitmq.js';
+import type { ChatRequest, RecordedCall } from './helpers/fake-apisix.js';
+import type { TestBroker } from './helpers/rabbitmq.js';
 import { freePort, spawnWorker, type WorkerProcess } from './helpers/process.js';
-import { startSilentServer, startTcpProxy, type TcpProxy } from './helpers/tcp-proxy.js';
+import {
+	startSilentServer,
+	startTcpProxy,
+	upstreamOf,
+	type TcpProxy
+} from './helpers/tcp-proxy.js';
 
-const ACTIVITY = 'activity';
-const ASSIGNED = 'com.twake.tasks.task.assigned.v1';
 // A type the deployment does not listen to
 const COMPLETED = 'com.twake.tasks.task.completed.v1';
-// The instance's own names on the broker, and its own user there
-const PREFIX = 'twake-harness-test';
+// The instance's own queue on the broker, and its dead letters
 const QUEUE = `${PREFIX}.activity`;
 const DEAD_LETTERS = `${QUEUE}.dlq`;
-const HARNESS_USER = 'twake-harness-test';
-const HARNESS_PASSWORD = 'harness-test-password';
-// What the instance's user may do on its vhost: declare and write its own names only, and read
-// the activity exchange and its own queues
-const PERMISSIONS = {
-	configure: `^${PREFIX}\\.`,
-	write: `^${PREFIX}\\.`,
-	read: `^(activity|${PREFIX}\\..+)$`
-};
 // What people wrote, which no log line may carry
 const CONFIDENTIAL = 'Salary review: Bob leaves in June';
 // The first delay of the worker's retries, which doubles from there
@@ -41,29 +52,6 @@ const ALICE = { email: 'alice@test.local', reason: 'assigned' };
 
 type LogLine = Record<string, unknown>;
 
-// What a role writes to its logs, line by line
-interface LogCapture {
-	readonly stream: PassThrough;
-	lines(): LogLine[];
-	text(): string;
-}
-
-function captureLogs(): LogCapture {
-	const stream = new PassThrough();
-	const chunks: string[] = [];
-	stream.on('data', (chunk: Buffer) => chunks.push(chunk.toString('utf8')));
-	const text = (): string => chunks.join('');
-	return {
-		stream,
-		text,
-		lines: () =>
-			text()
-				.split('\n')
-				.filter((line) => line.length > 0)
-				.map((line) => JSON.parse(line) as LogLine)
-	};
-}
-
 // A vhost of its own, as the platform sets one up: its name, and the platform's channel there
 interface OwnVhost {
 	readonly name: string;
@@ -75,48 +63,27 @@ const CONTENT = CONFIDENTIAL.split(' ')[0] ?? CONFIDENTIAL;
 
 // Nothing of what an event says reaches a worker's logs, at any level, nor a stack in the lines
 // of its listener, which would quote the message of a failure
-function expectNoContentIn(capture: LogCapture): void {
-	expect(capture.text()).not.toContain(CONTENT);
+function expectNoContentIn(logs: LogSink): void {
+	expect(JSON.stringify(logs.lines())).not.toContain(CONTENT);
 	expect(
-		capture
+		logs
 			.lines()
 			.filter((line) => line['listener'] !== undefined && JSON.stringify(line).includes('"stack"'))
 			.map((line) => line['msg'])
 	).toEqual([]);
 }
 
-// What an application publishes: a CloudEvent naming the people it is for in data.recipients
-interface ActivityEvent extends Record<string, unknown> {
-	readonly id: string;
-	readonly type: string;
-}
-
 let serial = 0;
 
-// A task assigned by Bob, published as Twake Tasks does, for Alice unless told otherwise
-function activityEvent(recipients: readonly Record<string, unknown>[] = [ALICE]): ActivityEvent {
+// A task assigned by Bob, published as Twake Tasks does, each under an id of its own and with a
+// title that no line may carry, for Alice unless told otherwise
+function assignment(recipients: readonly Record<string, unknown>[] = [ALICE]): ActivityEvent {
 	serial += 1;
-	return {
-		specversion: '1.0',
+	return activityEvent({
 		id: `0199c0de-${String(serial).padStart(4, '0')}-7c3e-8a1f-6d2b4e8c9a07`,
-		source: 'twake://tasks',
-		type: ASSIGNED,
-		time: '2026-10-07T14:41:40.123456Z',
-		twakeactor: 'bob@test.local',
-		data: {
-			object: { type: 'task', id: `task-${serial}`, key: `ROAD-${serial}`, title: CONFIDENTIAL },
-			recipients
-		}
-	};
-}
-
-function lastUser(request: ChatRequest | undefined): string {
-	return request?.messages.filter((m: ChatMessage) => m.role === 'user').at(-1)?.content ?? '';
-}
-
-// The model calls of the turns whose message names this event
-function turnCalls(calls: readonly RecordedCall[], eventId: string): RecordedCall[] {
-	return calls.filter((call) => lastUser(call.request).includes(`(id ${eventId})`));
+		recipients,
+		object: { type: 'task', id: `task-${serial}`, key: `ROAD-${serial}`, title: CONFIDENTIAL }
+	});
 }
 
 // Those of one assistant, known by the name its system prompt gives it
@@ -133,16 +100,11 @@ describe('an event that fails holds back none of those after it, and is never lo
 	// The worker reaches its database through a proxy the tests take down and bring back, and the
 	// broker through another, which follows the broker when a restart moves it
 	let database: TcpProxy;
-	let databaseUrl: string;
 	let workerDb: Db;
 	let amqp: TcpProxy;
-	const logs = captureLogs();
+	const logs = logSink();
 	beforeAll(async () => {
-		broker = await startTestBroker({ consumerTimeoutMs: CONSUMER_TIMEOUT_MS });
-		// The exchange the applications publish on, and the instance's user, as the platform makes
-		// them: it may declare and write its own names only, and read activity and its own queues
-		await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-		await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, PERMISSIONS);
+		broker = await startActivityBroker({ consumerTimeoutMs: CONSUMER_TIMEOUT_MS });
 		r = await startConsentRoom({
 			ACTIVITY_ENABLED: 'true',
 			ACTIVITY_AMQP_URL: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD),
@@ -150,20 +112,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 			// The suite wakes Alice's assistant more often than an owner may start turns by default
 			ADMISSION_USER_PER_MINUTE: '120'
 		});
-		const direct = new URL(TEST_DATABASE_URL);
-		database = await startTcpProxy(() => ({
-			host: direct.hostname,
-			port: Number(direct.port || '5432')
-		}));
-		const proxied = new URL(TEST_DATABASE_URL);
-		proxied.hostname = '127.0.0.1';
-		proxied.port = String(database.port);
-		databaseUrl = proxied.toString();
-		workerDb = makeDb(databaseUrl);
+		database = await startTcpProxy(() => upstreamOf(TEST_DATABASE_URL));
+		workerDb = makeDb(database.through(TEST_DATABASE_URL));
 		amqp = await startTcpProxy(() => broker.address());
-		const amqpUrl = new URL(broker.urlFor(HARNESS_USER, HARNESS_PASSWORD));
-		amqpUrl.hostname = '127.0.0.1';
-		amqpUrl.port = String(amqp.port);
 		const { activity } = r.h.config;
 		if (activity === null) throw new Error('the suite listens to the activity exchange');
 		// Every line the worker writes, down to its debug lines, is read for content
@@ -172,14 +123,16 @@ describe('an event that fails holds back none of those after it, and is never lo
 				...r.h.config,
 				role: 'worker',
 				logLevel: 'debug',
-				activity: { ...activity, amqpUrl: amqpUrl.toString() }
+				activity: {
+					...activity,
+					amqpUrl: amqp.through(broker.urlFor(HARNESS_USER, HARNESS_PASSWORD))
+				}
 			},
 			db: workerDb,
 			logStream: logs.stream,
 			retryDelayMs: RETRY_DELAY_MS
 		});
-		// It listens in the background: an event published before its queue is there reaches none
-		await until('listening', async () => (await healthOf(worker)) === 'connected');
+		await whenListening(worker);
 		// A literal model: it says which event it was told of
 		r.h.apisix.llm.script = (request: ChatRequest) => {
 			const id = /\(id ([^)]+)\)/.exec(lastUser(request))?.[1];
@@ -200,7 +153,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 	}
 
 	// Waits until Alice's assistant told her of an event in her room
-	async function toldOf(event: ActivityEvent): Promise<void> {
+	async function toldAlice(event: ActivityEvent): Promise<void> {
 		await r.client.waitForMessage(r.room, r.assistantId, (t) => t === `Told of (${event.id})`);
 	}
 
@@ -236,7 +189,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 	}
 
 	// A worker of its own, on a vhost of its own, as the instance's user there
-	function workerOn(amqpUrl: string, logStream: PassThrough, db: Db = r.h.db): Promise<WorkerRole> {
+	function workerOn(amqpUrl: string, logStream: Writable, db: Db = r.h.db): Promise<WorkerRole> {
 		return startWorkerRole({
 			config: {
 				...r.h.config,
@@ -256,7 +209,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const channel = await broker.addVhost(name);
 		if (exchange) await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
 		await broker.addUser(user, HARNESS_PASSWORD, { configure: '^$', write: '^$', read: '^$' });
-		await broker.allow(user, name, PERMISSIONS);
+		await broker.allow(user, name, HARNESS_PERMISSIONS);
 		return { name, channel };
 	}
 
@@ -331,8 +284,8 @@ describe('an event that fails holds back none of those after it, and is never lo
 			messageId: 'not-json'
 		});
 		await broker.channel.waitForConfirms();
-		const withoutSource: ActivityEvent = { ...activityEvent(), source: undefined };
-		const aboutNothing = activityEvent();
+		const withoutSource: ActivityEvent = { ...assignment(), source: undefined };
+		const aboutNothing = assignment();
 		const withoutObject: ActivityEvent = {
 			...aboutNothing,
 			data: { recipients: [ALICE], preview: CONFIDENTIAL }
@@ -340,14 +293,11 @@ describe('an event that fails holds back none of those after it, and is never lo
 		await publish(withoutSource);
 		await publish(withoutObject);
 		// The next event is told as ever
-		const next = activityEvent();
+		const next = assignment();
 		await publish(next);
-		await toldOf(next);
+		await toldAlice(next);
 		// The broker counts a dead letter once its dead letter queue confirmed it
-		await until(
-			'three dead letters',
-			async () => (await broker.queue(DEAD_LETTERS))?.messages === 3
-		);
+		await broker.waitForMessages(DEAD_LETTERS, 3);
 		expect(turnCalls(r.h.apisix.llm.calls, withoutSource.id)).toHaveLength(0);
 		expect(turnCalls(r.h.apisix.llm.calls, withoutObject.id)).toHaveLength(0);
 		expect(
@@ -376,22 +326,22 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const dave = { email: 'dave@test.local', reason: 'assigned' };
 		const elsewhere = { email: 'alice@elsewhere.test', reason: 'assigned' };
 		const unreadable = { email: 'not an address', reason: 'assigned' };
-		const many = activityEvent([ALICE, dave, elsewhere, unreadable]);
-		const nobody = activityEvent([]);
+		const many = assignment([ALICE, dave, elsewhere, unreadable]);
+		const nobody = assignment([]);
 		// Of a type the deployment no longer listens to, whose binding stays on the broker until it
 		// is removed there
-		const completed: ActivityEvent = { ...activityEvent(), type: COMPLETED };
+		const completed: ActivityEvent = { ...assignment(), type: COMPLETED };
 		await broker.channel.bindQueue(QUEUE, ACTIVITY, COMPLETED);
-		const next = activityEvent();
+		const next = assignment();
 		try {
 			await publish(many);
-			await toldOf(many);
+			await toldAlice(many);
 			// Delivered again, as after a restart
 			await publish(many);
 			await publish(nobody);
 			await publish(completed);
 			await publish(next);
-			await toldOf(next);
+			await toldAlice(next);
 		} finally {
 			await broker.channel.unbindQueue(QUEUE, ACTIVITY, COMPLETED);
 		}
@@ -428,7 +378,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 	it('tries an event again while the database is down, ever further apart, then wakes me once', async () => {
 		await broker.channel.purgeQueue(DEAD_LETTERS);
 		const mark = logs.lines().length;
-		const event = activityEvent();
+		const event = assignment();
 		database.cut();
 		try {
 			await publish(event);
@@ -447,7 +397,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		} finally {
 			database.restore();
 		}
-		await toldOf(event);
+		await toldAlice(event);
 		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(1);
 		expect((await broker.queue(DEAD_LETTERS))?.messages).toBe(0);
 		expect(handled(mark).map(({ eventId, outcome }) => ({ eventId, outcome }))).toEqual([
@@ -484,7 +434,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		await broker.channel.deleteQueue(control);
 		// The worker holds an event past it, trying it again, and never has it taken back
 		const mark = logs.lines().length;
-		const event = activityEvent();
+		const event = assignment();
 		database.cut();
 		try {
 			await publish(event);
@@ -500,7 +450,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 		} finally {
 			database.restore();
 		}
-		await toldOf(event);
+		await toldAlice(event);
 		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(1);
 		expectNoContentIn(logs);
 	});
@@ -508,19 +458,19 @@ describe('an event that fails holds back none of those after it, and is never lo
 	it('dead-letters an event that keeps failing after five attempts, and goes on with the next', async () => {
 		await broker.channel.purgeQueue(DEAD_LETTERS);
 		const mark = logs.lines().length;
-		const failing = activityEvent();
-		const next = activityEvent();
+		const failing = assignment();
+		const next = assignment();
 		await refuseWakeups(`new.event_id = '${failing.id}'`);
 		try {
 			await publish(failing);
 			await publish(next);
-			await toldOf(next);
+			await toldAlice(next);
 		} finally {
 			await allowWakeups();
 		}
 		const failures = await failuresOf(failing, 5);
 		expect(failures.map((line) => line['transient'])).toEqual(Array(5).fill(false));
-		await until('one dead letter', async () => (await broker.queue(DEAD_LETTERS))?.messages === 1);
+		await broker.waitForMessages(DEAD_LETTERS, 1);
 		expect(turnCalls(r.h.apisix.llm.calls, failing.id)).toHaveLength(0);
 		expect(
 			handled(mark).map(({ eventId, outcome, reason }) => ({ eventId, outcome, reason }))
@@ -538,17 +488,14 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const created = await r.h.api.post('carol@test.local', '/v1/assistants', { name: 'Friday' });
 		expect(created.status).toBe(201);
 		const carol = { email: 'carol@test.local', reason: 'assigned' };
-		const event = activityEvent([ALICE, carol]);
+		const event = assignment([ALICE, carol]);
 		await refuseWakeups(`new.owner = 'carol@test.local'`);
 		try {
 			// Alice is told at the first attempt, and the event is dead-lettered for Carol's sake
 			await publish(event);
-			await toldOf(event);
+			await toldAlice(event);
 			await failuresOf(event, 5);
-			await until(
-				'the event dead-lettered',
-				async () => (await broker.queue(DEAD_LETTERS))?.messages === 1
-			);
+			await broker.waitForMessages(DEAD_LETTERS, 1);
 		} finally {
 			await allowWakeups();
 		}
@@ -561,12 +508,8 @@ describe('an event that fails holds back none of those after it, and is never lo
 		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Jarvis')).toHaveLength(1);
 		expect(turnsOf(r.h.apisix.llm.calls, event.id, 'Friday')).toHaveLength(1);
 		// Taken from both queues, as the broker counts them once it settled them
-		await until(
-			'both queues empty',
-			async () =>
-				(await broker.queue(DEAD_LETTERS))?.messages === 0 &&
-				(await broker.queue(QUEUE))?.messages === 0
-		);
+		await broker.waitForMessages(DEAD_LETTERS, 0);
+		await broker.waitForMessages(QUEUE, 0);
 		expectNoContentIn(logs);
 	});
 
@@ -587,16 +530,16 @@ describe('an event that fails holds back none of those after it, and is never lo
 			});
 			return Number(line?.['time']);
 		};
-		const old = activityEvent();
+		const old = assignment();
 		await publish(old);
 		const oldAt = await wokenAt(old);
 		await new Promise((resolve) => setTimeout(resolve, 3000));
-		const young = activityEvent();
+		const young = assignment();
 		await publish(young);
 		const youngAt = await wokenAt(young);
 		// A retention halfway between their ages, for a worker whose start purges
 		const retentionMs = Date.now() - youngAt + (youngAt - oldAt) / 2;
-		const purgeLogs = captureLogs();
+		const purgeLogs = logSink();
 		const purging = await startWorkerRole({
 			config: {
 				...r.h.config,
@@ -627,7 +570,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 
 	it('starts without the activity exchange, holds no connection while it waits, and listens once it is there', async () => {
 		const vhost = await vhostOf('late', 'twake-harness-late', false);
-		const lateLogs = captureLogs();
+		const lateLogs = logSink();
 		const late = await workerOn(
 			broker.urlFor('twake-harness-late', HARNESS_PASSWORD, vhost.name),
 			lateLogs.stream
@@ -645,10 +588,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 			expect(await connections()).toBeLessThanOrEqual(1);
 			// The platform declares the exchange
 			await vhost.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-			await until('listening', async () => (await healthOf(late)) === 'connected');
-			const event = activityEvent();
+			await whenListening(late);
+			const event = assignment();
 			await publishOn(vhost, event);
-			await toldOf(event);
+			await toldAlice(event);
 		} finally {
 			await late.stop();
 		}
@@ -660,10 +603,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const loop = await vhostOf('loop', 'twake-harness-loop');
 		const url = broker.urlFor('twake-harness-loop', HARNESS_PASSWORD, loop.name);
 		// A first life declares the queue, before the event is published
-		const first = await workerOn(url, captureLogs().stream);
-		await until('listening', async () => (await healthOf(first)) === 'connected');
+		const first = await whenListening(await workerOn(url, silent()));
 		await first.stop();
-		const event = activityEvent();
+		const event = assignment();
 		await publishOn(loop, event);
 		const lives: WorkerProcess[] = [];
 		const lock = await lockWakeups();
@@ -690,12 +632,8 @@ describe('an event that fails holds back none of those after it, and is never lo
 						.filter((line) => line['msg'] === 'event handled')
 						.map(({ eventId, outcome, reason }) => ({ eventId, outcome, reason }))
 				).toEqual([{ eventId: event.id, outcome: 'dead_lettered', reason: 'delivery_limit' }]);
-				await until(
-					'the event dead-lettered',
-					async () =>
-						(await broker.queue(DEAD_LETTERS, loop.name))?.messages === 1 &&
-						(await broker.queue(QUEUE, loop.name))?.messages === 0
-				);
+				await broker.waitForMessages(DEAD_LETTERS, 1, loop.name);
+				await broker.waitForMessages(QUEUE, 0, loop.name);
 			} finally {
 				await last.kill('SIGTERM');
 			}
@@ -709,11 +647,11 @@ describe('an event that fails holds back none of those after it, and is never lo
 		const vhost = await vhostOf('away', 'twake-harness-away');
 		const proxy = await startTcpProxy(() => broker.address());
 		proxy.cut();
-		const url = new URL(broker.urlFor('twake-harness-away', HARNESS_PASSWORD, vhost.name));
-		url.hostname = '127.0.0.1';
-		url.port = String(proxy.port);
-		const awayLogs = captureLogs();
-		const away = await workerOn(url.toString(), awayLogs.stream);
+		const awayLogs = logSink();
+		const away = await workerOn(
+			proxy.through(broker.urlFor('twake-harness-away', HARNESS_PASSWORD, vhost.name)),
+			awayLogs.stream
+		);
 		let stopped = false;
 		try {
 			expect(await healthOf(away)).toBe('disconnected');
@@ -729,10 +667,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 					.map((line) => line['msg'])
 			).toEqual([]);
 			proxy.restore();
-			await until('listening', async () => (await healthOf(away)) === 'connected');
-			const event = activityEvent();
+			await whenListening(away);
+			const event = assignment();
 			await publishOn(vhost, event);
-			await toldOf(event);
+			await toldAlice(event);
 			// The broker goes again, and the role stops meanwhile, as at a rollout
 			proxy.cut();
 			await until('disconnected', async () => (await healthOf(away)) === 'disconnected');
@@ -747,7 +685,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 
 	it('answers its health at once against a broker that never answers, and keeps trying', async () => {
 		const silent = await startSilentServer();
-		const silentLogs = captureLogs();
+		const silentLogs = logSink();
 		const startedAt = Date.now();
 		// A connection has half a second to open, rather than the ten seconds of a deployment
 		const role = await workerOn(
@@ -763,7 +701,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			);
 			// Each attempt gave up on its connection, so that none piles up
 			expect(silent.connections()).toBeLessThanOrEqual(1);
-			expect(silentLogs.text()).toContain('connect ETIMEDOUT');
+			expect(JSON.stringify(silentLogs.lines())).toContain('connect ETIMEDOUT');
 		} finally {
 			await role.stop();
 			await silent.close();
@@ -773,13 +711,13 @@ describe('an event that fails holds back none of those after it, and is never lo
 
 	it('tries again when it cannot read its queue again after a reconnection, saying so meanwhile', async () => {
 		const vhost = await vhostOf('gone', 'twake-harness-gone');
-		const goneLogs = captureLogs();
+		const goneLogs = logSink();
 		const gone = await workerOn(
 			broker.urlFor('twake-harness-gone', HARNESS_PASSWORD, vhost.name),
 			goneLogs.stream
 		);
 		try {
-			await until('listening', async () => (await healthOf(gone)) === 'connected');
+			await whenListening(gone);
 			// The exchange goes, then the broker drops the listener's connection
 			await vhost.channel.deleteExchange(ACTIVITY);
 			await broker.closeConnectionsOf('twake-harness-gone');
@@ -789,9 +727,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 			);
 			await vhost.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
 			await until('connected again', async () => (await healthOf(gone)) === 'connected');
-			const event = activityEvent();
+			const event = assignment();
 			await publishOn(vhost, event);
-			await toldOf(event);
+			await toldAlice(event);
 		} finally {
 			await gone.stop();
 		}
@@ -808,9 +746,9 @@ describe('an event that fails holds back none of those after it, and is never lo
 			await restarting;
 		}
 		await until('connected again', async () => (await healthOf(worker)) === 'connected');
-		const event = activityEvent();
+		const event = assignment();
 		await publish(event);
-		await toldOf(event);
+		await toldAlice(event);
 		expectNoContentIn(logs);
 	});
 });
@@ -836,12 +774,3 @@ describe('the retention of the wake-ups', () => {
 		);
 	});
 });
-
-// Waits for what a condition tells, a minute at most
-async function until(what: string, condition: () => Promise<boolean> | boolean): Promise<void> {
-	for (let i = 0; i < 240; i += 1) {
-		if (await condition()) return;
-		await new Promise((resolve) => setTimeout(resolve, 250));
-	}
-	throw new Error(`${what}: not within a minute`);
-}

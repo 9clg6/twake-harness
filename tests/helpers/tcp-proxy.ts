@@ -6,10 +6,22 @@ export interface Upstream {
 	readonly port: number;
 }
 
+// The port of an address that names none, by its scheme
+const DEFAULT_PORTS: Readonly<Record<string, number>> = { 'postgres:': 5432, 'amqp:': 5672 };
+
+// The server an address points to, such as a database's or a broker's URL
+export function upstreamOf(url: string): Upstream {
+	const { hostname, port, protocol } = new URL(url);
+	return { host: hostname, port: port === '' ? (DEFAULT_PORTS[protocol] ?? 0) : Number(port) };
+}
+
 // A server between a role and one it depends on, such as its database or its broker, that the
 // test can take down and bring back while the role runs
 export interface TcpProxy {
 	readonly port: number;
+	// An address of the upstream server, such as its URL with a user and a database, through the
+	// proxy instead
+	through(url: string): string;
 	// Drops every connection through it, and refuses the next ones, as a server gone down
 	cut(): void;
 	restore(): void;
@@ -45,8 +57,15 @@ export async function startTcpProxy(upstream: () => Upstream): Promise<TcpProxy>
 	const dropAll = (): void => {
 		for (const socket of sockets) socket.resetAndDestroy();
 	};
+	const { port } = address;
 	return {
-		port: address.port,
+		port,
+		through: (url) => {
+			const proxied = new URL(url);
+			proxied.hostname = '127.0.0.1';
+			proxied.port = String(port);
+			return proxied.toString();
+		},
 		cut: () => {
 			up = false;
 			dropAll();
