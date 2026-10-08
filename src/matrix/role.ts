@@ -1299,12 +1299,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
-		// A question to answer yes or no goes out marked, as the assistants' do, encrypted with the
-		// rest of the reply when the room is
-		await appservice.botIntent.sendEvent(
-			roomId,
-			markQuestion(makeRichText(turn.reply), turn.question)
-		);
+		// The reply asks the question the dialog now waits on, if any: it goes out marked, as the
+		// assistants' do, encrypted with the rest of the reply when the room is
+		const asked =
+			turn.nextState?.step === 'confirming_deletion' ? turn.nextState.question : undefined;
+		await appservice.botIntent.sendEvent(roomId, markQuestion(makeRichText(turn.reply), asked));
 	}
 
 	// Answers computed by the api role, sent as the assistant through its intent, which encrypts

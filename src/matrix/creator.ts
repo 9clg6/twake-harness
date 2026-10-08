@@ -18,8 +18,8 @@ export function helpText(messages: Messages): string {
 
 export interface CreatorTurn {
 	readonly reply: string;
-	// The question to answer yes or no that the reply asks, which its content is marked with
-	readonly question?: YesNoQuestion;
+	// Where the dialog stands once the owner read the reply: the question it then waits on is the
+	// one the reply asks
 	readonly nextState: DialogState | null;
 	readonly command: string;
 }
@@ -113,8 +113,7 @@ export async function runCreatorTurn(
 			return {
 				command,
 				nextState: { step: 'confirming_deletion', question },
-				reply: say.confirmDeletion(assistant.name),
-				question
+				reply: say.confirmDeletion(assistant.name)
 			};
 		}
 		case '/recover':
