@@ -56,7 +56,7 @@ export interface TurnDeps {
 	readonly maxToolCalls: number;
 	// The tokens the turn may spend, the prompts and answers of its model calls summed, checked
 	// before each call: not the budget of one call, which is the client's
-	readonly maxTokens: number;
+	readonly maxTurnTokens: number;
 	// The most characters of the past conversation the model reads; its stored history keeps all
 	readonly historyMaxChars: number;
 }
@@ -230,7 +230,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	let notRun = 0;
 	// Every model answer that calls tools runs at least one of them, until a limit stops the loop:
 	// the tool calls of the message, or the tokens of the turn, checked before each model call
-	while (notRun === 0 && tokens < deps.maxTokens) {
+	while (notRun === 0 && tokens < deps.maxTurnTokens) {
 		const asked = await askModel(
 			deps,
 			iteration,
@@ -329,8 +329,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		reached = `the limit of ${deps.maxToolCalls} tool calls for one message, so the calls you made past it did not run`;
 		noticed = 'tool call limit notice';
 	} else {
-		deps.log.info({ limit: deps.maxTokens, tokens }, 'token limit reached');
-		reached = `the limit of ${deps.maxTokens} tokens for one message`;
+		deps.log.info({ limit: deps.maxTurnTokens, tokens }, 'token limit reached');
+		reached = `the limit of ${deps.maxTurnTokens} tokens for one message`;
 		noticed = 'token limit notice';
 	}
 	// In the system prompt rather than a message of its own: some chat templates refuse a system

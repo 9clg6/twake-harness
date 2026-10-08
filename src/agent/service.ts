@@ -642,7 +642,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						tools,
 						log,
 						maxToolCalls: config.turn.maxToolCalls,
-						maxTokens: config.turn.maxTokens,
+						maxTurnTokens: config.turn.maxTokens,
 						historyMaxChars: config.turn.historyMaxChars
 					},
 					{
@@ -669,7 +669,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						message: told.message,
 						context,
 						actionsBefore,
-						limitNotice: (actions) => messages.notices.callLimit(actions),
+						limitNotice: (actions) => messages.notices.turnLimit(actions),
 						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone })
 					}
 				);
