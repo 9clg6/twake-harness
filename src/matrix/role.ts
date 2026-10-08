@@ -142,7 +142,8 @@ interface SendJob {
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
 const preparePayload = z.object({ owner: z.string().min(1) });
-const namePayload = z.object({ owner: z.string().min(1) });
+// After its owner: the assistant, still under a former default name, takes its owner's first name
+const namePayload = z.object({ owner: z.string().min(1), afterOwner: z.boolean().optional() });
 // The actions a turn has done so far, for its status message
 const progressPayload = z.object({
 	asUserId: z.string().min(1),
@@ -1426,7 +1427,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (job.kind === 'name') {
 				const parsed = namePayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('name payload is malformed');
-				await assistants.showName(parsed.data.owner);
+				const { owner, afterOwner } = parsed.data;
+				const renamed = afterOwner === true ? await assistants.nameAfterOwner(owner) : 'kept';
+				// Its rooms show its name even when the owner's could not be read, which is tried again
+				await assistants.showName(owner);
+				if (renamed === 'failed') throw new Error('the assistant was not named after its owner');
 				return null;
 			}
 			if (job.kind === 'progress') {
@@ -1518,6 +1523,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				}
 			)
 		);
+	}
+	// Every assistant goes by its name from the start: one still under a default name it had before
+	// takes its owner's first name, and its rooms show its name, which a homeserver may keep from its
+	// profile. By jobs, which try again when the homeserver refuses.
+	const owners = new Set(assistantsAtStart.map(({ owner }) => owner));
+	owners.delete(ORGANIZATION_PRINCIPAL);
+	try {
+		for (const owner of owners) await requestNaming(db, owner, { afterOwner: true });
+	} catch (err: unknown) {
+		log.warn({ err }, 'assistant names not requested at start');
 	}
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
 	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts

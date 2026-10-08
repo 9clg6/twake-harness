@@ -25,6 +25,8 @@ export interface Messages {
 	// The name of an assistant a provisioner creates, after the first name in its owner's Matrix
 	// name, which its owner may change
 	defaultAssistantName(ownerName: string): string;
+	// The default name such an assistant had before, after its owner's whole Matrix name
+	formerDefaultAssistantName(ownerName: string): string;
 	readonly creator: {
 		readonly helpHeader: string;
 		readonly commands: readonly CreatorCommand[];
@@ -240,6 +242,7 @@ const ENGLISH: Messages = {
 	welcome: (name) =>
 		`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`,
 	defaultAssistantName: (ownerName) => `${firstNameOf(ownerName)}'s assistant`,
+	formerDefaultAssistantName: (ownerName) => `${ownerName}'s assistant`,
 	creator: {
 		helpHeader: 'I create and manage your Twake Space assistant. Commands:',
 		commands: [
@@ -461,6 +464,7 @@ const FRENCH: Messages = {
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
 	defaultAssistantName: (ownerName) => `Assistant ${frenchOf(firstNameOf(ownerName))}`,
+	formerDefaultAssistantName: (ownerName) => `Assistant de ${ownerName}`,
 	creator: {
 		helpHeader: 'Je crée et je gère ton assistant Twake Space :',
 		commands: [

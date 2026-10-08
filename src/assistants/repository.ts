@@ -112,6 +112,20 @@ export async function renameAssistant(tx: Tx, owner: string, name: string): Prom
 	return result.count === 1;
 }
 
+// Renames the owner's assistant only while it still goes by one of the names given: a name given
+// to it meanwhile stays
+export async function renameAssistantFrom(
+	tx: Tx,
+	owner: string,
+	from: readonly string[],
+	name: string
+): Promise<boolean> {
+	const result = await tx.sql`
+		update assistants set name = ${name}
+		where owner = ${owner} and deleted_at is null and name in ${tx.sql([...from])}`;
+	return result.count === 1;
+}
+
 export async function markAssistantDeleted(tx: Tx, owner: string): Promise<boolean> {
 	const result =
 		await tx.sql`update assistants set deleted_at = now(), room_id = null where owner = ${owner} and deleted_at is null`;
