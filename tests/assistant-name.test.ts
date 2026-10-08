@@ -79,6 +79,17 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		);
 	});
 
+	it('goes by the name its owner chose in the room it opens with them', async () => {
+		const owner = await h.synapse.registerUser('paul', 'Paul VALÉRY');
+		const created = await h.api.post<AssistantView>('paul@test.local', '/v1/assistants', {
+			name: 'Friday'
+		});
+		expect(created.status).toBe(201);
+		const room = created.body.roomId ?? '';
+		await h.synapse.joinRoom(owner, room);
+		expect(await nameShown(owner, room, created.body.userId, 'Friday')).toBe('Friday');
+	});
+
 	it('goes by each name its owner gives it in their room', async () => {
 		const { owner, assistant } = await provisioned('omar', 'Omar SY');
 		const room = await h.synapse.createDirectRoom(owner, assistant.userId);

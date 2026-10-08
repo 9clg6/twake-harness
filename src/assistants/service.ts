@@ -193,7 +193,8 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				const opened = await admin.createDirectRoom(userId, ownerUserId);
 				roomId = opened;
 				// The greeting waits for the owner to join: the matrix role then encrypts it for their
-				// devices. The room and its index land together or not at all.
+				// devices. The room and its index land together or not at all, with the job that shows
+				// the assistant's name there.
 				// A first assistant greets in the deployment's language; one created again, in the
 				// language its owner chose for the one before
 				const toOwner = await fetchOwnerMessages(db, owner, config.locale);
@@ -201,6 +202,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				await withPrincipal(db, { id: owner }, async (tx) => {
 					await setAssistantRoomId(tx, owner, opened);
 					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
+					await requestNaming(tx, owner);
 				});
 				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
 				// As in every room of the assistant: the client offers them after « / »
