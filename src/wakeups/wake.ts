@@ -19,6 +19,8 @@ import {
 } from '../journal/repository.js';
 import { fenced } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { isListening } from '../sources/repository.js';
+import { sourceOfActivity } from '../sources/sources.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
 
 // Someone an event names, as its source knows them
@@ -52,7 +54,7 @@ export interface Wakeup {
 export const BRIEF_SOURCE = 'schedule';
 
 export type WakeOutcome =
-	'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped' | 'for_brief';
+	'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped' | 'for_brief' | 'unlistened';
 
 export interface WakeDeps {
 	readonly config: Config;
@@ -97,9 +99,11 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 // brief for the brief the scheduler asks for. The owner is
 // the recipient by their email, which is their principal: only a person of the instance's mail
 // domain has one, nobody is woken for their own action, and nobody more often in an hour than the
-// deployment allows. Their listening journal notes each event they are woken for or their cap
-// holds back, and of their own actions a task they assigned themselves, for their brief, none of
-// which wakes them twice; a brief, which the scheduler tries again, it never notes.
+// deployment allows. An activity of an application their assistant does not listen to, as they
+// chose or by its default, wakes nothing and leaves nothing. Their listening journal notes each
+// event they are woken for or their cap holds back, and of their own actions a task they assigned
+// themselves, for their brief, none of which wakes them twice; a brief, which the scheduler tries
+// again, it never notes.
 export async function wake(
 	deps: WakeDeps,
 	wakeup: Wakeup,
@@ -117,10 +121,18 @@ export async function wake(
 	if ((wakeup.source === BRIEF_SOURCE) !== (wakeup.brief !== undefined)) return 'ignored';
 	// A brief is no activity: the journal notes the others alone
 	const isActivity = wakeup.brief === undefined;
+	// The application an activity comes from, by the source it was published under: one the
+	// harness does not know is listened to by nobody
+	const application = isActivity ? sourceOfActivity(wakeup.source) : null;
 	const outcome = await withPrincipal(db, { id: owner }, async (tx) => {
 		const assistant = await findAssistant(tx, owner);
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
 			return 'no_assistant' as const;
+		}
+		// What the owner does not have their assistant listen to reaches neither their room nor
+		// their journal, and takes none of their wake-ups
+		if (isActivity && (application === null || !(await isListening(tx, owner, application)))) {
+			return 'unlistened' as const;
 		}
 		// One wake-up of an owner at a time, whatever source it comes from: what woke them is settled
 		// when it is read, and no two events take the last wake-up of their hour
@@ -184,6 +196,10 @@ export async function wake(
 	});
 	const logged = { source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner };
 	if (outcome === 'woken') deps.log.info(logged, 'event queued');
+	// A source the harness does not know publishes for nobody: its operator learns which
+	if (outcome === 'unlistened' && application === null) {
+		deps.log.warn(logged, 'activity of an unknown source, listened to by nobody');
+	}
 	// Taken all the same, for no turn: nothing tells the owner of an event past their cap
 	if (outcome === 'capped' && options.logCapped !== false) deps.log.info(logged, 'event capped');
 	// What came of an activity, once settled: one capped or kept for the brief is, one woken once

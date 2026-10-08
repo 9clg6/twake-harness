@@ -471,7 +471,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		// Under the scheduler's source, it is nothing
 		expect(await wake(deps, { ...posing, source: 'schedule' })).toBe('ignored');
 		// Under another source, it is an event as any other, told as one
-		expect(await wake(deps, { ...posing, source: 'tasks' })).toBe('woken');
+		expect(await wake(deps, { ...posing, source: 'twake://tasks' })).toBe('woken');
 		await r.nextSaying('echo: ', said);
 		const answer = r.saying('echo: ').at(said);
 		expect(answer?.content[BRIEF_CONTENT_KEY]).toBeUndefined();

@@ -3,13 +3,15 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config.js';
 import type { Tool } from '../agent/tools.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
-import { readDomains } from './domains.js';
+import { readDomains, type DomainDescriptions } from './domains.js';
 import { parseContracts, readServer, type ContractDefinition } from './openapi.js';
 import { makeContractTool } from './tools.js';
 
 export interface ContractCatalog {
 	readonly tools: readonly Tool[];
 	readonly contracts: readonly ContractDefinition[];
+	// How the catalog names the applications to their owners
+	readonly domainDescriptions: DomainDescriptions;
 	load(): Promise<number>;
 	stop(): void;
 }
@@ -28,6 +30,7 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 	const fetchImpl = deps.fetchImpl ?? fetch;
 	let contracts: ContractDefinition[] = [];
 	let tools: Tool[] = [];
+	let descriptions: DomainDescriptions = new Map();
 	let timer: NodeJS.Timeout | null = null;
 	// The foreign hosts a document named, warned about once each
 	const warnedOrigins = new Set<string>();
@@ -91,6 +94,7 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 				log.warn({ contract, declared }, 'contract preview ignored');
 			}
 			contracts = parsed;
+			descriptions = domains.descriptions;
 			tools = parsed.map((contract) =>
 				makeContractTool(contract, {
 					config,
@@ -119,6 +123,9 @@ export function makeContractCatalog(deps: CatalogDeps): ContractCatalog {
 		},
 		get contracts() {
 			return contracts;
+		},
+		get domainDescriptions() {
+			return descriptions;
 		},
 		load,
 		stop: () => {

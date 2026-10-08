@@ -7,6 +7,7 @@ import { formatOffset, wallTimeIn } from '../agent/clock.js';
 import type { CalendarSource } from '../config.js';
 import { cut } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
+import { CALENDAR_SOURCE } from '../sources/sources.js';
 import { INVITED_EVENT_TYPE } from './event-types.js';
 import { listenOnOwnQueue, type Identity, type Listener, type Reading } from './listener.js';
 import type { WakeDeps, Wakeup } from './wake.js';
@@ -15,9 +16,6 @@ import type { WakeDeps, Wakeup } from './wake.js';
 // meeting, on Calendar's own vhost: a fanout, which gives every queue bound to it every message.
 // The invitations of personal calendars never reach the activity exchange.
 const CALENDAR_FANOUT = 'calendar:event:notificationEmail:send';
-
-// The source the calendar producer gave the invitations it published, which wake-ups are kept by
-const SOURCE = 'twake://calendar';
 
 // The most characters of the title, the UID and the zone the model is shown: the organizer writes
 // them, at any length, and one longer is cut rather than refused
@@ -255,7 +253,7 @@ function invitationOf(message: Record<string, unknown>, recipient: string): Read
 	const shownTitle = typeof title === 'string' ? { title: cut(title, TITLE_MAX) } : {};
 	const shownUid = cut(uid, UID_MAX);
 	const wakeup: Wakeup = {
-		source: SOURCE,
+		source: CALENDAR_SOURCE,
 		id,
 		type: INVITED_EVENT_TYPE,
 		recipient: { email: recipient, uuid: null, reason: 'invited' },
@@ -263,7 +261,7 @@ function invitationOf(message: Record<string, unknown>, recipient: string): Read
 		shown: {
 			computed: {
 				type: INVITED_EVENT_TYPE,
-				source: SOURCE,
+				source: CALENDAR_SOURCE,
 				id,
 				...(organizer === null ? {} : { actor: organizer }),
 				reason: 'invited',
@@ -305,7 +303,7 @@ function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 	if (recipient === null || matrixLocalpartOfPrincipal(deps.config, recipient) === null) {
 		return { kind: 'foreign' };
 	}
-	const identity: Identity = { source: SOURCE, recipients: 1 };
+	const identity: Identity = { source: CALENDAR_SOURCE, recipients: 1 };
 	const method = message['method'];
 	if (
 		typeof method !== 'string' ||
@@ -328,7 +326,10 @@ function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 	const { wakeup, leftOut } = read;
 	if (leftOut.length > 0) {
 		// As for the activity exchange: the fields' names, never what the calendar wrote there
-		deps.log.warn({ source: SOURCE, eventId: wakeup.id, fields: leftOut }, 'event fields left out');
+		deps.log.warn(
+			{ source: CALENDAR_SOURCE, eventId: wakeup.id, fields: leftOut },
+			'event fields left out'
+		);
 	}
 	return {
 		kind: 'wakeups',

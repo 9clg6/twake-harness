@@ -294,13 +294,19 @@ describe('the assistant proposes from the messages of channels', () => {
 	});
 
 	it("offers the turn the owner's yes resumed none of the tools of their own turns", async () => {
-		// That turn is still the channel's: after the meeting, the model is not offered the owner's
-		// listening journal
+		// That turn is still the channel's: after the meeting, the model is offered neither the
+		// owner's listening journal nor the choice of what their assistant listens to
 		const resumed = await eventually(() =>
 			h.apisix.llm.calls.find((c) => (c.request.messages.at(-1)?.content ?? '').includes('m-1'))
 		);
 		expect(toolsOf(resumed?.request)).toContain('create_meeting');
-		expect(toolsOf(resumed?.request)).not.toContain('listening_journal');
+		for (const own of [
+			'listening_journal',
+			'listen_to_source',
+			'stop_listening_to_source',
+			'listened_sources'
+		])
+			expect(toolsOf(resumed?.request)).not.toContain(own);
 	});
 
 	it('proposes once a day at most three times, and once per room per twelve hours', async () => {

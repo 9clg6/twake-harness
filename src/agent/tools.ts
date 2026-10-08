@@ -143,6 +143,10 @@ export interface Tool {
 	// The argument keys the tool accepts; anything else is refused before it runs
 	readonly argumentKeys: readonly string[];
 	readonly requiredAction: string | null;
+	// For a tool of the harness's own whose call may wait for its owner, as listening to an
+	// application they have not let their assistant read: what its frozen calls name in place of a
+	// contract, by which the call their yes allowed finds the tool again
+	readonly frozenAs?: string;
 	run(args: unknown, context: ToolContext): Promise<ToolOutcome>;
 }
 

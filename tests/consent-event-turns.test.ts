@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import {
-	MAIL_RECEIVED,
-	mailEvent,
+	activityEvent,
 	startActivityExchange,
+	type ActivityEvent,
 	type ActivityExchange
 } from './helpers/activity.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -68,6 +68,16 @@ function applications(_call: ContractCall): ContractReply {
 	return { status: 200, body: { found: 'Paul asks for the Q4 budget' } };
 }
 
+// A task assigned to Alice, as Twake Tasks publishes it on the activity exchange, which her
+// assistant acts on in her mail
+function assigned(id: string, title: string): ActivityEvent {
+	return activityEvent({
+		id,
+		recipient: 'alice@test.local',
+		object: { type: 'task', id: `task-${id}`, key: 'FIN-4', title }
+	});
+}
+
 // How every request of the harness ends
 const HOW_TO_ANSWER = 'Answer yes or no in your next message.';
 
@@ -92,7 +102,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 	let activity: ActivityExchange;
 	let r: ConsentRoom;
 	beforeAll(async () => {
-		activity = await startActivityExchange([MAIL_RECEIVED]);
+		activity = await startActivityExchange();
 		// Many turns of one owner in a row: admission is the subject of its own suite
 		r = await startConsentRoom({
 			...activity.settings,
@@ -139,7 +149,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		return r.h.apisix.contracts.calls.filter((c) => c.method !== 'GET').map((c) => c.path);
 	}
 
-	it('asks before it first reads my mail for a mail that arrived, then before sending the answer it prepared', async () => {
+	it('asks before it first reads my mail for a task that arrived, then before sending the answer it prepared', async () => {
 		// Alice lets her assistant write in her mail; it never read it
 		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'write');
 		const reply = {
@@ -155,19 +165,19 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 			}
 			if (last?.role === 'tool') return { content: `Sent: ${last.content ?? ''}` };
 			return {
-				content: 'A mail arrived. Let me read it.',
-				toolCalls: [toolCall('call_search_emails', 'search_emails', { q: 'mail-1' })]
+				content: 'Paul wants an answer about the Q4 budget. Let me read his mail.',
+				toolCalls: [toolCall('call_search_emails', 'search_emails', { q: 'Q4 budget' })]
 			};
 		};
 		const seen = requests().length;
-		await activity.publish(mailEvent('mail-1', 'alice@test.local'));
+		await activity.publish(assigned('task-1', 'Answer Paul about the Q4 budget'));
 		// Its first read of my mail asks as it would in our conversation, and reads nothing yet
 		const read = await nextRequest(seen);
 		expect(read.body).toBe(
 			askedAbout(
 				'This is the first time I need to read your data in mail. Do you allow it?',
 				null,
-				'A mail arrived. Let me read it.'
+				'Paul wants an answer about the Q4 budget. Let me read his mail.'
 			)
 		);
 		expect(lastWait()).toMatchObject({ reasons: ['consent'], domain: 'mail', level: 'read' });
@@ -199,8 +209,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 
 	it('shows me which action it prepared for what arrived when the call has no arguments', async () => {
 		await grantConsent(r.h.db, 'alice@test.local', 'mail', 'write');
-		const said =
-			'Anna writes that your vacation is over. I prepared turning your vacation response off.';
+		const said = 'Your vacation is over. I prepared turning your vacation response off.';
 		r.h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
 			if (last?.role === 'tool') return { content: `Turned off: ${last.content ?? ''}` };
@@ -210,7 +219,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 			};
 		};
 		let seen = requests().length;
-		await activity.publish(mailEvent('mail-back', 'alice@test.local'));
+		await activity.publish(assigned('task-back', 'Turn my vacation response off'));
 		const request = await nextRequest(seen);
 		// The tool, as the harness names it, stands under the question in the call's place
 		expect(request.body).toBe(
@@ -230,7 +239,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		// Its first write in my mail for what arrives asks for both, about that same action
 		await withdrawConsent(r.h.db, 'alice@test.local', 'mail', 'write');
 		seen = requests().length;
-		await activity.publish(mailEvent('mail-back-again', 'alice@test.local'));
+		await activity.publish(assigned('task-back-again', 'Turn my vacation response off'));
 		const first = await nextRequest(seen);
 		expect(first.body).toBe(
 			askedAbout(
