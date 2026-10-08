@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeClient } from './helpers/client.js';
 import { makeSettableClock } from './helpers/clock.js';
 import {
+	modelFor,
 	modelUsing,
 	QUESTION_CONTENT_KEY,
 	readCatalog,
@@ -19,6 +20,9 @@ const TOO_MANY = 'I received too many messages at once';
 // What my assistant tells me when admission kept it too long from doing what I allowed
 const HELD_TOO_LONG =
 	'Too many requests came in at once for me to do it in time, so I have not done it yet. Your request stays open: answer yes in your next message and I will try again.';
+
+// What my assistant tells me of a request a newer one replaced
+const SUPERSEDED = 'A newer request replaced this one, so I did nothing. Answer the latest one.';
 
 // How my assistant asks me in French before it first reads my data in an application
 const FRENCH_QUESTION = "C'est la première fois";
@@ -169,6 +173,64 @@ describe('my yes while my assistant is busy', () => {
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/drive/items');
 		expect(r.h.apisix.contracts.calls.filter((c) => c.path.includes('/drive/'))).toHaveLength(1);
 		expect(r.saying(TOO_MANY)).toHaveLength(0);
+	});
+});
+
+describe('my yes held while my assistant asks me something newer', () => {
+	let r: ConsentRoom;
+	beforeAll(async () => {
+		// Two turns of mine a minute, and a second for the turn my yes resumes to get through
+		// admission
+		r = await startMailRoom({ ADMISSION_USER_PER_MINUTE: '2', TURN_EVENT_MAX_DELAY_MS: '1000' });
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	// The question about my mail, once my assistant asked it
+	let mail = '';
+
+	it('closes the request my yes answered, the newer one staying the one to answer', async () => {
+		// My second request is held at the model until released: my yes to the first waits behind it
+		const model = modelFor({
+			'Find the budget in my drive': { tool: 'search_drive', args: { q: 'budget' } },
+			'Find the budget in my mail': { tool: 'search_mail', args: { q: 'budget' } }
+		});
+		let release: () => void = () => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let working = false;
+		r.h.apisix.llm.script = (request) => {
+			if (lastUserContent(request) !== 'Find the budget in my mail') return model(request);
+			working = true;
+			return { ...model(request), hold: released };
+		};
+		await r.client.sendText(r.room, 'Find the budget in my drive');
+		const drive = await r.nextQuestion(0);
+		await r.client.sendText(r.room, 'Find the budget in my mail');
+		expect(await eventually(() => working)).toBe(true);
+		await r.client.react(r.room, drive, '✅');
+		expect(await eventually(async () => (await waitingRequests(r)).length === 0)).toBe(true);
+		release();
+		mail = await r.nextQuestion(1);
+		// My two turns of the minute spent, my yes waits, gives up, and finds a newer request open
+		const notice = await nextMessage(r, SUPERSEDED, 0);
+		expect(notice.content).not.toHaveProperty([QUESTION_CONTENT_KEY]);
+		expect(logged(r, 'resumed turn deferred')[0]).toMatchObject({ reason: 'user_rate' });
+		const waiting = await r.requestAskedIn(mail, 'mail');
+		expect(await waitingRequests(r)).toEqual([expect.objectContaining({ id: waiting.id })]);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('then asks me again about the newer request once my yes to it waits too long', async () => {
+		await r.client.sendText(r.room, 'yes');
+		const notice = await nextMessage(r, HELD_TOO_LONG, 0);
+		expect(notice.content[QUESTION_CONTENT_KEY]).toEqual(
+			r.questions().find((m) => m.eventId === mail)?.content[QUESTION_CONTENT_KEY]
+		);
+		await r.requestAskedIn(notice.eventId, 'mail');
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 });
 

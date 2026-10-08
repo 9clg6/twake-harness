@@ -493,13 +493,34 @@ export async function reopenRequest(
 	return result.count === 1;
 }
 
-// The call its owner allowed, which admission kept from running past the end of its request, is
-// closed as expired, erasing what it would have sent, the question and the digest of what its
-// owner was shown. Their yes stays recorded, so that, delivered again, it is not taken for a
-// message. False when the call no longer waited to run.
-export async function expireHeldRequest(tx: Tx, owner: string, id: string): Promise<boolean> {
+// Whether a request other than this one is open in the room, its question gone out or about to:
+// a newer one, as asking a request supersedes those open before it in its room
+export async function hasNewerRequest(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	id: string
+): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from pending_calls p left join sessions s on s.id = p.session_id
+		where p.owner = ${owner} and p.id <> ${id} and p.status = 'open'
+			and coalesce(p.room_id, s.room_id) = ${roomId}
+		limit 1`;
+	return rows.length > 0;
+}
+
+// The call its owner allowed, which admission kept from running, is closed: expired past the end
+// of its request, or superseded by a newer request of its room. What it would have sent is erased,
+// with the question and the digest of what its owner was shown. Their yes stays recorded, so that,
+// delivered again, it is not taken for a message. False when the call no longer waited to run.
+export async function closeHeldRequest(
+	tx: Tx,
+	owner: string,
+	id: string,
+	status: 'expired' | 'superseded'
+): Promise<boolean> {
 	const result = await tx.sql`
-		update pending_calls set status = 'expired', decided_at = now(), arguments = null,
+		update pending_calls set status = ${status}, decided_at = now(), arguments = null,
 			request_text = null, preview_digest = null
 		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
 	return result.count === 1;

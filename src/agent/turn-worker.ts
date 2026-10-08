@@ -9,8 +9,9 @@ import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
 import {
-	expireHeldRequest,
+	closeHeldRequest,
 	findPendingCall,
+	hasNewerRequest,
 	lockPendingCall,
 	reopenRequest,
 	toYesNoQuestion,
@@ -105,7 +106,7 @@ export interface ProgressPayload {
 // What the yes of a turn admission refused did to the call it allowed, in the state an answer finds
 // its request: settled, open again or closed, or left as it was, null once the call is gone
 type Settlement =
-	| { readonly settled: true; readonly state: Extract<RequestState, 'open' | 'expired'> }
+	| { readonly settled: true; readonly state: Exclude<RequestState, 'decided'> }
 	| { readonly settled: false; readonly state: RequestState | null };
 
 export interface TurnWorkerOptions {
@@ -220,12 +221,15 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// The call its owner allowed did not run, admission refusing the turn their yes resumed: their
-	// day is spent, or the turn waited for room too long. The yes settles the call all the same: its
-	// request waits for an answer again, should it last until the refusal lifts, at midnight or now,
-	// which the assistant tells them on a message marked as the request, for their client to offer
-	// the answers again; otherwise it closes as expired, which the assistant tells them too. The job
-	// is done in the same transaction, so that their next yes queues one again. A call that no
-	// longer waits to run is left as it is, and one whose yes is still to be recorded waits for it.
+	// day is spent, or the turn waited for room too long. The yes settles the call all the same. A
+	// newer request open in its room, asked while the yes waited, stays the room's question: this
+	// one closes as superseded, which the assistant tells them as it would an answer to it.
+	// Otherwise its request waits for an answer again, should it last until the refusal lifts, at
+	// midnight or now, which the assistant tells them on a message marked as the request, for their
+	// client to offer the answers again: a message that asks it again, superseding no other request.
+	// Failing that, it closes as expired, which the assistant tells them too. The job is done in the
+	// same transaction, so that their next yes queues one again. A call that no longer waits to run
+	// is left as it is, and one whose yes is still to be recorded waits for it.
 	async function settleRefusedYes(
 		job: Job,
 		request: ResumeRequest,
@@ -238,23 +242,28 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		// When the refusal lifts, and what the assistant tells the owner of their request, open again or
 		// expired: a spent day lifts at midnight, and a turn kept waiting too long for room may run at
 		// once
-		const { liftsInMs, told } =
+		const { liftsInMs, open, expired } =
 			refusal.reason === 'user_budget'
 				? {
 						liftsInMs: refusal.liftsInMs,
-						told: { open: consent.heldUntilMidnight, expired: consent.endsBeforeMidnight }
+						open: consent.heldUntilMidnight,
+						expired: consent.endsBeforeMidnight
 					}
-				: { liftsInMs: 0, told: { open: consent.heldTooLong, expired: consent.expired } };
+				: { liftsInMs: 0, open: consent.heldTooLong, expired: consent.expired };
+		const told = { open, expired, superseded: consent.superseded };
 		const settlement = await withPrincipal(db, { id: owner }, async (tx): Promise<Settlement> => {
 			// Locked before anything is read of it: an answer recorded meanwhile waits for this
 			// transaction to end, and finds the call as it left it
 			const held = await lockPendingCall(tx, owner, pendingCallId);
 			if (held === null || !held.waitsToRun) return { settled: false, state: held?.state ?? null };
-			const reopened = await reopenRequest(tx, owner, pendingCallId, requestLifetimeMs, liftsInMs);
-			if (!reopened) await expireHeldRequest(tx, owner, pendingCallId);
-			const state = reopened ? 'open' : 'expired';
+			const newer = await hasNewerRequest(tx, owner, roomId, pendingCallId);
+			const reopened =
+				!newer && (await reopenRequest(tx, owner, pendingCallId, requestLifetimeMs, liftsInMs));
+			const state = reopened ? 'open' : newer ? 'superseded' : 'expired';
+			if (state !== 'open') await closeHeldRequest(tx, owner, pendingCallId, state);
 			const call = reopened ? await findPendingCall(tx, owner, pendingCallId) : null;
 			const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+			const asked: PendingQuestion = { pendingCallId, owner, again: true };
 			await enqueueJob(tx, {
 				kind: 'send',
 				payload: {
@@ -262,7 +271,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 					roomId,
 					text: told[state],
 					outcome: 'failed',
-					...(reopened ? { request: { pendingCallId, owner } } : {}),
+					...(reopened ? { request: asked } : {}),
 					...(questionMarker === null ? {} : { questionMarker }),
 					...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
 				} satisfies SendPayload,

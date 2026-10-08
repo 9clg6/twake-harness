@@ -22,6 +22,9 @@ export const REFUSE_REACTION = '❌';
 export interface PendingQuestion {
 	readonly pendingCallId: string;
 	readonly owner: string;
+	// The question asks again about a call whose yes admission kept from running: it supersedes no
+	// other request of the room
+	readonly again?: true;
 }
 
 // What resumes a turn once its owner allowed the call it froze, and where they allowed it: in the

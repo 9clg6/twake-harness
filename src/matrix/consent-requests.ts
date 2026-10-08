@@ -53,9 +53,10 @@ export interface ConsentRequestsOptions {
 // hands over only what it read encrypted from the owner's own device: nothing written in the
 // owner's name on the server side, which cannot encrypt for the room, answers for them.
 export interface ConsentRequests {
-	// A request went out: it supersedes the one still open in the room. It carries no buttons: Twake
-	// Chat sends the reactions a tap on one would repeat in the clear, which answer nothing.
-	asked(room: RequestRoom, pendingCallId: string, eventId: string): Promise<void>;
+	// A request went out: it supersedes the one still open in the room, unless it asks again about a
+	// call whose yes admission kept from running, which supersedes nothing. It carries no buttons:
+	// Twake Chat sends the reactions a tap on one would repeat in the clear, which answer nothing.
+	asked(room: RequestRoom, pendingCallId: string, eventId: string, again?: boolean): Promise<void>;
 	// The owner put a bare ✅ or ❌ on an event of the room
 	reacted(
 		room: RequestRoom,
@@ -157,13 +158,14 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	}
 
 	return {
-		asked: async (room, pendingCallId, eventId) => {
+		asked: async (room, pendingCallId, eventId, again = false) => {
 			const { roomId, owner } = room;
 			const { recorded, superseded } = await withPrincipal(db, { id: owner }, async (tx) => {
 				const stored = await recordRequestEvent(tx, pendingCallId, eventId, roomId);
 				return {
 					recorded: stored,
-					superseded: stored ? await supersedeRequests(tx, owner, roomId, pendingCallId) : []
+					superseded:
+						stored && !again ? await supersedeRequests(tx, owner, roomId, pendingCallId) : []
 				};
 			});
 			for (const request of superseded) {

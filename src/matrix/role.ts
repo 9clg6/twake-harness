@@ -201,7 +201,11 @@ function isSendJob(value: unknown): value is SendJob {
 function isPendingQuestion(value: unknown): value is PendingQuestion {
 	if (typeof value !== 'object' || value === null) return false;
 	const request = value as Record<string, unknown>;
-	return typeof request['pendingCallId'] === 'string' && typeof request['owner'] === 'string';
+	return (
+		typeof request['pendingCallId'] === 'string' &&
+		typeof request['owner'] === 'string' &&
+		(request['again'] === undefined || request['again'] === true)
+	);
 }
 
 function annotationOf(event: RoomEvent): { readonly eventId: string; readonly key: string } | null {
@@ -1408,7 +1412,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					owner: request.owner,
 					assistantUserId: job.payload.asUserId
 				};
-				await requests.asked(requestRoom, request.pendingCallId, sent);
+				await requests.asked(requestRoom, request.pendingCallId, sent, request.again === true);
 			}
 			if (turn !== null) {
 				feedback
