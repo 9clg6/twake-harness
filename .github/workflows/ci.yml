@@ -62,6 +62,10 @@ jobs:
           node-version: 24
           cache: npm
       - run: npm ci
+      # The suites start their RabbitMQ containers side by side, and the Docker the job shares
+      # with other jobs can lose a pull that two of them race for ("No such image"): pulled once
+      # here, the image is there before any test starts
+      - run: docker pull mirror.gcr.io/library/rabbitmq:3.13
       - run: npm run test:ci -- --shard=${{ matrix.shard }}/3
         env:
           TEST_ADMIN_DATABASE_URL: postgres://harness:harness@127.0.0.1:5433/harness
