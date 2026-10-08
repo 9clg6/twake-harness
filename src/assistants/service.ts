@@ -17,14 +17,15 @@ import {
 } from './naming.js';
 import {
 	findAssistant,
+	isFlaggedToRenameIfFormerDefault,
 	listAssistantRoomIds,
 	markAssistantDeleted,
 	renameAssistant,
-	renameAssistantFrom,
 	saveAssistant,
 	saveAssistantRoom,
 	saveProvisioned,
 	setAssistantRoomId,
+	settleRenameIfFormerDefault,
 	type AssistantRecord
 } from './repository.js';
 
@@ -61,9 +62,10 @@ export interface AssistantService {
 	find(owner: string): Promise<AssistantView | null>;
 	identify(owner: string): Promise<AssistantIdentity | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
-	// The owner's assistant, still under a default name it had before it took its owner's first
-	// name, takes it; a name its owner gives it meanwhile stays. Failed when the owner's name could
-	// not be read, which leaves the former name.
+	// The owner's assistant, flagged to take its owner's first name, takes it if it still goes by a
+	// default name it had before; renamed or not, its name is then settled, and no longer flagged.
+	// A name its owner gives it meanwhile stays. Failed when the owner's name could not be read,
+	// which leaves it flagged for the next start.
 	renameIfFormerDefault(owner: string): Promise<'renamed' | 'kept' | 'failed'>;
 	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
 	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
@@ -205,7 +207,8 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			}
 		},
 		async provision(owner) {
-			// A live assistant is named after its owner by the matrix role as it starts, not here
+			// A live assistant keeps its name: one flagged for it takes its owner's first name as the
+			// matrix role starts, not here
 			const live = await current(owner);
 			if (live !== null) {
 				await saveProvisioned(db, { owner, userId: live.userId, owesWelcome: false });
@@ -259,17 +262,18 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			return toView({ ...record, name });
 		},
 		async renameIfFormerDefault(owner) {
-			const record = await current(owner);
+			const flagged = await withPrincipal(db, { id: owner }, (tx) =>
+				isFlaggedToRenameIfFormerDefault(tx, owner)
+			);
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
-			if (record === null || ownerLocalpart === null) return 'kept';
+			if (!flagged || ownerLocalpart === null) return 'kept';
 			const { name, former } = await defaultNamesOf(owner, ownerLocalpart);
 			if (former === null) return 'failed';
-			if (!former.includes(record.name) || name === record.name) return 'kept';
 			const renamed = await withPrincipal(db, { id: owner }, (tx) =>
-				renameAssistantFrom(tx, owner, former, name)
+				settleRenameIfFormerDefault(tx, owner, former, name)
 			);
 			if (!renamed) return 'kept';
-			log.info({ owner, userId: record.userId }, 'assistant named after its owner');
+			log.info({ owner }, 'assistant named after its owner');
 			return 'renamed';
 		},
 		async showName(owner) {

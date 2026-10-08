@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { runMigrations } from '../src/db/migrate.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { eventually } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
@@ -11,6 +12,9 @@ import {
 	type OwnedAssistant
 } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
+
+// The migration that flags the live assistants to take their owner's first name at the next start
+const FLAG_MIGRATION = '0065_assistants_rename_if_former_default.sql';
 
 // Where a user's Matrix name is, on the homeserver's client API
 function profileName(userId: string): string {
@@ -55,10 +59,21 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		return shown;
 	}
 
-	// How many calls of the method on the path the gateway passed on to the homeserver
-	function calls(method: string, path: string): number {
-		return h.apisix.matrixCalls.filter((call) => call.method === method && call.path.includes(path))
-			.length;
+	// How many calls of the method on the path the gateway passed on to the homeserver, since the
+	// call counted first
+	function calls(method: string, path: string, since = 0): number {
+		return h.apisix.matrixCalls
+			.slice(since)
+			.filter((call) => call.method === method && call.path.includes(path)).length;
+	}
+
+	// The database as it stood before the flag, brought up to date: every live assistant is flagged
+	// to take its owner's first name at the next start, as the assistants were when the harness
+	// started naming them after it
+	async function flagLiveAssistants(): Promise<void> {
+		await h.db.sql`alter table assistants drop column rename_if_former_default`;
+		await h.db.sql`delete from schema_migrations where name = ${FLAG_MIGRATION}`;
+		expect((await runMigrations(h.db)).applied).toEqual([FLAG_MIGRATION]);
 	}
 
 	it("takes its owner's first name, the words before the first one in capitals", async () => {
@@ -232,6 +247,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			expect(await nameShown(owner, roomId, assistant.userId, given)).toBe(given);
 			opened.push({ owner, assistantId: assistant.userId, roomId, reads: 0 });
 		}
+		await flagLiveAssistants();
 		for (const room of opened)
 			room.reads = calls('GET', memberEvent(room.roomId, room.assistantId));
 
@@ -255,6 +271,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		const renamed = await h.api.put('vic@test.local', '/v1/assistants/me', { name: 'Assistant' });
 		expect(renamed.status).toBe(200);
 		expect(await nameShown(owner, roomId, assistant.userId, 'Assistant')).toBe('Assistant');
+		await flagLiveAssistants();
 		// The homeserver is slow to give the owner's name, as the role reads it at its start
 		let release = (): void => undefined;
 		const slow = new Promise<void>((resolve) => {
@@ -282,4 +299,82 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		const mine = await h.api.get<OwnedAssistant>('vic@test.local', '/v1/assistants/me');
 		expect(mine.body.name).toBe('Vision');
 	});
+
+	it('goes over its name at one start only, after which « Assistant » chosen by its owner stays', async () => {
+		const owners = [
+			{ localpart: 'ana', name: 'Ana DE ARMAS', given: 'Assistant' },
+			{ localpart: 'bea', name: 'Bea ARTHUR', given: 'Assistant' },
+			{ localpart: 'cid', name: 'Cid CAMPEADOR', given: 'Jarvis' }
+		];
+		const opened: { owner: MatrixUser; assistantId: string; roomId: string }[] = [];
+		for (const { localpart, name, given } of owners) {
+			const { owner, assistant } = await provisioned(h, localpart, name);
+			const roomId = await h.synapse.createDirectRoom(owner, assistant.userId);
+			const renamed = await h.api.put(`${localpart}@test.local`, '/v1/assistants/me', {
+				name: given
+			});
+			expect(renamed.status).toBe(200);
+			expect(await nameShown(owner, roomId, assistant.userId, given)).toBe(given);
+			opened.push({ owner, assistantId: assistant.userId, roomId });
+		}
+		const [ana, bea, cid] = opened;
+		if (ana === undefined || bea === undefined || cid === undefined) {
+			throw new Error('no room opened');
+		}
+		await flagLiveAssistants();
+
+		// At the first start, the homeserver fails to give bea's name each time the queue asks for it
+		let refused = 0;
+		h.apisix.matrixFault = (call) => {
+			if (call.method !== 'GET' || !call.path.includes(profileName(bea.owner.userId))) return null;
+			refused += 1;
+			return 500;
+		};
+		const firstStart = h.apisix.matrixCalls.length;
+		try {
+			await h.restartRole();
+			// The queue's third try, its last
+			expect(await eventually(() => refused >= 3, 30_000)).toBe(true);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+		expect(await nameShown(ana.owner, ana.roomId, ana.assistantId, "Ana's assistant")).toBe(
+			"Ana's assistant"
+		);
+		const cidRead = (): boolean =>
+			calls('GET', memberEvent(cid.roomId, cid.assistantId), firstStart) > 0;
+		expect(await eventually(cidRead)).toBe(true);
+		const chosen = await h.api.put('ana@test.local', '/v1/assistants/me', { name: 'Assistant' });
+		expect(chosen.status).toBe(200);
+		expect(await nameShown(ana.owner, ana.roomId, ana.assistantId, 'Assistant')).toBe('Assistant');
+
+		const secondStart = h.apisix.matrixCalls.length;
+		await h.restartRole();
+
+		// The one name the first start left unsettled
+		expect(await nameShown(bea.owner, bea.roomId, bea.assistantId, "Bea's assistant")).toBe(
+			"Bea's assistant"
+		);
+		// Nothing about the other two goes to the homeserver: their owners' names, their profiles or
+		// their rooms
+		const paths = [ana, cid].flatMap(({ owner, assistantId, roomId }) => [
+			profileName(owner.userId),
+			profileName(assistantId),
+			memberEvent(roomId, assistantId)
+		]);
+		const checkedAgain = (): boolean =>
+			h.apisix.matrixCalls
+				.slice(secondStart)
+				.some((call) => paths.some((path) => call.path.includes(path)));
+		expect(await eventually(checkedAgain, 3_000)).toBe(false);
+		for (const [localpart, expected] of [
+			['ana', 'Assistant'],
+			['bea', "Bea's assistant"],
+			['cid', 'Jarvis']
+		] as const) {
+			const mine = await h.api.get<OwnedAssistant>(`${localpart}@test.local`, '/v1/assistants/me');
+			expect(mine.body.name).toBe(expected);
+		}
+		expect(await nameShown(ana.owner, ana.roomId, ana.assistantId, 'Assistant')).toBe('Assistant');
+	}, 240_000);
 });

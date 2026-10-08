@@ -24,6 +24,7 @@ import {
 	clearAssistantRoomId,
 	findAssistant,
 	findDialog,
+	isFlaggedToRenameIfFormerDefault,
 	listActiveAssistants,
 	listProvisionedWithoutRoom,
 	saveDialog,
@@ -1521,13 +1522,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			)
 		);
 	}
-	// Every assistant goes by its name from the start: one still under a default name it had before
-	// takes its owner's first name, and its rooms show its name, which a homeserver may keep from its
-	// profile. By jobs, which try again when the homeserver refuses.
+	// An assistant flagged when the harness started naming assistants after their owner's first name
+	// takes it, if it still goes by a default name it had before, and goes by its name in its rooms.
+	// Once: its naming job clears the flag once the name is settled, and keeps it for the next start
+	// when the owner's name cannot be read.
 	const owners = new Set(assistantsAtStart.map(({ owner }) => owner));
 	owners.delete(ORGANIZATION_PRINCIPAL);
 	try {
-		for (const owner of owners) await requestNaming(db, owner, { renameIfFormerDefault: true });
+		for (const owner of owners) {
+			const flagged = await withPrincipal(db, { id: owner }, (tx) =>
+				isFlaggedToRenameIfFormerDefault(tx, owner)
+			);
+			if (flagged) await requestNaming(db, owner, { renameIfFormerDefault: true });
+		}
 	} catch (err: unknown) {
 		log.warn({ err }, 'assistant names not requested at start');
 	}

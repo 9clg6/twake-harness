@@ -48,10 +48,10 @@ export async function findAssistant(tx: Tx, owner: string): Promise<AssistantRec
 	return row === undefined ? null : normalize(row);
 }
 
-// Saves the owner's assistant, created now, in the row of the one they deleted if any. A deleted row
-// of another principal may still name its Matrix account, as one an earlier build left under the
-// owner's old principal: it is purged first, which the reclaim policies allow for that row only,
-// while app.reclaim_user_id names the account.
+// Saves the owner's assistant, created now, in the row of the one they deleted if any, under a name
+// the matrix role's start never renames. A deleted row of another principal may still name its
+// Matrix account, as one an earlier build left under the owner's old principal: it is purged first,
+// which the reclaim policies allow for that row only, while app.reclaim_user_id names the account.
 export async function saveAssistant(
 	tx: Tx,
 	record: Omit<AssistantRecord, 'createdAt' | 'deletedAt' | 'locale'>
@@ -69,7 +69,8 @@ export async function saveAssistant(
 			name = excluded.name,
 			room_id = excluded.room_id,
 			created_at = now(),
-			deleted_at = null`;
+			deleted_at = null,
+			rename_if_former_default = false`;
 	return { reclaimed: purged.count };
 }
 
@@ -106,24 +107,38 @@ export async function saveAssistantRoom(
 			owner = excluded.owner, user_id = excluded.user_id, welcome = excluded.welcome`;
 }
 
+// A name its owner gives the assistant settles it: the matrix role's start no longer renames it
 export async function renameAssistant(tx: Tx, owner: string, name: string): Promise<boolean> {
-	const result =
-		await tx.sql`update assistants set name = ${name} where owner = ${owner} and deleted_at is null`;
+	const result = await tx.sql`
+		update assistants set name = ${name}, rename_if_former_default = false
+		where owner = ${owner} and deleted_at is null`;
 	return result.count === 1;
 }
 
-// Renames the owner's assistant only while it still goes by one of the names given: a name given
-// to it meanwhile stays
-export async function renameAssistantFrom(
+// Whether the owner's live assistant is flagged to take their first name at the matrix role's start,
+// should it still go by a former default name
+export async function isFlaggedToRenameIfFormerDefault(tx: Tx, owner: string): Promise<boolean> {
+	const rows = await tx.sql<{ flagged: boolean }[]>`
+		select rename_if_former_default as flagged
+		from assistants where owner = ${owner} and deleted_at is null`;
+	return rows[0]?.flagged === true;
+}
+
+// Settles the name of the owner's flagged assistant, which then goes unflagged: renamed only while
+// it is flagged and still goes by one of the former names, so that a name given to it meanwhile
+// stays. True when it was renamed.
+export async function settleRenameIfFormerDefault(
 	tx: Tx,
 	owner: string,
-	from: readonly string[],
+	former: readonly string[],
 	name: string
 ): Promise<boolean> {
-	const result = await tx.sql`
+	const renamed = await tx.sql`
 		update assistants set name = ${name}
-		where owner = ${owner} and deleted_at is null and name in ${tx.sql([...from])}`;
-	return result.count === 1;
+		where owner = ${owner} and deleted_at is null and rename_if_former_default
+			and name in ${tx.sql([...former])} and name <> ${name}`;
+	await tx.sql`update assistants set rename_if_former_default = false where owner = ${owner}`;
+	return renamed.count === 1;
 }
 
 export async function markAssistantDeleted(tx: Tx, owner: string): Promise<boolean> {
