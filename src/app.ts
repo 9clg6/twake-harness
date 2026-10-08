@@ -370,28 +370,28 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		return { client, owner, ownerUserId };
 	}
 
-	// The provisioner's answer once the owner's assistant exists: its identity once ready, logged as
-	// `given`; that it awaits its owner's recovery; or that it is not ready yet, its preparation
-	// asked for meanwhile
+	// The provisioner's answer once the owner's assistant exists, whether the provisioner read it or
+	// provisioned it, as `via` logs: its identity once ready; that it awaits its owner's recovery; or
+	// that it is not ready yet, its preparation asked for meanwhile
 	async function answerAssistant(
 		request: FastifyRequest,
 		reply: FastifyReply,
 		asked: { readonly client: string; readonly owner: string; readonly userId: string },
-		given: string
+		via: 'read' | 'provision'
 	): Promise<FastifyReply> {
 		const { client, owner, userId } = asked;
 		const known = await readIdentity(db, owner, userId);
 		if (known.state === 'ready') {
-			request.log.info({ client, owner, userId: known.identity.userId }, given);
+			request.log.info({ client, owner, userId: known.identity.userId, via }, 'assistant ready');
 			return reply.code(200).send(known.identity);
 		}
 		// Only the owner's recovery brings an escrowed identity back: preparing it changes nothing
 		if (known.state === 'awaiting_recovery') {
-			request.log.info({ client, owner, userId }, 'assistant awaits its recovery');
+			request.log.info({ client, owner, userId, via }, 'assistant awaits its recovery');
 			return reply.code(409).send(RECOVERY_NEEDED);
 		}
 		const queued = await requestPreparation(db, owner);
-		request.log.info({ client, owner, userId, queued }, 'assistant not ready');
+		request.log.info({ client, owner, userId, queued, via }, 'assistant not ready');
 		return reply.code(503).header('retry-after', '5').send({ error: 'not_ready' });
 	}
 
@@ -403,12 +403,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		const { client, owner } = admitted;
 		const assistant = await assistants.find(owner);
 		if (assistant === null) return reply.code(404).send(NO_ASSISTANT);
-		return answerAssistant(
-			request,
-			reply,
-			{ client, owner, userId: assistant.userId },
-			'assistant read by a client'
-		);
+		return answerAssistant(request, reply, { client, owner, userId: assistant.userId }, 'read');
 	});
 
 	app.put('/v1/provisioning/assistants/:owner', async (request, reply) => {
@@ -428,7 +423,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			request,
 			reply,
 			{ client, owner, userId: provisioned.userId },
-			'assistant provisioned for a client'
+			'provision'
 		);
 	});
 
