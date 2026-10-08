@@ -220,8 +220,9 @@ function firstNameOf(name: string): string {
 	return family > 0 ? words.slice(0, family).join(' ') : name.trim();
 }
 
-// « d' » before a vowel or an h, accented or not: « d'Hélène », « d'Émile », « de Michel »
-function frenchOf(name: string): string {
+// The name after « de », or after « d' » before a vowel or an h, accented or not: « d'Hélène »,
+// « d'Émile », « de Michel »
+function withDeOrDApostrophe(name: string): string {
 	const initial = name.normalize('NFD').charAt(0).toLowerCase();
 	return /[aeiouyhæœ]/u.test(initial) ? `d'${name}` : `de ${name}`;
 }
@@ -463,7 +464,7 @@ const FRENCH: Messages = {
 	language: { name: 'Français', speak: "Parle français avec la personne qui t'écrit." },
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
-	defaultAssistantName: (ownerName) => `Assistant ${frenchOf(firstNameOf(ownerName))}`,
+	defaultAssistantName: (ownerName) => `Assistant ${withDeOrDApostrophe(firstNameOf(ownerName))}`,
 	formerDefaultAssistantName: (ownerName) => `Assistant de ${ownerName}`,
 	creator: {
 		helpHeader: 'Je crée et je gère ton assistant Twake Space :',

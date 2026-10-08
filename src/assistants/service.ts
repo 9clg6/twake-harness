@@ -64,7 +64,7 @@ export interface AssistantService {
 	// The owner's assistant, still under a default name it had before it took its owner's first
 	// name, takes it; a name its owner gives it meanwhile stays. Failed when the owner's name could
 	// not be read, which leaves the former name.
-	nameAfterOwner(owner: string): Promise<'renamed' | 'kept' | 'failed'>;
+	renameIfFormerDefault(owner: string): Promise<'renamed' | 'kept' | 'failed'>;
 	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
 	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
 	showName(owner: string): Promise<void>;
@@ -258,7 +258,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			log.debug({ owner, userId: record.userId, name }, 'assistant renamed');
 			return toView({ ...record, name });
 		},
-		async nameAfterOwner(owner) {
+		async renameIfFormerDefault(owner) {
 			const record = await current(owner);
 			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (record === null || ownerLocalpart === null) return 'kept';

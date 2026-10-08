@@ -460,7 +460,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			// Its name shows there by a job, as at the join, in case the room refused it for good then
 			await requestNaming(tx, owner);
 		});
-		request.log.info({ client, owner, userId: assistant.userId, roomId }, 'assistant room named');
+		request.log.info(
+			{ client, owner, userId: assistant.userId, roomId },
+			'assistant home room set'
+		);
 		// Announced at the join already, unless the room refused it then
 		await announceCommands(
 			{ admin: matrixAdmin, log: request.log },

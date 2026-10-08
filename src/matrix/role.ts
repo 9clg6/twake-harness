@@ -141,8 +141,12 @@ interface SendJob {
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
 const preparePayload = z.object({ owner: z.string().min(1) });
-// After its owner: the assistant, still under a former default name, takes its owner's first name
-const namePayload = z.object({ owner: z.string().min(1), afterOwner: z.boolean().optional() });
+// With renameIfFormerDefault, the assistant takes its owner's first name if still under a former
+// default name
+const namePayload = z.object({
+	owner: z.string().min(1),
+	renameIfFormerDefault: z.boolean().optional()
+});
 // The actions a turn has done so far, for its status message
 const progressPayload = z.object({
 	asUserId: z.string().min(1),
@@ -1419,8 +1423,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (job.kind === 'name') {
 				const parsed = namePayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('name payload is malformed');
-				const { owner, afterOwner } = parsed.data;
-				const renamed = afterOwner === true ? await assistants.nameAfterOwner(owner) : 'kept';
+				const { owner, renameIfFormerDefault } = parsed.data;
+				const renamed =
+					renameIfFormerDefault === true ? await assistants.renameIfFormerDefault(owner) : 'kept';
 				// Its rooms show its name even when the owner's could not be read, which is tried again
 				await assistants.showName(owner);
 				if (renamed === 'failed') throw new Error('the assistant was not named after its owner');
@@ -1522,7 +1527,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const owners = new Set(assistantsAtStart.map(({ owner }) => owner));
 	owners.delete(ORGANIZATION_PRINCIPAL);
 	try {
-		for (const owner of owners) await requestNaming(db, owner, { afterOwner: true });
+		for (const owner of owners) await requestNaming(db, owner, { renameIfFormerDefault: true });
 	} catch (err: unknown) {
 		log.warn({ err }, 'assistant names not requested at start');
 	}
