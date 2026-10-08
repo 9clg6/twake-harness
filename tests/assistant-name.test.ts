@@ -1,8 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { eventually } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
-import { PROVISIONER, provisioningPath } from './helpers/provisioning.js';
+import { PROVISIONER, provisioningPath, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
 interface AssistantView {
@@ -13,6 +14,7 @@ interface AssistantView {
 
 describe('an assistant named after its owner, on a homeserver that refuses display-name changes', () => {
 	let h: MatrixTestHarness;
+	const clients: E2eeClient[] = [];
 
 	beforeAll(async () => {
 		h = await startMatrixHarness({
@@ -22,6 +24,7 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		});
 	}, 240_000);
 	afterAll(async () => {
+		for (const client of clients) await client.stop();
 		if (h !== undefined) await h.close();
 	});
 
@@ -101,6 +104,36 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			const renamed = await h.api.put('omar@test.local', '/v1/assistants/me', { name });
 			expect(renamed.status).toBe(200);
 			expect(await nameShown(owner, room, assistant.userId, name)).toBe(name);
+		}
+	});
+
+	it('greets its owner, and tries its name in their room again when the homeserver refuses it', async () => {
+		const qara = await h.synapse.registerUser('qara', 'Qara KHAN');
+		const client = await startE2eeClient(h.synapse.url, qara);
+		clients.push(client);
+		const mine = await provisionUntilReady(h.api, qara.userId);
+		// The homeserver refuses the name in the room twice: as the assistant joins, then once more
+		let refused = 0;
+		h.apisix.matrixFault = (call) => {
+			if (call.method !== 'PUT' || !call.path.includes('/state/m.room.member/') || refused >= 2) {
+				return null;
+			}
+			refused += 1;
+			return 403;
+		};
+		try {
+			const room = await client.createDirectRoom(mine.userId);
+			await client.waitForMessage(room, mine.userId, (text) => text.startsWith('Hello'));
+			expect(await nameShown(qara, room, mine.userId, "Qara's assistant")).toBe("Qara's assistant");
+			expect(refused).toBe(2);
+			const logged = h
+				.logLines()
+				.filter(
+					(line) => line['msg'] === 'assistant not named in its room' && line['roomId'] === room
+				);
+			expect(logged).toHaveLength(2);
+		} finally {
+			h.apisix.matrixFault = null;
 		}
 	});
 });
