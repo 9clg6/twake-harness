@@ -203,6 +203,11 @@ export interface Messages {
 		// Taken all the same, the deployment only reporting, from a session another identity than the
 		// one held signed: whether the owner reset their identity themselves, to answer yes or no
 		readonly identityQuestion: string;
+		// The owner answered yes: the identity asked about is the one held from now on
+		readonly identityAdopted: string;
+		// The owner answered no: what to do, someone else possibly using their account, and the
+		// identity held stays the same
+		readonly identityRejected: string;
 	};
 }
 
@@ -458,7 +463,11 @@ const ENGLISH: Messages = {
 			const again = via === 'message' ? 'send it again' : 'answer again';
 			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then ${again}.`;
 		},
-		identityQuestion: `Your encryption identity is not the one I know. Did you reset your identity yourself? ${ENGLISH_HOW_TO_ANSWER}`
+		identityQuestion: `Your encryption identity is not the one I know. Did you reset your identity yourself? ${ENGLISH_HOW_TO_ANSWER}`,
+		identityAdopted:
+			'Noted: your new identity is now the one I know, and I no longer flag your messages.',
+		identityRejected:
+			'Then someone else may have reset it: change your password now and warn your administrator. I keep the identity I knew, and I go on answering you as before.'
 	}
 };
 
@@ -692,7 +701,11 @@ const FRENCH: Messages = {
 			const again = via === 'message' ? 'renvoie-le' : 'réponds à nouveau';
 			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Dans Twake Chat, envoie /discardsession dans cette conversation pour qu'elle en utilise de nouvelles ; puis ${again}.`;
 		},
-		identityQuestion: `Ton identité de chiffrement n'est pas celle que je connais. C'est toi qui as réinitialisé ton identité ? ${FRENCH_HOW_TO_ANSWER}`
+		identityQuestion: `Ton identité de chiffrement n'est pas celle que je connais. C'est toi qui as réinitialisé ton identité ? ${FRENCH_HOW_TO_ANSWER}`,
+		identityAdopted:
+			"C'est noté : ta nouvelle identité est désormais celle que je connais, et je ne signale plus tes messages.",
+		identityRejected:
+			"Alors quelqu'un d'autre l'a peut-être réinitialisée : change ton mot de passe dès maintenant et préviens ton administrateur. Je garde l'identité que je connaissais, et je continue de te répondre comme avant."
 	}
 };
 
@@ -709,5 +722,6 @@ export type OwnerWordsKind = 'message' | 'answer';
 // or their identity is not the one their assistant holds
 export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
 
-// Where an owner confirms an identity they reset themselves, which no message in the chat can do
+// Where an owner confirms an identity they reset themselves while the deployment enforces their
+// sessions' identity, which no message in the chat can do then
 const OWNER_IDENTITY_ROUTE = 'PUT /v1/assistants/me/owner-identity';

@@ -25,3 +25,9 @@ alter table owner_cross_signing
 			question_expires_at
 		) in (0, 6)
 	);
+
+-- chat: the owner answered yes to that question, which holds the identity it asks about as the API
+-- would
+alter table owner_cross_signing drop constraint owner_cross_signing_pinned_by_check;
+alter table owner_cross_signing add constraint owner_cross_signing_pinned_by_check
+	check (pinned_by in ('first_use', 'api', 'chat'));

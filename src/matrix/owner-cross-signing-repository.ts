@@ -1,8 +1,14 @@
+import type { Answer } from '../consents/answers.js';
 import type { Tx } from '../db/client.js';
 
-// How the harness came to hold an owner's identity: the first one it saw published, or the one the
-// owner accepted through the API
-export type PinnedBy = 'first_use' | 'api';
+// How the harness came to hold an owner's identity: the first one it saw published, the one the
+// owner accepted through the API, or the one they said yes to when their assistant asked them
+export type PinnedBy = 'first_use' | 'api' | 'chat';
+
+// How the owner accepted the identity the harness holds for them
+export type AcceptedBy = Exclude<PinnedBy, 'first_use'>;
+
+const ACCEPTED_BY: readonly AcceptedBy[] = ['api', 'chat'];
 
 // The identity that signed the session the owner's words last came from, when it was another one
 // than the one held, and when
@@ -41,7 +47,7 @@ function normalize(row: OwnerCrossSigningRow): OwnerCrossSigning {
 	return {
 		owner: row.owner,
 		masterPublicKey: row.master_public_key,
-		pinnedBy: row.pinned_by === 'api' ? 'api' : 'first_use',
+		pinnedBy: ACCEPTED_BY.find((by) => by === row.pinned_by) ?? 'first_use',
 		pinnedAt: row.pinned_at,
 		seen:
 			row.seen_master_public_key === null || row.seen_at === null
@@ -93,15 +99,16 @@ export async function clearSeen(tx: Tx, owner: string): Promise<void> {
 		where owner = ${owner} and seen_at is not null`;
 }
 
-// The identity the owner accepted through the API replaces the one the harness held
-export async function pinAccepted(
+// The identity the owner accepted replaces the one the harness held
+async function pinAccepted(
 	tx: Tx,
 	owner: string,
-	masterPublicKey: string
+	masterPublicKey: string,
+	by: AcceptedBy
 ): Promise<OwnerCrossSigning> {
 	const rows = await tx.sql<OwnerCrossSigningRow[]>`
 		insert into owner_cross_signing (owner, master_public_key, pinned_by)
-		values (${owner}, ${masterPublicKey}, 'api')
+		values (${owner}, ${masterPublicKey}, ${by})
 		on conflict (owner) do update set
 			master_public_key = excluded.master_public_key,
 			pinned_by = excluded.pinned_by,
@@ -112,6 +119,23 @@ export async function pinAccepted(
 	const row = rows[0];
 	if (row === undefined) throw new Error('the accepted identity is not stored');
 	return normalize(row);
+}
+
+// The owner accepts the identity that signed the session their words last came from, in place of
+// the one the harness held: only while it is still the latest one seen. Resolves to the identity
+// held before, and to the one held now, null when it was not the identity seen.
+export async function acceptSeenIdentity(
+	tx: Tx,
+	owner: string,
+	masterPublicKey: string,
+	by: AcceptedBy
+): Promise<{
+	readonly held: OwnerCrossSigning | null;
+	readonly pinned: OwnerCrossSigning | null;
+}> {
+	const held = await findOwnerCrossSigning(tx, owner);
+	if (held?.seen?.masterPublicKey !== masterPublicKey) return { held, pinned: null };
+	return { held, pinned: await pinAccepted(tx, owner, masterPublicKey, by) };
 }
 
 // The question that asks the owner whether they reset their identity themselves, as their client
@@ -157,6 +181,67 @@ export async function askIdentityQuestion(
 		returning question_id, question_expires_at`;
 	const row = rows[0];
 	return row === undefined ? null : { id: row.question_id, expiresAt: row.question_expires_at };
+}
+
+// The question about their identity open to the owner's words: asked in the room, about the
+// identity seen for them still, neither answered nor closed to words, and not expired
+export interface OpenIdentityQuestion {
+	readonly id: string;
+	readonly masterPublicKey: string;
+	readonly askedAt: Date;
+}
+
+// The owner wrote in the room: the question about their identity asked there is no longer open to
+// an answer in words, unless these are the words that raised it. Resolves to the question that was
+// open to them, null when none was.
+export async function closeIdentityQuestion(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	eventId: string
+): Promise<OpenIdentityQuestion | null> {
+	const rows = await tx.sql<
+		{ question_id: string; question_master_public_key: string; question_asked_at: Date }[]
+	>`
+		update owner_cross_signing set question_closed_at = now()
+		where owner = ${owner} and question_room_id = ${roomId} and question_event_id <> ${eventId}
+			and question_closed_at is null and question_answer is null and question_expires_at > now()
+			and question_master_public_key = seen_master_public_key
+		returning question_id, question_master_public_key, question_asked_at`;
+	const row = rows[0];
+	return row === undefined
+		? null
+		: {
+				id: row.question_id,
+				masterPublicKey: row.question_master_public_key,
+				askedAt: row.question_asked_at
+			};
+}
+
+// The owner's answer to the question about their identity, and the event that carries it
+export async function recordIdentityAnswer(
+	tx: Tx,
+	owner: string,
+	questionId: string,
+	says: Answer,
+	eventId: string
+): Promise<void> {
+	await tx.sql`
+		update owner_cross_signing
+		set question_answer = ${says}, question_answer_event_id = ${eventId}
+		where owner = ${owner} and question_id = ${questionId}`;
+}
+
+// Whether this event of the owner already answered the question about their identity, as an event
+// delivered again would have
+export async function isIdentityAnswerEvent(
+	tx: Tx,
+	owner: string,
+	eventId: string
+): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from owner_cross_signing where owner = ${owner} and question_answer_event_id = ${eventId}`;
+	return rows.length > 0;
 }
 
 // Records when the check first decrypted words of an owner's Megolm session. Resolves to whether

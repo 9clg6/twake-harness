@@ -44,8 +44,8 @@ import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
 import { announceCommands } from './matrix/commands.js';
 import {
+	acceptSeenIdentity,
 	findOwnerCrossSigning,
-	pinAccepted,
 	type OwnerCrossSigning
 } from './matrix/owner-cross-signing-repository.js';
 import { listMemory } from './memory/repository.js';
@@ -594,11 +594,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				const masterKey = parsed.data.master_key;
 				// Only the identity that signed the session the owner's words last came from, as the
 				// harness showed it to them, and only while it is still the latest one seen
-				const accepted = await withPrincipal(db, principal, async (tx) => {
-					const held = await findOwnerCrossSigning(tx, principal.id);
-					if (held?.seen?.masterPublicKey !== masterKey) return { held, pinned: null };
-					return { held, pinned: await pinAccepted(tx, principal.id, masterKey) };
-				});
+				const accepted = await withPrincipal(db, principal, (tx) =>
+					acceptSeenIdentity(tx, principal.id, masterKey, 'api')
+				);
 				if (accepted.pinned === null) {
 					return reply
 						.code(409)

@@ -1230,7 +1230,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					if (checked === null) return;
 					message = checked.text;
 					content = checked.content;
+					// The owner's words answer the newest question of the room: the one about their
+					// identity, or a request
 					const requestRoom = { roomId, owner, assistantUserId: room.userId };
+					if (await ownerDevices.answered(requestRoom, eventId, checked.text)) return;
 					if (await requests.wrote(requestRoom, eventId, checked.text)) return;
 				}
 			}
