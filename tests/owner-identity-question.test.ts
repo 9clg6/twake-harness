@@ -401,3 +401,102 @@ describe('my assistant asks me about my identity again once its question expired
 		});
 	});
 });
+
+describe('each notice about a new identity of mine, told once per session, per kind and per identity', () => {
+	// What my assistant tells me in French when my words came from a session my new identity did
+	// not sign
+	const UNSIGNED_START = 'Ton identité de chiffrement a changé, et la nouvelle';
+	const UNSIGNED =
+		"Ton identité de chiffrement a changé, et la nouvelle n'a pas signé cette session. Je donne suite à ce que tu écris pour l'instant ; pour que je puisse te demander si tu l'as réinitialisée toi-même, écris-moi depuis une session qu'elle a signée, ou vérifie celle-ci : dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier ».";
+	// What the creator tells me in French when my identity changed, as I have an assistant
+	const SENT_TO_ASSISTANT_START = 'Ton identité de chiffrement a changé. Je donne suite';
+	const SENT_TO_ASSISTANT =
+		"Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; écris à ton assistant, qui te demandera dans son salon si tu l'as réinitialisée toi-même.";
+
+	let r: ConsentRoom;
+	// My conversation with the creator, opened from my first session
+	let creatorRoom: string;
+	// Another session of mine, which replaces my identity with new ones that sign it alone
+	let other: E2eeClient | undefined;
+	beforeAll(async () => {
+		r = await startConsentRoom({ ASSISTANT_LOCALE: 'fr', ADMISSION_USER_PER_MINUTE: '100' });
+		r.h.apisix.llm.script = modelFor({});
+		// My first words hold the identity I have now
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Bonjour');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Bonjour');
+		creatorRoom = await r.client.createDirectRoom(r.h.role.creatorUserId);
+		await r.client.waitForMessage(creatorRoom, r.h.role.creatorUserId, (t) =>
+			t.includes('/newbot')
+		);
+		other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'));
+	}, 240_000);
+	afterAll(async () => {
+		if (other !== undefined) await other.stop();
+		if (r !== undefined) await r.close();
+	});
+
+	// What the creator said in my conversation with it that starts with a prefix
+	function creatorSaying(prefix: string): string[] {
+		return r.client.messages
+			.filter(
+				(m) =>
+					m.roomId === creatorRoom &&
+					m.sender === r.h.role.creatorUserId &&
+					m.body.startsWith(prefix)
+			)
+			.map((m) => m.body);
+	}
+
+	async function nextCreatorSaying(prefix: string, seen: number): Promise<string> {
+		for (let i = 0; i < 120; i += 1) {
+			const latest = creatorSaying(prefix).at(seen);
+			if (latest !== undefined) return latest;
+			await sleep(250);
+		}
+		throw new Error(`the creator said nothing new starting with ${prefix}`);
+	}
+
+	function otherSession(): E2eeClient {
+		if (other === undefined) throw new Error('my other session did not start');
+		return other;
+	}
+
+	it("tells me in my assistant's room what to do from a session my new identity did not sign, once the creator sent me there", async () => {
+		await otherSession().resetIdentity();
+		// The creator sends my first session, which the new identity did not sign, to my assistant
+		await r.client.sendText(creatorRoom, '/help');
+		expect(await nextCreatorSaying(SENT_TO_ASSISTANT_START, 0)).toBe(SENT_TO_ASSISTANT);
+		// There, my words from it are acted on, and I am told what to do
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Depuis ma première session');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Depuis ma première session');
+		expect(await r.nextSaying(UNSIGNED_START, 0)).toBe(UNSIGNED);
+	});
+
+	it('tells that session again about the next identity that did not sign it', async () => {
+		await otherSession().resetIdentity();
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Toujours depuis ma première session');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Toujours depuis ma première session');
+		expect(await r.nextSaying(UNSIGNED_START, 1)).toBe(UNSIGNED);
+	});
+
+	it('tells me after my no that it still flags my words, from a session the creator told about my identity before', async () => {
+		const session = otherSession();
+		// The creator sends the session my new identity signed to my assistant
+		const sent = creatorSaying(SENT_TO_ASSISTANT_START).length;
+		await session.sendText(creatorRoom, '/help');
+		expect(await nextCreatorSaying(SENT_TO_ASSISTANT_START, sent)).toBe(SENT_TO_ASSISTANT);
+		// There, my assistant asks me whether I reset my identity, and I answer no
+		await session.sendText(r.room, 'Depuis la session signée');
+		expect(await r.nextSaying(QUESTION_START, 0)).toBe(QUESTION);
+		await session.sendText(r.room, 'non');
+		expect(await r.nextSaying(REJECTED, 0)).toBe(REJECTED);
+		// My next words from it are acted on, and I am told it still flags them
+		const heard = r.saying('Heard:').length;
+		await session.sendText(r.room, 'Toujours moi');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Toujours moi');
+		expect(await r.nextSaying(DENIED_START, 0)).toBe(DENIED);
+	});
+});

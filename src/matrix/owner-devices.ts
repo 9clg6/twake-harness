@@ -20,6 +20,7 @@ import {
 	receiveWords,
 	recordSeen,
 	seeSession,
+	type DeviceNotice,
 	type DeviceNoticeReason,
 	type OwnerCrossSigning
 } from './owner-cross-signing-repository.js';
@@ -71,11 +72,21 @@ export interface OwnerWords {
 // held already or seen for the first time just now, another one, or none on either side
 type IdentityState = 'pinned' | 'first_seen' | 'changed' | 'none';
 
-// Why a device falls short, as the owner is told and as the notices are counted
+// Why a device falls short, as the owner is told and as the notices are counted: another identity
+// than the one held as the refusal of their words, which the deployment reports otherwise
 const SHORTFALLS: Readonly<Record<DeviceShortfall, DeviceNoticeReason>> = {
 	unverified: 'unverified',
 	no_identity: 'no_identity',
-	changed: 'identity_changed'
+	changed: 'identity_refused'
+};
+
+// Each report of another identity than the one held is counted apart, so that being told one never
+// keeps the owner from being told another
+const IDENTITY_REPORTS: Readonly<Record<IdentityReport, DeviceNoticeReason>> = {
+	unsigned: 'identity_unsigned',
+	assistant_asks: 'identity_assistant_asks',
+	no_assistant: 'identity_no_assistant',
+	denied: 'identity_denied'
 };
 
 interface DeviceVerdict {
@@ -185,19 +196,20 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 
 	// Tells the owner in the room: once a minute at most per device when their words were not
 	// taken, in either mode, so that words refused again are told again; once per device when they
-	// were taken all the same. Whether the owner could be told never changes whether their words
-	// count.
+	// were taken all the same. A notice about another identity than the one held counts for that
+	// identity alone, so that each new one is told anew. Whether the owner could be told never
+	// changes whether their words count.
 	async function tell(
 		words: OwnerWords,
-		device: string,
-		reason: DeviceNoticeReason,
+		notice: DeviceNotice,
 		taken: boolean,
 		text: (messages: Messages) => string
 	): Promise<void> {
 		const { owner, roomId, eventId } = words;
+		const { reason } = notice;
 		try {
 			const claimed = await withPrincipal(db, { id: owner }, (tx) =>
-				claimDeviceNotice(tx, owner, device, reason, taken ? null : REFUSAL_NOTICE_INTERVAL_MS)
+				claimDeviceNotice(tx, owner, notice, taken ? null : REFUSAL_NOTICE_INTERVAL_MS)
 			);
 			if (!claimed) return;
 			const messages = await deps.fetchMessages(owner);
@@ -247,9 +259,12 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			return null;
 		});
 		if (report === null) return;
-		await tell(words, verdict.device, 'identity_changed', true, (m) =>
-			m.ownerDevices.reportedIdentity(report)
-		);
+		const notice = {
+			device: verdict.device,
+			reason: IDENTITY_REPORTS[report],
+			identity: verdict.masterKey ?? ''
+		};
+		await tell(words, notice, true, (m) => m.ownerDevices.reportedIdentity(report));
 	}
 
 	return {
@@ -286,7 +301,8 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 						{ roomId, owner, eventId, via, mode, deviceId },
 						'assistant ignored words of an old session'
 					);
-					await tell(words, deviceId ?? curve25519Key ?? 'unknown', 'old_session', false, (m) =>
+					const device = deviceId ?? curve25519Key ?? 'unknown';
+					await tell(words, { device, reason: 'old_session' }, false, (m) =>
 						m.ownerDevices.oldSession(via)
 					);
 					return REFUSED;
@@ -298,7 +314,12 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Report mode takes the words only once the check decrypted them and knew them for new
 				// words, whatever it found after
 				if (mode === 'report' && fresh !== null) return { admitted: true, event: fresh.event };
-				await tell(words, '*', 'check_failed', false, (messages) => messages.notices.turnFailed);
+				await tell(
+					words,
+					{ device: '*', reason: 'check_failed' },
+					false,
+					(messages) => messages.notices.turnFailed
+				);
 				return REFUSED;
 			}
 			const admitted: Admission = { admitted: true, event: fresh.event };
@@ -324,22 +345,23 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 					: verdict.identity === 'none'
 						? 'no_identity'
 						: 'unverified';
-			const reason = SHORTFALLS[shortfall];
+			// A notice about another identity than the one held is about the one published
+			const notice: DeviceNotice = {
+				device: verdict.device,
+				reason: SHORTFALLS[shortfall],
+				identity: shortfall === 'changed' ? (verdict.masterKey ?? '') : ''
+			};
 			if (mode === 'report') {
 				log.info(fields, 'owner device unverified');
 				if (shortfall === 'changed') {
 					await reportIdentity(words, verdict);
 				} else {
-					await tell(words, verdict.device, reason, true, (m) =>
-						m.ownerDevices.reported(shortfall)
-					);
+					await tell(words, notice, true, (m) => m.ownerDevices.reported(shortfall));
 				}
 				return admitted;
 			}
 			log.info(fields, 'assistant ignored an unverified device');
-			await tell(words, verdict.device, reason, false, (m) =>
-				m.ownerDevices.refused(via, shortfall)
-			);
+			await tell(words, notice, false, (m) => m.ownerDevices.refused(via, shortfall));
 			return REFUSED;
 		},
 		admitUnencrypted: async (words, reason) => {
@@ -350,7 +372,12 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				return true;
 			}
 			log.info(fields, 'assistant ignored an unencrypted message');
-			await tell(words, '*', 'unencrypted', false, (m) => m.ownerDevices.unencrypted);
+			await tell(
+				words,
+				{ device: '*', reason: 'unencrypted' },
+				false,
+				(m) => m.ownerDevices.unencrypted
+			);
 			return false;
 		}
 	};

@@ -43,3 +43,19 @@ alter table owner_cross_signing
 alter table owner_cross_signing drop constraint owner_cross_signing_pinned_by_check;
 alter table owner_cross_signing add constraint owner_cross_signing_pinned_by_check
 	check (pinned_by in ('first_use', 'api', 'chat'));
+
+-- A notice about another identity than the one held is counted by its kind and by that identity,
+-- by its public master key: a device told one kind is still told the others, and told anew about
+-- the next identity. Every other notice is about none. identity_changed, which counted them all as
+-- one, stays for the rows it counted, and counts no notice any more.
+alter table owner_device_notices add column identity text not null default '';
+alter table owner_device_notices drop constraint owner_device_notices_pkey;
+alter table owner_device_notices add primary key (owner, device, reason, identity);
+alter table owner_device_notices drop constraint owner_device_notices_reason_check;
+alter table owner_device_notices add constraint owner_device_notices_reason_check check (
+	reason in (
+		'unverified', 'no_identity', 'identity_changed', 'check_failed', 'unencrypted', 'old_session',
+		'identity_refused', 'identity_unsigned', 'identity_assistant_asks', 'identity_no_assistant',
+		'identity_denied'
+	)
+);

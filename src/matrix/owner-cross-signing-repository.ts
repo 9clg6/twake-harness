@@ -36,14 +36,29 @@ export interface OwnerCrossSigning {
 	readonly seen: SeenIdentity | null;
 }
 
-// Why the owner is told about one of their devices
+// Why the owner is told about one of their devices. Each kind of notice about another identity than
+// the one held has its own: their words refused for it where the deployment enforces, and each
+// report of it where the deployment only reports.
 export type DeviceNoticeReason =
 	| 'unverified'
 	| 'no_identity'
-	| 'identity_changed'
 	| 'check_failed'
 	| 'unencrypted'
-	| 'old_session';
+	| 'old_session'
+	| 'identity_refused'
+	| 'identity_unsigned'
+	| 'identity_assistant_asks'
+	| 'identity_no_assistant'
+	| 'identity_denied';
+
+// A notice the owner is told about one of their devices, counted by that device, by why, and by the
+// identity it is about, by its public master key, so that each new identity is told anew: none
+// when it is about no identity
+export interface DeviceNotice {
+	readonly device: string;
+	readonly reason: DeviceNoticeReason;
+	readonly identity?: string;
+}
 
 interface OwnerCrossSigningRow {
 	owner: string;
@@ -338,27 +353,28 @@ export async function receiveWords(
 	return first === eventId ? null : first;
 }
 
-// Whether the owner is to be told about a device now: once for good when `againAfterMs` is null,
-// or again once that long has passed since they were last told. Resolves to true for the one
+// Whether the owner is to be told this notice now: once for good when `againAfterMs` is null, or
+// again once that long has passed since they were last told it. Resolves to true for the one
 // caller that is to tell them.
 export async function claimDeviceNotice(
 	tx: Tx,
 	owner: string,
-	device: string,
-	reason: DeviceNoticeReason,
+	notice: DeviceNotice,
 	againAfterMs: number | null
 ): Promise<boolean> {
+	const { device, reason } = notice;
+	const identity = notice.identity ?? '';
 	const rows =
 		againAfterMs === null
 			? await tx.sql`
-				insert into owner_device_notices (owner, device, reason)
-				values (${owner}, ${device}, ${reason})
-				on conflict (owner, device, reason) do nothing
+				insert into owner_device_notices (owner, device, reason, identity)
+				values (${owner}, ${device}, ${reason}, ${identity})
+				on conflict (owner, device, reason, identity) do nothing
 				returning 1`
 			: await tx.sql`
-				insert into owner_device_notices (owner, device, reason)
-				values (${owner}, ${device}, ${reason})
-				on conflict (owner, device, reason) do update set notified_at = now()
+				insert into owner_device_notices (owner, device, reason, identity)
+				values (${owner}, ${device}, ${reason}, ${identity})
+				on conflict (owner, device, reason, identity) do update set notified_at = now()
 				where owner_device_notices.notified_at
 					<= now() - make_interval(secs => ${againAfterMs / 1000})
 				returning 1`;
