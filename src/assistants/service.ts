@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
+import { eraseAssistant } from './erasure.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { announceCommands } from '../matrix/commands.js';
@@ -19,6 +20,7 @@ import {
 	findAssistant,
 	isFlaggedToRenameIfFormerDefault,
 	listAssistantRoomIds,
+	listAssistantRooms,
 	markAssistantDeleted,
 	renameAssistant,
 	saveAssistant,
@@ -70,7 +72,8 @@ export interface AssistantService {
 	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
 	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
 	showName(owner: string): Promise<void>;
-	// Deletes the live assistant, only when it is the one created at that time if one is given
+	// Deletes the live assistant and erases what the harness keeps of it, only when it is the one
+	// created at that time if one is given
 	remove(owner: string, createdAt?: Date): Promise<boolean>;
 }
 
@@ -297,14 +300,28 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (record === null) return false;
 			if (createdAt !== undefined && record.createdAt.getTime() !== createdAt.getTime())
 				return false;
-			// The assistant leaves and goes dormant with its device, which the application service
-			// keeps: a device it no longer drives would fail every later transaction that names it.
-			if (record.roomId !== null) {
-				await admin.leaveRoom(record.userId, record.roomId);
+			// The assistant leaves every room it is in before anything is erased: the rooms it answered
+			// its owner in, as the account the index names there, and any other the homeserver lists
+			// for it, such as a room it could not leave once someone else came in. Should the homeserver
+			// refuse, nothing is erased, and the owner, told the request failed, may ask again. It goes
+			// dormant with its device, which the application service keeps: a device it no longer drives
+			// would fail every later transaction that names it.
+			const rooms = await listAssistantRooms(db, owner);
+			const leaving = new Map(rooms.map((room) => [room.roomId, room.userId]));
+			const joined = await admin.joinedRooms(record.userId);
+			for (const roomId of [...(record.roomId === null ? [] : [record.roomId]), ...joined]) {
+				if (!leaving.has(roomId)) leaving.set(roomId, record.userId);
 			}
-			await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
-			await db.sql`delete from assistant_rooms where owner = ${owner}`;
-			await db.sql`delete from assistant_provisioned where owner = ${owner}`;
+			for (const [roomId, userId] of leaving) {
+				try {
+					await admin.leaveRoom(userId, roomId);
+				} catch (err: unknown) {
+					log.warn({ owner, userId, roomId, err }, 'assistant not deleted: a room was not left');
+					throw err;
+				}
+			}
+			const erased = await withPrincipal(db, { id: owner }, (tx) => eraseAssistant(tx, record));
+			if (!erased) return false;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
 		}

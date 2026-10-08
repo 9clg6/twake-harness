@@ -46,8 +46,8 @@ export interface Messages {
 		readonly renameUsage: string;
 		renamed(name: string): string;
 		readonly renameRefused: string;
-		// The question that asks the owner to confirm the deletion of their assistant, by its name, and
-		// the yes that confirms it
+		// The question that asks the owner to confirm the deletion of their assistant, by its name: what
+		// the deletion erases, and the yes that confirms it
 		confirmDeletion(name: string): string;
 		// Anything but a yes to that question, in its time: the assistant stays
 		readonly deletionCancelled: string;
@@ -286,7 +286,8 @@ const ENGLISH: Messages = {
 		renameUsage: 'Send /rename followed by the new name.',
 		renamed: (name) => `Your assistant is now called ${name}.`,
 		renameRefused: 'Nothing to rename: you have no assistant, or that name is not usable.',
-		confirmDeletion: (name) => `Delete ${name}? Answer yes to confirm.`,
+		confirmDeletion: (name) =>
+			`Delete ${name}? I will erase its conversations, its memory, its skills and your permissions. Answer yes to confirm.`,
 		deletionCancelled: 'Deletion cancelled: your assistant stays.',
 		deletionExpired:
 			'This deletion request has expired, so I deleted nothing. Send /delete again if you still want to.',
@@ -526,7 +527,8 @@ const FRENCH: Messages = {
 		renameUsage: 'Envoie /rename suivi du nouveau nom.',
 		renamed: (name) => `C'est noté : le nouveau nom est ${name}.`,
 		renameRefused: "Rien à renommer : tu n'as pas d'assistant, ou ce nom ne convient pas.",
-		confirmDeletion: (name) => `Supprimer ${name} ? Réponds oui pour confirmer.`,
+		confirmDeletion: (name) =>
+			`Supprimer ${name} ? J'efface ses conversations, sa mémoire, ses compétences et tes accords. Réponds oui pour confirmer.`,
 		deletionCancelled: 'Suppression annulée : ton assistant reste.',
 		deletionExpired:
 			"Cette demande de suppression a expiré, je n'ai donc rien supprimé. Renvoie /delete si tu le veux toujours.",

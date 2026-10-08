@@ -355,7 +355,7 @@ describe('a deployment that speaks French', () => {
 	it('asks in French before deleting the assistant, and keeps it on anything but yes', async () => {
 		await h.synapse.sendText(alice, creatorRoom, '/delete');
 		expect(await fromCreator((t) => t.startsWith('Supprimer'))).toBe(
-			'Supprimer Lucie ? Réponds oui pour confirmer.'
+			"Supprimer Lucie ? J'efface ses conversations, sa mémoire, ses compétences et tes accords. Réponds oui pour confirmer."
 		);
 		await h.synapse.sendText(alice, creatorRoom, 'non');
 		expect(await fromCreator((t) => t.startsWith('Suppression'))).toBe(

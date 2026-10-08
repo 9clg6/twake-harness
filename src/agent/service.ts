@@ -1,7 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import { localeOf } from '../assistants/locale.js';
-import { findAssistant } from '../assistants/repository.js';
+import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
 import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
@@ -491,6 +491,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const opened = await withPrincipal(db, principal, async (tx) => {
 				const record = await ensurePrincipal(tx, principal);
 				if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
+				// A turn of a room opens nothing once its assistant no longer answers there, as when the
+				// owner deleted it while the turn waited for their turn before it: the record of the
+				// assistant is held until this transaction ends, so that a deletion that comes meanwhile
+				// waits for what this transaction keeps, then erases it too
+				if (
+					target.kind === 'room' &&
+					!(await holdAssistantInRoom(tx, principal.id, target.roomId))
+				) {
+					return { kind: 'missing' as const };
+				}
 				// The owner's answer approves the call once. Asked about a first use, it also lets the
 				// assistant use that application at that level from now on; asked to try again once
 				// the platform has their permission, it allows nothing more.

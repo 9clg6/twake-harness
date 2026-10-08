@@ -144,6 +144,28 @@ export async function requeueStaleJobs(db: Db, leaseMs: number): Promise<number>
 	return result.count;
 }
 
+// The jobs an assistant's erasure takes with it, by the payload field that names it: its owner's
+// turns, an event's included, whatever their state, which then keep nothing; its owner's namings,
+// so that none shows the deleted assistant's name again; the recoveries and preparations of its
+// owner that failed for good, which no route shows; and what it was to send, answers and status
+// counts. A kind these lists do not name stays, as one a later build adds.
+const OWNER_JOBS: readonly JobKind[] = ['turn', 'resume', 'name'];
+const OWNER_JOBS_FAILED: readonly JobKind[] = ['recover', 'prepare'];
+const ASSISTANT_JOBS: readonly JobKind[] = ['send', 'progress'];
+
+// Deletes the jobs of the owner's assistant, the account it speaks as, in the transaction given
+export async function deleteJobsOf(tx: Tx, owner: string, userId: string): Promise<void> {
+	// A payload is kept as the JSON text of its fields
+	const field = (key: string) => tx.sql`(payload #>> '{}')::jsonb ->> ${key}`;
+	await tx.sql`
+		delete from jobs where
+			(
+				(kind in ${tx.sql(OWNER_JOBS)} or (kind in ${tx.sql(OWNER_JOBS_FAILED)} and status = 'failed'))
+				and ${field('owner')} = ${owner}
+			)
+			or (kind in ${tx.sql(ASSISTANT_JOBS)} and ${field('asUserId')} = ${userId})`;
+}
+
 // A job done is deleted, its dedup key free again: within a transaction, a handler can finish its
 // job with what it wrote, before its worker does
 export async function completeJob(db: Db | Tx, id: number): Promise<void> {

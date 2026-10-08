@@ -10,6 +10,8 @@ export interface MatrixAdmin {
 	createDirectRoom(asUserId: string, inviteUserId: string): Promise<string>;
 	sendText(asUserId: string, roomId: string, text: string): Promise<void>;
 	leaveRoom(asUserId: string, roomId: string): Promise<void>;
+	// The rooms the user named is joined to, as the homeserver lists them
+	joinedRooms(asUserId: string): Promise<string[]>;
 	// The members joined to a room, as the user named reads them; null when that user is not in it
 	joinedMembers(asUserId: string, roomId: string): Promise<string[] | null>;
 	// A state event of a room as the user named reads it, its content; null when the room has none
@@ -189,6 +191,14 @@ export function makeMatrixAdmin(options: MatrixAdminOptions): MatrixAdmin {
 				asUserId
 			);
 			if (response.status !== 200 && response.status !== 403) fail('leave', response);
+		},
+		async joinedRooms(asUserId) {
+			const response = await call('GET', '/joined_rooms', undefined, options.asToken, asUserId);
+			if (response.status !== 200) fail('joined rooms', response);
+			const rooms = response.body['joined_rooms'];
+			return Array.isArray(rooms)
+				? rooms.filter((room): room is string => typeof room === 'string')
+				: [];
 		},
 		async joinedMembers(asUserId, roomId) {
 			const response = await call(

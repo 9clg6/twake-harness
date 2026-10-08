@@ -306,6 +306,25 @@ export async function isIdentityAnswerEvent(
 	return rows.length > 0;
 }
 
+// Forgets the question that asked the owner whether they reset their identity themselves: its
+// room, when it was asked and their answer, as the deletion of their assistant does, so that the
+// next one asks them again. The identity held and the one seen last stay.
+export async function forgetIdentityQuestion(tx: Tx, owner: string): Promise<void> {
+	await tx.sql`
+		update owner_cross_signing set
+			question_id = null,
+			question_master_public_key = null,
+			question_room_id = null,
+			question_raised_by = null,
+			question_expires_at = null,
+			question_event_id = null,
+			question_asked_at = null,
+			question_closed_at = null,
+			question_answer = null,
+			question_answer_event_id = null
+		where owner = ${owner} and question_id is not null`;
+}
+
 // Records when the check first decrypted words of an owner's Megolm session, `now` if it never did
 // before. Resolves to whether that was longer ago than `keptMs`, the time the digests of those
 // words are kept for.

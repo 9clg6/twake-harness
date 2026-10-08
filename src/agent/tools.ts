@@ -6,7 +6,7 @@ import type { ConsentMetrics } from '../consents/metrics.js';
 import { listConsents, toConsentView, withdrawConsents } from '../consents/repository.js';
 import type { WaitReason } from '../consents/consent.js';
 import type { OwnerRequest } from '../consents/request.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import {
@@ -16,7 +16,12 @@ import {
 	toMemoryTarget
 } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
-import { findSession, listSessionIds, searchSessions } from '../sessions/repository.js';
+import {
+	findSession,
+	holdSession,
+	listSessionIds,
+	searchSessions
+} from '../sessions/repository.js';
 import {
 	findSkill,
 	insertSkill,
@@ -90,6 +95,36 @@ export interface ToolContext {
 	// For that call, when its contract showed them what it would do: the digest of that preview,
 	// which the call carries so that its contract refuses it should what it acts on have changed
 	readonly previewDigest?: string;
+}
+
+// What the model reads when its turn's conversation was erased with its assistant while the turn
+// ran: nothing was kept
+export const CONVERSATION_GONE = {
+	error: 'conversation_gone',
+	hint: 'The owner deleted their assistant while this turn ran, and this conversation with it: nothing was kept, and nothing waits for the owner. Do not make the call again.'
+} as const;
+
+// Writes what a call keeps in the name of its turn's conversation, under its owner's principal,
+// while that conversation still stands, which is held until the write's transaction ends: an
+// erasure that comes meanwhile waits for the write, then erases it too, and one that came first
+// leaves nothing to write, which CONVERSATION_GONE says. A direct call through the API has no
+// conversation: what it keeps is its owner's own.
+export async function keepInConversation<T>(
+	context: ToolContext,
+	write: (tx: Tx) => Promise<T>
+): Promise<T | typeof CONVERSATION_GONE> {
+	return withPrincipal(context.db, { id: context.principalId }, async (tx) =>
+		context.sessionId === undefined || (await holdSession(tx, context.sessionId))
+			? write(tx)
+			: CONVERSATION_GONE
+	);
+}
+
+// Whether a write in the name of a turn's conversation found it gone, and kept nothing
+export function isConversationGone<T>(
+	kept: T | typeof CONVERSATION_GONE
+): kept is typeof CONVERSATION_GONE {
+	return kept === CONVERSATION_GONE;
 }
 
 export interface Tool {
@@ -266,7 +301,7 @@ export const memoryTool: Tool = {
 		const target = toMemoryTarget(parsed.data.target ?? 'memory');
 		if (target === null) return { result: ACCESS_DENIED, denied: true };
 		const { action, content, old_text: oldText, new_text: newText } = parsed.data;
-		const result = await withPrincipal(context.db, { id: context.principalId }, async (tx) => {
+		const result = await keepInConversation(context, async (tx) => {
 			if (action === 'add') return addMemoryEntry(tx, context.principalId, target, content ?? '');
 			if (oldText === undefined) return { success: false as const, error: 'old_text is required' };
 			if (action === 'remove') return removeMemoryEntry(tx, context.principalId, target, oldText);
@@ -437,7 +472,7 @@ export const skillsProposeTool: Tool = {
 	run: async (args, context) => {
 		const parsed = skillProposeArgs.safeParse(args);
 		if (!parsed.success) return { result: { error: 'name, description and content are required' } };
-		const skill = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
+		const skill = await keepInConversation(context, (tx) =>
 			insertSkill(tx, {
 				scope: 'user',
 				owner: context.principalId,
@@ -445,6 +480,7 @@ export const skillsProposeTool: Tool = {
 				...parsed.data
 			})
 		);
+		if (isConversationGone(skill)) return { result: skill };
 		return { result: { proposed: skill.id, status: 'proposed' } };
 	}
 };

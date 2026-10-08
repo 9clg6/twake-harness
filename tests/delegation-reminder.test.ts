@@ -297,4 +297,29 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(passes()).toEqual([1]);
 		expect(warnedAbout(AARON)).toEqual([{ msg: 'delegation reminder skipped' }]);
 	});
+
+	it('reminds me again, through the assistant I create once I deleted mine, of a permission the deleted one reminded me of', async () => {
+		const seen = r.saying(REMINDER).length;
+		r.h.apisix.delegation = (owner) =>
+			owner === ALICE ? brokerDelegation('2027-03-01T10:00:00Z', '2027-03-31T10:00:00Z') : null;
+		// Nine in Paris on Saturday 27 March, four days before it expires
+		clock.set('2027-03-27T08:00:00Z');
+		await startWorker();
+		await r.nextSaying(REMINDER, seen);
+		await stopWorker();
+		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+		const created = await r.h.api.post<{ roomId: string }>(ALICE, '/v1/assistants', {
+			name: 'Lucie'
+		});
+		expect(created.status).toBe(201);
+		const room = created.body.roomId;
+		await r.client.joinRoom(room);
+		await r.client.waitForMessage(room, r.assistantId, (t) => t.includes('Lucie'));
+		// Nine in Paris the next day, in summer time
+		clock.set('2027-03-28T07:00:00Z');
+		await startWorker();
+		expect(
+			await r.client.waitForMessage(room, r.assistantId, (t) => t.startsWith(REMINDER), 60_000)
+		).toContain('expire le mercredi 31 mars 2027 à 12:00.');
+	});
 });
