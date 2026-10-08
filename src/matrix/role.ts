@@ -16,6 +16,7 @@ import { z } from 'zod';
 
 import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
+import { requestNaming } from '../assistants/naming.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
 	claimDialogQuestion,
@@ -54,6 +55,7 @@ import { helpText, runCreatorTurn, type CreatorTurn } from './creator.js';
 import { machineOf } from './crypto-requests.js';
 import { installRejectionGuard } from './last-resort.js';
 import { makeListenerGuard, makeWorkTracker } from './listeners.js';
+import { nameInRoom } from './naming.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
@@ -140,6 +142,7 @@ interface SendJob {
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
 const preparePayload = z.object({ owner: z.string().min(1) });
+const namePayload = z.object({ owner: z.string().min(1) });
 // The actions a turn has done so far, for its status message
 const progressPayload = z.object({
 	asUserId: z.string().min(1),
@@ -780,6 +783,14 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return;
 		}
 		const toOwner = await fetchMessages(owner);
+		// Its name in the room comes before its first words there: clients show it over the name of its
+		// profile, which a homeserver may keep from changing. A refusal is left to the job the room's
+		// index asks for below, which tries again, and takes a name changed meanwhile.
+		try {
+			await nameInRoom({ admin, log }, { roomId, assistantUserId: invited }, assistant.name);
+		} catch (err: unknown) {
+			log.warn({ roomId, userId: invited, err }, 'assistant not named in its room');
+		}
 		// A provisioned assistant greets its owner in the first room they open with it, as one the
 		// creator conversation makes greets them in the room it opens. The room becomes one of its
 		// rooms in the transaction that takes the greeting and queues the job sending it: what the
@@ -794,6 +805,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			await tx.sql`
 				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${invited})
 				on conflict (room_id) do nothing`;
+			await requestNaming(tx, owner);
 			if (assistant.roomId !== null) return false;
 			await setAssistantRoomId(tx, owner, roomId);
 			if (!(await claimProvisionedWelcome(tx, owner, invited))) return false;
@@ -1396,7 +1408,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	const sender: JobWorker = startJobWorker({
 		db,
 		log,
-		kinds: ['send', 'recover', 'progress', 'prepare'],
+		kinds: ['send', 'recover', 'progress', 'prepare', 'name'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (job.kind === 'recover') {
@@ -1409,6 +1421,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const parsed = preparePayload.safeParse(job.payload);
 				if (!parsed.success) throw new Error('prepare payload is malformed');
 				await prepare(parsed.data.owner);
+				return null;
+			}
+			if (job.kind === 'name') {
+				const parsed = namePayload.safeParse(job.payload);
+				if (!parsed.success) throw new Error('name payload is malformed');
+				await assistants.showName(parsed.data.owner);
 				return null;
 			}
 			if (job.kind === 'progress') {

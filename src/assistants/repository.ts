@@ -214,6 +214,17 @@ export async function listActiveAssistants(db: Db): Promise<{ owner: string; use
 	return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
 }
 
+// The rooms of an assistant with its owner, from the rooms index
+export async function listAssistantRoomIds(
+	db: Db,
+	owner: string,
+	userId: string
+): Promise<string[]> {
+	const rows = await db.sql<{ room_id: string }[]>`
+		select room_id from assistant_rooms where owner = ${owner} and user_id = ${userId}`;
+	return rows.map((row) => row.room_id);
+}
+
 // An assistant a provisioner asked for, in an index without user content: the matrix role
 // prepares it at its start even before it has a room. An assistant the provisioner made owes its
 // owner the greeting until it gives it; one that already existed owes no more than it did.

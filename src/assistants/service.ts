@@ -5,10 +5,12 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { announceCommands } from '../matrix/commands.js';
+import { nameInRoom } from '../matrix/naming.js';
 import { assistantUserId } from '../matrix/registration.js';
 import { matrixLocalpartOfPrincipal, matrixUserIdOfLocalpart } from '../principals/identity.js';
 import {
 	findAssistant,
+	listAssistantRoomIds,
 	markAssistantDeleted,
 	renameAssistant,
 	saveAssistant,
@@ -51,6 +53,10 @@ export interface AssistantService {
 	find(owner: string): Promise<AssistantView | null>;
 	identify(owner: string): Promise<AssistantIdentity | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
+	// The owner's assistant goes by its name: in its profile, where the homeserver lets it change,
+	// and in each of its rooms with its owner. A room that refuses it fails the call, to be tried
+	// again.
+	showName(owner: string): Promise<void>;
 	// Deletes the live assistant, only when it is the one created at that time if one is given
 	remove(owner: string, createdAt?: Date): Promise<boolean>;
 }
@@ -263,6 +269,31 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			log.info({ owner, userId: record.userId }, 'assistant renamed');
 			log.debug({ owner, userId: record.userId, name }, 'assistant renamed');
 			return toView({ ...record, name });
+		},
+		async showName(owner) {
+			const record = await current(owner);
+			if (record === null) return;
+			const { userId, name } = record;
+			try {
+				if ((await admin.displayName(userId)) !== name) {
+					const named = await admin.setDisplayName(userId, name);
+					log.info({ owner, userId, named }, 'assistant profile named');
+				}
+			} catch (err: unknown) {
+				log.warn({ owner, userId, err }, 'assistant profile not named');
+			}
+			// Clients show the name of the room over the name of the profile, which a homeserver may
+			// keep from changing
+			let refused = 0;
+			for (const roomId of await listAssistantRoomIds(db, owner, userId)) {
+				try {
+					await nameInRoom({ admin, log }, { roomId, assistantUserId: userId }, name);
+				} catch (err: unknown) {
+					refused += 1;
+					log.warn({ owner, userId, roomId, err }, 'assistant not named in its room');
+				}
+			}
+			if (refused > 0) throw new Error(`the name of the assistant was refused in ${refused} rooms`);
 		},
 		async remove(owner, createdAt) {
 			const record = await current(owner);

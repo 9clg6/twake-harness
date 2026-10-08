@@ -1,7 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { eventually } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import { PROVISIONER, provisioningPath } from './helpers/provisioning.js';
+import type { MatrixUser } from './helpers/synapse.js';
 
 interface AssistantView {
 	readonly userId: string;
@@ -24,28 +26,56 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 	});
 
 	// The owner's assistant as a provisioner asks for it, then as its owner reads it
-	async function provisioned(localpart: string, displayName: string): Promise<AssistantView> {
+	async function provisioned(
+		localpart: string,
+		displayName: string
+	): Promise<{ owner: MatrixUser; assistant: AssistantView }> {
 		const owner = await h.synapse.registerUser(localpart, displayName);
 		const asked = await h.api.put(PROVISIONER, provisioningPath(owner.userId), {});
 		expect([200, 503]).toContain(asked.status);
 		const mine = await h.api.get<AssistantView>(`${localpart}@test.local`, '/v1/assistants/me');
 		expect(mine.status).toBe(200);
-		return mine.body;
+		return { owner, assistant: mine.body };
+	}
+
+	// The name the assistant goes by in the room, as its owner's client reads it: once it is the one
+	// expected, or else when the time is up
+	async function nameShown(
+		owner: MatrixUser,
+		roomId: string,
+		assistantId: string,
+		expected: string
+	): Promise<unknown> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state/m.room.member/${encodeURIComponent(assistantId)}`;
+		let shown: unknown = null;
+		await eventually(async () => {
+			shown = (await h.synapse.request(owner, 'GET', path)).body['displayname'];
+			return shown === expected;
+		});
+		return shown;
 	}
 
 	it("takes its owner's first name, the words before the first one in capitals", async () => {
-		expect((await provisioned('michel', 'Michel-Marie MAUDET')).name).toBe(
-			"Michel-Marie's assistant"
-		);
+		const { assistant } = await provisioned('michel', 'Michel-Marie MAUDET');
+		expect(assistant.name).toBe("Michel-Marie's assistant");
 	});
 
 	it('keeps the first 64 characters of a long name, none of them cut in half', async () => {
-		const name = (await provisioned('ines', `Inès ${'😀'.repeat(70)}`)).name;
-		expect(name).toBe(`Inès ${'😀'.repeat(59)}`);
+		const { assistant } = await provisioned('ines', `Inès ${'😀'.repeat(70)}`);
+		expect(assistant.name).toBe(`Inès ${'😀'.repeat(59)}`);
 	});
 
 	it("takes its owner's identifier when their name holds what a name of an assistant cannot", async () => {
 		// The technologist emoji joins its two halves with a format character
-		expect((await provisioned('zoe', 'Zoé 👩‍💻')).name).toBe("zoe's assistant");
+		const { assistant } = await provisioned('zoe', 'Zoé 👩‍💻');
+		expect(assistant.name).toBe("zoe's assistant");
+	});
+
+	it('goes by its name in the room its owner opens with it', async () => {
+		const { owner, assistant } = await provisioned('nina', 'Nina SIMONE');
+		const room = await h.synapse.createDirectRoom(owner, assistant.userId);
+		expect(await nameShown(owner, room, assistant.userId, "Nina's assistant")).toBe(
+			"Nina's assistant"
+		);
 	});
 });
