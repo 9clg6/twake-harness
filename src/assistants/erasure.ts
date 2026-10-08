@@ -8,15 +8,16 @@ import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 // permissions they gave it, the calls that wait for their answer, the suggestions it made them,
 // the reminders of their delegation, what it told them of their sessions, the question it asked
 // them about their identity with their answer, and the jobs that would still run for it. Its record
-// stays, marked deleted, with the language its owner chose, and its rooms leave the index. What a
-// new assistant needs or must not lose stays: the Matrix account, its device and keys, as a Matrix
-// identifier is never reused, the owner's quota counters, the zone of their calendar, a setting of
-// theirs and not of their assistant, the channels they took out of the suggestions and whether they
-// want them at all, which they chose for themselves, the identity the harness pinned for them and
-// the one it saw last, and what keeps the next assistant from taking anything twice: the wake-ups,
-// which keep an event replayed later from waking it, the owner's words received, which keep a copy
-// of them from counting, and when it first read each session their words came from, which keeps the
-// words of a session older than those it remembers from counting.
+// stays, marked deleted, with the language its owner chose, and its rooms leave the index, the
+// encrypted conversations it read for its owner with them. What a new assistant needs or must not
+// lose stays: the Matrix account, its device and keys, as a Matrix identifier is never reused, the
+// owner's quota counters, the zone of their calendar, a setting of theirs and not of their
+// assistant, the channels they took out of the suggestions and whether they want them at all, which
+// they chose for themselves, the identity the harness pinned for them and the one it saw last, and
+// what keeps the next assistant from taking anything twice: the wake-ups, which keep an event
+// replayed later from waking it, the owner's words received, which keep a copy of them from
+// counting, and when it first read each session their words came from, which keeps the words of a
+// session older than those it remembers from counting.
 // False when the live assistant is no longer the one created at that time.
 export async function eraseAssistant(
 	tx: Tx,
@@ -29,6 +30,7 @@ export async function eraseAssistant(
 	if (live === undefined || live.created_at.getTime() !== createdAt.getTime()) return false;
 	await markAssistantDeleted(tx, owner);
 	await tx.sql`delete from assistant_rooms where owner = ${owner}`;
+	await tx.sql`delete from assistant_listened_rooms where owner = ${owner}`;
 	await tx.sql`delete from assistant_provisioned where owner = ${owner}`;
 	// The conversations go before what a turn keeps in their name, which holds its conversation as
 	// it writes: such a write that came first is erased below, and one that comes later finds its

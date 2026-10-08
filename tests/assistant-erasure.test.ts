@@ -621,7 +621,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		await ask(next, 'Hello again after my reset', (t) => t === IDENTITY_QUESTION);
 	});
 
-	it("erases the suggestions it made me and those it was still to make, and keeps the channels I took out of them, and Carol's", async () => {
+	it("erases the suggestions it made me and those it was still to make, forgets the conversations it read for me, and keeps the channels I took out of them, and Carol's", async () => {
 		// A suggestion still to make, with the messages of a channel it quotes
 		const toMake = (owner: string) => ({
 			kind: 'suggest' as const,
@@ -664,9 +664,17 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 				await writeSettings(tx, ALICE, { enabled: true, mutedRooms: ['!quiet:test.local'] });
 				await muteRoomFor(tx, ALICE, '!noisy:test.local', DAY_MS);
 			});
+			// An encrypted conversation of mine it read for me, and one Carol's assistant reads for her
+			await r.h.db.sql`
+				insert into assistant_listened_rooms (room_id, owner, user_id) values
+					('!pair:test.local', ${ALICE}, ${r.assistantId}),
+					('!pair-carol:test.local', ${CAROL}, '@bot_carol:test.local')`;
 			expect(await enqueueJob(r.h.db, toMake(ALICE))).toBe(true);
 			expect(await enqueueJob(r.h.db, toMake(CAROL))).toBe(true);
 			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+			const listened = await r.h.db.sql<{ owner: string }[]>`
+				select owner from assistant_listened_rooms`;
+			expect(listened.map((row) => row.owner)).toEqual([CAROL]);
 			expect(
 				await withPrincipal(r.h.db, { id: ALICE }, async (tx) => ({
 					suggestions: await tx.sql`select 1 from suggestions`,
@@ -682,6 +690,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 			});
 		} finally {
 			await r.h.db.sql`delete from jobs where kind = 'suggest'`;
+			await r.h.db.sql`delete from assistant_listened_rooms`;
 			r.h.startTurnWorkers();
 		}
 	});
