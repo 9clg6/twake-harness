@@ -251,7 +251,7 @@ const UNVERIFIED_MESSAGE =
 const UNVERIFIED_ANSWER =
 	'I did not take your answer, so my question still waits: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then answer again.';
 const CHANGED_MESSAGE =
-	"I did not act on your last message: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity); until then I act on none of your messages.";
+	"I did not act on your last message: your encryption identity changed, and I act only on the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity): for your safety, no message can do it. If you did not, change your password and warn your administrator. Until then I act on none of your messages.";
 const UNENCRYPTED_MESSAGE =
 	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
 const NO_IDENTITY_MESSAGE =
@@ -703,6 +703,9 @@ describe('my assistant acts only on what the sessions my identity signed write',
 			matchesPin: false
 		});
 		expect(await r.nextSaying('I did not act on your last message', notices)).toBe(CHANGED_MESSAGE);
+		// It asks me nothing to answer: no message of mine can make it hold another identity
+		const notice = r.saying('I did not act on your last message').at(-1);
+		expect(notice?.content).not.toHaveProperty([QUESTION_CONTENT_KEY]);
 		expect(await heldIdentity(r)).toEqual({ master_public_key: before, pinned_by: 'first_use' });
 		// Through the API, with my own token, I see both, and accept only the one my words came with
 		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);

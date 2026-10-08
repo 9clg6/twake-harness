@@ -440,7 +440,7 @@ const ENGLISH: Messages = {
 				case 'no_identity':
 					return `${what}: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then ${again}.`;
 				case 'changed':
-					return `${what}: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}); until then I act on none of your messages.`;
+					return `${what}: your encryption identity changed, and I act only on the one I know. If you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}): for your safety, no message can do it. If you did not, change your password and warn your administrator. Until then I act on none of your messages.`;
 			}
 		},
 		reported: (reason) => {
@@ -677,7 +677,7 @@ const FRENCH: Messages = {
 				case 'no_identity':
 					return `${what} : ton compte n'a pas encore d'identité de chiffrement, je ne peux donc vérifier aucune de tes sessions. Déconnecte-toi de Twake Chat et reconnecte-toi pour la créer ; puis ${again}.`;
 				case 'changed':
-					return `${what} : ton identité de chiffrement n'est pas celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) ; d'ici là, je ne donne suite à aucun de tes messages.`;
+					return `${what} : ton identité de chiffrement a changé, et je ne donne suite qu'à celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) : par sécurité, aucun message ne le peut. Sinon, change ton mot de passe et préviens ton administrateur. D'ici là, je ne donne suite à aucun de tes messages.`;
 			}
 		},
 		reported: (reason) => {
