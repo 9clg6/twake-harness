@@ -39,14 +39,11 @@ describe('the hour of the reminders', () => {
 		APISIX_CONSUMER_KEY: 'k'
 	};
 
-	it('is nine unless set', () => {
-		expect(loadConfig(base).consent.delegationReminderHour).toBe(9);
-		expect(
-			loadConfig({ ...base, DELEGATION_REMINDER_HOUR: '0' }).consent.delegationReminderHour
-		).toBe(0);
-	});
-
-	it('refuses, at startup, an hour that is not one of the day', () => {
+	it('takes any hour of the day, and refuses, at startup, one that is not', () => {
+		for (const hour of [0, 23]) {
+			const config = loadConfig({ ...base, DELEGATION_REMINDER_HOUR: String(hour) });
+			expect(config.consent.delegationReminderHour).toBe(hour);
+		}
 		for (const hour of ['24', '-1', '9.5', 'nine']) {
 			expect(() => loadConfig({ ...base, DELEGATION_REMINDER_HOUR: hour })).toThrow(
 				'invalid configuration: DELEGATION_REMINDER_HOUR'
@@ -103,14 +100,19 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		if (r !== undefined) await r.close();
 	});
 
-	it('tells me at nine, five days before it expires, when it expires and where to renew it, and asks me nothing', async () => {
+	it('tells me at nine unless the deployment sets another hour, five days before it expires, when it expires and where to renew it, and asks me nothing', async () => {
 		r.h.apisix.delegation = (owner) =>
 			owner === ALICE
 				? brokerDelegation('2026-09-13T14:23:51Z', '2026-10-13T14:23:51Z', ANSWERED_CONSENT_URL)
 				: null;
-		// Nine in Paris, on Thursday 8 October
-		clock.set('2026-10-08T07:00:00Z');
+		const before = asked(ALICE);
+		// A minute before nine in Paris, on Thursday 8 October: the deployment sets no hour
+		clock.set('2026-10-08T06:59:00Z');
 		await startWorker();
+		await sleep(500);
+		expect(asked(ALICE)).toBe(before);
+		// Nine
+		clock.set('2026-10-08T07:00:00Z');
 		// The link is the deployment's, never the one the broker's answer carries
 		expect(await r.nextSaying(REMINDER, 0)).toBe(
 			`L'autorisation d'agir en ton nom que tu m'as donnée expire le mardi 13 octobre 2026 à 16:23. Renouvelle-la d'ici là pour que je continue à agir pour toi : ${ALICE_CONSENT_URL}`
