@@ -36,6 +36,10 @@ export interface PushDeps {
 	readonly storage: IAppserviceStorageProvider;
 	readonly ensureEncryption: EnsureEncryption;
 	readonly deadlineMs: number;
+	// Whether an encrypted event of this room is left out of a push before the SDK looks at it: the
+	// registration asks for the events of every room, and the SDK would try to decrypt, and ask
+	// Synapse for the members of, each one of the rooms no assistant is in
+	readonly dropsEncrypted?: (roomId: string) => Promise<boolean>;
 }
 
 function eventsOf(value: unknown): Record<string, unknown>[] {
@@ -224,7 +228,23 @@ export function makePushedAppservice(options: IAppserviceOptions, deps: PushDeps
 				req.body = withoutKeyUpdatesOf(body, new Set(failed));
 			}
 		}
+		await dropEncryptedEvents(req);
 		await handleTransaction.call(this, req, res);
+	}
+
+	async function dropEncryptedEvents(req: PushRequest): Promise<void> {
+		const body = req.body;
+		const drops = deps.dropsEncrypted;
+		if (drops === undefined || !isRecord(body) || !Array.isArray(body['events'])) return;
+		const events: unknown[] = body['events'];
+		const kept: unknown[] = [];
+		for (const event of events) {
+			const roomId = isRecord(event) ? event['room_id'] : undefined;
+			const encrypted = isRecord(event) && event['type'] === 'm.room.encrypted';
+			if (encrypted && typeof roomId === 'string' && (await drops(roomId))) continue;
+			kept.push(event);
+		}
+		if (kept.length !== events.length) req.body = { ...body, events: kept };
 	}
 
 	// The SDK's constructor takes its handler from the prototype, which its types keep private

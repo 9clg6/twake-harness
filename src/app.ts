@@ -10,6 +10,7 @@ import Fastify, {
 import { z } from 'zod';
 
 import type { Clock } from './agent/clock.js';
+import { readMeeting } from './agent/suggestion.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
@@ -36,7 +37,7 @@ import {
 	type PendingCallView,
 	type RequestState
 } from './consents/repository.js';
-import { withPrincipal, type Db, type Tx } from './db/client.js';
+import { readJsonColumn, withPrincipal, type Db, type Tx } from './db/client.js';
 import { getMessages } from './i18n/messages.js';
 import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
@@ -53,6 +54,14 @@ import { principalOfMatrixUser } from './principals/identity.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
 import { findSession, listSessionIds } from './sessions/repository.js';
+import { suggestGroup, type SuggestPayload } from './suggestions/job.js';
+import {
+	findSuggestion,
+	muteRoomFor,
+	readCallArguments,
+	readSettings,
+	writeSettings
+} from './suggestions/repository.js';
 import {
 	findSkill,
 	insertSkill,
@@ -109,6 +118,20 @@ const chatBodySchema = z
 			.string()
 			.regex(/^[0-9a-f]{32}$/)
 			.optional()
+	})
+	.strict();
+
+// Why the owner refuses a suggestion: another time is tried once, not useful mutes the room a week
+const refuseBodySchema = z
+	.object({ reason: z.enum(['another_time', 'not_useful']).optional() })
+	.strict();
+
+const NOT_USEFUL_MUTE_MS = 7 * 24 * 60 * 60 * 1000;
+
+const suggestionSettingsSchema = z
+	.object({
+		enabled: z.boolean(),
+		mutedRooms: z.array(z.string().min(1).max(255)).max(500)
 	})
 	.strict();
 
@@ -835,6 +858,25 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				}
 			);
 
+			// Whether the assistant may read the owner's messages in channels and offer them actions
+			// (see Suggestions in the README), and the channels it leaves alone
+			scope.get('/suggestions/settings', async (request) => {
+				const principal = principalOf(request);
+				await loadPrincipal(principal);
+				return withPrincipal(db, principal, (tx) => readSettings(tx, principal.id));
+			});
+
+			scope.put('/suggestions/settings', async (request, reply) => {
+				const principal = principalOf(request);
+				const parsed = suggestionSettingsSchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				await loadPrincipal(principal);
+				return withPrincipal(db, principal, async (tx) => {
+					await writeSettings(tx, principal.id, parsed.data);
+					return readSettings(tx, principal.id);
+				});
+			});
+
 			// What waits for the owner's answer, asked in their room or through the API, which they
 			// answer here as they would in the chat
 			scope.get('/pending-calls', async (request, reply) => {
@@ -877,9 +919,50 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							? await refusalNotice(principal, call.channel.roomId, id)
 							: null;
 					const answerId = `api:${request.id}`;
+					const parsedBody = refuseBodySchema.safeParse(request.body ?? {});
+					if (!parsedBody.success) return reply.code(400).send({ error: 'invalid request' });
+					const { reason } = parsedBody.data;
 					const refused = await withPrincipal(db, principal, async (tx) => {
+						// What a suggestion needs of its call is read before the refusal erases it
+						const suggestion =
+							reason === undefined ? null : await findSuggestion(tx, principal.id, id);
+						const meeting =
+							suggestion === null
+								? null
+								: readMeeting(readJsonColumn(await readCallArguments(tx, principal.id, id)));
 						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
 						if (notice !== null) await enqueueJob(tx, notice);
+						if (suggestion !== null && reason === 'not_useful') {
+							await muteRoomFor(tx, principal.id, suggestion.roomId, NOT_USEFUL_MUTE_MS);
+						}
+						// Another time is tried once: the second suggestion is not offered a third
+						if (
+							suggestion !== null &&
+							reason === 'another_time' &&
+							suggestion.attempt === 0 &&
+							meeting !== null
+						) {
+							const payload: SuggestPayload = {
+								owner: principal.id,
+								roomId: suggestion.roomId,
+								eventId: `retry:${id}`,
+								at: Date.now(),
+								quoted: [],
+								retry: {
+									title: meeting.title,
+									attendees: [...meeting.attendees],
+									start: meeting.start,
+									end: meeting.end,
+									timeZone: meeting.time_zone ?? null
+								}
+							};
+							await enqueueJob(tx, {
+								kind: 'suggest',
+								payload,
+								dedupKey: `suggest:retry:${id}`,
+								groupKey: suggestGroup(principal.id)
+							});
+						}
 						return true;
 					});
 					if (!refused) return reply.code(409).send(pendingCallClosed('decided'));

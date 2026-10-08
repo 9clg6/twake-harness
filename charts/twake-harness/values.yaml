@@ -58,6 +58,15 @@ config:
   # broker lacks its owner's permission to act for them, as do the worker role's reminders before
   # that permission expires; an https URL, empty for none, and then the worker reminds nobody
   brokerConsentUrl: ''
+  # Whether the assistants propose actions from the messages of channels that are not encrypted
+  # (see Suggestions in the README): on unless false. Turning it off also takes the rooms out of
+  # the registration, which must then be applied on Synapse again
+  suggestionsEnabled: ''
+  # Twake Space's API, where a suggestion is posted to the notifications of its user; empty means
+  # a suggestion reaches the assistant's room alone. Its token, a tws_ API token with the scope
+  # notifications:write, goes in secretEnv as SPACE_API_TOKEN. The harness reaches the outside
+  # only through APISIX: give an APISIX route here, or an egress rule in networkPolicy.extraEgress
+  spaceApiUrl: ''
   # Admission limits; each empty value keeps the harness default
   # Turns in flight on one replica; default 32
   admissionMaxInflight: ''

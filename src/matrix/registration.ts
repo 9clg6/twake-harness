@@ -18,6 +18,14 @@ function namespaceUserRegex(config: Config): string {
 	return `@(?:${escapeRegex(config.matrix.assistantPrefix)}.*|${escapeRegex(config.matrix.senderLocalpart)}):${server}`;
 }
 
+// With suggestions on, Synapse pushes the events of every room of the homeserver, without the
+// application service joining any of them: the namespace is not exclusive and holds no user
+function roomNamespaces(config: Config): { exclusive: boolean; regex: string }[] {
+	return config.suggestions.enabled
+		? [{ exclusive: false, regex: `!.*:${escapeRegex(config.matrix.serverName)}` }]
+		: [];
+}
+
 // The registration Synapse loads: the harness owns the assistants' identifiers exclusively and
 // asks for to-device messages and device masquerading so encryption works without a sync loop.
 export function buildRegistration(config: Config, url: string): IAppserviceRegistration {
@@ -29,7 +37,7 @@ export function buildRegistration(config: Config, url: string): IAppserviceRegis
 		sender_localpart: config.matrix.senderLocalpart,
 		namespaces: {
 			users: [{ exclusive: true, regex: namespaceUserRegex(config) }],
-			rooms: [],
+			rooms: roomNamespaces(config),
 			aliases: []
 		},
 		rate_limited: false,

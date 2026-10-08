@@ -160,6 +160,13 @@ export interface Config {
 		readonly k8sRole: string;
 		readonly k8sTokenPath: string;
 	};
+	readonly suggestions: {
+		// Whether the assistants propose actions from the messages of channels that are not
+		// encrypted: it makes the registration ask Synapse for the rooms of the homeserver
+		readonly enabled: boolean;
+		// Twake Space's notifications, which receive a suggestion for its user; null for none
+		readonly space: { readonly apiUrl: URL; readonly apiToken: string } | null;
+	};
 	// The language of the fixed texts of the assistants and the creator
 	readonly locale: Locale;
 	// The IANA time zone the assistants read the present in, such as Europe/Paris, until a read of
@@ -255,6 +262,9 @@ const envSchema = z.object({
 		.string()
 		.min(1)
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
+	SUGGESTIONS_ENABLED: z.enum(['true', 'false']).default('true'),
+	SPACE_API_URL: z.string().default(''),
+	SPACE_API_TOKEN: z.string().default(''),
 	ASSISTANT_LOCALE: z.enum(LOCALES).default('en'),
 	ASSISTANT_TIMEZONE: z.string().min(1).default('UTC'),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
@@ -366,6 +376,12 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
+	if (values.SPACE_API_URL !== '' && !URL.canParse(values.SPACE_API_URL)) {
+		throw new Error('invalid configuration: SPACE_API_URL is not a URL');
+	}
+	if (values.SPACE_API_URL !== '' && values.SPACE_API_TOKEN === '') {
+		throw new Error('invalid configuration: SPACE_API_URL needs SPACE_API_TOKEN');
+	}
 	const timeZone = findTimeZone(values.ASSISTANT_TIMEZONE);
 	if (timeZone === null) {
 		throw new Error(
@@ -457,6 +473,13 @@ export function loadConfig(env: Env): Config {
 			authPath: values.OPENBAO_AUTH_PATH,
 			k8sRole: values.OPENBAO_K8S_ROLE,
 			k8sTokenPath: values.OPENBAO_K8S_TOKEN_PATH
+		},
+		suggestions: {
+			enabled: values.SUGGESTIONS_ENABLED === 'true',
+			space:
+				values.SPACE_API_URL === ''
+					? null
+					: { apiUrl: new URL(values.SPACE_API_URL), apiToken: values.SPACE_API_TOKEN }
 		},
 		locale: values.ASSISTANT_LOCALE,
 		timeZone,

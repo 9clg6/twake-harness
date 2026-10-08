@@ -71,6 +71,7 @@ import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
 import { makeAppserviceStorage } from './storage.js';
+import { makeSuggestionIntake } from '../suggestions/intake.js';
 
 // The SDK caches the intent it acts as a user through, and makes a new one an hour after the last,
 // however busy the user is. The old intent is never released: its encryption stays subscribed to the
@@ -352,7 +353,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			cryptoStorage,
 			intentOptions: { maxAgeMs: INTENT_MAX_AGE_MS, maxCached: MAX_INTENTS }
 		},
-		{ log, storage, ensureEncryption, deadlineMs: options.pushDeadlineMs ?? PUSH_DEADLINE_MS }
+		{
+			log,
+			storage,
+			ensureEncryption,
+			deadlineMs: options.pushDeadlineMs ?? PUSH_DEADLINE_MS,
+			dropsEncrypted: (roomId) => dropsEncrypted(roomId)
+		}
 	);
 	routeEncryptionSetups(appservice, ensureEncryption);
 	// What a stop waits for: the listeners under way, and the backups they start
@@ -448,16 +455,37 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// The creator answers only in rooms it was invited to; a message can arrive before its join
 	// of a fresh invitation has settled, so an invitation counts as presence.
+	// The rooms the creator is in, which stay so, and for a moment those it is not in. The creator
+	// never joins a room by itself: with the registration asking for every room, most of what is
+	// pushed is channels it was never invited to, and it must stay out of them.
+	const creatorRooms = new Map<string, true | number>();
+	const NOT_CREATOR_ROOM_MS = 30_000;
 	async function creatorIsInRoom(roomId: string): Promise<boolean> {
-		const client = appservice.botIntent.underlyingClient;
-		const members = await client.getJoinedRoomMembers(roomId);
-		if (members.includes(creator)) return true;
+		const known = creatorRooms.get(roomId);
+		if (known === true) return true;
+		if (known !== undefined && known > Date.now()) return false;
+		let isIn = false;
 		try {
-			await appservice.botIntent.joinRoom(roomId);
-			return true;
-		} catch {
-			return false;
+			isIn = (await appservice.botIntent.underlyingClient.getJoinedRoomMembers(roomId)).includes(
+				creator
+			);
+		} catch (err: unknown) {
+			// Not in the room: a channel
+			if (errcodeOf(err) !== 'M_FORBIDDEN') throw err;
 		}
+		creatorRooms.set(roomId, isIn ? true : Date.now() + NOT_CREATOR_ROOM_MS);
+		return isIn;
+	}
+
+	// Suggestions from the messages of channels no assistant is in (see Suggestions in the README)
+	const suggestions = makeSuggestionIntake({ config, db, log });
+
+	// An encrypted event of a room no assistant and not the creator is in is not for the SDK to
+	// decrypt: the room is noted as encrypted, which suggestions never read
+	async function dropsEncrypted(roomId: string): Promise<boolean> {
+		if ((await assistantRoom(roomId)) !== null || (await creatorIsInRoom(roomId))) return false;
+		await suggestions.noteEncrypted(roomId);
+		return true;
 	}
 
 	// The to-device events Synapse pushes, mostly the owners' key shares: which device they target
@@ -628,12 +656,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				// What the SDK hands here is the encrypted event itself
 				const encrypted = event as unknown as Record<string, unknown>;
 				takeEncrypted(event.event_id);
+				const room = await assistantRoom(roomId);
+				if (room === null) return;
 				log.error(
 					{ roomId, sender: event.sender, eventId: event.event_id, err },
 					'decryption failed'
 				);
-				const room = await assistantRoom(roomId);
-				if (room === null || event.sender === room.userId) return;
+				if (event.sender === room.userId) return;
 				try {
 					const fetched = await fetchMissedKeyShares(room.userId, roomId);
 					log.info({ roomId, userId: room.userId, fetched }, 'missed key shares fetched');
@@ -712,6 +741,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					// Key shares for this room may arrive with the next transaction: be ready to receive them
 					await ensureEncryption(intent);
 					await intent.joinRoom(roomId);
+					creatorRooms.set(roomId, true);
 				} catch (err: unknown) {
 					log.warn({ roomId, invited, err }, 'join failed');
 					return;
@@ -1210,6 +1240,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
+	// A room that turns encrypted is never read for suggestions again
+	appservice.on(
+		'room.event',
+		guard(
+			'room encryption',
+			async (roomId: string, event: RoomEvent) => {
+				if (event.type === 'm.room.encryption') await suggestions.noteEncrypted(roomId);
+			},
+			(roomId: string, event: RoomEvent) => ({ roomId, eventId: event.event_id })
+		)
+	);
+
 	async function onRoomMessage(
 		roomId: string,
 		event: MatrixEvent<unknown> | RoomEvent,
@@ -1319,7 +1361,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			backupInBackground(room.userId, owner);
 			return;
 		}
-		if (!(await creatorIsInRoom(roomId))) return;
+		if (!(await creatorIsInRoom(roomId))) {
+			// A channel: no assistant is in it, and none joins
+			if (raw.event_id !== undefined) {
+				await suggestions.onMessage(roomId, { sender, eventId: raw.event_id, text });
+			}
+			return;
+		}
 		const owner = principalOfMatrixUser(config, sender);
 		if (owner === null) {
 			log.info({ roomId, sender }, 'creator ignored a foreign sender');

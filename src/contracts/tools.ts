@@ -230,7 +230,12 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		) {
 			reasons.push('consent');
 		}
-		if (contract.level === 'write' && context.origin === 'event') reasons.push('event_turn');
+		if (
+			contract.level === 'write' &&
+			(context.origin === 'event' || context.origin === 'suggestion')
+		) {
+			reasons.push('event_turn');
+		}
 		if (contract.risk === 'high') reasons.push('high_risk');
 		return reasons;
 	}

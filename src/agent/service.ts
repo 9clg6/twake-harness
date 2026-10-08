@@ -68,6 +68,7 @@ import {
 
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
+import { makeSuggestionRunner, type SuggestionInput, type SuggestionResult } from './suggestion.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -222,6 +223,8 @@ export interface AgentService {
 	readonly admission: Admission;
 	runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult>;
 	runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult>;
+	// What the owner's assistant proposes from the messages of a channel, if anything
+	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -538,7 +541,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// call alone, and any other write it prepares waits for them again.
 			const origin = approved?.origin ?? input.origin;
 			const withheld =
-				origin === 'event'
+				origin === 'event' || origin === 'suggestion'
 					? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
 					: [];
 			const actions = opened.actions.filter((action) => !withheld.includes(action));
@@ -714,5 +717,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	return { llm, tools, gate, contracts, admission, runOwnerTurn, runAllowedCall };
+	const suggestions = makeSuggestionRunner({ config, db, llm, contracts, admission, gate, clock });
+
+	return {
+		llm,
+		tools,
+		gate,
+		contracts,
+		admission,
+		runOwnerTurn,
+		runAllowedCall,
+		runSuggestion: suggestions.run
+	};
 }

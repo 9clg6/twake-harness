@@ -11,6 +11,7 @@ import type { JobWorker } from '../../src/jobs/worker.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
 import { makeDb, type Db } from '../../src/db/client.js';
+import { spaceFromConfig } from '../../src/suggestions/space.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
 import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
@@ -144,6 +145,7 @@ export async function startMatrixHarness(
 				locale: config.locale,
 				turn: config.turn,
 				requestLifetimeMs: config.consent.requestLifetimeMs,
+				suggestions: { config, space: spaceFromConfig(config, replica.log) },
 				pollIntervalMs: 100
 			})
 		);
