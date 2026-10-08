@@ -96,6 +96,7 @@ spec:
             - name: ASSISTANT_TIMEZONE
               value: {{ . | quote }}
             {{- end }}
+            {{- /* The api role shows it when the broker lacks an owner's permission, the worker role in its reminders before that permission expires */}}
             {{- with .Values.config.brokerConsentUrl }}
             - name: BROKER_CONSENT_URL
               value: {{ . | quote }}

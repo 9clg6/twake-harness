@@ -55,7 +55,8 @@ config:
   # starts a user's day of tokens; empty means UTC
   assistantTimezone: ''
   # The token broker's consent link, the same for every user, which an assistant shows when the
-  # broker lacks its owner's permission to act for them; an https URL, empty for none
+  # broker lacks its owner's permission to act for them, as do the worker role's reminders before
+  # that permission expires; an https URL, empty for none, and then the worker reminds nobody
   brokerConsentUrl: ''
   # Admission limits; each empty value keeps the harness default
   # Turns in flight on one replica; default 32
