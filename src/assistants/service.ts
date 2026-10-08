@@ -300,16 +300,26 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (record === null) return false;
 			if (createdAt !== undefined && record.createdAt.getTime() !== createdAt.getTime())
 				return false;
-			// The assistant leaves every room it answered its owner in, as the account the index names
-			// there, before anything is erased: should the homeserver refuse, nothing is, and the owner
-			// may ask again. It goes dormant with its device, which the application service keeps: a
-			// device it no longer drives would fail every later transaction that names it.
+			// The assistant leaves every room it is in before anything is erased: the rooms it answered
+			// its owner in, as the account the index names there, and any other the homeserver lists
+			// for it, such as a room it could not leave once someone else came in. Should the homeserver
+			// refuse, nothing is erased, and the owner, told the request failed, may ask again. It goes
+			// dormant with its device, which the application service keeps: a device it no longer drives
+			// would fail every later transaction that names it.
 			const rooms = await listAssistantRooms(db, owner);
 			const leaving = new Map(rooms.map((room) => [room.roomId, room.userId]));
-			if (record.roomId !== null && !leaving.has(record.roomId)) {
-				leaving.set(record.roomId, record.userId);
+			const joined = await admin.joinedRooms(record.userId);
+			for (const roomId of [...(record.roomId === null ? [] : [record.roomId]), ...joined]) {
+				if (!leaving.has(roomId)) leaving.set(roomId, record.userId);
 			}
-			for (const [roomId, userId] of leaving) await admin.leaveRoom(userId, roomId);
+			for (const [roomId, userId] of leaving) {
+				try {
+					await admin.leaveRoom(userId, roomId);
+				} catch (err: unknown) {
+					log.warn({ owner, userId, roomId, err }, 'assistant not deleted: a room was not left');
+					throw err;
+				}
+			}
 			const erased = await withPrincipal(db, { id: owner }, (tx) => eraseAssistant(tx, record));
 			if (!erased) return false;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');

@@ -256,6 +256,34 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		await r.client.waitForMessage(secondRoom, r.assistantId, (t) => t === UNVERIFIED_REPORT);
 	});
 
+	it('stays in a room it could not leave once someone else came in, while I have it', async () => {
+		const logged = r.h.logLines().length;
+		const bob = await r.h.synapse.registerUser('bob');
+		// The homeserver refuses my assistant's leave of the room I opened with it
+		r.h.apisix.matrixFault = (c) =>
+			c.method === 'POST' && decodeURIComponent(c.path).includes(`/rooms/${secondRoom}/leave`)
+				? 500
+				: null;
+		try {
+			const invited = await r.h.synapse.request(
+				r.alice,
+				'POST',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(secondRoom)}/invite`,
+				{ user_id: bob.userId }
+			);
+			expect(invited.status).toBe(200);
+			await until('my assistant tried to leave the room', () =>
+				r.h
+					.logLines()
+					.slice(logged)
+					.some((line) => line['msg'] === 'room not left' && line['roomId'] === secondRoom)
+			);
+		} finally {
+			r.h.apisix.matrixFault = null;
+		}
+		expect(await r.h.synapse.joinedMembers(r.alice, secondRoom)).toContain(r.assistantId);
+	});
+
 	it('keeps the jobs that failed for good, mine and those of others, while I have it', async () => {
 		const carol = await r.h.synapse.registerUser('carol');
 		// The homeserver refuses what my assistant and Carol's send
@@ -293,7 +321,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		);
 	});
 
-	it('leaves every room it answered me in', async () => {
+	it('leaves every room it is in, the one it could not leave before included', async () => {
 		for (const room of [r.room, secondRoom]) {
 			await until(
 				`the assistant left ${room}`,
