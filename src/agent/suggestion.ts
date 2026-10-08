@@ -244,7 +244,12 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		if (!decision.ok) return { kind: 'busy' };
 		try {
 			return await gate.run(owner, async (): Promise<SuggestionResult> => {
-				const turnLog = log.child({ principal: owner, origin: 'suggestion' });
+				// The messages and the arguments the model wrote from them are logged at debug, which this
+				// flow never logs: the quotes of a channel reach no log, whatever the deployment's level
+				const turnLog = log.child(
+					{ principal: owner, origin: 'suggestion' },
+					{ level: log.level === 'debug' || log.level === 'trace' ? 'info' : log.level }
+				);
 				let turn;
 				try {
 					turn = await runTurn(
