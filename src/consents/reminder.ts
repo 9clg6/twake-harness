@@ -123,7 +123,7 @@ export function startReminderScheduler(deps: ReminderDeps, checkMs: number): Rem
 	const tick = (): void => {
 		if (running !== null || stopped) return;
 		const today = wallDayAt(deps.clock.now(), deps.config.timeZone);
-		if (today.date === doneOn || today.hour < deps.config.consent.reminderHour) return;
+		if (today.date === doneOn || today.hour < deps.config.consent.delegationReminderHour) return;
 		running = pass(today.date);
 	};
 	tick();

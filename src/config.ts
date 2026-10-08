@@ -91,7 +91,7 @@ export interface Config {
 		readonly brokerConsentUrl: string | null;
 		// The hour, from 0 to 23 on the wall clock of the assistants' time zone, of the worker role's
 		// daily pass that reminds the owners whose permission expires within five days
-		readonly reminderHour: number;
+		readonly delegationReminderHour: number;
 	};
 	readonly matrix: {
 		readonly serverName: string;
@@ -411,7 +411,7 @@ export function loadConfig(env: Env): Config {
 		consent: {
 			requestLifetimeMs: values.CONSENT_REQUEST_LIFETIME_MS,
 			brokerConsentUrl: values.BROKER_CONSENT_URL === '' ? null : values.BROKER_CONSENT_URL,
-			reminderHour: values.DELEGATION_REMINDER_HOUR
+			delegationReminderHour: values.DELEGATION_REMINDER_HOUR
 		},
 		matrix: {
 			serverName: values.MATRIX_SERVER_NAME,

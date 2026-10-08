@@ -35,8 +35,10 @@ describe('the hour of the reminders', () => {
 	};
 
 	it('is nine unless set', () => {
-		expect(loadConfig(base).consent.reminderHour).toBe(9);
-		expect(loadConfig({ ...base, DELEGATION_REMINDER_HOUR: '0' }).consent.reminderHour).toBe(0);
+		expect(loadConfig(base).consent.delegationReminderHour).toBe(9);
+		expect(
+			loadConfig({ ...base, DELEGATION_REMINDER_HOUR: '0' }).consent.delegationReminderHour
+		).toBe(0);
 	});
 
 	it('refuses, at startup, an hour that is not one of the day', () => {
@@ -138,7 +140,7 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		const before = asked(ALICE);
 		// 17:59 in Paris on Monday 11 January, a minute before the hour set
 		clock.set('2027-01-11T16:59:00Z');
-		await startWorker({ reminderHour: 18 });
+		await startWorker({ delegationReminderHour: 18 });
 		await sleep(500);
 		expect(asked(ALICE)).toBe(before);
 		// 18:00 in Paris, 17:00 in UTC
