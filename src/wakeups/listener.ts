@@ -1,9 +1,22 @@
 import { setTimeout as sleep } from 'node:timers/promises';
-import { RabbitMQClient, type RabbitMQMessageHandler } from '@linagora/rabbitmq-client';
+import {
+	DeadLetterError,
+	RabbitMQClient,
+	type RabbitMQMessage,
+	type RabbitMQMessageProperties
+} from '@linagora/rabbitmq-client';
 
 import type { Config } from '../config.js';
-import { brokerLogger, failureOf, logHandled } from './logs.js';
-import type { WakeDeps } from './wake.js';
+import { isTransient } from '../db/transient.js';
+import {
+	brokerLogger,
+	failureOf,
+	logHandled,
+	outcomeOf,
+	type Handled,
+	type RecipientOutcome
+} from './logs.js';
+import { wake, type WakeDeps, type Wakeup } from './wake.js';
 
 // How many times a message may come back before it is dead-lettered, as one that brings the
 // worker down whenever it is delivered: set, since RabbitMQ 3.13 has no limit and 4.0 one of 20,
@@ -14,6 +27,33 @@ const DELIVERY_LIMIT = 5;
 // transient failure, such as the database being down, is tried again for as long as it lasts
 const RETRY_DELAY_MS = 1000;
 const MAX_RETRY_DELAY_MS = 60_000;
+
+// How many times a message whose failure is not transient is tried before it goes to the dead
+// letter queue, so that the messages behind it go on
+const MAX_ATTEMPTS = 5;
+
+// What identifies a message in its line, as far as the listener could read it
+export type Identity = Pick<Handled, 'source' | 'eventId' | 'type' | 'recipients'>;
+
+// What a source makes of a message, before anything is written
+export type Reading =
+	// No event it can read: it goes to the dead letter queue at once, its line saying why
+	| { readonly kind: 'malformed'; readonly identity: Identity; readonly reason: string }
+	// Taken without effect, its line saying why
+	| { readonly kind: 'ignored'; readonly identity: Identity; readonly reason: string }
+	// Taken without effect and logged nowhere: a message for another instance, of which the
+	// listener keeps nothing
+	| { readonly kind: 'foreign' }
+	// The wake-ups it brings, and what came of the recipients it left out
+	| {
+			readonly kind: 'wakeups';
+			readonly identity: Identity;
+			readonly wakeups: readonly Wakeup[];
+			readonly left: readonly RecipientOutcome[];
+	  };
+
+// How a source's messages read
+export type Read = (message: RabbitMQMessage, properties: RabbitMQMessageProperties) => Reading;
 
 // A queue of the instance's own, which it declares and reads, bound to the exchange of a source
 // another service owns
@@ -44,19 +84,61 @@ export function ownQueueName(config: Config, name: string): string {
 // Listens to a source on the instance's own quorum queue: one message at a time and with a single
 // active consumer, so that messages keep their order whatever the replicas, a delivery limit, and
 // dead letters into the instance's own exchange on the source's vhost, <prefix>.dlx, and queue,
-// <queue>.dlq. A message is taken once its handler returns. A broker out of reach or an exchange
-// missing never stops the role: the listener tries again without end, the waits doubling up to a
-// minute, and resolves once its first attempt is over.
+// <queue>.dlq. Each message the source reads wakes the assistant of each recipient it brings, and
+// is taken once what it wakes is written. A transient failure is tried again without end and any
+// other five times, before the message goes to the dead letter queue; one that is no event goes
+// there at once. Each message gives one line, event handled, and no line carries what a message
+// says. A broker out of reach or an exchange missing never stops the role: the listener tries
+// again without end, the waits doubling up to a minute, and resolves once its first attempt is
+// over.
 export async function listenOnOwnQueue(
 	deps: WakeDeps,
 	own: OwnQueue,
-	handle: RabbitMQMessageHandler,
+	read: Read,
 	options: { readonly retryDelayMs?: number } = {}
 ): Promise<Listener> {
 	const log = deps.log.child({ listener: own.name });
 	const retryDelayMs = options.retryDelayMs ?? RETRY_DELAY_MS;
 	const queue = ownQueueName(deps.config, own.name);
 	const deadLetterExchange = `${deps.config.rabbitmq.prefix}.dlx`;
+	// The event whose failures are not transient, by its source and id, and how many it had: one
+	// at a time, since the listener holds one message at a time
+	let failing: { readonly key: string; readonly count: number } | null = null;
+
+	const handle = async (
+		message: RabbitMQMessage,
+		properties: RabbitMQMessageProperties
+	): Promise<void> => {
+		const reading = read(message, properties);
+		if (reading.kind === 'foreign') return;
+		const { identity } = reading;
+		if (reading.kind === 'ignored') {
+			logHandled(log, { ...identity, outcome: 'ignored', reason: reading.reason });
+			return;
+		}
+		if (reading.kind === 'malformed') {
+			logHandled(log, { ...identity, outcome: 'dead_lettered', reason: reading.reason });
+			throw new DeadLetterError(reading.reason);
+		}
+		const outcomes: RecipientOutcome[] = [...reading.left];
+		try {
+			for (const wakeup of reading.wakeups) outcomes.push(await wake(deps, wakeup));
+		} catch (err: unknown) {
+			const transient = isTransient(err);
+			log.warn({ ...identity, transient, err: failureOf(err) }, 'event failed');
+			if (transient) throw err;
+			const key = JSON.stringify([identity.source, identity.eventId]);
+			const count = failing?.key === key ? failing.count + 1 : 1;
+			failing = { key, count };
+			if (count < MAX_ATTEMPTS) throw err;
+			failing = null;
+			const reason = `failed ${MAX_ATTEMPTS} times`;
+			logHandled(log, { ...identity, outcome: 'dead_lettered', reason });
+			throw new DeadLetterError(reason, { cause: err });
+		}
+		failing = null;
+		logHandled(log, { ...identity, ...outcomeOf(outcomes) });
+	};
 	const stopping = new AbortController();
 	let client: RabbitMQClient | null = null;
 	let listening = false;

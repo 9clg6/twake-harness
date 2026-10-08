@@ -1,15 +1,15 @@
 import { createHash } from 'node:crypto';
-import { DeadLetterError } from '@linagora/rabbitmq-client';
+import { DeadLetterError, type RabbitMQMessage } from '@linagora/rabbitmq-client';
 import ICAL from 'ical.js';
 import { z } from 'zod';
 
 import { formatOffset, wallTimeIn } from '../agent/clock.js';
-import type { CalendarSource, Config } from '../config.js';
+import type { CalendarSource } from '../config.js';
 import { cut } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { INVITED_EVENT_TYPE } from './event-types.js';
-import { listenOnOwnQueue, type Listener } from './listener.js';
-import { wake, type WakeDeps, type Wakeup } from './wake.js';
+import { listenOnOwnQueue, type Identity, type Listener, type Reading } from './listener.js';
+import type { WakeDeps, Wakeup } from './wake.js';
 
 // Where Calendar's side service sends a notification for each invitee of each change to a
 // meeting, on Calendar's own vhost: a fanout, which gives every queue bound to it every message.
@@ -230,19 +230,12 @@ interface Read {
 	readonly leftOut: readonly string[];
 }
 
-// The wake-up a notification of Calendar brings its invitee, for a new invitation alone: an update,
-// a cancellation or a reply wakes nobody. The fanout carries every tenant's invitations: one for
-// an invitee off the instance's mail domain is taken without effect, and nothing of it is read or
-// kept, even in the dead letters. What the calendar computed (the times, the organizer's address
-// and the occurrence) is shown apart from what the organizer wrote (the title, the UID and the
-// zone, under untrusted); the description and the location are never read. The check takes the
-// UID and the zone whole.
-function wakeupOf(message: Record<string, unknown>, config: Config): Read | null {
-	const method = message['method'];
-	if (typeof method !== 'string' || method.toUpperCase() !== 'REQUEST') return null;
-	if (message['isNewEvent'] !== true) return null;
-	const recipient = addressOf(message['recipientEmail']);
-	if (recipient === null || matrixLocalpartOfPrincipal(config, recipient) === null) return null;
+// The wake-up a new invitation brings its invitee. What the calendar computed (the times, the
+// organizer's address and the occurrence) is shown apart from what the organizer wrote (the
+// title, the UID and the zone, under untrusted); the description and the location are never read.
+// The check takes the UID and the zone whole. An iCalendar that cannot be read throws a
+// DeadLetterError that says why.
+function invitationOf(message: Record<string, unknown>, recipient: string): Read {
 	const vevent = veventOf(message['event']);
 	// The UID as the calendar knows it, which the contracts take, and as written, which is hashed
 	const uid = vevent.parsed.getFirstPropertyValue('uid');
@@ -291,6 +284,48 @@ function wakeupOf(message: Record<string, unknown>, config: Config): Read | null
 	return { wakeup, leftOut };
 }
 
+// What a notification of Calendar is to the listener. The fanout carries every tenant's
+// invitations: one for an invitee off the instance's mail domain is foreign to it, taken without
+// effect, and nothing of it is read, kept or logged, even in the dead letters. Only a new
+// invitation wakes its invitee: an update, a cancellation or a reply is ignored.
+function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
+	const recipient = addressOf(message['recipientEmail']);
+	if (recipient === null || matrixLocalpartOfPrincipal(deps.config, recipient) === null) {
+		return { kind: 'foreign' };
+	}
+	const identity: Identity = { source: SOURCE, recipients: 1 };
+	const method = message['method'];
+	if (
+		typeof method !== 'string' ||
+		method.toUpperCase() !== 'REQUEST' ||
+		message['isNewEvent'] !== true
+	) {
+		return { kind: 'ignored', identity, reason: 'no new invitation' };
+	}
+	let read: Read;
+	try {
+		read = invitationOf(message, recipient);
+	} catch (err: unknown) {
+		if (!(err instanceof DeadLetterError)) throw err;
+		return {
+			kind: 'malformed',
+			identity: { ...identity, type: INVITED_EVENT_TYPE },
+			reason: err.message
+		};
+	}
+	const { wakeup, leftOut } = read;
+	if (leftOut.length > 0) {
+		// As for the activity exchange: the fields' names, never what the calendar wrote there
+		deps.log.warn({ source: SOURCE, eventId: wakeup.id, fields: leftOut }, 'event fields left out');
+	}
+	return {
+		kind: 'wakeups',
+		identity: { ...identity, eventId: wakeup.id, type: INVITED_EVENT_TYPE },
+		wakeups: [wakeup],
+		left: []
+	};
+}
+
 // Listens to Calendar's fanout on the instance's own queue, on Calendar's vhost: a new invitation
 // wakes its invitee's assistant
 export async function startCalendarListener(
@@ -302,19 +337,7 @@ export async function startCalendarListener(
 		deps,
 		// A fanout routes on no key: one binding takes all
 		{ url: source.amqpUrl, name: 'calendar', exchange: CALENDAR_FANOUT, routingKeys: [''] },
-		async (message) => {
-			const read = wakeupOf(message, deps.config);
-			if (read === null) return;
-			const { wakeup, leftOut } = read;
-			if (leftOut.length > 0) {
-				// As for the activity exchange: the fields' names, never what the calendar wrote there
-				deps.log.warn(
-					{ source: SOURCE, eventId: wakeup.id, fields: leftOut },
-					'event fields left out'
-				);
-			}
-			await wake(deps, wakeup);
-		},
+		(message) => readingOf(message, deps),
 		options
 	);
 }

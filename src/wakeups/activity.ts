@@ -1,19 +1,20 @@
-import { DeadLetterError } from '@linagora/rabbitmq-client';
+import type { RabbitMQMessage, RabbitMQMessageProperties } from '@linagora/rabbitmq-client';
 import { z } from 'zod';
 
 import type { ActivitySource } from '../config.js';
-import { isTransient } from '../db/transient.js';
 import { cut } from '../llm/data.js';
-import { listenOnOwnQueue, ownQueueName, type Listener } from './listener.js';
-import { failureOf, logHandled, outcomeOf, type Handled, type RecipientOutcome } from './logs.js';
-import { wake, type WakeDeps, type Wakeup } from './wake.js';
+import {
+	listenOnOwnQueue,
+	ownQueueName,
+	type Identity,
+	type Listener,
+	type Reading
+} from './listener.js';
+import type { RecipientOutcome } from './logs.js';
+import type { WakeDeps, Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
-
-// How many times an event whose failure is not transient is tried before it goes to the dead
-// letter queue, so that the events behind it go on
-const MAX_ATTEMPTS = 5;
 
 // The most recipients of one event the listener reads, in their order: the others are left out
 const MAX_RECIPIENTS = 100;
@@ -105,10 +106,7 @@ type ActivityEvent = z.infer<typeof activityEventSchema>;
 // The attributes that identify an event, as far as a message the listener does not read has them
 const IDENTITY = { source: 'source', eventId: 'id', type: 'type' } as const;
 
-function identityOf(
-	message: unknown,
-	routingKey: string
-): Pick<Handled, 'source' | 'eventId' | 'type' | 'recipients'> {
+function identityOf(message: unknown, routingKey: string): Identity {
 	const identity: { source?: string; eventId?: string; type?: string; recipients?: number } = {
 		type: routingKey
 	};
@@ -210,10 +208,57 @@ export async function startActivityListener(
 	options: { readonly retryDelayMs?: number } = {}
 ): Promise<Listener> {
 	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
-	const log = deps.log.child({ listener: ACTIVITY_EXCHANGE });
-	// The event whose failures are not transient, by its source and id, and how many it had: one
-	// at a time, since the listener holds one message at a time
-	let failing: { readonly key: string; readonly count: number } | null = null;
+	const read = (message: RabbitMQMessage, { routingKey }: RabbitMQMessageProperties): Reading => {
+		// A type the deployment no longer lists keeps its binding, since the library removes none:
+		// its events are taken and dropped. An event comes by the queue's own name when its dead
+		// letters are moved back into it.
+		if (routingKey !== queue && !source.types.includes(routingKey)) {
+			return {
+				kind: 'ignored',
+				identity: identityOf(message, routingKey),
+				reason: 'type not listened to'
+			};
+		}
+		const parsed = activityEventSchema.safeParse(message);
+		if (!parsed.success) {
+			return {
+				kind: 'malformed',
+				identity: identityOf(message, routingKey),
+				reason: malformation(message, parsed.error)
+			};
+		}
+		const event = parsed.data;
+		const fields = leftOutFields(message, event);
+		if (fields.length > 0) {
+			deps.log.warn({ source: event.source, eventId: event.id, fields }, 'event fields left out');
+		}
+		const { wakeups, skipped, ignored } = wakeupsOf(event);
+		if (ignored > 0) {
+			deps.log.warn({ source: event.source, eventId: event.id, ignored }, 'recipients ignored');
+		}
+		for (const { index, fields } of skipped) {
+			deps.log.warn(
+				{ source: event.source, eventId: event.id, recipient: index, fields },
+				'recipient skipped'
+			);
+		}
+		return {
+			kind: 'wakeups',
+			identity: {
+				source: event.source,
+				eventId: event.id,
+				type: event.type,
+				recipients: (event.data.recipients ?? []).length
+			},
+			wakeups,
+			// Those left out count among the recipients of the event: past the most it reads, as
+			// ignored, and those it cannot read, as invalid
+			left: [
+				...skipped.map((): RecipientOutcome => 'invalid'),
+				...Array.from({ length: ignored }, (): RecipientOutcome => 'ignored')
+			]
+		};
+	};
 	return listenOnOwnQueue(
 		deps,
 		{
@@ -222,69 +267,7 @@ export async function startActivityListener(
 			exchange: ACTIVITY_EXCHANGE,
 			routingKeys: source.types
 		},
-		async (message, { routingKey }) => {
-			// A type the deployment no longer lists keeps its binding, since the library removes none:
-			// its events are taken and dropped. An event comes by the queue's own name when its dead
-			// letters are moved back into it.
-			if (routingKey !== queue && !source.types.includes(routingKey)) {
-				logHandled(log, {
-					...identityOf(message, routingKey),
-					outcome: 'ignored',
-					reason: 'type not listened to'
-				});
-				return;
-			}
-			const parsed = activityEventSchema.safeParse(message);
-			if (!parsed.success) {
-				const reason = malformation(message, parsed.error);
-				logHandled(log, { ...identityOf(message, routingKey), outcome: 'dead_lettered', reason });
-				throw new DeadLetterError(reason);
-			}
-			const event = parsed.data;
-			const fields = leftOutFields(message, event);
-			if (fields.length > 0) {
-				deps.log.warn({ source: event.source, eventId: event.id, fields }, 'event fields left out');
-			}
-			const { wakeups, skipped, ignored } = wakeupsOf(event);
-			if (ignored > 0) {
-				deps.log.warn({ source: event.source, eventId: event.id, ignored }, 'recipients ignored');
-			}
-			for (const { index, fields } of skipped) {
-				deps.log.warn(
-					{ source: event.source, eventId: event.id, recipient: index, fields },
-					'recipient skipped'
-				);
-			}
-			// Those left out count among the recipients of the event: past the most it reads, as
-			// ignored, and those it cannot read, as invalid
-			const outcomes: RecipientOutcome[] = [
-				...skipped.map((): RecipientOutcome => 'invalid'),
-				...Array.from({ length: ignored }, (): RecipientOutcome => 'ignored')
-			];
-			const identity = {
-				source: event.source,
-				eventId: event.id,
-				type: event.type,
-				recipients: (event.data.recipients ?? []).length
-			};
-			try {
-				for (const wakeup of wakeups) outcomes.push(await wake(deps, wakeup));
-			} catch (err: unknown) {
-				const transient = isTransient(err);
-				log.warn({ ...identity, transient, err: failureOf(err) }, 'event failed');
-				if (transient) throw err;
-				const key = JSON.stringify([event.source, event.id]);
-				const count = failing?.key === key ? failing.count + 1 : 1;
-				failing = { key, count };
-				if (count < MAX_ATTEMPTS) throw err;
-				failing = null;
-				const reason = `failed ${MAX_ATTEMPTS} times`;
-				logHandled(log, { ...identity, outcome: 'dead_lettered', reason });
-				throw new DeadLetterError(reason, { cause: err });
-			}
-			failing = null;
-			logHandled(log, { ...identity, ...outcomeOf(outcomes) });
-		},
+		read,
 		options
 	);
 }
