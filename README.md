@@ -11,7 +11,7 @@ The Twake Space agent harness: one shared service, written in TypeScript, that g
 
 - Specification: issue #101 of the deployment project, https://ci.linagora.com/linagora/lrs/saas/deployments/twake/twake-workplace-cozy-apps/-/work_items/101
 - Tickets: #102 to #121 of the same project.
-- Deployment: the `agent-harness` release of that project, on the dev cluster, from the chart in `charts/twake-harness` published as an OCI package next to the image, `ghcr.io/linagora/twake-harness`.
+- Deployment: the `agent-harness` release of that project, on the dev cluster, from the chart in `charts/twake-harness` published as an OCI package next to the image, `ghcr.io/linagora/twake-harness`. Each build of `main` publishes the image as `sha-<commit>` and the chart as `0.1.0-sha-<commit>`, the same seven characters of the commit, with that image as its appVersion, so a release pins both and no later build changes them.
 - Capability catalog: [`docs/capability-catalog.md`](docs/capability-catalog.md), the contracts proposed for each Twake application and what opening one to the assistants takes.
 
 ## Stack and conventions
