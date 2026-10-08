@@ -74,6 +74,9 @@ config:
   turnHistoryMaxChars: ''
   # The most tool calls one turn may make before it stops. Empty means the harness default, 6
   turnMaxToolCalls: ''
+  # The most tokens one turn may spend, the prompts and answers of its model calls summed, before
+  # it stops. Empty means the harness default, 250000
+  turnMaxTokens: ''
   # How long a turn may go without answering before the assistant posts a status message, which
   # closes once the turn answered, in milliseconds (matrix role); at least 1000. Empty means the
   # harness default, 3000
