@@ -145,7 +145,8 @@ export async function insertPendingCall(tx: Tx, input: PendingCallInput): Promis
 }
 
 // The Matrix event and room of the question asked about a call, which its owner's answer points
-// to; false when no such call is stored, so that no answer could ever find it
+// to, and the time it was asked there, a question that asks it again counting from then; false
+// when no such call is stored, so that no answer could ever find it
 export async function recordRequestEvent(
 	tx: Tx,
 	id: string,
@@ -153,7 +154,8 @@ export async function recordRequestEvent(
 	roomId: string
 ): Promise<boolean> {
 	const result = await tx.sql`
-		update pending_calls set request_event_id = ${eventId}, room_id = ${roomId} where id = ${id}`;
+		update pending_calls set request_event_id = ${eventId}, room_id = ${roomId}, asked_at = now()
+		where id = ${id}`;
 	return result.count === 1;
 }
 
@@ -274,8 +276,9 @@ export async function findRequest(
 	return foundRequest(rows[0]);
 }
 
-// The latest request of a room still open to an answer in words, its owner having written nothing
-// else since it was asked. One that expired is found too, so that its answer gets the notice.
+// The request of a room asked there last that is still open to an answer in words, its owner
+// having written nothing else since it was asked. One that expired is found too, so that its
+// answer gets the notice.
 export async function findRequestOpenToWords(
 	tx: Tx,
 	owner: string,
@@ -285,7 +288,7 @@ export async function findRequestOpenToWords(
 		select id, status, domain, level, reasons from pending_calls
 		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
 			and words_closed_at is null
-		order by created_at desc
+		order by asked_at desc
 		limit 1`;
 	return foundRequest(rows[0]);
 }
