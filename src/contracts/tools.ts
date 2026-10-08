@@ -1,6 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
-import { findTimeZone, type TimeZone } from '../agent/clock.js';
+import { findCalendarOperation, zoneOfAnswer } from '../agent/calendar.js';
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { WaitReason } from '../consents/consent.js';
@@ -94,32 +94,14 @@ const MADE_WITHOUT_OWNER = {
 	hint: "Asked what this call would do, the application did it instead: the call was made, without the owner's yes, and the harness told the owner so. Do not make it again."
 } as const;
 
-// The read of the owner's events over whole days of their calendar's zone, from a date
-const LIST_CALENDAR_EVENTS = 'list_calendar_events';
-
-// The calendar reads whose answer names, in time_zone, the zone of the owner's calendar: the
-// contract reads it from their calendar's settings, and gives every time in it
-const OWNER_ZONE_READS: readonly string[] = [LIST_CALENDAR_EVENTS, 'read_calendar_event'];
-
-// What the info line of a call carries of its arguments: of a list of calendar events, the days it
-// reads, from and days as it sent them, those it gave, which the gateway's audit does not keep while
-// an end-to-end test checks the model's "tomorrow" by them; of any other call, nothing
-function loggedArguments(toolName: string, url: URL): Record<string, string> {
-	if (toolName !== LIST_CALENDAR_EVENTS) return {};
-	const logged: Record<string, string> = {};
-	for (const name of ['from', 'days']) {
+// Of the arguments named, those a call carries, as it sent them
+function carriedArguments(url: URL, names: readonly string[]): Record<string, string> {
+	const carried: Record<string, string> = {};
+	for (const name of names) {
 		const value = url.searchParams.get(name);
-		if (value !== null) logged[name] = value;
+		if (value !== null) carried[name] = value;
 	}
-	return logged;
-}
-
-// The zone an answer names in time_zone, by its canonical name: null when it names none the runtime
-// knows
-function zoneOf(body: unknown): TimeZone | null {
-	if (typeof body !== 'object' || body === null) return null;
-	const zone = (body as Record<string, unknown>)['time_zone'];
-	return typeof zone === 'string' ? findTimeZone(zone) : null;
+	return carried;
 }
 
 // A call as the model wrote it, ready to go on the gateway: the operation's address, with its
@@ -165,6 +147,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	// declares, until a preview of it does what the call asks, a sign that it takes the preview
 	// header for nothing. The catalog's next load makes the tool again, previews included.
 	let previewing = contract.preview;
+	// What the harness does with the calls beyond making them, when the contract is one of the
+	// calendar's operations it knows
+	const calendar = findCalendarOperation(contract.toolName);
 
 	// Freezes the call as the model wrote it until its owner answers, with the turn's session, the
 	// harness's question as its owner reads it and the digest of the preview they are shown, if
@@ -267,8 +252,8 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	}
 
 	// Calls the contract through APISIX, and logs the call, never what it sent or got back but the
-	// days a list of calendar events reads. Only a preview carries the header that asks for one, and
-	// the action carries the digest of the preview its owner allowed, never that header.
+	// arguments a calendar operation gives its line. Only a preview carries the header that asks for
+	// one, and the action carries the digest of the preview its owner allowed, never that header.
 	async function send(
 		request: ContractRequest,
 		context: ToolContext,
@@ -321,7 +306,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				method: contract.method,
 				status,
 				principal: context.principalId,
-				...loggedArguments(contract.toolName, request.url),
+				...carriedArguments(request.url, calendar?.loggedArguments ?? []),
 				...(sending.kind === 'preview' ? { preview: true } : {}),
 				...(delegation === null ? {} : { delegation })
 			},
@@ -520,7 +505,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// present in: an error says nothing of their calendar, whatever zone it names
 			const succeeded = answered.status >= 200 && answered.status < 300;
 			const zone =
-				succeeded && OWNER_ZONE_READS.includes(contract.toolName) ? zoneOf(answered.body) : null;
+				succeeded && calendar?.namesOwnerZone === true ? zoneOfAnswer(answered.body) : null;
 			if (zone !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				await withPrincipal(context.db, { id: owner }, (tx) => saveOwnerTimeZone(tx, owner, zone));
 			}
