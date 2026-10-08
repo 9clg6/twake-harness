@@ -1371,7 +1371,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		if (listener.has(roomId)) {
 			// A channel the listener was invited to: no assistant is in it, and none joins
-			if (raw.event_id !== undefined) {
+			// A message without words proposes nothing
+			if (raw.event_id !== undefined && text !== null) {
 				await suggestions.onMessage(roomId, { sender, eventId: raw.event_id, text });
 			}
 			return;

@@ -293,7 +293,7 @@ describe('a deployment that speaks French', () => {
 				}
 			}
 		};
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
 		// Alice lets her assistant read her calendar, never write there
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
 		h.apisix.contracts.calls.length = 0;

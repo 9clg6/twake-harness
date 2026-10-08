@@ -207,6 +207,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							tools: registry,
 							log: turnLog,
 							maxToolCalls: Math.min(config.turn.maxToolCalls, MAX_TOOL_CALLS),
+							maxTurnTokens: config.turn.maxTokens,
 							historyMaxChars: config.turn.historyMaxChars
 						},
 						{

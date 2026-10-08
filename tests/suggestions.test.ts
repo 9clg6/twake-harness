@@ -4,6 +4,7 @@ import { withPrincipal } from '../src/db/client.js';
 import { buildRegistration } from '../src/matrix/registration.js';
 import { makeSpaceNotifications } from '../src/suggestions/space.js';
 import { grantConsent } from './helpers/consents.js';
+import { eventually } from './helpers/feedback.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	CALENDAR_CATALOG,
@@ -157,7 +158,7 @@ describe('the assistant proposes from the messages of channels', () => {
 			}
 		});
 		h.apisix.contracts.spec = CALENDAR_CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
 		h.apisix.llm.script = proposeMonday;
 		alice = await becomeAssistantOwner('alice');
 		bob = await becomeAssistantOwner('bob');
@@ -251,13 +252,15 @@ describe('the assistant proposes from the messages of channels', () => {
 			expect.stringContaining('assistant')
 		);
 		void eventId;
-		// The write waits for its owner whatever they allowed
-		const waiting = await h.api.get<{
-			pending_calls: { id: string; reasons: string[]; channel: string }[];
-		}>(ALICE, '/v1/pending-calls');
-		expect(waiting.body.pending_calls).toHaveLength(1);
-		expect(waiting.body.pending_calls[0]?.reasons).toContain('high_risk');
-		expect(waiting.body.pending_calls[0]?.channel).toBe('api_tool');
+		// The write waits for its owner whatever they allowed, asked in their room too once the
+		// question went out there: a yes from Space then resumes it in that room
+		type Waiting = { id: string; reasons: string[]; channel: string };
+		const waiting = await eventually(async () => {
+			const { body } = await h.api.get<{ pending_calls: Waiting[] }>(ALICE, '/v1/pending-calls');
+			return body.pending_calls[0]?.channel === 'room' ? body.pending_calls : undefined;
+		}).then((calls) => calls ?? []);
+		expect(waiting).toHaveLength(1);
+		expect(waiting[0]?.reasons).toContain('high_risk');
 	});
 
 	it('creates the meeting on one click of the owner, in their name', async () => {
@@ -268,8 +271,11 @@ describe('the assistant proposes from the messages of channels', () => {
 			body: { uid: 'm-1', echo: c.method }
 		});
 		const approved = await h.api.post(ALICE, `/v1/pending-calls/${id}/approve`, {});
-		expect(approved.status).toBe(200);
-		const posted = h.apisix.contracts.calls.filter((c) => c.method === 'POST');
+		expect(approved.status).toBe(202);
+		// The resumed turn runs the call in the owner's room
+		const isPost = (c: ContractCall): boolean => c.method === 'POST';
+		await eventually(() => h.apisix.contracts.calls.some(isPost));
+		const posted = h.apisix.contracts.calls.filter(isPost);
 		expect(posted).toHaveLength(1);
 		expect(posted[0]?.path).toBe('/contracts/v1/calendar/meetings');
 		expect(posted[0]?.headers['x-twake-on-behalf-of']).toBe(ALICE);
