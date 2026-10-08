@@ -920,6 +920,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
 					const { id } = request.params;
 					if (!PENDING_CALL_ID.test(id)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
+					const parsedBody = refuseBodySchema.safeParse(request.body ?? {});
+					if (!parsedBody.success) return reply.code(400).send({ error: 'invalid request' });
+					const { reason } = parsedBody.data;
 					const call = await withOverdueExpired(principal, request.log, (tx) =>
 						findPendingCall(tx, principal.id, id)
 					);
@@ -927,6 +930,16 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					if (call.state !== 'open') {
 						if (call.state !== 'decided') {
 							answeredThroughApi(request.log, principal.id, call, 'no', call.state);
+						}
+						// Not useful is said of the channel, which the owner hears no more of, whether the
+						// suggestion still waits for them or not
+						if (reason === 'not_useful') {
+							await withPrincipal(db, principal, async (tx) => {
+								const suggestion = await findSuggestion(tx, principal.id, id);
+								if (suggestion !== null) {
+									await muteRoomFor(tx, principal.id, suggestion.roomId, NOT_USEFUL_MUTE_MS);
+								}
+							});
 						}
 						return reply.code(409).send(pendingCallClosed(call.state));
 					}
@@ -937,9 +950,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							? await refusalNotice(principal, call.channel.roomId, id)
 							: null;
 					const answerId = `api:${request.id}`;
-					const parsedBody = refuseBodySchema.safeParse(request.body ?? {});
-					if (!parsedBody.success) return reply.code(400).send({ error: 'invalid request' });
-					const { reason } = parsedBody.data;
 					const refused = await withPrincipal(db, principal, async (tx) => {
 						// What a suggestion needs of its call is read before the refusal erases it
 						const suggestion =
@@ -948,11 +958,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							suggestion === null
 								? null
 								: readMeeting(readJsonColumn(await readCallArguments(tx, principal.id, id)));
-						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
-						if (notice !== null) await enqueueJob(tx, notice);
+						// Before the refusal, which an answer that came first wins
 						if (suggestion !== null && reason === 'not_useful') {
 							await muteRoomFor(tx, principal.id, suggestion.roomId, NOT_USEFUL_MUTE_MS);
 						}
+						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
+						if (notice !== null) await enqueueJob(tx, notice);
 						// Another time is tried once: the second suggestion is not offered a third
 						if (
 							suggestion !== null &&

@@ -380,6 +380,13 @@ describe('the assistant proposes from the messages of channels', () => {
 		);
 		await sleep(3000);
 		expect(llmCalls()).toBe(calls);
+		// Not useful still mutes the room of a suggestion already answered
+		const late = await h.api.post(
+			'erin@test.local',
+			`/v1/pending-calls/${retry.body['pendingCallId'] as string}/refuse`,
+			{ reason: 'not_useful' }
+		);
+		expect(late.status).toBe(409);
 		// Not useful: the room is muted for that member
 		const other = await openChannel(erin, [bob]);
 		await withPrincipal(h.db, { id: 'erin@test.local' }, (tx) => tx.sql`delete from suggestions`);
@@ -401,7 +408,7 @@ describe('the assistant proposes from the messages of channels', () => {
 			'erin@test.local',
 			'/v1/suggestions/settings'
 		);
-		expect(settings.body.mutedRooms).toEqual([other]);
+		expect([...settings.body.mutedRooms].sort()).toEqual([other, room].sort());
 		const muted = await withPrincipal(
 			h.db,
 			{ id: 'erin@test.local' },
