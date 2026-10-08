@@ -262,6 +262,8 @@ function errcodeOf(err: unknown): string | null {
 
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
 	const { config, db, log } = options;
+	// The creator's questions expire by this process's clock alone: the chart keeps the matrix role
+	// at one replica, as the values file says, so no other clock reads them
 	const clock = options.clock ?? SYSTEM_CLOCK;
 	const messages = getMessages(config.locale);
 	const fetchMessages = (owner: string): Promise<Messages> =>
