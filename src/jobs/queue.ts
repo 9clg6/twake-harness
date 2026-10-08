@@ -48,14 +48,25 @@ export async function enqueueJob(db: Db | Tx, input: EnqueueInput): Promise<bool
 	return result.count === 1;
 }
 
-// Queued anew even after a job of the same key failed for good, which keeps its key and would
-// refuse every later one: that job goes first. A job of the key still queued or running keeps it.
-export async function enqueueJobAnew(
-	db: Db,
+// Queued even when a job of the same key failed for good: that job no longer holds the key, and
+// the new one takes its row, as if newly queued, under a fresh id that puts it at the back of the
+// queue. A job of the key still queued, running or deferred keeps it, and nothing is queued.
+export async function enqueueJobReplacingFailed(
+	db: Db | Tx,
 	input: EnqueueInput & { readonly dedupKey: string }
 ): Promise<boolean> {
-	await db.sql`delete from jobs where dedup_key = ${input.dedupKey} and status = 'failed'`;
-	return enqueueJob(db, input);
+	const payload = JSON.stringify(input.payload);
+	const groupKey = input.groupKey ?? null;
+	const result = await db.sql`
+		insert into jobs (kind, payload, group_key, dedup_key)
+		values (${input.kind}, ${payload}::jsonb, ${groupKey}, ${input.dedupKey})
+		on conflict (dedup_key) do update set
+			id = nextval(pg_get_serial_sequence('jobs', 'id')), kind = excluded.kind,
+			payload = excluded.payload, group_key = excluded.group_key, status = 'queued', attempts = 0,
+			deferrals = 0, first_deferred_at = null, run_after = now(), locked_by = null,
+			locked_at = null, last_error = null, created_at = now(), finished_at = null
+		where jobs.status = 'failed'`;
+	return result.count === 1;
 }
 
 // Claims the oldest runnable job of the given kinds, skipping what other workers hold. A job
