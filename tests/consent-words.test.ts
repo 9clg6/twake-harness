@@ -3,7 +3,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import {
 	modelFor,
 	modelUsing,
-	QUESTION_KEY,
+	QUESTION_CONTENT_KEY,
 	readCatalog,
 	startConsentRoom,
 	type ConsentRoom
@@ -20,8 +20,6 @@ const DOMAINS = [
 	'boards',
 	'sheets'
 ];
-
-const DAY_MS = 24 * 60 * 60 * 1000;
 
 describe('I answer the question in words', () => {
 	let r: ConsentRoom;
@@ -105,7 +103,6 @@ describe('I answer the question in words', () => {
 	it('tells my client which request its question is and until when, in words left unchanged', async () => {
 		r.h.apisix.llm.script = modelUsing('search_sheets', { q: 'budget' });
 		const seen = r.questions().length;
-		const askedAt = Date.now();
 		await r.client.sendText(r.room, 'Find the budget in my sheets');
 		const asked = await r.nextQuestion(seen);
 		const question = r.questions().find((m) => m.eventId === asked);
@@ -116,19 +113,14 @@ describe('I answer the question in words', () => {
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
-		// The request as the API shows it waiting for me: the same id, and the same end, a day after
-		// I asked
-		const request = await r.waitingRequest('sheets');
-		const expiresAt = Date.parse(request.expires_at);
-		expect(question?.content[QUESTION_KEY]).toEqual({ id: request.id, expires_ts: expiresAt });
-		expect(Math.abs(expiresAt - (askedAt + DAY_MS))).toBeLessThan(60_000);
+		await r.requestAskedIn(asked, 'sheets');
 		// My yes in words answers it as before
 		const found = r.saying('Found:').length;
 		await r.client.sendText(r.room, 'oui');
 		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/sheets/items');
 		// Only its questions are marked: not its welcome, nor an answer or a notice
 		const marked = r.client.messages.filter(
-			(m) => m.roomId === r.room && m.sender === r.assistantId && QUESTION_KEY in m.content
+			(m) => m.roomId === r.room && m.sender === r.assistantId && QUESTION_CONTENT_KEY in m.content
 		);
 		expect(marked.map((m) => m.eventId)).toEqual(r.questions().map((m) => m.eventId));
 	});
