@@ -1,6 +1,7 @@
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
+import { requestRevocation } from '../consents/revocation.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { eraseAssistant } from './erasure.js';
 import { fetchOwnerMessages } from './locale.js';
@@ -323,9 +324,13 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 					throw err;
 				}
 			}
-			const erased = await withPrincipal(db, { id: owner }, (tx) =>
-				eraseAssistant(tx, record, requestedAt)
-			);
+			const erased = await withPrincipal(db, { id: owner }, async (tx) => {
+				if (!(await eraseAssistant(tx, record))) return false;
+				// Once the owner's jobs are erased, which never take it: the deletion is done once this
+				// commits, whatever the broker answers later
+				await requestRevocation(tx, owner, requestedAt);
+				return true;
+			});
 			if (!erased) return false;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
