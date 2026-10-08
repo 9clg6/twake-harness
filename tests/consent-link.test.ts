@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { makeOwnerConsentLink } from '../src/contracts/consent-link.js';
+import {
+	makeOptionalOwnerConsentLink,
+	makeOwnerConsentLink
+} from '../src/contracts/consent-link.js';
 
 describe("the token broker's consent link, bound to the owner it is for", () => {
 	it('names the owner exactly, encoded for a query string', () => {
@@ -19,6 +22,6 @@ describe("the token broker's consent link, bound to the owner it is for", () => 
 	});
 
 	it('gives no link when the deployment gives none', () => {
-		expect(makeOwnerConsentLink(null, 'alice@test.local')).toBeNull();
+		expect(makeOptionalOwnerConsentLink(null, 'alice@test.local')).toBeNull();
 	});
 });
