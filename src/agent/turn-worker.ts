@@ -12,7 +12,8 @@ import {
 	expireHeldRequest,
 	findPendingCall,
 	reopenRequest,
-	toYesNoQuestion
+	toYesNoQuestion,
+	type RequestState
 } from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
@@ -44,11 +45,11 @@ export type TurnPayload = z.infer<typeof turnPayload>;
 // The prefix that keys a turn an event woke, in its payload and its jobs' dedup keys
 const EVENT_KEY_PREFIX = 'event:';
 
-// How long the turn of an event waits the first time admission refuses it, before it is tried
-// again: each refusal after that doubles the wait, up to a minute, the window of the turns a user
-// may start per minute
-const EVENT_TURN_RETRY_MS = 2000;
-const EVENT_TURN_RETRY_MAX_MS = 60_000;
+// How long a turn nobody can send again waits the first time admission refuses it, before it is
+// tried again, whether an event woke it or its owner's yes resumed it: each refusal after that
+// doubles the wait, up to a minute, the window of the turns a user may start per minute
+const REFUSED_TURN_RETRY_MS = 2000;
+const REFUSED_TURN_RETRY_MAX_MS = 60_000;
 
 // What links a turn's contract calls and log lines to their cause: the Matrix id of the owner's
 // message, or, for a turn an event woke, the bare id the event's source gave it, so that the
@@ -100,6 +101,12 @@ export interface ProgressPayload {
 	readonly actions: number;
 }
 
+// What the yes of a turn admission refused did to the call it allowed, in the state an answer finds
+// its request: settled, open again or closed, or left as it was, null once the call is gone
+type Settlement =
+	| { readonly settled: true; readonly state: Extract<RequestState, 'open' | 'expired'> }
+	| { readonly settled: false; readonly state: RequestState | null };
+
 export interface TurnWorkerOptions {
 	readonly db: Db;
 	readonly agent: AgentService;
@@ -138,7 +145,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return null;
 		}
 		const deferral: Deferral = {
-			retryInMs: Math.min(EVENT_TURN_RETRY_MS * 2 ** job.deferrals, EVENT_TURN_RETRY_MAX_MS, leftMs)
+			retryInMs: Math.min(
+				REFUSED_TURN_RETRY_MS * 2 ** job.deferrals,
+				REFUSED_TURN_RETRY_MAX_MS,
+				leftMs
+			)
 		};
 		turnLog.info({ owner, reason, ...deferral }, `${kind} turn deferred`);
 		return deferral;
@@ -208,12 +219,13 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// The call its owner allowed did not run, admission refusing the turn their yes resumed: their
-	// day is spent, or the turn waited for room too long. Their request waits for an answer again,
-	// should it last until the refusal lifts, at midnight or now, which the assistant tells them on
-	// a message marked as the request, for their client to offer the answers again; otherwise it
-	// closes as expired, which the assistant tells them too. The job is done in the same
-	// transaction, so that their next yes queues one again.
-	async function reopen(
+	// day is spent, or the turn waited for room too long. The yes settles the call all the same: its
+	// request waits for an answer again, should it last until the refusal lifts, at midnight or now,
+	// which the assistant tells them on a message marked as the request, for their client to offer
+	// the answers again; otherwise it closes as expired, which the assistant tells them too. The job
+	// is done in the same transaction, so that their next yes queues one again. A call that no
+	// longer waits to run is left as it is, and one whose yes is still to be recorded waits for it.
+	async function settleRefusedYes(
 		job: Job,
 		request: ResumeRequest,
 		assistant: AssistantRecord,
@@ -222,23 +234,23 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	): Promise<Deferral | null> {
 		const { owner, roomId, pendingCallId } = request;
 		const { consent } = await fetchOwnerMessages(db, owner, locale);
-		// When the refusal lifts, and what the assistant says once the request waits again or closed: a
-		// spent day lifts at midnight, and a turn kept waiting too long for room may run at once
-		const held =
+		// When the refusal lifts, and what the assistant tells the owner of their request, open again or
+		// expired: a spent day lifts at midnight, and a turn kept waiting too long for room may run at
+		// once
+		const { liftsInMs, told } =
 			refusal.reason === 'user_budget'
 				? {
 						liftsInMs: refusal.liftsInMs,
-						reopened: consent.heldUntilMidnight,
-						expired: consent.endsBeforeMidnight
+						told: { open: consent.heldUntilMidnight, expired: consent.endsBeforeMidnight }
 					}
-				: { liftsInMs: 0, reopened: consent.heldTooLong, expired: consent.expired };
-		const { liftsInMs } = held;
-		const state = await withPrincipal(db, { id: owner }, async (tx) => {
+				: { liftsInMs: 0, told: { open: consent.heldTooLong, expired: consent.expired } };
+		const settlement = await withPrincipal(db, { id: owner }, async (tx): Promise<Settlement> => {
 			const reopened = await reopenRequest(tx, owner, pendingCallId, requestLifetimeMs, liftsInMs);
 			if (!reopened && !(await expireHeldRequest(tx, owner, pendingCallId))) {
 				const found = await findPendingCall(tx, owner, pendingCallId);
-				return found?.state === 'open' ? 'unanswered' : null;
+				return { settled: false, state: found?.state ?? null };
 			}
+			const state = reopened ? 'open' : 'expired';
 			const call = reopened ? await findPendingCall(tx, owner, pendingCallId) : null;
 			const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
 			await enqueueJob(tx, {
@@ -246,7 +258,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				payload: {
 					asUserId: assistant.userId,
 					roomId,
-					text: reopened ? held.reopened : held.expired,
+					text: told[state],
 					outcome: 'failed',
 					...(reopened ? { request: { pendingCallId, owner } } : {}),
 					...(questionMarker === null ? {} : { questionMarker }),
@@ -255,21 +267,22 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				groupKey: `send:${roomId}`
 			});
 			await completeJob(tx, job.id);
-			return reopened ? 'reopened' : 'expired';
+			return { settled: true, state };
 		});
-		// The matrix role records a yes after it queued its job: a job refused in between waits for the
-		// yes as a turn waits for room, and once given up, leaves the call open to the owner's answer
-		if (state === 'unanswered') {
-			return deferOrAbandon(job, refusal.reason, turnLog, owner, 'resumed');
-		}
-		if (state === null) {
+		if (!settlement.settled) {
+			// The matrix role records a yes right after it queued its job: a job refused in between waits
+			// for the yes as a turn waits for room, and once given up, leaves the call open to the
+			// owner's answer
+			if (settlement.state === 'open') {
+				return deferOrAbandon(job, refusal.reason, turnLog, owner, 'resumed');
+			}
 			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
-		} else {
-			turnLog.info(
-				{ pendingCallId, reason: refusal.reason, liftsInMs, state },
-				'held request settled'
-			);
+			return null;
 		}
+		turnLog.info(
+			{ pendingCallId, reason: refusal.reason, liftsInMs, state: settlement.state },
+			'refused yes settled'
+		);
 		return null;
 	}
 
@@ -302,13 +315,13 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		}
 		// The owner allowed the call already, and sending their yes again would change nothing: a turn
 		// refused for room waits for it, and one refused for their day, or kept waiting too long,
-		// leaves the call to their answer again
+		// settles the call their yes allowed
 		if (result.kind === 'busy') {
 			if (result.reason !== 'user_budget') {
 				const deferral = deferOrAbandon(job, result.reason, turnLog, owner, 'resumed');
 				if (deferral !== null) return deferral;
 			}
-			return reopen(job, request, assistant, result, turnLog);
+			return settleRefusedYes(job, request, assistant, result, turnLog);
 		}
 		if (result.kind !== 'ok') turnLog.warn({ result }, 'resumed turn did not succeed');
 		// Read once the turn is over: the owner may have changed their language in it
