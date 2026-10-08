@@ -114,6 +114,15 @@ describe('the assistant proposes from the messages of channels', () => {
 		await sleep(5000);
 		return (await h.synapse.joinedMembers(owner, room)).includes(LISTENER);
 	}
+	// Whether a user is still in a room once it had time to join and leave
+	async function listenerStaysFor(
+		owner: MatrixUser,
+		room: string,
+		userId: string
+	): Promise<boolean> {
+		await sleep(5000);
+		return (await h.synapse.joinedMembers(owner, room)).includes(userId);
+	}
 	const invite = (owner: MatrixUser, room: string): Promise<unknown> =>
 		h.synapse.request(
 			owner,
@@ -576,6 +585,68 @@ describe('the assistant proposes from the messages of channels', () => {
 		it('never posts anything in a channel', async () => {
 			const messages = await h.synapse.messagesFrom(bob, channel, LISTENER);
 			expect(messages).toEqual([]);
+		});
+	});
+
+	// D128 of Twake Chat: the owner of an encrypted direct conversation invites their assistant,
+	// warned first; it reads both sides for its owner alone and never writes there
+	describe('an assistant its owner invites into an encrypted direct conversation', () => {
+		it('stays, proposes to its owner alone, never writes, and stops once removed', async () => {
+			const tag = Math.random().toString(36).slice(2, 7);
+			const owner = await becomeAssistantOwner(`o${tag}`);
+			const other = await becomeAssistantOwner(`t${tag}`);
+			const ownerClient = await startE2eeClient(h.synapse.url, owner);
+			const otherClient = await startE2eeClient(h.synapse.url, other);
+			try {
+				const room = await ownerClient.createDirectRoom(other.userId);
+				await otherClient.joinRoom(room);
+				const principal = `o${tag}@test.local`;
+				const rows = await withPrincipal(
+					h.db,
+					{ id: principal },
+					(tx) => tx.sql<{ user_id: string }[]>`
+						select user_id from assistants where owner = ${principal}`
+				);
+				const assistant = rows[0]?.user_id ?? '';
+				await ownerClient.client.inviteUser(assistant, room);
+				await until(async () =>
+					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`)
+						.length === 1
+						? true
+						: null
+				);
+				expect(await listenerStaysFor(owner, room, assistant)).toBe(true);
+
+				// The other person writes: a proposal goes to the owner, none to the other person
+				const before = space.calls.length;
+				await otherClient.sendText(room, 'ok on parle lundi à 10h');
+				const call = await until(() =>
+					space.calls.slice(before).find((c) => c.body['matrixRoomId'] === room)
+				);
+				expect(call.body['matrixUserId']).toBe(owner.userId);
+				await sleep(3000);
+				expect(
+					space.calls.slice(before).filter((c) => c.body['matrixUserId'] === other.userId)
+				).toHaveLength(0);
+				// Not a word from the assistant in the conversation
+				expect(
+					otherClient.events
+						.filter((e) => e.roomId === room && e.sender === assistant)
+						.filter((e) => e.type === 'm.room.message')
+				).toHaveLength(0);
+
+				// Removed by the other person: forgotten
+				await otherClient.client.kickUser(assistant, room);
+				await until(async () =>
+					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`)
+						.length === 0
+						? true
+						: null
+				);
+			} finally {
+				await ownerClient.stop();
+				await otherClient.stop();
+			}
 		});
 	});
 });

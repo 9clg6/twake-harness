@@ -30,8 +30,9 @@ export interface ChannelMessage {
 export interface SuggestionIntake {
 	// The listener left a room: the last message held of it is dropped
 	forget(roomId: string): void;
-	// A clear message of a channel the listener is in
-	onMessage(roomId: string, message: ChannelMessage): Promise<void>;
+	// A clear message of a channel the listener is in; with `onlyFor`, a message of an encrypted
+	// direct conversation whose owner invited their assistant, which proposes to that owner alone
+	onMessage(roomId: string, message: ChannelMessage, onlyFor?: string): Promise<void>;
 	// The role stops: what is held goes, and nothing is looked for any more
 	stop(): void;
 }
@@ -87,7 +88,7 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			clearInterval(sweeping);
 			recent.clear();
 		},
-		async onMessage(roomId, message) {
+		async onMessage(roomId, message, onlyFor) {
 			if (!config.suggestions.enabled) return;
 			sweep();
 			const sender = principalOfMatrixUser(config, message.sender);
@@ -119,8 +120,9 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			const quoted: Quoted[] = [context, current]
 				.filter((item): item is Remembered => item !== null)
 				.map(({ author, email, text }) => ({ author, email, text }));
-			// The conversation pair: whoever wrote the message and whoever wrote the one before
-			const owners = [...new Set(quoted.map((q) => q.email))];
+			// The conversation pair: whoever wrote the message and whoever wrote the one before; the
+			// owner alone where they invited their assistant, the other member having asked nothing
+			const owners = onlyFor === undefined ? [...new Set(quoted.map((q) => q.email))] : [onlyFor];
 			let queued = 0;
 			for (const owner of owners) {
 				if (!(await hasAssistant(owner))) continue;
