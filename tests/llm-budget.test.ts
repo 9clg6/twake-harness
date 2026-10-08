@@ -241,4 +241,32 @@ describe('the token budget of a turn', () => {
 			tokens: 300_000
 		});
 	});
+
+	it('logs them and what it spent when the answer that takes it past them goes past its tool calls too', async () => {
+		// One answer makes seven reads and reports 300,000 tokens: six run, the seventh is past the six
+		// tool calls of a message, and the turn is past its tokens
+		const progress = 'I read your consents six times; one read remains. Ask me to continue.';
+		h.apisix.llm.script = (request) =>
+			request.tools === undefined
+				? { content: progress }
+				: {
+						toolCalls: Array.from({ length: 7 }, (_, n) => readCall(n)),
+						usage: { promptTokens: 295_000, completionTokens: 5_000 }
+					};
+		const { status, body } = await chat(h, 'hank', 'Read them all at once', 'turn-tokens-calls');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(progress);
+		const lines = h.logLines().filter((line) => line['reqId'] === 'turn-tokens-calls');
+		expect(lines.find((line) => line['msg'] === 'tool call limit reached')).toMatchObject({
+			limit: 6,
+			notRun: 1
+		});
+		expect(lines.find((line) => line['msg'] === 'token limit reached')).toMatchObject({
+			level: 30,
+			limit: 250_000,
+			tokens: 300_000
+		});
+		// The model is told of the read that did not run
+		expect(h.apisix.llm.calls[1]?.request.messages[0]?.content).toMatch(/limit of 6 tool calls/);
+	});
 });

@@ -352,10 +352,13 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// The message ran all the calls it may, or the turn spent all its tokens: rather than fail, the
 	// turn ends on the model's own account of what it did and what remains, which only the call that
 	// asks for it is told to give
+	// Each limit reached is logged; the model is told of the tool calls when one answer reached both,
+	// as the calls it made past them did not run
 	const reached: TurnLimit = notRun > 0 ? 'tool_calls' : 'tokens';
-	if (reached === 'tool_calls') {
+	if (notRun > 0) {
 		deps.log.info({ limit: deps.maxToolCalls, toolCalls, notRun }, 'tool call limit reached');
-	} else {
+	}
+	if (spent.tokens >= deps.maxTurnTokens) {
 		deps.log.info({ limit: deps.maxTurnTokens, tokens: spent.tokens }, 'token limit reached');
 	}
 	// In the system prompt rather than a message of its own: some chat templates refuse a system
