@@ -44,6 +44,11 @@ const DAY_SPENT = 'I have reached my limit for the day';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 
+// What the assistant asks me once my words came from a session that an identity of mine it does
+// not know signed
+const IDENTITY_QUESTION =
+	'Your encryption identity is not the one I know. Did you reset your identity yourself? Answer yes or no in your next message.';
+
 // A literal model: it tells of the event a turn names, says what it remembers of me, searches our
 // past conversations or the application I name, tells what a search found, and repeats anything
 // else it hears
@@ -125,12 +130,22 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		return r.client.messages.filter((m) => m.roomId === creatorRoom && m.sender === creatorId);
 	}
 
-	// What the creator answers me next, once I wrote it a message
-	async function answerTo(text: string): Promise<string> {
+	// What the creator answers me next, once I wrote it a message: when I say what its answer looks
+	// like, the first of its messages since then that does, as it may tell me something else first
+	async function answerTo(
+		text: string,
+		answer: (body: string) => boolean = () => true
+	): Promise<string> {
 		const seen = fromCreator().length;
 		await r.client.sendText(creatorRoom, text);
-		await until(`the creator answered « ${text} »`, () => fromCreator().length > seen);
-		return fromCreator()[seen]?.body ?? '';
+		let answered: string | undefined;
+		await until(`the creator answered « ${text} »`, () => {
+			answered = fromCreator()
+				.slice(seen)
+				.find((m) => answer(m.body))?.body;
+			return answered !== undefined;
+		});
+		return answered ?? '';
 	}
 
 	// What my assistant answers me in a room once I wrote it a message: the first of its messages
@@ -551,6 +566,31 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect((await failedSends()).sort()).toEqual([CAROLS_ASSISTANT, r.assistantId].sort());
 		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
 		expect(await failedSends()).toEqual([CAROLS_ASSISTANT]);
+	});
+
+	it('asks me again, in its new room, about an identity of mine it does not know, and keeps the one it holds', async () => {
+		expect((await r.h.api.post(ALICE, '/v1/assistants', { name: 'Iris' })).status).toBe(201);
+		const room = await meetNewAssistant('Iris', []);
+		// My words from this session, which my new identity signed, raise the question
+		const after = await r.client.resetIdentity();
+		await ask(room, 'Hello after my reset', (t) => t === IDENTITY_QUESTION);
+		// The creator may tell me first that my identity changed
+		await answerTo('/delete', (t) => t.includes('Delete Iris?'));
+		expect(await answerTo('yes', (t) => t.startsWith('Your assistant is deleted'))).toBe(
+			'Your assistant is deleted. Send /newbot when you want a new one.'
+		);
+		// The identity it holds stays, and so does the one it saw last, before my next words show it
+		// again
+		expect((await r.h.api.get(ALICE, '/v1/assistants/me/owner-identity')).body).toMatchObject({
+			pinned,
+			published: { master_key: after }
+		});
+		await answerTo('/newbot', (t) => t === 'Which name do you want for your assistant?');
+		expect(await answerTo('Iris', (t) => t.startsWith('Done.'))).toContain(
+			`Done. Your assistant Iris is ${r.assistantId}`
+		);
+		const next = await meetNewAssistant('Iris', [room]);
+		await ask(next, 'Hello again after my reset', (t) => t === IDENTITY_QUESTION);
 	});
 });
 
