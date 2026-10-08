@@ -93,6 +93,38 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		expect(await nameShown(owner, room, created.body.userId, 'Friday')).toBe('Friday');
 	});
 
+	it('goes by its name in the room a provisioner makes its home', async () => {
+		const { owner, assistant } = await provisioned('rosa', 'Rosa PARKS');
+		// The homeserver is slow to take the name the assistant writes as it joins
+		let release = (): void => undefined;
+		const slow = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let held = 0;
+		h.apisix.matrixHold = (call) => {
+			if (call.method !== 'PUT' || !call.path.includes('/state/m.room.member/') || held > 0) {
+				return null;
+			}
+			held += 1;
+			return slow;
+		};
+		try {
+			const room = await h.synapse.createDirectRoom(owner, assistant.userId);
+			await h.synapse.waitForMember(owner, room, assistant.userId);
+			await eventually(() => held === 1);
+			const home = await h.api.put(PROVISIONER, `${provisioningPath(owner.userId)}/home`, {
+				roomId: room
+			});
+			expect(home.status).toBe(204);
+			expect(await nameShown(owner, room, assistant.userId, "Rosa's assistant")).toBe(
+				"Rosa's assistant"
+			);
+		} finally {
+			release();
+			h.apisix.matrixHold = null;
+		}
+	});
+
 	it('goes by each name its owner gives it in their room', async () => {
 		const { owner, assistant } = await provisioned('omar', 'Omar SY');
 		const room = await h.synapse.createDirectRoom(owner, assistant.userId);
