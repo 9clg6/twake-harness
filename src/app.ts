@@ -386,6 +386,24 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		return reply.code(503).header('retry-after', '5').send({ error: 'not_ready' });
 	}
 
+	// The owner's assistant as its provisioner reads it, never made nor brought back by reading:
+	// what the provisioning answers for one that exists, none for an owner without one
+	app.get('/v1/provisioning/assistants/:owner', async (request, reply) => {
+		const client = await admitProvisioner(request, reply);
+		if (client === null) return reply;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const assistant = await assistants.find(owner);
+		if (assistant === null) return reply.code(404).send(NO_ASSISTANT);
+		return answerAssistant(
+			request,
+			reply,
+			{ client, owner, userId: assistant.userId },
+			'assistant read by a client'
+		);
+	});
+
 	app.put('/v1/provisioning/assistants/:owner', async (request, reply) => {
 		const client = await admitProvisioner(request, reply);
 		if (client === null) return reply;

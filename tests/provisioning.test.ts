@@ -80,22 +80,47 @@ describe('the provisioning API admits its provisioners only', () => {
 		expect(none.status).toBe(404);
 		expect(none.body).toEqual({ error: 'no assistant' });
 	});
+
+	it("reads an owner's assistant for a provisioner only, and none for an owner without one", async () => {
+		const anonymous = await h.app.inject({ method: 'GET', url: provisioningPath(OWNER) });
+		expect(anonymous.statusCode).toBe(401);
+		// The owner's own token is not a provisioner's either
+		expect(await api.get('bob@test.local', provisioningPath(OWNER))).toEqual({
+			status: 403,
+			body: { error: 'not a provisioner' }
+		});
+		expect(await api.get(PROVISIONER, provisioningPath('@bob:elsewhere.example'))).toEqual({
+			status: 422,
+			body: { error: 'owner not on the homeserver' }
+		});
+		expect(await api.get(PROVISIONER, provisioningPath(OWNER))).toEqual({
+			status: 404,
+			body: { error: 'no assistant' }
+		});
+	});
 });
 
 describe('a provisioned assistant', () => {
 	let h: MatrixTestHarness;
 	const clients: E2eeClient[] = [];
 
+	interface OnTheWire {
+		readonly status: number;
+		readonly body: Record<string, unknown>;
+		readonly retryAfter: string | undefined;
+	}
+
 	// The provisioner's call as it goes on the wire, its headers included
-	async function provision(
+	async function provisionerCall(
+		method: 'GET' | 'PUT',
 		owner: string,
-		body: Record<string, unknown> = {}
-	): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | undefined }> {
+		body?: Record<string, unknown>
+	): Promise<OnTheWire> {
 		const res = await h.apps[0]!.inject({
-			method: 'PUT',
+			method,
 			url: provisioningPath(owner),
 			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
-			payload: body
+			...(body === undefined ? {} : { payload: body })
 		});
 		const retryAfter = res.headers['retry-after'];
 		return {
@@ -103,6 +128,15 @@ describe('a provisioned assistant', () => {
 			body: res.json() as Record<string, unknown>,
 			retryAfter: retryAfter === undefined ? undefined : String(retryAfter)
 		};
+	}
+
+	function provision(owner: string, body: Record<string, unknown> = {}): Promise<OnTheWire> {
+		return provisionerCall('PUT', owner, body);
+	}
+
+	// What the provisioner reads of the owner's assistant, which makes none
+	function read(owner: string): Promise<OnTheWire> {
+		return provisionerCall('GET', owner);
 	}
 
 	async function provisionerPut(
@@ -169,6 +203,56 @@ describe('a provisioned assistant', () => {
 		const again = await provision(bob.userId);
 		expect(again.status).toBe(200);
 		expect(again.body).toEqual(mine);
+	});
+
+	it('is read without being made: none before the provisioning, then the identity it gave', async () => {
+		const ada = await h.synapse.registerUser('ada');
+
+		expect(await read(ada.userId)).toEqual({ status: 404, body: { error: 'no assistant' } });
+		// Reading made none: its owner finds none either
+		expect((await h.api.get('ada@test.local', '/v1/assistants/me')).status).toBe(404);
+
+		const mine = await provisionUntilReady(h.api, ada.userId);
+		expect(await read(ada.userId)).toEqual({ status: 200, body: mine });
+	});
+
+	it('is read as not ready while the provisioning says so, then as its identity', async () => {
+		const ivy = await h.synapse.registerUser('ivy');
+		// The homeserver refuses every upload of the identity while the provisioner calls
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/device_signing/upload')
+				? 500
+				: null;
+		try {
+			expect((await provision(ivy.userId)).status).toBe(503);
+			expect(await read(ivy.userId)).toEqual({
+				status: 503,
+				body: { error: 'not_ready' },
+				retryAfter: '5'
+			});
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+
+		// Read again after each 503, until the harness prepared it
+		let later = await read(ivy.userId);
+		for (let i = 0; i < 120 && later.status === 503; i += 1) {
+			await sleep(250);
+			later = await read(ivy.userId);
+		}
+		expect(later.status).toBe(200);
+		expect(later.body).toEqual((await provision(ivy.userId)).body);
+	});
+
+	it('is none to its provisioner once its owner deleted it, and stays deleted once read', async () => {
+		const max = await h.synapse.registerUser('max');
+		await provisionUntilReady(h.api, max.userId);
+		expect((await h.api.delete('max@test.local', '/v1/assistants/me')).status).toBe(204);
+
+		const none = { status: 404, body: { error: 'no assistant' } };
+		expect(await read(max.userId)).toEqual(none);
+		// Reading did not bring it back: its owner finds none either
+		expect((await h.api.get('max@test.local', '/v1/assistants/me')).status).toBe(404);
 	});
 
 	it('becomes ready after a failed preparation, without its provisioner calling again', async () => {
@@ -824,6 +908,9 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 		expect(await provisionUntil(rita.userId, 409)).toEqual({ error: 'recovery_needed' });
 		// Asking again changes nothing: only the owner's recovery brings the identity back
 		expect((await provision(rita.userId)).status).toBe(409);
+		// Reading it answers as the provisioning does
+		const read = await h.api.get(PROVISIONER, provisioningPath(rita.userId));
+		expect(read).toEqual({ status: 409, body: { error: 'recovery_needed' } });
 
 		// The provisioner asks for it on the owner's behalf, as the owner would
 		const asked = await h.apps[0]!.inject({
@@ -836,5 +923,7 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 		const after = await provisionUntil(rita.userId, 200);
 		expect(after['masterKey']).toBe(before['masterKey']);
 		expect(after['deviceId']).not.toBe(before['deviceId']);
+		const readAfter = await h.api.get(PROVISIONER, provisioningPath(rita.userId));
+		expect(readAfter).toEqual({ status: 200, body: after });
 	});
 });
