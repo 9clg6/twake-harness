@@ -60,9 +60,14 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 	): Promise<{ readonly questionId: string; readonly says: Answer } | 'again' | null> {
 		const { roomId, owner, assistantUserId } = room;
 		return withPrincipal(db, { id: owner }, async (tx) => {
-			if (written !== null && (await isIdentityAnswerEvent(tx, owner, eventId))) return 'again';
+			// Closed first, which takes the owner's row: of two deliveries of the same words at once,
+			// the one that waited for the other finds the question closed, then the answer it took
 			const question = await closeIdentityQuestion(tx, owner, roomId, eventId);
-			if (question === null || written === null) return null;
+			if (written === null) return null;
+			if (question === null) {
+				// Delivered again, the message that answered is still that answer
+				return (await isIdentityAnswerEvent(tx, owner, eventId)) ? 'again' : null;
+			}
 			// The owner answers the newest question of the room, as their client shows it
 			if (await isRequestOpenToWordsSince(tx, owner, roomId, question.askedAt)) return null;
 			const { says, texts } = written;
