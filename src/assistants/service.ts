@@ -3,6 +3,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { fetchOwnerMessages } from './locale.js';
+import { requestNaming } from './naming.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
 import { announceCommands } from '../matrix/commands.js';
 import { nameInRoom } from '../matrix/naming.js';
@@ -263,10 +264,14 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (!isValidAssistantName(name)) return null;
 			const record = await current(owner);
 			if (record === null) return null;
-			await admin.setDisplayName(record.userId, name);
-			await withPrincipal(db, { id: owner }, (tx) => renameAssistant(tx, owner, name));
+			const named = await admin.setDisplayName(record.userId, name);
+			// Its rooms show the name too, by a job that tries again when they refuse it
+			await withPrincipal(db, { id: owner }, async (tx) => {
+				await renameAssistant(tx, owner, name);
+				await requestNaming(tx, owner);
+			});
 			// The name is the owner's own text: only debug carries it, as with conversations
-			log.info({ owner, userId: record.userId }, 'assistant renamed');
+			log.info({ owner, userId: record.userId, named }, 'assistant renamed');
 			log.debug({ owner, userId: record.userId, name }, 'assistant renamed');
 			return toView({ ...record, name });
 		},

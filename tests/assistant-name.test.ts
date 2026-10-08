@@ -78,4 +78,18 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 			"Nina's assistant"
 		);
 	});
+
+	it('goes by each name its owner gives it in their room', async () => {
+		const { owner, assistant } = await provisioned('omar', 'Omar SY');
+		const room = await h.synapse.createDirectRoom(owner, assistant.userId);
+		expect(await nameShown(owner, room, assistant.userId, "Omar's assistant")).toBe(
+			"Omar's assistant"
+		);
+
+		for (const name of ['Jarvis', 'Vision']) {
+			const renamed = await h.api.put('omar@test.local', '/v1/assistants/me', { name });
+			expect(renamed.status).toBe(200);
+			expect(await nameShown(owner, room, assistant.userId, name)).toBe(name);
+		}
+	});
 });
