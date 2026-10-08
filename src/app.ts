@@ -341,11 +341,14 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 
 	// A provisioner, such as the identity server the Twake Chat clients ask for their assistant,
 	// acts for the owner it names after authenticating them itself. Only the service clients named
-	// in the settings may, never a user. Resolves to the client admitted, or null once refused.
+	// in the settings may, never a user. The owner is named by their Matrix identifier on the
+	// assistants' homeserver, as the provisioner authenticated them: their principal is the
+	// platform's email for that account. Resolves to the client admitted and the owner it acts for,
+	// or null once refused.
 	async function admitProvisioner(
 		request: FastifyRequest,
 		reply: FastifyReply
-	): Promise<string | null> {
+	): Promise<{ client: string; owner: string; ownerUserId: string } | null> {
 		const auth = await authenticate(request.headers.authorization);
 		if (!auth.ok) {
 			request.log.info({ reason: auth.reason }, 'provisioning refused');
@@ -358,7 +361,13 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			await reply.code(403).send(NOT_A_PROVISIONER);
 			return null;
 		}
-		return client;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) {
+			await reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+			return null;
+		}
+		return { client, owner, ownerUserId };
 	}
 
 	// The provisioner's answer once the owner's assistant exists: its identity once ready, logged as
@@ -389,11 +398,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	// The owner's assistant as its provisioner reads it, never made nor brought back by reading:
 	// what the provisioning answers for one that exists, none for an owner without one
 	app.get('/v1/provisioning/assistants/:owner', async (request, reply) => {
-		const client = await admitProvisioner(request, reply);
-		if (client === null) return reply;
-		const { owner: ownerUserId } = request.params as { owner: string };
-		const owner = principalOfMatrixUser(config, ownerUserId);
-		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const admitted = await admitProvisioner(request, reply);
+		if (admitted === null) return reply;
+		const { client, owner } = admitted;
 		const assistant = await assistants.find(owner);
 		if (assistant === null) return reply.code(404).send(NO_ASSISTANT);
 		return answerAssistant(
@@ -405,13 +412,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	});
 
 	app.put('/v1/provisioning/assistants/:owner', async (request, reply) => {
-		const client = await admitProvisioner(request, reply);
-		if (client === null) return reply;
-		const { owner: ownerUserId } = request.params as { owner: string };
-		// The owner by their Matrix identifier on the assistants' homeserver, as the provisioner
-		// authenticated them: their principal is the platform's email for that account
-		const owner = principalOfMatrixUser(config, ownerUserId);
-		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const admitted = await admitProvisioner(request, reply);
+		if (admitted === null) return reply;
+		const { client, owner } = admitted;
 		// The zone the owner's client reports is accepted, though the harness keeps none per owner
 		const parsed = provisionBodySchema.safeParse(request.body ?? {});
 		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
@@ -433,11 +436,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	// writes to its owner in, as an event's turn does, and one of the rooms it answers them in. Only
 	// a room where the assistant and its owner are, and nobody else, may be that room.
 	app.put('/v1/provisioning/assistants/:owner/home', async (request, reply) => {
-		const client = await admitProvisioner(request, reply);
-		if (client === null) return reply;
-		const { owner: ownerUserId } = request.params as { owner: string };
-		const owner = principalOfMatrixUser(config, ownerUserId);
-		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const admitted = await admitProvisioner(request, reply);
+		if (admitted === null) return reply;
+		const { client, owner, ownerUserId } = admitted;
 		const parsed = homeBodySchema.safeParse(request.body);
 		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
 		const { roomId } = parsed.data;
@@ -474,11 +475,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	// authenticated them, and the job is the one of /v1/assistants/me/recover, which puts back the
 	// identity the owner's clients already trust
 	app.post('/v1/provisioning/assistants/:owner/recover', async (request, reply) => {
-		const client = await admitProvisioner(request, reply);
-		if (client === null) return reply;
-		const { owner: ownerUserId } = request.params as { owner: string };
-		const owner = principalOfMatrixUser(config, ownerUserId);
-		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const admitted = await admitProvisioner(request, reply);
+		if (admitted === null) return reply;
+		const { client, owner } = admitted;
 		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 		if (assistant === null || assistant.deletedAt !== null) {
 			return reply.code(404).send(NO_ASSISTANT);
