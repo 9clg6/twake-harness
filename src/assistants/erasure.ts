@@ -29,8 +29,12 @@ export async function eraseAssistant(
 	await tx.sql`delete from sessions where owner = ${owner}`;
 	await tx.sql`delete from memory_entries where owner = ${owner}`;
 	await tx.sql`delete from skills where owner = ${owner} and scope = 'user'`;
-	await tx.sql`delete from consents where owner = ${owner}`;
+	// The calls that wait for the owner go before the permissions, which a yes grants under the lock
+	// it takes on its call: a yes that took its call first has granted its permission by the time the
+	// calls are erased, and that permission is erased below, and one that comes later finds no call
+	// to allow and grants nothing
 	await tx.sql`delete from pending_calls where owner = ${owner}`;
+	await tx.sql`delete from consents where owner = ${owner}`;
 	await tx.sql`delete from delegation_reminders where owner = ${owner}`;
 	await deleteJobsOf(tx, owner, userId);
 	return true;
