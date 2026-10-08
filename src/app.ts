@@ -411,7 +411,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		const admitted = await admitProvisioner(request, reply);
 		if (admitted === null) return reply;
 		const { client, owner } = admitted;
-		// The zone the owner's client reports is accepted, though the harness keeps none per owner
+		// The zone the owner's client reports is accepted and ignored: the harness keeps for each
+		// owner the zone of their calendar, as a read of it names it
 		const parsed = provisionBodySchema.safeParse(request.body ?? {});
 		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
 		const provisioned = await assistants.provision(owner);

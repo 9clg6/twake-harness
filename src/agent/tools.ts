@@ -69,7 +69,9 @@ export interface ToolContext {
 	readonly actions: readonly string[];
 	// Actions the principal holds but this turn may not use: a turn an event started never changes
 	// the owner's settings nor keeps anything, so text written by a third party cannot steer the
-	// assistant, now or in a later turn
+	// assistant, now or in a later turn. The zone a read of the owner's calendar returns is kept
+	// whatever turn read it, one an event started included: the contract takes it from the settings
+	// of their calendar, which no third party writes.
 	readonly withheldActions?: readonly string[];
 	readonly db: Db;
 	// What links this turn's calls in the audit: the request id, or the Matrix event id
@@ -170,7 +172,9 @@ export const clarifyTool: Tool = {
 };
 
 // The right to change one's own settings, such as the language: a turn an event started never
-// holds it, so that a third party's text cannot change how the assistant speaks to its owner
+// holds it, so that a third party's text cannot change how the assistant speaks to its owner. The
+// zone of the owner's calendar takes no right: a read of their calendar keeps it, whatever turn
+// made the read, as their calendar's settings give it.
 export const WRITE_OWN_SETTINGS: string = 'settings.write_own';
 
 // The languages the harness speaks, each by its own name

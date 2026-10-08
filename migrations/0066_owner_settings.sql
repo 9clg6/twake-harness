@@ -1,7 +1,7 @@
--- What the harness keeps of each owner apart from their assistant, which they may not have: for
--- now the zone of their calendar, as the last calendar read that named one returned it, in which
--- their turns state the present. Null until a read named one: the deployment's zone serves until
--- then.
+-- The settings of each owner, kept apart from their assistant, which they may not have. time_zone
+-- is the zone of their calendar, in which their turns state the present, as the last successful
+-- read of it that named one returned it; null until such a read, the deployment's zone serving
+-- until then.
 create table owner_settings (
 	owner text primary key,
 	time_zone text

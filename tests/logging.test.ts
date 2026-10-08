@@ -36,7 +36,8 @@ describe('structured logs', () => {
 
 // Messages reach the harness end-to-end encrypted and are decrypted only inside it: what a user
 // says, what the model answers or thinks, and what a tool receives must never reach a log line at
-// info, which is the production level. Debug keeps the full exchange for local troubleshooting.
+// info, which is the production level, but for the from and days of a list of calendar events, the
+// days it reads (see clock.test.ts). Debug keeps the full exchange for local troubleshooting.
 const USER_MARKER = 'USER-MARKER-7f3a';
 const ANSWER_MARKER = 'ANSWER-MARKER-91c2';
 const REASONING_MARKER = 'REASONING-MARKER-4d8e';
