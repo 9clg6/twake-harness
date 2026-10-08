@@ -361,6 +361,31 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		return client;
 	}
 
+	// The provisioner's answer once the owner's assistant exists: its identity once ready, logged as
+	// `given`; that it awaits its owner's recovery; or that it is not ready yet, its preparation
+	// asked for meanwhile
+	async function answerAssistant(
+		request: FastifyRequest,
+		reply: FastifyReply,
+		asked: { readonly client: string; readonly owner: string; readonly userId: string },
+		given: string
+	): Promise<FastifyReply> {
+		const { client, owner, userId } = asked;
+		const known = await readIdentity(db, owner, userId);
+		if (known.state === 'ready') {
+			request.log.info({ client, owner, userId: known.identity.userId }, given);
+			return reply.code(200).send(known.identity);
+		}
+		// Only the owner's recovery brings an escrowed identity back: preparing it changes nothing
+		if (known.state === 'awaiting_recovery') {
+			request.log.info({ client, owner, userId }, 'assistant awaits its recovery');
+			return reply.code(409).send(RECOVERY_NEEDED);
+		}
+		const queued = await requestPreparation(db, owner);
+		request.log.info({ client, owner, userId, queued }, 'assistant not ready');
+		return reply.code(503).header('retry-after', '5').send({ error: 'not_ready' });
+	}
+
 	app.put('/v1/provisioning/assistants/:owner', async (request, reply) => {
 		const client = await admitProvisioner(request, reply);
 		if (client === null) return reply;
@@ -378,25 +403,12 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				? reply.code(422).send(OWNER_NOT_ON_HOMESERVER)
 				: reply.code(502).send({ error: 'assistant creation failed' });
 		}
-		const known = await readIdentity(db, owner, provisioned.userId);
-		if (known.state === 'ready') {
-			request.log.info(
-				{ client, owner, userId: known.identity.userId },
-				'assistant provisioned for a client'
-			);
-			return reply.code(200).send(known.identity);
-		}
-		// Only the owner's recovery brings an escrowed identity back: preparing it changes nothing
-		if (known.state === 'awaiting_recovery') {
-			request.log.info(
-				{ client, owner, userId: provisioned.userId },
-				'assistant awaits its recovery'
-			);
-			return reply.code(409).send(RECOVERY_NEEDED);
-		}
-		const queued = await requestPreparation(db, owner);
-		request.log.info({ client, owner, userId: provisioned.userId, queued }, 'assistant not ready');
-		return reply.code(503).header('retry-after', '5').send({ error: 'not_ready' });
+		return answerAssistant(
+			request,
+			reply,
+			{ client, owner, userId: provisioned.userId },
+			'assistant provisioned for a client'
+		);
 	});
 
 	// The direct room the owner's client opened with the assistant becomes the room the assistant
