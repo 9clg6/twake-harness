@@ -124,7 +124,9 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 		expect((await h.api.post(OWNER, '/v1/assistants', { name: 'Jarvis' })).status).toBe(201);
 		clock.set('2026-10-08T09:00:00Z');
 		const question = await answerTo('/delete');
-		expect(question.body).toBe('Delete Jarvis? Answer yes to confirm.');
+		expect(question.body).toBe(
+			'Delete Jarvis? I will erase its conversations, its memory, its skills and your permissions. Answer yes to confirm.'
+		);
 		expect(question.content[QUESTION_CONTENT_KEY]).toEqual({
 			id: expect.stringMatching(UUID),
 			expires_ts: Date.parse('2026-10-08T09:10:00Z')
