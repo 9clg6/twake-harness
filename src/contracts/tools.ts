@@ -14,8 +14,9 @@ import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { saveOwnerTimeZone } from '../settings/repository.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import {
-	CONVERSATION_GONE,
-	holdConversation,
+	isConversationGone,
+	keepInConversation,
+	type CONVERSATION_GONE,
 	type Tool,
 	type ToolContext,
 	type ToolOutcome
@@ -169,14 +170,15 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	// Freezes the call as it would run until its owner answers, with the turn's session, the
 	// harness's question as its owner reads it and the digest of the preview they are shown, if
 	// any, counts it, and logs why it waits, never what it would send; resolves to the frozen call's
-	// id, or to null when the turn's conversation was erased with its assistant: nothing waits
+	// id, or to CONVERSATION_GONE when the turn's conversation was erased with its assistant: nothing
+	// waits
 	async function freeze(
 		values: Record<string, unknown>,
 		context: ToolContext,
 		reasons: readonly WaitReason[],
 		request: string,
 		previewDigest: string | null
-	): Promise<string | null> {
+	): Promise<string | typeof CONVERSATION_GONE> {
 		const owner = context.principalId;
 		const call: PendingCallInput = {
 			owner,
@@ -192,10 +194,8 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			sessionId: context.sessionId ?? null,
 			request
 		};
-		const pendingCallId = await withPrincipal(context.db, { id: owner }, async (tx) =>
-			(await holdConversation(tx, context)) ? insertPendingCall(tx, call) : null
-		);
-		if (pendingCallId === null) return null;
+		const pendingCallId = await keepInConversation(context, (tx) => insertPendingCall(tx, call));
+		if (isConversationGone(pendingCallId)) return pendingCallId;
 		deps.consentMetrics.requested(call);
 		log.info(
 			{
@@ -357,7 +357,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			makeOptionalOwnerConsentLink(config.consent.brokerConsentUrl, context.principalId)
 		);
 		const pendingCallId = await freeze(values, context, ['delegation'], request, previewDigest);
-		if (pendingCallId === null) return { result: CONVERSATION_GONE };
+		if (isConversationGone(pendingCallId)) return { result: pendingCallId };
 		return {
 			result: { status: 'awaiting_owner', reason: 'delegation', code },
 			final: request,
@@ -489,7 +489,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			request.question,
 			preview?.digest ?? null
 		);
-		if (pendingCallId === null) return { result: CONVERSATION_GONE };
+		if (isConversationGone(pendingCallId)) return { result: pendingCallId };
 		return {
 			result: {
 				status: 'awaiting_owner',

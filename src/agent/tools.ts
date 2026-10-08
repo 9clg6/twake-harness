@@ -104,12 +104,27 @@ export const CONVERSATION_GONE = {
 	hint: 'The owner deleted their assistant while this turn ran, and this conversation with it: nothing was kept, and nothing waits for the owner. Do not make the call again.'
 } as const;
 
-// Whether the turn's conversation still stands, held until the transaction ends: an erasure that
-// comes meanwhile waits for what the transaction keeps, then erases it too, and one that came first
-// leaves the transaction nothing to keep. A direct call through the API has no conversation: it is
-// its owner's own.
-export async function holdConversation(tx: Tx, context: ToolContext): Promise<boolean> {
-	return context.sessionId === undefined || holdSession(tx, context.sessionId);
+// Writes what a call keeps in the name of its turn's conversation, under its owner's principal,
+// while that conversation still stands, which is held until the write's transaction ends: an
+// erasure that comes meanwhile waits for the write, then erases it too, and one that came first
+// leaves nothing to write, which CONVERSATION_GONE says. A direct call through the API has no
+// conversation: what it keeps is its owner's own.
+export async function keepInConversation<T>(
+	context: ToolContext,
+	write: (tx: Tx) => Promise<T>
+): Promise<T | typeof CONVERSATION_GONE> {
+	return withPrincipal(context.db, { id: context.principalId }, async (tx) =>
+		context.sessionId === undefined || (await holdSession(tx, context.sessionId))
+			? write(tx)
+			: CONVERSATION_GONE
+	);
+}
+
+// Whether a write in the name of a turn's conversation found it gone, and kept nothing
+export function isConversationGone<T>(
+	kept: T | typeof CONVERSATION_GONE
+): kept is typeof CONVERSATION_GONE {
+	return kept === CONVERSATION_GONE;
 }
 
 export interface Tool {
@@ -286,9 +301,7 @@ export const memoryTool: Tool = {
 		const target = toMemoryTarget(parsed.data.target ?? 'memory');
 		if (target === null) return { result: ACCESS_DENIED, denied: true };
 		const { action, content, old_text: oldText, new_text: newText } = parsed.data;
-		const result = await withPrincipal(context.db, { id: context.principalId }, async (tx) => {
-			if (!(await holdConversation(tx, context)))
-				return { success: false as const, ...CONVERSATION_GONE };
+		const result = await keepInConversation(context, async (tx) => {
 			if (action === 'add') return addMemoryEntry(tx, context.principalId, target, content ?? '');
 			if (oldText === undefined) return { success: false as const, error: 'old_text is required' };
 			if (action === 'remove') return removeMemoryEntry(tx, context.principalId, target, oldText);
@@ -459,17 +472,15 @@ export const skillsProposeTool: Tool = {
 	run: async (args, context) => {
 		const parsed = skillProposeArgs.safeParse(args);
 		if (!parsed.success) return { result: { error: 'name, description and content are required' } };
-		const skill = await withPrincipal(context.db, { id: context.principalId }, async (tx) =>
-			(await holdConversation(tx, context))
-				? insertSkill(tx, {
-						scope: 'user',
-						owner: context.principalId,
-						status: 'proposed',
-						...parsed.data
-					})
-				: null
+		const skill = await keepInConversation(context, (tx) =>
+			insertSkill(tx, {
+				scope: 'user',
+				owner: context.principalId,
+				status: 'proposed',
+				...parsed.data
+			})
 		);
-		if (skill === null) return { result: CONVERSATION_GONE };
+		if (isConversationGone(skill)) return { result: skill };
 		return { result: { proposed: skill.id, status: 'proposed' } };
 	}
 };
