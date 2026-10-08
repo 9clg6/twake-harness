@@ -301,10 +301,13 @@ export async function closeRequestsToWords(tx: Tx, owner: string, roomId: string
 }
 
 // Whether this event of the owner already answered one of their requests, as an event delivered
-// again would have
+// again would have, even a request the harness asked again since
 export async function isAnswerEvent(tx: Tx, owner: string, eventId: string): Promise<boolean> {
 	const rows = await tx.sql`
-		select 1 from pending_calls where owner = ${owner} and answer_event_id = ${eventId}`;
+		select 1 from pending_calls
+		where owner = ${owner}
+			and (answer_event_id = ${eventId} or ${eventId} = any(earlier_answer_event_ids))
+		limit 1`;
 	return rows.length > 0;
 }
 
@@ -478,8 +481,9 @@ export async function lockPendingCall(
 
 // The call its owner allowed, which admission kept from running, waits for their answer again as
 // it did once asked, should its request end after the refusal lifts, in this many milliseconds: no
-// answer is recorded, and the owner's next message may answer it in words. False when the call no
-// longer waited to run, or its request ends before then.
+// answer is recorded, and the owner's next message may answer it in words. The yes that allowed
+// it is kept among its earlier answers, so that, delivered again, it answers nothing. False when
+// the call no longer waited to run, or its request ends before then.
 export async function reopenRequest(
 	tx: Tx,
 	owner: string,
@@ -489,6 +493,8 @@ export async function reopenRequest(
 ): Promise<boolean> {
 	const result = await tx.sql`
 		update pending_calls set status = 'open', decided_at = null, answer_event_id = null,
+			earlier_answer_event_ids = case when answer_event_id is null then earlier_answer_event_ids
+				else array_append(earlier_answer_event_ids, answer_event_id) end,
 			words_closed_at = null
 		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null
 			and created_at + make_interval(secs => ${lifetimeMs / 1000})

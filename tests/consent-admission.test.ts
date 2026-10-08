@@ -108,9 +108,32 @@ async function busyEverywhere(r: ConsentRoom, script: LlmScript): Promise<() => 
 	};
 }
 
-// What the api role logged about the turns my yes resumed, as its operator reads it
+// What the harness logged, as its operator reads it
 function logged(r: ConsentRoom, msg: string): Record<string, unknown>[] {
 	return r.h.logLines().filter((line) => line['msg'] === msg);
+}
+
+// An event of my room as the homeserver holds it, encrypted
+async function encryptedEvent(r: ConsentRoom, eventId: string): Promise<Record<string, unknown>> {
+	const reply = await r.h.synapse.request(
+		r.alice,
+		'GET',
+		`/_matrix/client/v3/rooms/${encodeURIComponent(r.room)}/event/${encodeURIComponent(eventId)}`
+	);
+	return reply.body;
+}
+
+// Pushes events to the matrix role as the homeserver does, in a transaction of their own
+async function push(r: ConsentRoom, events: Record<string, unknown>[]): Promise<number> {
+	const reply = await fetch(
+		`http://127.0.0.1:${r.h.port}/_matrix/app/v1/transactions/test-${Date.now()}-${Math.random()}`,
+		{
+			method: 'PUT',
+			headers: { authorization: `Bearer ${r.h.hsToken}`, 'content-type': 'application/json' },
+			body: JSON.stringify({ events })
+		}
+	);
+	return reply.status;
 }
 
 describe('my yes while my assistant is busy', () => {
@@ -274,6 +297,34 @@ describe('my yes once my assistant reached its limit for the day, in Europe/Pari
 		await r.client.sendText(r.room, 'oui');
 		expect(await r.nextSaying('Found:', 0)).toContain('/contracts/v1/mail/items');
 		expect(r.h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ q: 'budget' }]);
+	});
+
+	it('takes the yes it kept, delivered again after midnight, for no answer', async () => {
+		// 23:30 in Paris, on a day of its own: the turn that asks me spends it
+		clock.set('2026-10-10T21:30:00Z');
+		r.h.apisix.llm.script = modelUsing('search_drive', { q: 'budget' });
+		const asked = r.saying(FRENCH_QUESTION).length;
+		await r.client.sendText(r.room, 'Trouve le budget dans mon drive');
+		await nextMessage(r, FRENCH_QUESTION, asked);
+		const held = r.saying(OPEN_UNTIL_MIDNIGHT).length;
+		const yes = await r.client.sendText(r.room, 'oui');
+		const notice = await nextMessage(r, OPEN_UNTIL_MIDNIGHT, held);
+		// After midnight, the homeserver delivers that yes again
+		clock.set('2026-10-10T22:05:00Z');
+		expect(await push(r, [await encryptedEvent(r, yes)])).toBe(200);
+		expect(
+			await eventually(() =>
+				logged(r, 'answer delivered again').find((line) => line['eventId'] === yes)
+			)
+		).toMatchObject({ eventId: yes });
+		// My request still waits for my answer
+		await r.requestAskedIn(notice.eventId, 'drive');
+		expect(r.h.apisix.contracts.calls.filter((c) => c.path.includes('/drive/'))).toEqual([]);
+		// My own yes does it
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'oui');
+		expect(await r.nextSaying('Found:', found)).toContain('/contracts/v1/drive/items');
+		expect(r.h.apisix.contracts.calls.filter((c) => c.path.includes('/drive/'))).toHaveLength(1);
 	});
 });
 
