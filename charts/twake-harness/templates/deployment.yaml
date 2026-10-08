@@ -105,11 +105,9 @@ spec:
             - name: BROKER_CONSENT_URL
               value: {{ . | quote }}
             {{- end }}
-            {{- if not (kindIs "invalid" .Values.config.suggestionsEnabled) }}
-            {{- if ne (toString .Values.config.suggestionsEnabled) "" }}
+            {{- if .Values.config.suggestionsEnabled }}
             - name: SUGGESTIONS_ENABLED
-              value: {{ .Values.config.suggestionsEnabled | toString | quote }}
-            {{- end }}
+              value: "true"
             {{- end }}
             {{- with .Values.config.suggestionsUserLocalpart }}
             - name: SUGGESTIONS_USER_LOCALPART

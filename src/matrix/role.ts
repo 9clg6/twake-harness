@@ -703,8 +703,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			'invite',
 			async (roomId: string, event: RoomEvent) => {
 				const invited = event.state_key ?? '';
-				if (config.suggestions.enabled && invited === listenerUserId(config)) {
-					await listener.onInvite(roomId, event);
+				if (invited === listenerUserId(config)) {
+					await (config.suggestions.enabled
+						? listener.onInvite(roomId, event)
+						: listener.decline(roomId));
 					return;
 				}
 				if (orgUserId !== null && invited === orgUserId) {
@@ -1608,6 +1610,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		} catch (err: unknown) {
 			log.error({ err }, 'channel listener setup failed');
 		}
+	} else {
+		await listener.standDown();
 	}
 	if (config.org.enabled) {
 		try {

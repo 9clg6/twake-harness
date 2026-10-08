@@ -152,6 +152,7 @@ describe('the assistant proposes from the messages of channels', () => {
 		space = await startFakeSpace();
 		h = await startMatrixHarness({
 			env: {
+				SUGGESTIONS_ENABLED: 'true',
 				SPACE_API_URL: space.url,
 				SPACE_API_TOKEN: 'tws_secret',
 				ASSISTANT_TIMEZONE: 'Europe/Paris'

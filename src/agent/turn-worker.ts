@@ -377,6 +377,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		const { owner, roomId } = payload;
 		const attempt = payload.retry === undefined ? 0 : 1;
 		const jobLog = log.child({ reqId: `suggest:${payload.eventId}`, roomId });
+		// Turned off since the job was queued, as a second try at another time can be
+		if (!settings.config.suggestions.enabled) {
+			jobLog.info({ owner }, 'suggestion dropped: off');
+			return;
+		}
 		if (Date.now() - payload.at > SUGGEST_MAX_AGE_MS) {
 			jobLog.info({ owner }, 'suggestion dropped: too old');
 			return;

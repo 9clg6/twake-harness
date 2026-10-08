@@ -166,7 +166,8 @@ export interface Config {
 	};
 	readonly suggestions: {
 		// Whether the assistants propose actions from the messages of channels that are not
-		// encrypted: it makes the registration ask Synapse for the rooms of the homeserver
+		// encrypted, off unless a deployment turns it on: the matrix role then registers the listener,
+		// which the registration's users namespace must hold
 		readonly enabled: boolean;
 		// The localpart of the one visible user that reads the channels it is invited to
 		readonly userLocalpart: string;
@@ -270,7 +271,7 @@ const envSchema = z.object({
 		.min(1)
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
 	SUGGESTIONS_USER_LOCALPART: z.string().min(1).default('twake-assistant'),
-	SUGGESTIONS_ENABLED: z.enum(['true', 'false']).default('true'),
+	SUGGESTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
 	SPACE_API_URL: z.string().default(''),
 	SPACE_API_TOKEN: z.string().default(''),
 	ASSISTANT_LOCALE: z.enum(LOCALES).default('en'),

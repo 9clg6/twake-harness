@@ -47,6 +47,12 @@ export interface ChannelListener {
 	onMember(roomId: string, event: { content?: Record<string, unknown> | undefined }): void;
 	// A room the listener is in turned encrypted, or sent an encrypted event: it leaves at once
 	onEncrypted(roomId: string): Promise<void>;
+	// Suggestions are off: the listener leaves the rooms it is still in from a time they were on, as
+	// its presence would tell their members that it reads them. Best effort and quiet, as are the
+	// two below: a listener never registered is in none, and is not made to exist for it.
+	standDown(): Promise<void>;
+	// Suggestions are off: an invite of the listener is declined
+	decline(roomId: string): Promise<void>;
 }
 
 // The one visible user that reads channels (see Suggestions in the README). It is a member of the
@@ -66,6 +72,18 @@ export function makeChannelListener(deps: ChannelListenerDeps): ChannelListener 
 			await intent.leaveRoom(roomId, reason);
 		} catch (err: unknown) {
 			log.warn({ roomId, err }, 'listener could not leave a room');
+		}
+	}
+
+	// Through the client the intent wraps, which registers no user first; false when it could not
+	async function leaveWhileOff(roomId: string): Promise<boolean> {
+		channels.delete(roomId);
+		deps.forget(roomId);
+		try {
+			await intent.underlyingClient.leaveRoom(roomId, 'off');
+			return true;
+		} catch {
+			return false;
 		}
 	}
 
@@ -124,6 +142,24 @@ export function makeChannelListener(deps: ChannelListenerDeps): ChannelListener 
 			if (!channels.has(roomId)) return;
 			log.info({ roomId, reason: 'encrypted' }, 'listener left a room');
 			await leave(roomId, 'encrypted');
+		},
+		async standDown() {
+			let rooms: string[];
+			try {
+				rooms = await intent.underlyingClient.getJoinedRooms();
+			} catch {
+				return;
+			}
+			let left = 0;
+			for (const roomId of rooms) if (await leaveWhileOff(roomId)) left += 1;
+			if (rooms.length > 0) {
+				log.info({ rooms: rooms.length, left }, 'listener left its rooms: suggestions are off');
+			}
+		},
+		async decline(roomId) {
+			if (await leaveWhileOff(roomId)) {
+				log.info({ roomId, reason: 'off' }, 'listener declined an invite');
+			}
 		}
 	};
 }
