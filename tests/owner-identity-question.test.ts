@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import { withPrincipal } from '../src/db/client.js';
 import {
 	modelFor,
 	QUESTION_CONTENT_KEY,
@@ -22,6 +23,9 @@ const ADOPTED =
 	"C'est noté : ta nouvelle identité est désormais celle que je connais, et je ne signale plus tes messages.";
 const REJECTED =
 	"Alors quelqu'un d'autre l'a peut-être réinitialisée : change ton mot de passe dès maintenant et préviens ton administrateur. Je garde l'identité que je connaissais, et je continue de te répondre comme avant.";
+const OLD_SESSION_START = "Je n'ai pas donné suite à ton dernier message : ton application";
+const OLD_SESSION =
+	"Je n'ai pas donné suite à ton dernier message : ton application l'a chiffré avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Envoie /discardsession dans ce salon pour qu'elle en utilise de nouvelles ; puis renvoie-le.";
 // What a request about a first call to an application starts with, in French
 const REQUEST_START = "C'est la première fois";
 
@@ -43,6 +47,26 @@ function sleep(ms: number): Promise<void> {
 // Until a question expired, by the end its mark gives, and a second more
 async function pastExpiry(mark: Mark): Promise<void> {
 	await sleep(Math.max(0, mark.expires_ts - Date.now()) + 1_000);
+}
+
+// Alice's Megolm sessions as the harness sees them a month after it first decrypted words of them,
+// while `run` runs
+async function sessionsAMonthOld(r: ConsentRoom, run: () => Promise<void>): Promise<void> {
+	const age = async (shift: string): Promise<void> => {
+		await withPrincipal(
+			r.h.db,
+			{ id: OWNER },
+			(tx) => tx.sql`
+				update owner_megolm_sessions set first_seen_at = now() - ${shift}::interval
+				where owner = ${OWNER}`
+		);
+	};
+	await age('31 days');
+	try {
+		await run();
+	} finally {
+		await age('0 seconds');
+	}
 }
 
 // The line the matrix role logged with a message, once it did
@@ -205,6 +229,17 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toMatchObject({
 			pinned: held,
 			published: { master_key: after }
+		});
+	});
+
+	it('tells me in my language to discard a session it first saw over a month ago, then send again', async () => {
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Mots récents');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Mots récents');
+		const notices = r.saying(OLD_SESSION_START).length;
+		await sessionsAMonthOld(r, async () => {
+			await r.client.sendText(r.room, "Mots d'une vieille session");
+			expect(await r.nextSaying(OLD_SESSION_START, notices)).toBe(OLD_SESSION);
 		});
 	});
 });

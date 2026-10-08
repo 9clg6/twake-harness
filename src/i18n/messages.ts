@@ -461,7 +461,7 @@ const ENGLISH: Messages = {
 					? 'I did not act on your last message'
 					: 'I did not take your answer, so my question still waits';
 			const again = via === 'message' ? 'send it again' : 'answer again';
-			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then ${again}.`;
+			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. Send /discardsession in this room so that it uses new ones; then ${again}.`;
 		},
 		identityQuestion: `Your encryption identity is not the one I know. Did you reset your identity yourself? ${ENGLISH_HOW_TO_ANSWER}`,
 		identityAdopted:
@@ -699,7 +699,7 @@ const FRENCH: Messages = {
 					: "Je n'ai pas pris ta réponse en compte, ma question attend donc toujours";
 			const encrypted = via === 'message' ? "l'a chiffré" : "l'a chiffrée";
 			const again = via === 'message' ? 'renvoie-le' : 'réponds à nouveau';
-			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Dans Twake Chat, envoie /discardsession dans cette conversation pour qu'elle en utilise de nouvelles ; puis ${again}.`;
+			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Envoie /discardsession dans ce salon pour qu'elle en utilise de nouvelles ; puis ${again}.`;
 		},
 		identityQuestion: `Ton identité de chiffrement n'est pas celle que je connais. C'est toi qui as réinitialisé ton identité ? ${FRENCH_HOW_TO_ANSWER}`,
 		identityAdopted:

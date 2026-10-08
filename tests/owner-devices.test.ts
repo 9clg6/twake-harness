@@ -257,7 +257,7 @@ const UNENCRYPTED_MESSAGE =
 const NO_IDENTITY_MESSAGE =
 	'I did not act on your last message: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then send it again.';
 const OLD_SESSION_MESSAGE =
-	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then send it again.';
+	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. Send /discardsession in this room so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 const CHANGED_QUESTION =
