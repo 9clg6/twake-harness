@@ -99,7 +99,10 @@ export interface ToolContext {
 
 // What the model reads when its turn's conversation was erased with its assistant while the turn
 // ran: nothing was kept
-export const CONVERSATION_GONE = { error: 'conversation_gone' } as const;
+export const CONVERSATION_GONE = {
+	error: 'conversation_gone',
+	hint: 'The owner deleted their assistant while this turn ran, and this conversation with it: nothing was kept, and nothing waits for the owner. Do not make the call again.'
+} as const;
 
 // Whether the turn's conversation still stands, held until the transaction ends: an erasure that
 // comes meanwhile waits for what the transaction keeps, then erases it too, and one that came first
