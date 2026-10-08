@@ -96,10 +96,14 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 	const { config, db, admin, log } = deps;
 
 	// « Assistant de <first name> », after the owner's Matrix name; after their localpart when they
-	// have none, or when the name it gives could not be an assistant's
+	// have none, when the homeserver fails to give it, or when the name it gives could not be an
+	// assistant's
 	async function defaultName(owner: string, ownerLocalpart: string): Promise<string> {
 		const ownerUserId = matrixUserIdOfLocalpart(config, ownerLocalpart);
-		const ownerName = await admin.displayName(ownerUserId).catch(() => null);
+		const ownerName = await admin.displayName(ownerUserId).catch((err: unknown) => {
+			log.warn({ owner, err }, 'owner name not read');
+			return null;
+		});
 		const messages = await fetchOwnerMessages(db, owner, config.locale);
 		const named = ownerName === null ? null : shortened(messages.defaultAssistantName(ownerName));
 		return named !== null && isValidAssistantName(named)
