@@ -291,40 +291,44 @@ export async function isIdentityAnswerEvent(
 	return rows.length > 0;
 }
 
-// Records when the check first decrypted words of an owner's Megolm session. Resolves to whether
-// that was longer ago than `keptMs`, the time the digests of those words are kept for.
+// Records when the check first decrypted words of an owner's Megolm session, `now` if it never did
+// before. Resolves to whether that was longer ago than `keptMs`, the time the digests of those
+// words are kept for.
 export async function seeSession(
 	tx: Tx,
 	owner: string,
 	sessionId: string,
-	keptMs: number
+	keptMs: number,
+	now: Date
 ): Promise<boolean> {
 	await tx.sql`
-		insert into owner_megolm_sessions (owner, session_id) values (${owner}, ${sessionId})
+		insert into owner_megolm_sessions (owner, session_id, first_seen_at)
+		values (${owner}, ${sessionId}, ${now})
 		on conflict (owner, session_id) do nothing`;
 	const rows = await tx.sql<{ old: boolean }[]>`
-		select first_seen_at <= now() - make_interval(secs => ${keptMs / 1000}) as old
+		select first_seen_at <= ${new Date(now.getTime() - keptMs)} as old
 		from owner_megolm_sessions where owner = ${owner} and session_id = ${sessionId}`;
 	return rows[0]?.old ?? false;
 }
 
-// Records that the owner's words with this digest were received under an event, the words received
-// longer ago than `keptMs` forgotten first. Resolves to the event they were first received under
-// when it is another one, and to null for words new to the harness or delivered again under the
-// same event.
+// Records that the owner's words with this digest were received under an event, `now`, the words
+// received longer ago than `keptMs` forgotten first. Resolves to the event they were first
+// received under when it is another one, and to null for words new to the harness or delivered
+// again under the same event.
 export async function receiveWords(
 	tx: Tx,
 	owner: string,
 	digest: string,
 	eventId: string,
-	keptMs: number
+	keptMs: number,
+	now: Date
 ): Promise<string | null> {
 	await tx.sql`
 		delete from owner_words_received
-		where owner = ${owner} and received_at <= now() - make_interval(secs => ${keptMs / 1000})`;
+		where owner = ${owner} and received_at <= ${new Date(now.getTime() - keptMs)}`;
 	const inserted = await tx.sql`
-		insert into owner_words_received (owner, digest, event_id)
-		values (${owner}, ${digest}, ${eventId})
+		insert into owner_words_received (owner, digest, event_id, received_at)
+		values (${owner}, ${digest}, ${eventId}, ${now})
 		on conflict (owner, digest) do nothing
 		returning 1`;
 	if (inserted.length === 1) return null;

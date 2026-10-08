@@ -92,7 +92,8 @@ export interface MatrixRoleOptions {
 	// How long a status message waits for its turn's answer before it gives up, as long as the
 	// typing by default
 	readonly statusMaxMs?: number;
-	// The present as the creator reads it; the system clock unless a test sets its own
+	// The present as the creator and the check of the owner's devices read it; the system clock
+	// unless a test sets its own
 	readonly clock?: Clock;
 }
 
@@ -283,8 +284,9 @@ function errcodeOf(err: unknown): string | null {
 
 export async function startMatrixRole(options: MatrixRoleOptions): Promise<MatrixRole> {
 	const { config, db, log } = options;
-	// The creator's questions expire by this process's clock alone: the chart keeps the matrix role
-	// at one replica, as the values file says, so no other clock reads them
+	// The creator's questions expire, and the owner's words and sessions grow old, by this process's
+	// clock alone: the chart keeps the matrix role at one replica, as the values file says, so no
+	// other clock reads them
 	const clock = options.clock ?? SYSTEM_CLOCK;
 	const messages = getMessages(config.locale);
 	const fetchMessages = (owner: string): Promise<Messages> =>
@@ -1059,6 +1061,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		db,
 		log,
 		mode: config.matrix.ownerDeviceTrust,
+		clock,
 		fetchMessages,
 		questions: identityQuestions,
 		hasAssistant: async (owner) => {

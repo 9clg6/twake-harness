@@ -55,7 +55,8 @@ export interface MatrixStartOptions {
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
 	readonly statusMaxMs?: number;
-	// The present the agent and the creator read, set by the test instead of the system clock
+	// The present the agent, the creator and the check of the owner's devices read, set by the test
+	// instead of the system clock
 	readonly clock?: Clock;
 }
 

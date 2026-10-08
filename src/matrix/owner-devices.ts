@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Clock } from '../agent/clock.js';
 import type { OwnerDeviceTrust } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import type {
@@ -111,6 +112,8 @@ export interface OwnerDeviceGateDeps {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
 	readonly mode: OwnerDeviceTrust;
+	// The present, by which the owner's words are forgotten and their sessions grow old
+	readonly clock: Clock;
 	// Decrypts the event again with the assistant's encryption engine, which tells who encrypted it
 	decrypt(
 		assistantUserId: string,
@@ -259,9 +262,10 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Words that cannot be told apart from others cannot be checked at all
 				const seal = sealOf(words.encrypted);
 				if (seal === null) throw new Error('the encrypted words cannot be told apart');
+				const now = deps.clock.now();
 				// The same encrypted words under another event are no new words, whatever the mode
 				const copyOf = await withPrincipal(db, { id: owner }, (tx) =>
-					receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS)
+					receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS, now)
 				);
 				if (copyOf !== null) {
 					log.info(
@@ -274,7 +278,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Nor are the words of a session whose first words the check decrypted longer ago than
 				// copies are remembered, whatever the mode: a session counts from there
 				const old = await withPrincipal(db, { id: owner }, (tx) =>
-					seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)
+					seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS, now)
 				);
 				if (old) {
 					const { deviceId, curve25519Key } = checked.sender;
