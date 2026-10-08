@@ -22,7 +22,7 @@ import {
 	type Preview,
 	type PreviewAnswer
 } from './preview.js';
-import { forWholeSeries } from './series.js';
+import { answersWholeSeries, forWholeSeries } from './series.js';
 
 export interface ContractToolDeps {
 	readonly config: Config;
@@ -470,12 +470,25 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		run: async (args, context): Promise<ToolOutcome> => {
 			const values =
 				typeof args === 'object' && args !== null ? (args as Record<string, unknown>) : {};
+			const owner = context.principalId;
+			const answeredReasons = context.answeredReasons ?? [];
+			// A call for the whole series of a recurring invitation waits for its owner to say so, as
+			// the model may write it so of its own accord: a request of its own asks them first, and
+			// the call goes on only once their yes to it, or to what it asked next, resumes it. A yes
+			// to the broker's permission says nothing about the series. The organization agent has
+			// nobody to ask.
+			if (
+				owner !== ORGANIZATION_PRINCIPAL &&
+				answersWholeSeries(contract, values) &&
+				answeredReasons.every((reason) => reason === 'delegation')
+			) {
+				return ask(values, context, ['series']);
+			}
 			// A call that waits is frozen as the model wrote it, and the turn ends with the harness's
 			// own request. The call its owner allowed runs as it was frozen, unless something their
 			// yes did not answer applies now, such as writing they took back since: it then waits
 			// again, and the request asks about everything that applies.
 			const reasons = await reasonsToWait(context);
-			const answeredReasons = context.answeredReasons ?? [];
 			if (reasons.some((reason) => !answeredReasons.includes(reason))) {
 				return ask(values, context, reasons);
 			}
@@ -485,7 +498,6 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			const previewDigest = context.previewDigest ?? null;
 			const answered = await send(built, context, { kind: 'action', previewDigest });
 			// The organization agent acts for no user: nobody could give it that permission
-			const owner = context.principalId;
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);

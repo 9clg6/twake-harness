@@ -108,7 +108,7 @@ function questionFor(
 	};
 	// What a question about that very call shows of it
 	const itself: ShownCall = bare ? { kind: 'tool', text: call.tool } : frozen;
-	if (call.reasons.includes('series')) return { question: consent.series, call: itself };
+	if (call.reasons.includes('series')) return { question: consent.series(name), call: itself };
 	// A high-risk write asks every time, whoever started the turn: its question also holds for one
 	// that a turn an event started prepared
 	if (call.reasons.includes('high_risk')) {

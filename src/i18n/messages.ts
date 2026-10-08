@@ -140,8 +140,8 @@ export interface Messages {
 			link: string | null
 		): string;
 		// The contract answers a recurring invitation only for the whole series: whether to answer
-		// for every occurrence of it
-		readonly series: string;
+		// for every occurrence of it, in the application named as for writing
+		series(application: string): string;
 		// The words that answer a question, alone in a message
 		readonly yes: string;
 		readonly no: string;
@@ -354,7 +354,8 @@ const ENGLISH: Messages = {
 				? `${why}\nShall I try again? ${answer}`
 				: `${why} Give it ${expired ? 'again ' : ''}here: ${link}\nOnce that is done, shall I try again? ${answer}`;
 		},
-		series: 'This is a series: shall I answer for the whole series?',
+		series: (application) =>
+			`This is a series in ${application}: shall I answer for the whole series?`,
 		yes: 'yes',
 		no: 'no',
 		refused: 'All right, I will not do it.',
@@ -583,7 +584,8 @@ const FRENCH: Messages = {
 				? `${why}\nJe réessaie ? ${answer}`
 				: `${why} Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;
 		},
-		series: "C'est une série : je réponds pour toute la série ?",
+		series: (application) =>
+			`C'est une série dans ${application} : je réponds pour toute la série ?`,
 		yes: 'oui',
 		no: 'non',
 		refused: "D'accord, je ne le fais pas.",

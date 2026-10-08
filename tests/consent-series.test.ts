@@ -6,6 +6,7 @@ import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
 	CALENDAR_CATALOG,
 	INVITATION_ANSWERS_CATALOG,
+	INVITATION_CANCELLED,
 	RECURRING_INVITATION,
 	UNPREVIEWED_INVITATION_ANSWERS_CATALOG,
 	type ContractCall,
@@ -16,8 +17,12 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// The invitation to Alice's weekly standup, which repeats every Monday
+// Alice's invitations, by the UID of their events: her weekly standup, which repeats every Monday;
+// the quarterly offsite, which repeated too until Paul cancelled it; and one Monday's review, which
+// Paul invited her to without the rest of its series
 const STANDUP = 'standup-weekly@calendar.test';
+const OFFSITE = 'offsite-quarterly@calendar.test';
+const REVIEW = 'review-one-monday@calendar.test';
 
 // What Alice's calendar says answering the standup for the whole series would do
 const ACCEPT_SUMMARY =
@@ -26,6 +31,9 @@ const DECLINE_SUMMARY =
 	'Decline the whole series "Standup", every Monday from 2026-10-12 at 09:00, organized by Paul\nCalendar tells the organizer';
 const FRENCH_ACCEPT_SUMMARY =
 	"Accepter toute la série « Standup », chaque lundi dès le 12/10/2026 à 09:00, organisée par Paul\nAgenda le dit à l'organisateur";
+// And answering the review, an event that does not repeat
+const REVIEW_SUMMARY =
+	'Accept "Review", Monday 2026-10-12 at 14:00, organized by Paul\nCalendar tells the organizer';
 // The digest of what that answer acts on
 const DIGEST = 'sha256:standup-1';
 // The answer for the whole series as the harness shows the call, where no summary stands in its
@@ -35,11 +43,11 @@ const WHOLE_SERIES_CALL = JSON.stringify({ body: { uid: STANDUP, series: true } 
 // The header by which a contract says it only previewed a call
 const PREVIEWED = { 'x-twake-preview': 'true' } as const;
 
-// How the harness asks Alice whether to answer for the whole series, and how every request ends,
-// in each language
-const SERIES = 'This is a series: shall I answer for the whole series?';
+// How the harness asks Alice whether to answer for the whole series, naming her calendar as the
+// catalog does, and how every request ends, in each language
+const SERIES = 'This is a series in calendar: shall I answer for the whole series?';
 const ANSWER = 'Answer yes or no in your next message.';
-const FRENCH_SERIES = "C'est une série : je réponds pour toute la série ?";
+const FRENCH_SERIES = "C'est une série dans calendar : je réponds pour toute la série ?";
 const FRENCH_ANSWER = 'Réponds par oui ou non dans ton prochain message.';
 
 // A text that is not the harness's, as Alice's client shows it in plain text: quoted line by line
@@ -51,7 +59,14 @@ function quoted(label: string, text: string): string {
 // What Alice asks, and what the model calls for it
 const REQUESTS = {
 	'Accept the standup': { tool: 'accept_invitation', args: { body: { uid: STANDUP } } },
+	// The model answers for the whole series of its own accord
+	'Accept the standup, every Monday': {
+		tool: 'accept_invitation',
+		args: { body: { uid: STANDUP, series: true } }
+	},
 	'Decline the standup': { tool: 'decline_invitation', args: { body: { uid: STANDUP } } },
+	'Accept the offsite': { tool: 'accept_invitation', args: { body: { uid: OFFSITE } } },
+	'Accept the review': { tool: 'accept_invitation', args: { body: { uid: REVIEW } } },
 	'Parle-moi en français': { tool: 'set_language', args: { language: 'fr' } },
 	'Accepte le standup': { tool: 'accept_invitation', args: { body: { uid: STANDUP } } }
 };
@@ -91,19 +106,24 @@ describe('my assistant asks me whether to answer for a whole series before it an
 	// What Alice's calendar wrote: her answers, as their invitations now have them
 	const written: { uid: unknown; partstat: string }[] = [];
 
-	// Alice's calendar behind the gateway, where the standup repeats: as the contract does, it
-	// refuses an answer that does not say it is for the whole series, says what one that does would
-	// do when asked, and writes it otherwise
+	// Alice's calendar behind the gateway, as the contract answers: an invitation whose event was
+	// cancelled is refused before anything else; a recurring one, unless the call answers for the
+	// whole series; and the review, which her copy holds alone, is answered as an event either way.
+	// Asked, it says what an answer would do, and writes it otherwise.
 	function calendar(c: ContractCall): ContractReply {
 		const body = c.body as { readonly uid?: unknown; readonly series?: unknown };
-		if (body.series !== true) return RECURRING_INVITATION;
+		if (body.uid === OFFSITE) return INVITATION_CANCELLED;
+		if (body.uid === STANDUP && body.series !== true) return RECURRING_INVITATION;
 		const accepting = c.path.endsWith('/accept');
 		if (c.headers['x-twake-preview'] !== undefined) {
-			const summary = !accepting
-				? DECLINE_SUMMARY
-				: c.headers['accept-language'] === 'fr'
-					? FRENCH_ACCEPT_SUMMARY
-					: ACCEPT_SUMMARY;
+			const summary =
+				body.uid === REVIEW
+					? REVIEW_SUMMARY
+					: !accepting
+						? DECLINE_SUMMARY
+						: c.headers['accept-language'] === 'fr'
+							? FRENCH_ACCEPT_SUMMARY
+							: ACCEPT_SUMMARY;
 			return { status: 200, headers: PREVIEWED, body: { summary, digest: DIGEST } };
 		}
 		const answer = { uid: body.uid, partstat: accepting ? 'ACCEPTED' : 'DECLINED' };
@@ -211,6 +231,27 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		).toEqual([['accept_invitation', { body: { uid: STANDUP, series: true } }]]);
 	});
 
+	it('declines the whole series once I say yes, and the calendar writes it once', async () => {
+		const seen = questionsIn(r).length;
+		await r.client.sendText(r.room, 'Decline the standup');
+		const question = await nextQuestionIn(r, seen);
+		expect(question.body).toBe(
+			[SERIES, quoted('calendar describes it as:', DECLINE_SUMMARY), ANSWER].join('\n\n')
+		);
+		await r.requestAskedIn(question.eventId, 'calendar');
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'yes');
+		expect(await r.nextSaying('Found:', found)).toContain('"partstat":"DECLINED"');
+		await sleep(1000);
+		expect(calendarCalls()).toEqual([
+			[null, { uid: STANDUP }],
+			['true', { uid: STANDUP, series: true }],
+			[null, { uid: STANDUP, series: true }]
+		]);
+		expect(r.h.apisix.contracts.calls.at(-1)?.headers['x-twake-preview-digest']).toBe(DIGEST);
+		expect(written).toEqual([{ uid: STANDUP, partstat: 'DECLINED' }]);
+	});
+
 	it('asks me when I decline a recurring invitation, and writes nothing when I say no', async () => {
 		const seen = questionsIn(r).length;
 		await r.client.sendText(r.room, 'Decline the standup');
@@ -230,6 +271,30 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		]);
 		expect(written).toEqual([]);
 		expect(r.h.apisix.llm.calls).toHaveLength(modelCalls);
+	});
+
+	it('asks me about the whole series when the assistant answers for it of its own accord, and writes it once I say yes', async () => {
+		const seen = questionsIn(r).length;
+		await r.client.sendText(r.room, 'Accept the standup, every Monday');
+		const question = await nextQuestionIn(r, seen);
+		expect(question.body).toBe(
+			[SERIES, quoted('calendar describes it as:', ACCEPT_SUMMARY), ANSWER].join('\n\n')
+		);
+		await r.requestAskedIn(question.eventId, 'calendar');
+		await sleep(1000);
+		// The calendar only said what the answer would do
+		expect(calendarCalls()).toEqual([['true', { uid: STANDUP, series: true }]]);
+		expect(written).toEqual([]);
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'yes');
+		expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+		await sleep(1000);
+		expect(calendarCalls()).toEqual([
+			['true', { uid: STANDUP, series: true }],
+			[null, { uid: STANDUP, series: true }]
+		]);
+		expect(r.h.apisix.contracts.calls.at(-1)?.headers['x-twake-preview-digest']).toBe(DIGEST);
+		expect(written).toEqual([{ uid: STANDUP, partstat: 'ACCEPTED' }]);
 	});
 
 	it('asks me about the series, then for my consent as a first write does, before it writes in my calendar for the first time', async () => {
@@ -263,6 +328,42 @@ describe('my assistant asks me whether to answer for a whole series before it an
 			await sleep(1000);
 			expect(calendarCalls()).toEqual([
 				['true', { uid: STANDUP }],
+				['true', { uid: STANDUP, series: true }],
+				['true', { uid: STANDUP, series: true }],
+				[null, { uid: STANDUP, series: true }]
+			]);
+			expect(written).toEqual([{ uid: STANDUP, partstat: 'ACCEPTED' }]);
+		} finally {
+			await grantConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		}
+	});
+
+	it('asks me about the whole series the assistant answers for of its own accord, then for my consent, once each, before it first writes in my calendar', async () => {
+		await withdrawConsent(r.h.db, 'alice@test.local', 'calendar', 'write');
+		try {
+			const seen = questionsIn(r).length;
+			await r.client.sendText(r.room, 'Accept the standup, every Monday');
+			const series = await nextQuestionIn(r, seen);
+			expect(series.body).toBe(
+				[SERIES, quoted('calendar describes it as:', ACCEPT_SUMMARY), ANSWER].join('\n\n')
+			);
+			const consents = r.questions().length;
+			await r.client.sendText(r.room, 'yes');
+			const consent = await r.nextQuestion(consents);
+			expect(r.client.messages.find((m) => m.eventId === consent)?.body).toBe(
+				[
+					'This is the first time I need to change your data in calendar. Do you allow it? I would start with this:',
+					quoted('calendar describes it as:', ACCEPT_SUMMARY),
+					ANSWER
+				].join('\n\n')
+			);
+			const found = r.saying('Found:').length;
+			await r.client.sendText(r.room, 'yes');
+			expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+			await sleep(1000);
+			// Neither question came back once answered
+			expect(r.questions()).toHaveLength(consents + 1);
+			expect(calendarCalls()).toEqual([
 				['true', { uid: STANDUP, series: true }],
 				['true', { uid: STANDUP, series: true }],
 				[null, { uid: STANDUP, series: true }]
@@ -334,6 +435,28 @@ describe('my assistant asks me whether to answer for a whole series before it an
 			r.h.apisix.contracts.spec = INVITATION_ANSWERS_CATALOG;
 			for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
 		}
+	});
+
+	it('asks nothing about a series when the organizer cancelled the invitation, and the model reads why', async () => {
+		const questions = r.questions().length;
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Accept the offsite');
+		expect(await r.nextSaying('Heard:', heard)).toContain('"code":"invitation_cancelled"');
+		await sleep(1000);
+		expect(r.questions()).toHaveLength(questions);
+		expect(calendarCalls()).toEqual([[null, { uid: OFFSITE }]]);
+		expect(written).toEqual([]);
+	});
+
+	it('answers an occurrence I was invited to without the rest of its series as an event, asking nothing', async () => {
+		const questions = r.questions().length;
+		const found = r.saying('Found:').length;
+		await r.client.sendText(r.room, 'Accept the review');
+		expect(await r.nextSaying('Found:', found)).toContain('"partstat":"ACCEPTED"');
+		await sleep(1000);
+		expect(r.questions()).toHaveLength(questions);
+		expect(calendarCalls()).toEqual([[null, { uid: REVIEW }]]);
+		expect(written).toEqual([{ uid: REVIEW, partstat: 'ACCEPTED' }]);
 	});
 
 	// Last: Alice speaks French with her assistant from then on
