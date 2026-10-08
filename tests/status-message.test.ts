@@ -278,7 +278,8 @@ describe('a status message while my assistant works on a message', () => {
 		};
 		try {
 			asked = await r.client.sendText(r.room, 'Close it whatever happens');
-			const status = await replySaying(asked, DONE);
+			// The closing edit goes out twice, each time with a room key of its own to share first
+			const status = await replySaying(asked, DONE, 60_000);
 			expect(failed).toBe(true);
 			expect(saidBy(status)).toEqual([WORKING, DONE]);
 		} finally {
