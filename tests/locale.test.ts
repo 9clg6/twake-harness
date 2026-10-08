@@ -93,7 +93,7 @@ describe('a deployment that speaks French', () => {
 			expect(
 				await brunoClient.waitForMessage(room, mine.userId, (t) => t.startsWith('Bonjour'))
 			).toBe(
-				"Bonjour, je m'appelle Assistant et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir."
+				"Bonjour, je m'appelle Assistant de bruno et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir."
 			);
 		} finally {
 			await brunoClient.stop();

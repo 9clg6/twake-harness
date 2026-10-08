@@ -55,6 +55,9 @@ export interface AssistantServiceDeps {
 
 const NAME = /^[^\p{C}]{1,64}$/u;
 
+// The name every provisioned assistant had before it took its owner's
+const LEGACY_DEFAULT_NAME = 'Assistant';
+
 export function isValidAssistantName(name: string): boolean {
 	return NAME.test(name.trim()) && name.trim().length > 0;
 }
@@ -74,6 +77,32 @@ function toView(record: Pick<AssistantRecord, 'userId' | 'name' | 'roomId'>): As
 
 export function makeAssistantService(deps: AssistantServiceDeps): AssistantService {
 	const { config, db, admin, log } = deps;
+
+	// « Assistant de <owner> », after the owner's Matrix name, their localpart when they have none
+	async function defaultName(owner: string, ownerLocalpart: string): Promise<string> {
+		const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
+		const ownerName = (await admin.displayName(ownerUserId).catch(() => null)) ?? ownerLocalpart;
+		const messages = await fetchOwnerMessages(db, owner, config.locale);
+		return messages.defaultAssistantName(ownerName).slice(0, 64);
+	}
+
+	// An assistant provisioned under the former default name takes its owner's, once. Best effort:
+	// a failure keeps the former name until the next call
+	async function nameAfterOwner(
+		owner: string,
+		userId: string,
+		ownerLocalpart: string
+	): Promise<void> {
+		try {
+			const name = await defaultName(owner, ownerLocalpart);
+			// Kept under the former name while the homeserver refuses it, so the next call tries again
+			if (!(await admin.setDisplayName(userId, name))) return;
+			await withPrincipal(db, { id: owner }, (tx) => renameAssistant(tx, owner, name));
+			log.info({ owner, userId }, 'assistant named after its owner');
+		} catch (err: unknown) {
+			log.warn({ owner, userId, err }, 'assistant not named after its owner');
+		}
+	}
 
 	async function current(owner: string): Promise<AssistantRecord | null> {
 		const record = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
@@ -160,15 +189,18 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 		},
 		async provision(owner) {
 			const live = await current(owner);
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (live !== null) {
+				if (live.name === LEGACY_DEFAULT_NAME && ownerLocalpart !== null) {
+					await nameAfterOwner(owner, live.userId, ownerLocalpart);
+				}
 				await saveProvisioned(db, { owner, userId: live.userId, owesWelcome: false });
 				return { ok: true, userId: live.userId };
 			}
-			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
 			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
 			const userId = assistantUserId(config, ownerLocalpart);
 			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
-			const name = (await fetchOwnerMessages(db, owner, config.locale)).defaultAssistantName;
+			const name = await defaultName(owner, ownerLocalpart);
 			try {
 				// The account is registered once and kept, as for an assistant the owner creates
 				await admin.registerUser(localpart);
