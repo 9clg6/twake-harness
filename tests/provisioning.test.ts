@@ -234,6 +234,29 @@ describe('a provisioned assistant', () => {
 		expect(later.body).toEqual((await provision(ivy.userId)).body);
 	});
 
+	it('is prepared again when its provisioner reads it after a preparation that failed for good', async () => {
+		const joy = await h.synapse.registerUser('joy');
+		// The homeserver refuses every upload of the identity: the preparation fails for good
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/device_signing/upload')
+				? 500
+				: null;
+		try {
+			expect((await provision(joy.userId)).status).toBe(503);
+			await sleep(12_000);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+
+		// Nobody provisions it again: reading it asks for its preparation, until it is ready
+		let later = await readAssistant(joy.userId);
+		for (let i = 0; i < 120 && later.status === 503; i += 1) {
+			await sleep(250);
+			later = await readAssistant(joy.userId);
+		}
+		expect(later.status).toBe(200);
+	});
+
 	it('is none to its provisioner once its owner deleted it, and stays deleted once read', async () => {
 		const max = await h.synapse.registerUser('max');
 		await provisionUntilReady(h.api, max.userId);
