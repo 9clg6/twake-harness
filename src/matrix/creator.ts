@@ -44,7 +44,8 @@ export interface CreatorTurn {
 
 export interface CreatorInput {
 	readonly owner: string;
-	readonly text: string;
+	// What the owner wrote, null for a message without words, as an image or a file
+	readonly text: string | null;
 	readonly state: DialogState | null;
 	// The present, which a question asked now expires after
 	readonly now: Date;
@@ -58,8 +59,8 @@ export interface CreatorDeps {
 }
 
 // The creator conversation, like a bot factory: one command per message, one question at a time.
-// Null when the message answers a question that another one already answered: the creator then
-// says nothing more.
+// Null when the creator has nothing to say: the message answers a question that another one
+// already answered, or, without words, answers none.
 export async function runCreatorTurn(
 	input: CreatorInput,
 	deps: CreatorDeps,
@@ -67,11 +68,6 @@ export async function runCreatorTurn(
 ): Promise<CreatorTurn | null> {
 	const { assistants } = deps;
 	const say = messages.creator;
-	const text = input.text.trim();
-	const [word = '', ...rest] = text.split(/\s+/);
-	const command = word.toLowerCase();
-	const argument = rest.join(' ').trim();
-
 	if (input.state?.step === 'confirming_deletion') {
 		const asked = input.state;
 		const answer = await deletionAnswer(input, asked, assistants);
@@ -80,6 +76,12 @@ export async function runCreatorTurn(
 			return settleDeletion(answer, input.owner, asked, assistants, say);
 		}
 	}
+	// A message without words names no command
+	if (input.text === null) return null;
+	const text = input.text.trim();
+	const [word = '', ...rest] = text.split(/\s+/);
+	const command = word.toLowerCase();
+	const argument = rest.join(' ').trim();
 	// A question that no longer stands leaves nothing to wait for
 	const awaitingName = input.state?.step === 'awaiting_name';
 
@@ -172,14 +174,15 @@ type DeletionAnswer = 'confirm' | 'cancel' | 'too_late';
 
 // What the owner's message is to the question that asks them to confirm the deletion of their
 // assistant. The question stands for the time it gives them, while the assistant it named is still
-// their live one: a yes then confirms and anything else cancels. Once the question no longer
-// stands, a yes or a no comes too late, and anything else is no answer, null.
+// their live one: a yes then confirms and any other message cancels, one without words included.
+// Once the question no longer stands, a yes or a no comes too late, and anything else is no
+// answer, null.
 async function deletionAnswer(
 	input: CreatorInput,
 	asked: ConfirmingDeletion,
 	assistants: AssistantService
 ): Promise<DeletionAnswer | null> {
-	const answer = wordAnswer(input.text);
+	const answer = input.text === null ? null : wordAnswer(input.text);
 	const live = await assistants.identify(input.owner);
 	const stands =
 		input.now.getTime() < asked.question.expiresTs &&

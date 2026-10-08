@@ -1093,22 +1093,29 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		);
 	}
 
-	// An owner's encrypted message once its session was checked: the text and content of the very event
-	// whose session was checked, a command it names included, null when the message does not count
-	async function checkedMessage(words: OwnerWords): Promise<CheckedWords | null> {
+	// An owner's encrypted message once its session was checked: the very event whose session was
+	// checked, with words or without, null when the message does not count
+	async function checkedEvent(words: OwnerWords): Promise<RoomEvent | null> {
 		const admission = await ownerDevices.admit(words);
 		if (!admission.admitted) return null;
 		const checked = admission.event as RoomEvent;
-		const checkedText =
-			checked.type === 'm.room.message' && checked.sender === words.ownerUserId
-				? textOf(checked)
-				: null;
-		if (checkedText === null) {
-			const { roomId, owner, eventId } = words;
-			log.info({ roomId, owner, eventId }, 'message ignored: not the event checked');
-			return null;
-		}
-		return { text: checkedText, content: checked.content };
+		if (checked.type === 'm.room.message' && checked.sender === words.ownerUserId) return checked;
+		const { roomId, owner, eventId } = words;
+		log.info({ roomId, owner, eventId }, 'message ignored: not the event checked');
+		return null;
+	}
+
+	// An owner's encrypted words once their session was checked: the text and content of the very
+	// event whose session was checked, a command it names included, null when the message does not
+	// count
+	async function checkedMessage(words: OwnerWords): Promise<CheckedWords | null> {
+		const checked = await checkedEvent(words);
+		if (checked === null) return null;
+		const checkedText = textOf(checked);
+		if (checkedText !== null) return { text: checkedText, content: checked.content };
+		const { roomId, owner, eventId } = words;
+		log.info({ roomId, owner, eventId }, 'message ignored: not the event checked');
+		return null;
 	}
 
 	// The messages that reached an assistant encrypted, between the SDK's decrypted event and the
@@ -1164,10 +1171,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const sender = raw.sender ?? '';
 		log.info({ roomId, sender, eventId: raw.event_id }, 'message received');
 		if (sender === creator || isAssistantUserId(config, sender)) return;
+		// Null for a message without words, as an image or a file, which only the creator reads
 		const text = textOf(raw);
-		if (text === null) return;
 		const room = await assistantRoom(roomId);
 		if (room !== null) {
+			if (text === null) return;
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			let owner: string;
 			let message = text;
@@ -1264,6 +1272,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.info({ roomId, sender }, 'creator ignored a foreign sender');
 			return;
 		}
+		// A message without words names no command: the creator reads one only while it waits for the
+		// owner's answer to its question, which any message of theirs answers
+		if (text === null) {
+			const asked = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner, log));
+			if (asked?.step !== 'confirming_deletion') return;
+		}
 		// The creator takes an owner's commands as their assistant takes their words: never in clear in
 		// an encrypted room, and only encrypted, from a session their identity signed, as long as the
 		// deployment enforces it
@@ -1281,9 +1295,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (await ignoredInClear(words)) return;
 			if (!(await ownerDevices.admitUnencrypted(words, 'unencrypted'))) return;
 		} else {
-			const checked = await checkedMessage(words);
+			const checked = await checkedEvent(words);
 			if (checked === null) return;
-			command = checked.text;
+			command = textOf(checked);
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner, log));
 		const toOwner = await fetchMessages(owner);
@@ -1300,8 +1314,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			return { command: 'failed', nextState: null, reply: toOwner.creator.requestFailed };
 		});
 		if (turn === null) {
-			// Another message answered the question first, and the owner was told what came of it
-			log.info({ roomId, sender, owner }, 'creator answer already taken');
+			// Another message answered the question first, and the owner was told what came of it, or
+			// this one, without words, answered none
+			log.info({ roomId, sender, owner }, 'creator answered nothing');
 			return;
 		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));

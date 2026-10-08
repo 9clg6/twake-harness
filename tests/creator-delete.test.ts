@@ -247,4 +247,22 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 		]);
 		expect(await myAssistant()).toBe(404);
 	});
+
+	it('keeps my assistant when I answer the question with a message of no words, an image', async () => {
+		await newAssistant('Jarvis');
+		clock.set('2026-10-08T17:00:00Z');
+		expect((await answerTo('/delete')).body).toContain('Delete Jarvis?');
+		const seen = fromCreator().length;
+		await client.client.sendMessage(room, {
+			msgtype: 'm.image',
+			body: 'cat.png',
+			url: 'mxc://test.local/cat'
+		});
+		await untilCreatorWrote(seen + 1);
+		expect(fromCreator()[seen]?.body).toBe('Deletion cancelled: your assistant stays.');
+		expect((await answerTo('yes')).body).toBe(
+			'I did not understand « yes ». Send /help for the commands.'
+		);
+		expect(await myAssistant()).toBe(200);
+	});
 });
