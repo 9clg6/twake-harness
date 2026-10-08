@@ -58,8 +58,9 @@ export interface Messages {
 	readonly notices: {
 		readonly turnFailed: string;
 		// Why admission refused a turn, and when to send the message again: the owner's limit for the
-		// day, which lifts at midnight in the deployment's time zone, or too many of their turns at
-		// once, whether over their turns per minute or past the queue of a full replica
+		// day, which lifts at midnight in the deployment's time zone; too many of their turns at once,
+		// whether over their turns per minute or past the queue of a full replica; or too many turns
+		// on the whole platform
 		busy(reason: RefusalReason): string;
 		readonly recovered: string;
 		readonly noEscrow: string;
@@ -260,7 +261,7 @@ const ENGLISH: Messages = {
 				case 'user_queue_full':
 					return 'I received too many messages at once and cannot take this one. Please wait a minute, then send it again.';
 				case 'global_rate':
-					return 'I am busy right now and cannot take this message. Please send it again in a moment.';
+					return 'The platform is receiving many requests right now and I cannot take this message. Please send it again in a moment.';
 			}
 		},
 		recovered:
@@ -474,7 +475,7 @@ const FRENCH: Messages = {
 				case 'user_queue_full':
 					return "J'ai reçu trop de messages d'un coup et je ne peux pas prendre celui-ci. Attends une minute, puis renvoie-le.";
 				case 'global_rate':
-					return "J'ai trop de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.";
+					return 'La plateforme reçoit beaucoup de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.';
 			}
 		},
 		recovered:

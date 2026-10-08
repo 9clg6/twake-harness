@@ -11,6 +11,8 @@ const DAY_SPENT =
 	"J'ai atteint ma limite du jour et je ne peux pas prendre ce message. Elle se lève à minuit : renvoie-le à ce moment-là.";
 const TOO_MANY =
 	"J'ai reçu trop de messages d'un coup et je ne peux pas prendre celui-ci. Attends une minute, puis renvoie-le.";
+const PLATFORM_BUSY =
+	'La plateforme reçoit beaucoup de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.';
 
 // What my assistant says in my room next, once I sent it a message
 async function replyTo(r: ConsentRoom, text: string): Promise<string> {
@@ -90,5 +92,24 @@ describe('a French deployment in Europe/Paris', () => {
 		// 02:30 in Paris, past midnight UTC: the same day of mine
 		clock.set('2026-10-11T00:30:00Z');
 		expect(await replyTo(r, 'Et là ?')).toBe(DAY_SPENT);
+	});
+});
+
+describe('a platform with many requests', () => {
+	let r: ConsentRoom;
+	beforeAll(async () => {
+		// One turn a minute on the whole platform
+		r = await startConsentRoom({ ASSISTANT_LOCALE: 'fr', ADMISSION_GLOBAL_PER_MINUTE: '1' });
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it('tells me the platform has many requests, and to send my message again in a moment', async () => {
+		// Someone else's turn takes the platform's minute
+		expect((await r.h.api.post('bob@test.local', '/v1/chat', { message: 'Bonjour' })).status).toBe(
+			200
+		);
+		expect(await replyTo(r, 'Bonjour')).toBe(PLATFORM_BUSY);
 	});
 });
