@@ -50,19 +50,19 @@ const UNVERIFIED_REPORT =
 function literal(request: ChatRequest): ScriptedReply {
 	const last = request.messages.at(-1);
 	if (last?.role === 'tool') return { content: `Found: ${last.content ?? ''}` };
-	const told = lastUser(request);
-	const event = /\(id ([^)]+)\)/.exec(told)?.[1];
+	const said = lastUser(request);
+	const event = /\(id ([^)]+)\)/.exec(said)?.[1];
 	if (event !== undefined) return { content: `Told of ${event}` };
-	if (told === 'What do you remember?') {
+	if (said === 'What do you remember?') {
 		const prompt = request.messages[0]?.content ?? '';
 		const remembered = [NOTE, SKILL.description].filter((thing) => prompt.includes(thing));
 		return { content: `I remember: ${remembered.join(' and ') || 'nothing'}` };
 	}
-	const query = /^Search our conversations for (.+)$/.exec(told)?.[1];
+	const query = /^Search our conversations for (.+)$/.exec(said)?.[1];
 	if (query !== undefined) return { toolCalls: call('session_search', { query }) };
-	const domain = /^Search my (\w+)$/.exec(told)?.[1];
+	const domain = /^Search my (\w+)$/.exec(said)?.[1];
 	if (domain !== undefined) return { toolCalls: call(`search_${domain}`, { q: 'budget' }) };
-	return { content: `Heard: ${told}` };
+	return { content: `Heard: ${said}` };
 }
 
 interface PendingCalls {
@@ -98,7 +98,8 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 	let pinned: unknown;
 	// Another session of mine, opened anew in a browser and never verified
 	let other: E2eeClient | undefined;
-	const told = activityEvent({ id: 'erasure-told-before', recipient: ALICE });
+	// An event my assistant told me of before I deleted it, which wakes none of my next ones
+	const toldBefore = activityEvent({ id: 'erasure-told-before', recipient: ALICE });
 
 	beforeAll(async () => {
 		activity = await startActivityExchange();
@@ -119,6 +120,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		if (r !== undefined) await r.close();
 	});
 
+	// What the creator wrote me in our conversation, so far
 	function fromCreator(): DecryptedMessage[] {
 		return r.client.messages.filter((m) => m.roomId === creatorRoom && m.sender === creatorId);
 	}
@@ -194,6 +196,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		};
 	}
 
+	// What my routes show once the harness keeps nothing of what I told my assistant
 	const NOTHING = {
 		sessions: [],
 		memory: { memory: [], user: [] },
@@ -230,8 +233,13 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(await ask(r.room, 'Search my drive', (t) => t.startsWith('Found:'))).toContain(
 			'Budget 2027'
 		);
-		await activity.publish(told);
-		await r.client.waitForMessage(r.room, r.assistantId, (t) => t === `Told of ${told.id}`, 60_000);
+		await activity.publish(toldBefore);
+		await r.client.waitForMessage(
+			r.room,
+			r.assistantId,
+			(t) => t === `Told of ${toldBefore.id}`,
+			60_000
+		);
 		// A room I opened with it myself
 		secondRoom = await r.client.createDirectRoom(r.assistantId);
 		await r.h.synapse.waitForMember(r.alice, secondRoom, r.assistantId);
@@ -292,30 +300,6 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(await r.h.synapse.joinedMembers(r.alice, secondRoom)).toContain(r.assistantId);
 	});
 
-	it('keeps the jobs that failed for good, mine and those of others, while I have it', async () => {
-		const carol = await r.h.synapse.registerUser('carol');
-		// The homeserver refuses what my assistant and Carol's send
-		const failing = new Set([r.assistantId, CAROLS_ASSISTANT]);
-		r.h.apisix.matrixFault = (c) =>
-			c.method === 'PUT' &&
-			/\/rooms\/[^/]+\/send\/m\.room\./.test(c.path) &&
-			failing.has(new URL(c.path, 'http://synapse').searchParams.get('user_id') ?? '')
-				? 500
-				: null;
-		try {
-			await r.client.sendText(secondRoom, 'Can you hear me?');
-			const carols = await r.h.api.post<CreatedAssistant>(CAROL, '/v1/assistants', {
-				name: 'Friday'
-			});
-			expect(carols.status).toBe(201);
-			await r.h.synapse.joinRoom(carol, carols.body.roomId);
-			await until('both sends failed for good', async () => (await failedSends()).length === 2);
-		} finally {
-			r.h.apisix.matrixFault = null;
-		}
-		expect((await failedSends()).sort()).toEqual([CAROLS_ASSISTANT, r.assistantId].sort());
-	});
-
 	it('erases our conversations, what I kept for it, what I allowed and what waited for me, once I confirm /delete', async () => {
 		expect(await answerTo('/delete')).toContain('Delete Jarvis?');
 		expect(await answerTo('yes')).toBe(
@@ -336,10 +320,6 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 				async () => !(await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)
 			);
 		}
-	});
-
-	it("erases my jobs that failed for good, and keeps Carol's", async () => {
-		expect(await failedSends()).toEqual([CAROLS_ASSISTANT]);
 	});
 
 	it('gives me a new assistant under the same Matrix identifier, which greets me in a new room and remembers nothing', async () => {
@@ -373,7 +353,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 	});
 
 	it('wakes my new assistant for no event it already told me of, however often the event comes again', async () => {
-		await activity.publish(told);
+		await activity.publish(toldBefore);
 		// Published after it: once my assistant tells me of this one, the replay was read
 		const next = activityEvent({ id: 'erasure-told-after', recipient: ALICE });
 		await activity.publish(next);
@@ -383,7 +363,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 			(t) => t === `Told of ${next.id}`,
 			60_000
 		);
-		expect(turnCalls(r.h.apisix.llm.calls, told.id)).toHaveLength(1);
+		expect(turnCalls(r.h.apisix.llm.calls, toldBefore.id)).toHaveLength(1);
 	});
 
 	it('erases the same through the API, with no question', async () => {
@@ -544,6 +524,33 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(
 			r.client.messages.filter((m) => m.roomId === next && m.sender === r.assistantId)
 		).toHaveLength(1);
+	});
+
+	it("erases my jobs that failed for good, and keeps Carol's", async () => {
+		const room = (await r.h.api.get<CreatedAssistant>(ALICE, '/v1/assistants/me')).body.roomId;
+		const carol = await r.h.synapse.registerUser('carol');
+		// The homeserver refuses what my assistant and Carol's send
+		const failing = new Set([r.assistantId, CAROLS_ASSISTANT]);
+		r.h.apisix.matrixFault = (c) =>
+			c.method === 'PUT' &&
+			/\/rooms\/[^/]+\/send\/m\.room\./.test(c.path) &&
+			failing.has(new URL(c.path, 'http://synapse').searchParams.get('user_id') ?? '')
+				? 500
+				: null;
+		try {
+			await r.client.sendText(room, 'Can you hear me?');
+			const carols = await r.h.api.post<CreatedAssistant>(CAROL, '/v1/assistants', {
+				name: 'Friday'
+			});
+			expect(carols.status).toBe(201);
+			await r.h.synapse.joinRoom(carol, carols.body.roomId);
+			await until('both sends failed for good', async () => (await failedSends()).length === 2);
+		} finally {
+			r.h.apisix.matrixFault = null;
+		}
+		expect((await failedSends()).sort()).toEqual([CAROLS_ASSISTANT, r.assistantId].sort());
+		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+		expect(await failedSends()).toEqual([CAROLS_ASSISTANT]);
 	});
 });
 
