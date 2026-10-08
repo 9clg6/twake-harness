@@ -4,6 +4,9 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { step } from '../src/matrix/crypto-requests.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
+import { modelUsing } from './helpers/consent-room.js';
+import { grantConsent } from './helpers/consents.js';
+import { CALENDAR_CATALOG } from './helpers/fake-apisix.js';
 
 describe('structured logs', () => {
 	let h: TestHarness;
@@ -36,7 +39,9 @@ describe('structured logs', () => {
 
 // Messages reach the harness end-to-end encrypted and are decrypted only inside it: what a user
 // says, what the model answers or thinks, and what a tool receives must never reach a log line at
-// info, which is the production level. Debug keeps the full exchange for local troubleshooting.
+// info, which is the production level, but for the from and days of a list of calendar events, the
+// days it reads, in the shape the contract takes them (see below). Debug keeps the full exchange
+// for local troubleshooting.
 const USER_MARKER = 'USER-MARKER-7f3a';
 const ANSWER_MARKER = 'ANSWER-MARKER-91c2';
 const REASONING_MARKER = 'REASONING-MARKER-4d8e';
@@ -131,6 +136,58 @@ describe('conversation content at the debug level', () => {
 	it('still keeps it out of every line at info and above', () => {
 		const text = textOf(h.logLines().filter((line) => Number(line['level']) >= 30));
 		for (const marker of MARKERS) expect(text).not.toContain(marker);
+	});
+});
+
+// The from and days of a list of the owner's events reach info, so that the days the model took for
+// "today" or "tomorrow" can be checked, but only in the shape the contract takes them: the model
+// writes them, and any other text written there would carry the conversation into the logs
+describe('the days a list of calendar events reads, at the production log level', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		h = await startTestHarness();
+		h.apisix.contracts.spec = CALENDAR_CATALOG;
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
+		// Alice already let her assistant read her calendar
+		await grantConsent(h.db, 'alice', 'calendar', 'read');
+		h.apisix.contracts.handler = () => ({
+			status: 200,
+			body: { time_zone: 'Europe/Paris', events: [], truncated: false }
+		});
+	});
+	afterAll(async () => {
+		await h.close();
+	});
+
+	// The info line of the one call a turn made to list Alice's events with these arguments
+	async function lineOfList(args: Record<string, unknown>): Promise<Record<string, unknown>> {
+		const before = h.logLines().length;
+		h.apisix.llm.script = modelUsing('list_calendar_events', args);
+		expect(await chat(h, 'What do I have tomorrow?')).toBe(200);
+		const lines = h.logLines().slice(before);
+		const called = lines.filter((line) => line['msg'] === 'contract called');
+		expect(called).toHaveLength(1);
+		return called[0] ?? {};
+	}
+
+	it('gives the day and the number of days of a list as sent, in the shape the contract takes', async () => {
+		expect(await lineOfList({ from: '2026-10-09', days: 1 })).toMatchObject({
+			level: 30,
+			from: '2026-10-09',
+			days: '1'
+		});
+	});
+
+	it('names an argument of another shape, never with what the model wrote there', async () => {
+		const line = await lineOfList({ from: `tomorrow ${TOOL_MARKER}`, days: 32 });
+		expect(line).toMatchObject({ level: 30, malformedArguments: ['from', 'days'] });
+		expect(line).not.toHaveProperty('from');
+		expect(line).not.toHaveProperty('days');
+		// A day written as a list goes once per item: the line gives none of them
+		const repeated = await lineOfList({ from: ['2026-10-09', TOOL_MARKER] });
+		expect(repeated).toMatchObject({ level: 30, malformedArguments: ['from'] });
+		expect(repeated).not.toHaveProperty('from');
+		expect(textOf(h.logLines())).not.toContain(TOOL_MARKER);
 	});
 });
 

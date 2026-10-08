@@ -28,6 +28,7 @@ import {
 	saveSessionMessages,
 	type SessionRecord
 } from '../sessions/repository.js';
+import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
@@ -315,7 +316,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question ??= questionOf(outcome);
 			return outcome;
 		};
-		const check = await checkAvailability(run, invitation, { timeZone: config.timeZone });
+		// An all-day invitation's days are those of the zone the owner's turns state the present in:
+		// theirs, the deployment's when none is kept
+		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
+		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
 		const availability = messages.events.availability(check.data);
 		return {
@@ -577,8 +581,6 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					...(request === null ? {} : { request })
 				};
 			}
-			// Read at the start of every turn, never kept: a session can span days
-			const moment = describeMoment(clock.now(), config.timeZone, locale);
 			let history: readonly LlmMessage[] = session.messages;
 			// The call its owner allowed counts among the actions of the turn it resumes
 			let actionsBefore = 0;
@@ -630,6 +632,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					return { kind: 'ok', sessionId: session.id, answer: notice, model: llm.model };
 				}
 			}
+			// Read at the start of every turn, never kept: a session can span days. It is told in the
+			// zone of the owner's calendar once a read of it named one, the call their yes just ran
+			// included, and in the deployment's until then.
+			const timeZone = await fetchOwnerTimeZone(db, principal.id, config.timeZone);
+			const moment = describeMoment(clock.now(), timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
 			// The names of the tools the model is given, which its rules are built on

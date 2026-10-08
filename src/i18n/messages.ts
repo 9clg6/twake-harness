@@ -68,9 +68,9 @@ export interface Messages {
 	readonly notices: {
 		readonly turnFailed: string;
 		// Why admission refused a turn, and when to send the message again: the owner's limit for the
-		// day, which lifts at midnight in the IANA time zone the assistants read the present in; too
-		// many of their turns at once, whether over their turns per minute or past the queue of a full
-		// replica; or too many turns on the whole platform
+		// day, which lifts at midnight in the deployment's zone, ASSISTANT_TIMEZONE, whatever the zone
+		// of their calendar; too many of their turns at once, whether over their turns per minute or
+		// past the queue of a full replica; or too many turns on the whole platform
 		busy(reason: RefusalReason): string;
 		readonly recovered: string;
 		readonly noEscrow: string;

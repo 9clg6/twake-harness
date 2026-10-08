@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import { findCalendarOperation, zoneOfAnswer } from '../agent/calendar.js';
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { WaitReason } from '../consents/consent.js';
@@ -10,6 +11,7 @@ import { makeOwnerRequest, requestText } from '../consents/request.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
+import { saveOwnerTimeZone } from '../settings/repository.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
 import { makeOptionalOwnerConsentLink } from './consent-link.js';
@@ -93,6 +95,24 @@ const MADE_WITHOUT_OWNER = {
 	hint: "Asked what this call would do, the application did it instead: the call was made, without the owner's yes, and the harness told the owner so. Do not make it again."
 } as const;
 
+// Of the arguments named, those a call carries once and in their shape, as it sent them, and the
+// names of the others it carries, in malformedArguments, never with what they hold
+function loggedArguments(
+	url: URL,
+	shapes: Readonly<Record<string, RegExp>>
+): Record<string, string | readonly string[]> {
+	const logged: Record<string, string> = {};
+	const malformed: string[] = [];
+	for (const [name, shape] of Object.entries(shapes)) {
+		const values = url.searchParams.getAll(name);
+		if (values.length === 0) continue;
+		const [value] = values;
+		if (values.length === 1 && value !== undefined && shape.test(value)) logged[name] = value;
+		else malformed.push(name);
+	}
+	return malformed.length === 0 ? logged : { ...logged, malformedArguments: malformed };
+}
+
 // A call as the model wrote it, ready to go on the gateway: the operation's address, with its
 // parameters, and its body
 interface ContractRequest {
@@ -136,6 +156,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 	// declares, until a preview of it does what the call asks, a sign that it takes the preview
 	// header for nothing. The catalog's next load makes the tool again, previews included.
 	let previewing = contract.preview;
+	// What the harness does with the calls beyond making them, when the contract is one of the
+	// calendar's operations it knows
+	const calendar = findCalendarOperation(contract.toolName);
 
 	// Freezes the call as it would run until its owner answers, with the turn's session, the
 	// harness's question as its owner reads it and the digest of the preview they are shown, if
@@ -237,9 +260,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		return { url, body };
 	}
 
-	// Calls the contract through APISIX, and logs the call, never what it sent or got back. Only a
-	// preview carries the header that asks for one, and the action carries the digest of the
-	// preview its owner allowed, never that header.
+	// Calls the contract through APISIX, and logs the call, never what it sent or got back but the
+	// arguments a calendar operation gives its line. Only a preview carries the header that asks for
+	// one, and the action carries the digest of the preview its owner allowed, never that header.
 	async function send(
 		request: ContractRequest,
 		context: ToolContext,
@@ -292,6 +315,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				method: contract.method,
 				status,
 				principal: context.principalId,
+				...loggedArguments(request.url, calendar?.loggedArguments ?? {}),
 				...(sending.kind === 'preview' ? { preview: true } : {}),
 				...(delegation === null ? {} : { delegation })
 			},
@@ -510,6 +534,14 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// organization agent having nobody to ask
 			if (owner !== ORGANIZATION_PRINCIPAL && refusedAsRecurring(contract, values, answered)) {
 				return ask(wholeSeriesValues(values), context, ['series']);
+			}
+			// A read of the owner's calendar that succeeded refreshes the zone their turns state the
+			// present in: an error says nothing of their calendar, whatever zone it names
+			const succeeded = answered.status >= 200 && answered.status < 300;
+			const zone =
+				succeeded && calendar?.namesOwnerZone === true ? zoneOfAnswer(answered.body) : null;
+			if (zone !== null && owner !== ORGANIZATION_PRINCIPAL) {
+				await withPrincipal(context.db, { id: owner }, (tx) => saveOwnerTimeZone(tx, owner, zone));
 			}
 			return { result: answered.result };
 		}

@@ -1,6 +1,6 @@
 import { z } from 'zod';
 
-import { findTimeZone } from './agent/clock.js';
+import { findTimeZone, type TimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './wakeups/event-types.js';
 import { HOUR_MS } from './wakeups/retention.js';
@@ -92,8 +92,8 @@ export interface Config {
 		// when the broker lacks an owner's permission for their assistant to act for them, or null
 		// when the deployment gives none
 		readonly brokerConsentUrl: string | null;
-		// The hour, from 0 to 23 on the wall clock of the assistants' time zone, of the worker role's
-		// daily pass that reminds the owners whose permission expires within five days
+		// The hour, from 0 to 23 on the wall clock of ASSISTANT_TIMEZONE, the deployment's zone, of the
+		// worker role's daily pass that reminds the owners whose permission expires within five days
 		readonly delegationReminderHour: number;
 	};
 	readonly matrix: {
@@ -162,8 +162,9 @@ export interface Config {
 	};
 	// The language of the fixed texts of the assistants and the creator
 	readonly locale: Locale;
-	// The IANA time zone the assistants read the present in, such as Europe/Paris
-	readonly timeZone: string;
+	// The IANA time zone the assistants read the present in, such as Europe/Paris, until a read of
+	// their owner's calendar names its zone, and at whose midnight a user's day of tokens starts
+	readonly timeZone: TimeZone;
 	readonly logLevel: LogLevel;
 }
 

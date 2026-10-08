@@ -66,7 +66,7 @@ describe('the harness checks an invitation’s slot before the model speaks, fro
 		});
 	});
 
-	it('takes an all-day invitation from midnight to midnight in the deployment zone', async () => {
+	it("takes an all-day invitation from midnight to midnight in the owner's zone, the deployment's when none is kept", async () => {
 		const calls: Call[] = [];
 		await checkAvailability(
 			runner({ read_freebusy: FREE }, calls),
