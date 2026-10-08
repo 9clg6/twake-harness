@@ -1,5 +1,6 @@
 import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
+import type { YesNoQuestion } from '../matrix/questions.js';
 import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
 
 export async function hasConsent(
@@ -551,11 +552,14 @@ export interface PendingCallView {
 
 // When the request about a call expires, its lifetime after the call froze: an answer from then on
 // runs nothing
-export function requestExpiry(
-	record: Pick<PendingCallRecord, 'createdAt'>,
-	lifetimeMs: number
-): Date {
+function requestExpiry(record: PendingCallRecord, lifetimeMs: number): Date {
 	return new Date(record.createdAt.getTime() + lifetimeMs);
+}
+
+// The question the request about a call asks its owner, as their client tells it from other
+// messages: the id and the end of validity the API shows
+export function toYesNoQuestion(record: PendingCallRecord, lifetimeMs: number): YesNoQuestion {
+	return { id: record.id, expiresTs: requestExpiry(record, lifetimeMs).getTime() };
 }
 
 export function toPendingCallView(record: PendingCallRecord, lifetimeMs: number): PendingCallView {

@@ -8,7 +8,7 @@ import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
-import { findPendingCall, requestExpiry } from '../consents/repository.js';
+import { findPendingCall, toYesNoQuestion } from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
@@ -76,9 +76,9 @@ export interface SendPayload {
 	// The text asks the owner about a frozen call: the matrix role remembers the event it sent,
 	// which the owner's answer points to
 	readonly request?: PendingQuestion;
-	// The text asks the owner a question to answer yes or no: the matrix role marks it so in the
-	// message's content, for their client
-	readonly question?: YesNoQuestion;
+	// The text asks the owner a question to answer yes or no: what the matrix role marks the
+	// message's content with, for their client to tell which one
+	readonly questionMarker?: YesNoQuestion;
 	// The text as HTML, when the harness laid it out itself rather than the model writing Markdown
 	readonly html?: string;
 	// The turn answered once it reached its limit of tool calls: there is more to do
@@ -164,33 +164,21 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		};
 	}
 
-	// The question a turn ended on, as the owner's client tells it from other messages: the request
-	// about the call it froze, until that request expires; none once the call is no longer stored,
-	// as no answer could find it
-	async function questionAbout(
-		owner: string,
-		pendingCallId: string
-	): Promise<YesNoQuestion | null> {
-		const call = await withPrincipal(db, { id: owner }, (tx) =>
-			findPendingCall(tx, owner, pendingCallId)
-		);
-		return call === null
-			? null
-			: { id: call.id, expiresTs: requestExpiry(call, requestLifetimeMs).getTime() };
-	}
-
 	// What the assistant sends back for a turn: its answer, or the fixed notice of a refused or
-	// failed turn, and the question it asks when the turn froze a call
+	// failed turn, and the question it asks when the turn froze a call, marked for the owner's
+	// client unless the call is no longer stored, as no answer could find it
 	async function replyTo(
 		result: OwnerTurnResult,
 		assistant: AssistantRecord,
 		roomId: string,
 		notices: Messages['notices']
 	): Promise<SendPayload> {
-		const question =
-			result.kind === 'ok' && result.pendingCallId !== undefined
-				? await questionAbout(assistant.owner, result.pendingCallId)
-				: null;
+		const { owner } = assistant;
+		const pendingCallId = result.kind === 'ok' ? result.pendingCallId : undefined;
+		const call =
+			pendingCallId === undefined
+				? null
+				: await withPrincipal(db, { id: owner }, (tx) => findPendingCall(tx, owner, pendingCallId));
 		return {
 			asUserId: assistant.userId,
 			roomId,
@@ -201,10 +189,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 						? notices.busy
 						: notices.turnFailed,
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
-			...(result.kind === 'ok' && result.pendingCallId !== undefined
-				? { request: { pendingCallId: result.pendingCallId, owner: assistant.owner } }
-				: {}),
-			...(question === null ? {} : { question }),
+			...(pendingCallId === undefined ? {} : { request: { pendingCallId, owner } }),
+			...(call === null ? {} : { questionMarker: toYesNoQuestion(call, requestLifetimeMs) }),
 			// The harness's own request, laid out by the harness as HTML too
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
