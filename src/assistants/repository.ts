@@ -1,11 +1,17 @@
+import type { FastifyBaseLogger } from 'fastify';
+
 import type { Db, Tx } from '../db/client.js';
 import { isLocale, type Locale } from '../i18n/messages.js';
+import type { YesNoQuestion } from '../matrix/questions.js';
 
 export interface AssistantRecord {
 	readonly owner: string;
 	readonly userId: string;
 	readonly name: string;
 	readonly roomId: string | null;
+	// When it was created: one its owner deleted and created again has a time of its own, under the
+	// same account
+	readonly createdAt: Date;
 	readonly deletedAt: Date | null;
 	// The language its owner chose, null for the deployment's
 	readonly locale: Locale | null;
@@ -16,6 +22,7 @@ interface AssistantRow {
 	user_id: string;
 	name: string;
 	room_id: string | null;
+	created_at: Date;
 	deleted_at: Date | null;
 	locale: string | null;
 }
@@ -26,6 +33,7 @@ function normalize(row: AssistantRow): AssistantRecord {
 		userId: row.user_id,
 		name: row.name,
 		roomId: row.room_id,
+		createdAt: row.created_at,
 		deletedAt: row.deleted_at,
 		// A language the harness no longer speaks falls back to the deployment's
 		locale: row.locale !== null && isLocale(row.locale) ? row.locale : null
@@ -34,18 +42,19 @@ function normalize(row: AssistantRow): AssistantRecord {
 
 export async function findAssistant(tx: Tx, owner: string): Promise<AssistantRecord | null> {
 	const rows = await tx.sql<AssistantRow[]>`
-		select owner, user_id, name, room_id, deleted_at, locale
+		select owner, user_id, name, room_id, created_at, deleted_at, locale
 		from assistants where owner = ${owner}`;
 	const row = rows[0];
 	return row === undefined ? null : normalize(row);
 }
 
-// Saves the owner's assistant. A deleted row of another principal may still name its Matrix
-// account, as one an earlier build left under the owner's old principal: it is purged first, which
-// the reclaim policies allow for that row only, while app.reclaim_user_id names the account.
+// Saves the owner's assistant, created now, in the row of the one they deleted if any. A deleted row
+// of another principal may still name its Matrix account, as one an earlier build left under the
+// owner's old principal: it is purged first, which the reclaim policies allow for that row only,
+// while app.reclaim_user_id names the account.
 export async function saveAssistant(
 	tx: Tx,
-	record: Omit<AssistantRecord, 'deletedAt' | 'locale'>
+	record: Omit<AssistantRecord, 'createdAt' | 'deletedAt' | 'locale'>
 ): Promise<{ readonly reclaimed: number }> {
 	await tx.sql`select set_config('app.reclaim_user_id', ${record.userId}, true)`;
 	const purged = await tx.sql`
@@ -59,6 +68,7 @@ export async function saveAssistant(
 			user_id = excluded.user_id,
 			name = excluded.name,
 			room_id = excluded.room_id,
+			created_at = now(),
 			deleted_at = null`;
 	return { reclaimed: purged.count };
 }
@@ -108,14 +118,51 @@ export async function markAssistantDeleted(tx: Tx, owner: string): Promise<boole
 	return result.count === 1;
 }
 
-export type DialogState = 'awaiting_name';
+// Where the creator conversation of an owner stands: waiting for the name of the assistant it
+// creates, or for the owner's answer to the question that asks them to confirm the deletion of
+// theirs, the one created at that time
+export type DialogState =
+	| { readonly step: 'awaiting_name' }
+	| {
+			readonly step: 'confirming_deletion';
+			readonly question: YesNoQuestion;
+			readonly assistantCreatedAt: Date;
+	  };
 
-export async function findDialog(tx: Tx, owner: string): Promise<DialogState | null> {
-	const rows = await tx.sql<
-		{ state: string }[]
-	>`select state from creator_dialogs where owner = ${owner}`;
-	const state = rows[0]?.state;
-	return state === 'awaiting_name' ? state : null;
+interface DialogRow {
+	state: string;
+	question_id: string | null;
+	expires_at: Date | null;
+	assistant_created_at: Date | null;
+}
+
+export async function findDialog(
+	tx: Tx,
+	owner: string,
+	log: FastifyBaseLogger
+): Promise<DialogState | null> {
+	const rows = await tx.sql<DialogRow[]>`
+		select state, question_id, expires_at, assistant_created_at
+		from creator_dialogs where owner = ${owner}`;
+	const row = rows[0];
+	if (row === undefined) return null;
+	if (row.state === 'awaiting_name') return { step: 'awaiting_name' };
+	if (
+		row.state === 'confirming_deletion' &&
+		row.question_id !== null &&
+		row.expires_at !== null &&
+		row.assistant_created_at !== null
+	) {
+		const question = { id: row.question_id, expiresTs: row.expires_at.getTime() };
+		return {
+			step: 'confirming_deletion',
+			question,
+			assistantCreatedAt: row.assistant_created_at
+		};
+	}
+	// A step this build does not know, as a later one may write, leaves the dialog where it starts
+	log.warn({ owner, state: row.state }, 'creator dialog unreadable');
+	return null;
 }
 
 export async function saveDialog(tx: Tx, owner: string, state: DialogState | null): Promise<void> {
@@ -123,9 +170,35 @@ export async function saveDialog(tx: Tx, owner: string, state: DialogState | nul
 		await tx.sql`delete from creator_dialogs where owner = ${owner}`;
 		return;
 	}
+	const confirming = state.step === 'confirming_deletion' ? state : null;
 	await tx.sql`
-		insert into creator_dialogs (owner, state) values (${owner}, ${state})
-		on conflict (owner) do update set state = excluded.state, updated_at = now()`;
+		insert into creator_dialogs (owner, state, question_id, expires_at, assistant_created_at)
+		values (
+			${owner},
+			${state.step},
+			${confirming?.question.id ?? null},
+			${confirming === null ? null : new Date(confirming.question.expiresTs)},
+			${confirming?.assistantCreatedAt ?? null}
+		)
+		on conflict (owner) do update set
+			state = excluded.state,
+			question_id = excluded.question_id,
+			expires_at = excluded.expires_at,
+			assistant_created_at = excluded.assistant_created_at,
+			updated_at = now()`;
+}
+
+// Takes the answer to the question the owner's dialog waits on, which leaves the dialog where it
+// starts: true for the one message that took it
+export async function claimDialogQuestion(
+	tx: Tx,
+	owner: string,
+	questionId: string
+): Promise<boolean> {
+	const claimed = await tx.sql`
+		delete from creator_dialogs
+		where owner = ${owner} and state = 'confirming_deletion' and question_id = ${questionId}`;
+	return claimed.count === 1;
 }
 
 // The identifiers of every live assistant, from the room index that carries no user content

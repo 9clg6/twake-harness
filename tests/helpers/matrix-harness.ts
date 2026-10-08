@@ -52,7 +52,7 @@ export interface MatrixStartOptions {
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
 	readonly statusMaxMs?: number;
-	// The present the agent reads, set by the test instead of the system clock
+	// The present the agent and the creator read, set by the test instead of the system clock
 	readonly clock?: Clock;
 }
 
@@ -153,7 +153,8 @@ export async function startMatrixHarness(
 			bindAddress: '0.0.0.0',
 			pollIntervalMs: 100,
 			...(options.pushDeadlineMs === undefined ? {} : { pushDeadlineMs: options.pushDeadlineMs }),
-			...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs })
+			...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs }),
+			...(options.clock === undefined ? {} : { clock: options.clock })
 		});
 	await reserved.release();
 	let role = await startRole();

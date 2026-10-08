@@ -148,7 +148,8 @@ describe('creating an assistant, like a Telegram bot', () => {
 	it('deletes the assistant, which leaves the room, and lets the owner start over', async () => {
 		const before = await h.api.get<AssistantView>('alice@test.local', '/v1/assistants/me');
 		const room = before.body.roomId ?? '';
-		expect(await ask('/delete')).toMatch(/deleted/i);
+		expect(await ask('/delete')).toContain('Delete Vision?');
+		expect(await ask('yes')).toMatch(/deleted/i);
 		expect((await h.api.get('alice@test.local', '/v1/assistants/me')).status).toBe(404);
 		expect(await ask('/mybot')).toContain('/newbot');
 		for (let i = 0; i < 40; i += 1) {

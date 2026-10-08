@@ -332,4 +332,16 @@ describe('a deployment that speaks French', () => {
 		);
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
 	});
+
+	it('asks in French before deleting the assistant, and keeps it on anything but yes', async () => {
+		await h.synapse.sendText(alice, creatorRoom, '/delete');
+		expect(await fromCreator((t) => t.startsWith('Supprimer'))).toBe(
+			'Supprimer Lucie ? Réponds oui pour confirmer.'
+		);
+		await h.synapse.sendText(alice, creatorRoom, 'non');
+		expect(await fromCreator((t) => t.startsWith('Suppression'))).toBe(
+			'Suppression annulée : ton assistant reste.'
+		);
+		expect((await h.api.get('alice@test.local', '/v1/assistants/me')).status).toBe(200);
+	});
 });
