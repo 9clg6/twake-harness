@@ -228,8 +228,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	// midnight or now, which the assistant tells them on a message marked as the request, for their
 	// client to offer the answers again: a message that asks it again, superseding no other request.
 	// Failing that, it closes as expired, which the assistant tells them too. The job is done in the
-	// same transaction, so that their next yes queues one again. A call that no longer waits to run
-	// is left as it is, and one whose yes is still to be recorded waits for it.
+	// same transaction rather than by its worker once this returns, so that their next yes queues one
+	// again at once, and so that a stop in between leaves no job to claim again: run again, it would
+	// find the call open and approve it without a new yes. A call that no longer waits to run is left
+	// as it is, and one whose yes is still to be recorded waits for it.
 	async function settleRefusedYes(
 		job: Job,
 		request: ResumeRequest,
