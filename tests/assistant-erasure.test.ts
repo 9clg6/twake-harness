@@ -11,7 +11,7 @@ import {
 } from './helpers/activity.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import type { DecryptedMessage } from './helpers/e2ee-client.js';
+import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 
 const ALICE = 'alice@test.local';
@@ -39,6 +39,10 @@ function firstRead(domain: string): string {
 
 // What the assistant says when my day is spent
 const DAY_SPENT = 'I have reached my limit for the day';
+
+// What the assistant tells me of a session of mine that I never verified, whose words it takes
+const UNVERIFIED_REPORT =
+	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 
 // A literal model: it tells of the event a turn names, says what it remembers of me, searches our
 // past conversations or the application I name, tells what a search found, and repeats anything
@@ -84,6 +88,8 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 	let waiting: string;
 	// What the harness held of my identity before I deleted Jarvis
 	let pinned: unknown;
+	// Another session of mine, opened anew in a browser and never verified
+	let other: E2eeClient | undefined;
 	const told = activityEvent({ id: 'erasure-told-before', recipient: ALICE });
 
 	beforeAll(async () => {
@@ -100,6 +106,7 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		await r.client.waitForMessage(creatorRoom, creatorId, (t) => t.includes('/newbot'));
 	}, 240_000);
 	afterAll(async () => {
+		if (other !== undefined) await other.stop();
 		if (activity !== undefined) await activity.close();
 		if (r !== undefined) await r.close();
 	});
@@ -236,6 +243,19 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(pinned).toMatchObject({ pinned_by: 'first_use' });
 	});
 
+	it('tells me once that a session of mine is not verified, while I have it', async () => {
+		other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'), {
+			session: 'unsigned'
+		});
+		await other.sendText(secondRoom, 'Hello from my other browser');
+		await r.client.waitForMessage(
+			secondRoom,
+			r.assistantId,
+			(t) => t === 'Heard: Hello from my other browser'
+		);
+		await r.client.waitForMessage(secondRoom, r.assistantId, (t) => t === UNVERIFIED_REPORT);
+	});
+
 	it('keeps the jobs that failed for good, mine and those of others, while I have it', async () => {
 		const carol = await r.h.synapse.registerUser('carol');
 		// The homeserver refuses what my assistant and Carol's send
@@ -298,6 +318,16 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		).toBe('Found: {"sessions":[]}');
 		// It asks again before it reads my drive
 		await ask(irisRoom, 'Search my drive', (t) => t.startsWith(firstRead('drive')));
+	});
+
+	it('tells me again, in its new room, that a session of mine is not verified', async () => {
+		await other?.sendText(irisRoom, 'Hello again from my other browser');
+		await r.client.waitForMessage(
+			irisRoom,
+			r.assistantId,
+			(t) => t === 'Heard: Hello again from my other browser'
+		);
+		await r.client.waitForMessage(irisRoom, r.assistantId, (t) => t === UNVERIFIED_REPORT);
 	});
 
 	it('keeps the identity it holds of me', async () => {
