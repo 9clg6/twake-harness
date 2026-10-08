@@ -29,7 +29,14 @@ alter table owner_cross_signing
 			question_raised_by,
 			question_expires_at
 		) in (0, 5)
-	);
+	),
+	-- Asked only once it went out, in an event of its own
+	add check ((question_event_id is null) = (question_asked_at is null)),
+	add check (question_asked_at is null or question_id is not null),
+	-- Closed to words only once asked, answered only once closed, and by an event of the owner's
+	add check (question_closed_at is null or question_asked_at is not null),
+	add check (question_answer is null or question_closed_at is not null),
+	add check ((question_answer is null) = (question_answer_event_id is null));
 
 -- chat: the owner answered yes to that question, which holds the identity it asks about as the API
 -- would
