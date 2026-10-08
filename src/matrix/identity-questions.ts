@@ -12,6 +12,7 @@ import {
 	askIdentityQuestion,
 	closeIdentityQuestion,
 	isIdentityAnswerEvent,
+	isIdentityDenied,
 	recordIdentityAnswer,
 	recordIdentityQuestionEvent
 } from './owner-cross-signing-repository.js';
@@ -27,13 +28,18 @@ export interface IdentityQuestionsOptions {
 	readonly lifetimeMs: number;
 }
 
+// Where the question about a new identity stands once the owner's words came with it: asked just
+// now, waiting for their answer, or answered no while it lasts
+export type IdentityQuestionState = 'asked' | 'waiting' | 'denied';
+
 // The question an assistant asks its owner, while the deployment only reports, once their words
 // came from a session that another identity than the one held signed: whether they reset their
 // identity themselves. Their yes holds that identity, as the API does; their no keeps the one held.
 export interface IdentityQuestions {
 	// Asks the owner in the room, in a question marked for their client: once per identity, and
-	// again once the question expired unanswered
-	ask(room: RequestRoom, eventId: string, masterPublicKey: string): Promise<void>;
+	// again once the question expired, whether they answered no or nothing. Resolves to where the
+	// question stands.
+	ask(room: RequestRoom, eventId: string, masterPublicKey: string): Promise<IdentityQuestionState>;
 	// The question went out in this event: from then on it is asked, the room's newest question
 	// until another one reaches the room
 	asked(room: RequestRoom, questionId: string, eventId: string): Promise<void>;
@@ -121,7 +127,9 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 					raisedBy: eventId,
 					lifetimeMs
 				});
-				if (asked === null) return null;
+				if (asked === null) {
+					return (await isIdentityDenied(tx, owner, masterPublicKey)) ? 'denied' : 'waiting';
+				}
 				const pending: PendingIdentityQuestion = { questionId: asked.id, owner };
 				await enqueueJob(tx, {
 					kind: 'send',
@@ -137,12 +145,12 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 				});
 				return asked;
 			});
-			if (question !== null) {
-				log.info(
-					{ roomId, owner, eventId, mode, questionId: question.id },
-					'owner asked about their identity'
-				);
-			}
+			if (typeof question === 'string') return question;
+			log.info(
+				{ roomId, owner, eventId, mode, questionId: question.id },
+				'owner asked about their identity'
+			);
+			return 'asked';
 		},
 		asked: async (room, questionId, eventId) => {
 			const { roomId, owner } = room;

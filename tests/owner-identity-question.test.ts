@@ -23,6 +23,9 @@ const ADOPTED =
 	"C'est noté : ta nouvelle identité est désormais celle que je connais, et je ne signale plus tes messages.";
 const REJECTED =
 	"Alors quelqu'un d'autre l'a peut-être réinitialisée : change ton mot de passe dès maintenant et préviens ton administrateur. Je garde l'identité que je connaissais, et je continue de te répondre comme avant.";
+const DENIED_START = "Tu m'as dit ne pas avoir réinitialisé";
+const DENIED =
+	"Tu m'as dit ne pas avoir réinitialisé ton identité de chiffrement : je continue de signaler ce que tu écris avec la nouvelle, et j'y donne suite pour l'instant. Si tu l'as bien réinitialisée, réponds oui quand je te reposerai la question, une fois qu'elle aura expiré.";
 const OLD_SESSION_START = "Je n'ai pas donné suite à ton dernier message : ton application";
 const OLD_SESSION =
 	"Je n'ai pas donné suite à ton dernier message : ton application l'a chiffré avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Envoie /discardsession dans ce salon pour qu'elle en utilise de nouvelles ; puis renvoie-le.";
@@ -34,6 +37,8 @@ const EN_QUESTION =
 const EN_QUESTION_START = 'Your encryption identity is not the one I know. Did you';
 const EN_REJECTED =
 	'Then someone else may have reset it: change your password now and warn your administrator. I keep the identity I knew, and I go on answering you as before.';
+const EN_ADOPTED =
+	'Noted: your new identity is now the one I know, and I no longer flag your messages.';
 
 interface Mark {
 	readonly id: string;
@@ -182,7 +187,7 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		expect(r.saying('Heard: oui')).toHaveLength(0);
 	});
 
-	it('keeps the identity it knew when I answer no, tells me what to do, and goes on answering me', async () => {
+	it('keeps the identity it knew when I answer no, tells me what to do, and still flags my words from the new one', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
 		const asked = r.saying(QUESTION_START).length;
@@ -198,10 +203,15 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 			pinned: { master_key: before, pinned_by: 'chat' },
 			published: { master_key: after }
 		});
-		// My words from the new identity are acted on all the same
+		// My words from the new identity are acted on all the same, and I am told it still flags
+		// them, with nothing to answer while its question lasts
+		const denied = r.saying(DENIED_START).length;
 		heard = r.saying('Heard:').length;
 		await r.client.sendText(r.room, 'Toujours là ?');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Toujours là ?');
+		expect(await r.nextSaying(DENIED_START, denied)).toBe(DENIED);
+		expect(markOf(r, r.saying(DENIED_START).at(-1)?.eventId ?? '')).toBeUndefined();
+		expect(r.saying(QUESTION_START)).toHaveLength(asked + 1);
 		expect(r.saying('Heard: non')).toHaveLength(0);
 	});
 
@@ -244,7 +254,7 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 	});
 });
 
-describe('my assistant asks me about my identity again once its question expired unanswered', () => {
+describe('my assistant asks me about my identity again once its question expired', () => {
 	let r: ConsentRoom;
 	beforeAll(async () => {
 		// Its questions wait ten seconds for an answer
@@ -282,8 +292,8 @@ describe('my assistant asks me about my identity again once its question expired
 		expect(second.expires_ts).toBeGreaterThan(first.expires_ts);
 	});
 
-	it('asks no more about an identity once I answered no, even past the end of the question', async () => {
-		await r.client.resetIdentity();
+	it('asks again once its question expired after I answered no, and holds the identity at my yes', async () => {
+		const after = await r.client.resetIdentity();
 		const asked = r.saying(EN_QUESTION_START).length;
 		await r.client.sendText(r.room, 'Reset again');
 		expect(await r.nextSaying(EN_QUESTION_START, asked)).toBe(EN_QUESTION);
@@ -291,10 +301,19 @@ describe('my assistant asks me about my identity again once its question expired
 		const advised = r.saying(EN_REJECTED).length;
 		await r.client.sendText(r.room, 'no');
 		expect(await r.nextSaying(EN_REJECTED, advised)).toBe(EN_REJECTED);
+		// A no given by mistake is taken back at the next question, once this one expired
 		await pastExpiry(question);
 		const heard = r.saying('Heard:').length;
 		await r.client.sendText(r.room, 'Later on');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Later on');
-		expect(r.saying(EN_QUESTION_START)).toHaveLength(asked + 1);
+		expect(await r.nextSaying(EN_QUESTION_START, asked + 1)).toBe(EN_QUESTION);
+		expect(lastMark().id).not.toBe(question.id);
+		const adopted = r.saying(EN_ADOPTED).length;
+		await r.client.sendText(r.room, 'yes');
+		expect(await r.nextSaying(EN_ADOPTED, adopted)).toBe(EN_ADOPTED);
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toEqual({
+			pinned: { master_key: after, pinned_by: 'chat', pinned_at: expect.any(String) },
+			published: null
+		});
 	});
 });

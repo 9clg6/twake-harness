@@ -201,7 +201,8 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 	}
 
 	// Why the owner is told about the identity that is not the one held, whose session their words
-	// came from: null once their assistant asked them whether they reset it themselves instead
+	// came from: null when their assistant asked them whether they reset it themselves instead, or
+	// waits for their answer
 	async function identityReport(
 		words: OwnerWords,
 		verdict: DeviceVerdict
@@ -213,8 +214,14 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		}
 		// It asks only about the identity that signed the session the words came from
 		if (!verdict.signed || verdict.masterKey === null) return 'unsigned';
-		await deps.questions.ask({ roomId, owner, assistantUserId }, eventId, verdict.masterKey);
-		return null;
+		const question = await deps.questions.ask(
+			{ roomId, owner, assistantUserId },
+			eventId,
+			verdict.masterKey
+		);
+		// The owner told it they did not reset that identity: what they write with it is still
+		// reported to them, until the question expires and is asked again
+		return question === 'denied' ? 'denied' : null;
 	}
 
 	// The owner's words came from a session of another identity than the one held, the deployment

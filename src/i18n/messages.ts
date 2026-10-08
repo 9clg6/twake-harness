@@ -463,6 +463,8 @@ const ENGLISH: Messages = {
 					return 'Your encryption identity changed. I act on what you write for now; write to your assistant, which will ask you in its room whether you reset it yourself.';
 				case 'no_assistant':
 					return 'Your encryption identity changed. I act on what you write for now; if you did not reset it yourself, change your password and warn your administrator.';
+				case 'denied':
+					return 'You told me you did not reset your encryption identity: I keep flagging what you write with the new one, and act on it for now. If you did reset it after all, answer yes when I ask you again, once my question expires.';
 			}
 		},
 		unencrypted:
@@ -708,6 +710,8 @@ const FRENCH: Messages = {
 					return "Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; écris à ton assistant, qui te demandera dans son salon si tu l'as réinitialisée toi-même.";
 				case 'no_assistant':
 					return "Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; si tu ne l'as pas réinitialisée toi-même, change ton mot de passe et préviens ton administrateur.";
+				case 'denied':
+					return "Tu m'as dit ne pas avoir réinitialisé ton identité de chiffrement : je continue de signaler ce que tu écris avec la nouvelle, et j'y donne suite pour l'instant. Si tu l'as bien réinitialisée, réponds oui quand je te reposerai la question, une fois qu'elle aura expiré.";
 			}
 		},
 		unencrypted:
@@ -743,9 +747,10 @@ export type OwnerWordsKind = 'message' | 'answer';
 export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
 
 // Why the owner is told about another identity than the one held rather than asked whether they
-// reset it, while the deployment only reports: it did not sign the session their words came from,
-// or they wrote to the creator, while they have an assistant, whose room asks them, or none yet
-export type IdentityReport = 'unsigned' | 'assistant_asks' | 'no_assistant';
+// reset it, while the deployment only reports: it did not sign the session their words came from;
+// they wrote to the creator, while they have an assistant, whose room asks them, or none yet; or
+// they told their assistant they did not reset it, while that question lasts
+export type IdentityReport = 'unsigned' | 'assistant_asks' | 'no_assistant' | 'denied';
 
 // Where an owner confirms an identity they reset themselves while the deployment enforces their
 // sessions' identity, which no message in the chat can do then

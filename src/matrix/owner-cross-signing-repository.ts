@@ -163,8 +163,9 @@ function toYesNoQuestion(row: IdentityQuestionRow): YesNoQuestion {
 // Asks the owner, in the room their words came to, whether they reset their identity themselves:
 // about the identity seen for them, waiting for their answer for `lifetimeMs` from now, an end
 // stored as its mark tells it to their client before it goes out. Unless a question about that
-// identity waits for their answer still, or they answered it already: resolves to the question to
-// ask then, and to null otherwise. It counts as asked once it reached the room.
+// identity lasts still, answered or not: once it expired, it is asked again, so that a no given by
+// mistake can be taken back. Resolves to the question to ask then, and to null otherwise. It counts
+// as asked once it reached the room.
 export async function askIdentityQuestion(
 	tx: Tx,
 	owner: string,
@@ -193,11 +194,24 @@ export async function askIdentityQuestion(
 			and (
 				question_id is null
 				or question_master_public_key <> ${masterPublicKey}
-				or (question_answer is null and question_expires_at <= now())
+				or question_expires_at <= now()
 			)
 		returning question_id, question_expires_at`;
 	const row = rows[0];
 	return row === undefined ? null : toYesNoQuestion(row);
+}
+
+// Whether the owner answered no to the question about that identity, while it lasts
+export async function isIdentityDenied(
+	tx: Tx,
+	owner: string,
+	masterPublicKey: string
+): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from owner_cross_signing
+		where owner = ${owner} and question_master_public_key = ${masterPublicKey}
+			and question_answer = 'no' and question_expires_at > now()`;
+	return rows.length > 0;
 }
 
 // The question about their identity reached the owner's room in this event: from then on it is
