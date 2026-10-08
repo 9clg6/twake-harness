@@ -8,6 +8,7 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { LlmError, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { fenced } from '../llm/data.js';
+import { escapeHtml } from '../matrix/format.js';
 import type { Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import { ensureRoomSession, saveSessionMessages } from '../sessions/repository.js';
@@ -105,10 +106,6 @@ export interface BriefRunnerDeps {
 
 export interface BriefRunner {
 	run(input: BriefInput): Promise<BriefResult>;
-}
-
-function escapeHtml(text: string): string {
-	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 // The wall time of a time the calendar gave in its day's zone, with that zone's offset: 09:00
