@@ -40,6 +40,12 @@ export interface IdentityQuestions {
 	wrote(room: RequestRoom, eventId: string, text: string): Promise<boolean>;
 }
 
+// A yes or a no the owner wrote, with the texts that tell them what comes of it
+interface WrittenAnswer {
+	readonly says: Answer;
+	readonly texts: Messages['ownerDevices'];
+}
+
 export function makeIdentityQuestions(options: IdentityQuestionsOptions): IdentityQuestions {
 	const { db, log, mode, fetchMessages, lifetimeMs } = options;
 
@@ -50,28 +56,28 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 	async function answer(
 		room: RequestRoom,
 		eventId: string,
-		says: Answer | null
+		written: WrittenAnswer | null
 	): Promise<{ readonly questionId: string; readonly says: Answer } | 'again' | null> {
 		const { roomId, owner, assistantUserId } = room;
 		return withPrincipal(db, { id: owner }, async (tx) => {
-			if (says !== null && (await isIdentityAnswerEvent(tx, owner, eventId))) return 'again';
+			if (written !== null && (await isIdentityAnswerEvent(tx, owner, eventId))) return 'again';
 			const question = await closeIdentityQuestion(tx, owner, roomId, eventId);
-			if (question === null || says === null) return null;
+			if (question === null || written === null) return null;
 			// The owner answers the newest question of the room, as their client shows it
 			if (await isRequestOpenToWordsSince(tx, owner, roomId, question.askedAt)) return null;
+			const { says, texts } = written;
 			await recordIdentityAnswer(tx, owner, question.id, says, eventId);
 			await closeRequestsToWords(tx, owner, roomId);
 			if (says === 'yes') {
 				const { pinned } = await acceptSeenIdentity(tx, owner, question.masterPublicKey, 'chat');
 				if (pinned === null) throw new Error('the identity asked about is no longer the one seen');
 			}
-			const { ownerDevices } = await fetchMessages(owner);
 			await enqueueJob(tx, {
 				kind: 'send',
 				payload: {
 					asUserId: assistantUserId,
 					roomId,
-					text: says === 'yes' ? ownerDevices.identityAdopted : ownerDevices.identityRejected
+					text: says === 'yes' ? texts.identityAdopted : texts.identityRejected
 				},
 				dedupKey: `identity-answer:${eventId}`,
 				groupKey: `send:${roomId}`
@@ -83,6 +89,8 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 	return {
 		ask: async (room, eventId, masterPublicKey) => {
 			const { roomId, owner, assistantUserId } = room;
+			// Read before the transaction, which holds the owner's row until it ends
+			const { ownerDevices } = await fetchMessages(owner);
 			const question = await withPrincipal(db, { id: owner }, async (tx) => {
 				const asked = await askIdentityQuestion(tx, owner, {
 					masterPublicKey,
@@ -91,13 +99,12 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 					lifetimeMs
 				});
 				if (asked === null) return null;
-				const messages = await fetchMessages(owner);
 				await enqueueJob(tx, {
 					kind: 'send',
 					payload: {
 						asUserId: assistantUserId,
 						roomId,
-						text: messages.ownerDevices.identityQuestion,
+						text: ownerDevices.identityQuestion,
 						questionMarker: asked
 					},
 					dedupKey: `identity-question:${eventId}`,
@@ -115,9 +122,14 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 		wrote: async (room, eventId, text) => {
 			if (mode !== 'report') return false;
 			const { roomId, owner } = room;
+			const says = wordAnswer(text);
 			let taken: Awaited<ReturnType<typeof answer>>;
 			try {
-				taken = await answer(room, eventId, wordAnswer(text));
+				// Read before the transaction, which holds the owner's row until it ends, and only for
+				// words that may answer
+				const written =
+					says === null ? null : { says, texts: (await fetchMessages(owner)).ownerDevices };
+				taken = await answer(room, eventId, written);
 			} catch (err: unknown) {
 				// The owner's words count all the same, for a request or a turn
 				log.error({ roomId, owner, eventId, mode, err }, 'owner identity answer failed');
