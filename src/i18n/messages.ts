@@ -58,7 +58,8 @@ export interface Messages {
 	readonly notices: {
 		readonly turnFailed: string;
 		// Why admission refused a turn, and when to send the message again: the owner's limit for the
-		// day, which lifts at midnight in the deployment's time zone
+		// day, which lifts at midnight in the deployment's time zone, or too many of their turns at
+		// once, whether over their turns per minute or past the queue of a full replica
 		busy(reason: RefusalReason): string;
 		readonly recovered: string;
 		readonly noEscrow: string;
@@ -251,10 +252,17 @@ const ENGLISH: Messages = {
 	},
 	notices: {
 		turnFailed: 'Something went wrong on my side. Please try again in a moment.',
-		busy: (reason) =>
-			reason === 'user_budget'
-				? 'I have reached my limit for the day and cannot take this message. It lifts at midnight: please send it again then.'
-				: 'I am busy right now and cannot take this message. Please send it again in a moment.',
+		busy: (reason) => {
+			switch (reason) {
+				case 'user_budget':
+					return 'I have reached my limit for the day and cannot take this message. It lifts at midnight: please send it again then.';
+				case 'user_rate':
+				case 'user_queue_full':
+					return 'I received too many messages at once and cannot take this one. Please wait a minute, then send it again.';
+				case 'global_rate':
+					return 'I am busy right now and cannot take this message. Please send it again in a moment.';
+			}
+		},
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
@@ -458,10 +466,17 @@ const FRENCH: Messages = {
 	},
 	notices: {
 		turnFailed: "Quelque chose s'est mal passé de mon côté. Réessaie dans un instant.",
-		busy: (reason) =>
-			reason === 'user_budget'
-				? "J'ai atteint ma limite du jour et je ne peux pas prendre ce message. Elle se lève à minuit : renvoie-le à ce moment-là."
-				: "J'ai trop de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.",
+		busy: (reason) => {
+			switch (reason) {
+				case 'user_budget':
+					return "J'ai atteint ma limite du jour et je ne peux pas prendre ce message. Elle se lève à minuit : renvoie-le à ce moment-là.";
+				case 'user_rate':
+				case 'user_queue_full':
+					return "J'ai reçu trop de messages d'un coup et je ne peux pas prendre celui-ci. Attends une minute, puis renvoie-le.";
+				case 'global_rate':
+					return "J'ai trop de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.";
+			}
+		},
 		recovered:
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:

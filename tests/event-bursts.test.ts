@@ -47,8 +47,8 @@ function assignment(recipients: readonly Record<string, unknown>[] = [ALICE]): A
 	};
 }
 
-// What the assistant says when admission refuses a turn
-const BUSY = 'I am busy right now';
+// What the assistant says when admission refuses a turn: too many at once, or its day spent
+const TOO_MANY = 'I received too many messages at once';
 const DAY_SPENT = 'I have reached my limit for the day';
 
 function sleep(ms: number): Promise<void> {
@@ -220,7 +220,7 @@ describe('an event turn the rate limit refuses', () => {
 		await l.publish(third);
 		// My own words are refused as before, and I am told so at once, while they wait
 		await l.r.client.sendText(l.r.room, 'And now?');
-		await l.r.client.waitForMessage(l.r.room, l.r.assistantId, (text) => text.startsWith(BUSY));
+		await l.r.client.waitForMessage(l.r.room, l.r.assistantId, (text) => text.startsWith(TOO_MANY));
 		// One is told once my next minute comes, and the other waits for the minute after it
 		const told = await l.r.client.waitForMessage(
 			l.r.room,
@@ -237,7 +237,7 @@ describe('an event turn the rate limit refuses', () => {
 		]);
 		expect(deferred.every((line) => line['reason'] === 'user_rate')).toBe(true);
 		// Told I asked too much for my own words alone
-		expect(l.r.saying(BUSY)).toHaveLength(1);
+		expect(l.r.saying(TOO_MANY)).toHaveLength(1);
 	}, 180_000);
 });
 
@@ -279,7 +279,7 @@ describe('event turns queued while the api role is down', () => {
 		l.r.h.startTurnWorkers();
 		for (const event of queued) await l.answerTo(event, 60_000);
 		expect(l.r.h.logLines().filter((line) => line['msg'] === 'event turn abandoned')).toEqual([]);
-		expect(l.r.saying(BUSY)).toHaveLength(0);
+		expect(l.r.saying(TOO_MANY)).toHaveLength(0);
 	}, 180_000);
 });
 
