@@ -16,6 +16,7 @@ import {
 	type ContractReply
 } from './helpers/fake-apisix.js';
 
+const AARON = 'aaron@test.local';
 const ALICE = 'alice@test.local';
 const BOB = 'bob@test.local';
 // The deployment's consent link bound to Alice, as the harness binds every consent link it shows
@@ -65,10 +66,19 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 
 	// The worker role on the harness's database, reading the suite's clock, and looking often
 	// whether the hour of the reminders has come
-	async function startWorker(consent: Partial<Config['consent']> = {}): Promise<void> {
+	async function startWorker(
+		consent: Partial<Config['consent']> = {},
+		contracts: Partial<Config['contracts']> = {}
+	): Promise<void> {
+		const { config } = r.h;
 		logs = logSink();
 		worker = await startWorkerRole({
-			config: { ...r.h.config, role: 'worker', consent: { ...r.h.config.consent, ...consent } },
+			config: {
+				...config,
+				role: 'worker',
+				consent: { ...config.consent, ...consent },
+				contracts: { ...config.contracts, ...contracts }
+			},
 			db: r.h.db,
 			logStream: logs.stream,
 			clock,
@@ -267,5 +277,28 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(await r.nextSaying(REMINDER, seen)).toContain(
 			'expire le dimanche 7 février 2027 à 11:00.'
 		);
+	});
+
+	it('reminds me even when the broker answers too late about an owner asked before me, whom it reminds of nothing', async () => {
+		await r.h.synapse.registerUser('aaron');
+		const created = await r.h.api.post(AARON, '/v1/assistants', { name: 'Edwin' });
+		expect(created.status).toBe(201);
+		const seen = r.saying(REMINDER).length;
+		// The same permission for Aaron and for me, but the broker answers about him, whom the pass
+		// asks about first, after the harness gave up waiting
+		const held = brokerDelegation('2027-02-10T15:00:00Z', '2027-03-12T15:00:00Z');
+		r.h.apisix.delegation = (owner) =>
+			owner === AARON ? { ...held, delayMs: 1_500 } : owner === ALICE ? held : brokerNoDelegation();
+		// Nine in Paris on Monday 8 March, four days before it expires; the harness waits 300 ms for
+		// an answer of the gateway
+		clock.set('2027-03-08T08:00:00Z');
+		await startWorker({}, { timeoutMs: 300 });
+		expect(await r.nextSaying(REMINDER, seen)).toContain(
+			'expire le vendredi 12 mars 2027 à 16:00.'
+		);
+		// The pass reminded me alone, and warned of Aaron
+		await until('the pass ended', () => passes().length === 1);
+		expect(passes()).toEqual([1]);
+		expect(warnedAbout(AARON)).toEqual([{ msg: 'delegation reminder skipped' }]);
 	});
 });
