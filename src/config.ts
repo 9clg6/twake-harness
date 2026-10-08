@@ -23,6 +23,11 @@ export interface ActivitySource {
 	readonly types: readonly string[];
 }
 
+export interface CalendarSource {
+	// The broker, Calendar's vhost included
+	readonly amqpUrl: string;
+}
+
 export interface Config {
 	readonly role: Role;
 	readonly host: string;
@@ -130,6 +135,9 @@ export interface Config {
 		// whatever their source, counted in the database: past it, an event wakes that owner no more
 		readonly perHour: number;
 	};
+	// Calendar's fanout of the notifications it sends each invitee, which the worker role listens
+	// to when it is set, for the new invitations
+	readonly calendar: CalendarSource | null;
 	readonly gateway: {
 		// The secret the gateway sets on every request it forwards, when the API is only behind it
 		readonly sharedSecret: string | null;
@@ -218,6 +226,8 @@ const envSchema = z.object({
 	ACTIVITY_TYPES: z.string().default(TASK_ASSIGNED_EVENT_TYPE),
 	// As many as the dispatcher allowed before the activity exchange replaced it
 	WAKEUPS_PER_HOUR: z.coerce.number().int().min(1).default(20),
+	CALENDAR_ENABLED: z.enum(['true', 'false']).default('false'),
+	CALENDAR_AMQP_URL: z.string().default(''),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -252,10 +262,31 @@ function isAmqpUrl(value: string): boolean {
 	return URL.canParse(value) && ['amqp:', 'amqps:'].includes(new URL(value).protocol);
 }
 
+// The address a source the worker listens to is read at, as its settings give it: an amqp or
+// amqps URL, which holds the password of the instance's user, so that a refusal never says it. The
+// owners a source wakes are the recipients whose email is on the mail domain: without one, it
+// would wake nobody, and say nothing.
+function sourceAddress(
+	source: 'ACTIVITY' | 'CALENDAR',
+	address: string,
+	values: { MATRIX_SERVER_NAME: string; MATRIX_MAIL_DOMAIN: string }
+): string {
+	if (!isAmqpUrl(address)) {
+		throw new Error(
+			`invalid configuration: ${source}_ENABLED needs ${source}_AMQP_URL, an amqp or amqps URL`
+		);
+	}
+	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
+		throw new Error(
+			`invalid configuration: ${source}_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes`
+		);
+	}
+	return address;
+}
+
 // The activity exchange as the worker listens to it. The routing keys its queue is bound to are
 // CloudEvent types, each exactly, since a word * or # of a topic binding would let in events of
-// other types, or every event. The owners it wakes are the recipients whose email is on the mail
-// domain: without one, it would wake nobody, and say nothing.
+// other types, or every event.
 function activitySource(values: {
 	ACTIVITY_AMQP_URL: string;
 	ACTIVITY_TYPES: string;
@@ -265,17 +296,7 @@ function activitySource(values: {
 	amqpUrl: string;
 	types: string[];
 } {
-	// The address holds the password of the instance's user: a refusal never says it
-	if (!isAmqpUrl(values.ACTIVITY_AMQP_URL)) {
-		throw new Error(
-			'invalid configuration: ACTIVITY_ENABLED needs ACTIVITY_AMQP_URL, an amqp or amqps URL'
-		);
-	}
-	if (values.MATRIX_SERVER_NAME === '' && values.MATRIX_MAIL_DOMAIN === '') {
-		throw new Error(
-			'invalid configuration: ACTIVITY_ENABLED needs MATRIX_SERVER_NAME or MATRIX_MAIL_DOMAIN, the mail domain of the owners it wakes'
-		);
-	}
+	const amqpUrl = sourceAddress('ACTIVITY', values.ACTIVITY_AMQP_URL, values);
 	const types = listOf(values.ACTIVITY_TYPES);
 	if (types.length === 0) {
 		throw new Error('invalid configuration: ACTIVITY_TYPES lists no CloudEvent type');
@@ -286,7 +307,17 @@ function activitySource(values: {
 			`invalid configuration: ACTIVITY_TYPES lists the CloudEvent types that wake an assistant, never a pattern such as ${JSON.stringify(pattern)}`
 		);
 	}
-	return { amqpUrl: values.ACTIVITY_AMQP_URL, types };
+	return { amqpUrl, types };
+}
+
+// Calendar's fanout, on the vhost its address names, whose notifications name their invitee by
+// email
+function calendarSource(values: {
+	CALENDAR_AMQP_URL: string;
+	MATRIX_SERVER_NAME: string;
+	MATRIX_MAIL_DOMAIN: string;
+}): CalendarSource {
+	return { amqpUrl: sourceAddress('CALENDAR', values.CALENDAR_AMQP_URL, values) };
 }
 
 export function loadConfig(env: Env): Config {
@@ -399,6 +430,7 @@ export function loadConfig(env: Env): Config {
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
+		calendar: values.CALENDAR_ENABLED === 'true' ? calendarSource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
 		},

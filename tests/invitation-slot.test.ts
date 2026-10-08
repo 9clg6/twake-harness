@@ -1,10 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
-import { invitationSlot, isInvitationEvent } from '../src/agent/invitation.js';
+import { invitationSlot } from '../src/agent/invitation.js';
 
 // What read_freebusy is asked: the invitation's own start and end, as RFC 3339 times with their
-// offset, or the reason why the slot cannot be checked. The calendar producer writes start and end
-// from DTSTART and DTEND, in one of several shapes.
+// offset, or the reason why the slot cannot be checked. The invitation's wake-up carries start and
+// end from DTSTART and DTEND, in one of several shapes.
 describe("an invitation's slot, for the free/busy check", () => {
 	it('keeps a time that already carries its offset', () => {
 		expect(
@@ -61,7 +61,8 @@ describe("an invitation's slot, for the free/busy check", () => {
 			)
 		).toEqual({
 			ok: false,
-			reason: 'availability not checked: unknown time zone Mars/Olympus_Mons'
+			// The organizer wrote the zone: what the logs and the model read of the check never names it
+			reason: 'availability not checked: unknown time zone'
 		});
 	});
 
@@ -105,13 +106,5 @@ describe("an invitation's slot, for the free/busy check", () => {
 		expect(
 			invitationSlot({ start: 'next Tuesday', end: '2026-10-13T18:00:00Z', timezone: null }, 'UTC')
 		).toEqual({ ok: false, reason: 'availability not checked: unreadable start time' });
-	});
-});
-
-describe('the events that are invitations', () => {
-	it('is the CloudEvent type the calendar producer and the dispatcher use', () => {
-		expect(isInvitationEvent('com.twake.calendar.event.invited.v1')).toBe(true);
-		expect(isInvitationEvent('com.twake.calendar.event.updated.v1')).toBe(false);
-		expect(isInvitationEvent('calendar.invitation')).toBe(false);
 	});
 });

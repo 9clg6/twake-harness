@@ -1,6 +1,6 @@
-import { randomBytes } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
+import { carriesInvitation, type Invitation } from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
@@ -8,6 +8,7 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
+import { fenced } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
 
@@ -30,6 +31,8 @@ export interface Wakeup {
 		readonly computed: Readonly<Record<string, unknown>>;
 		readonly untrusted: Readonly<Record<string, unknown>>;
 	};
+	// For an invitation, what its turn checks before the model speaks
+	readonly invitation?: Invitation;
 }
 
 export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped';
@@ -40,19 +43,17 @@ export interface WakeDeps {
 	readonly log: FastifyBaseLogger;
 }
 
-// The event as the model is handed it: one line of JSON, so that nothing a third party wrote can
-// start a line of its own, between fences of a random nonce it cannot close
-function fenced(wakeup: Wakeup): string {
-	const nonce = randomBytes(6).toString('hex');
-	const data = JSON.stringify({ ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
-	return [`<<<event-data ${nonce}`, data, `event-data ${nonce}>>>`].join('\n');
+// The event as the model is handed it: what its source computed, apart from what people wrote
+function eventData(wakeup: Wakeup): string {
+	return fenced('event-data', { ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
 }
 
 // What the owner's assistant is told, in its owner's language: what arrived, then the event
 function told(wakeup: Wakeup, messages: Messages): string {
+	if (carriesInvitation(wakeup)) return messages.events.invited(wakeup.id, eventData(wakeup));
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
-		? messages.events.taskAssigned(wakeup.id, fenced(wakeup))
-		: messages.events.published(wakeup.type, wakeup.id, fenced(wakeup));
+		? messages.events.taskAssigned(wakeup.id, eventData(wakeup))
+		: messages.events.published(wakeup.type, wakeup.id, eventData(wakeup));
 }
 
 function same(a: string | null, b: string | null): boolean {
@@ -107,7 +108,11 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 			eventId: key,
 			text: told(wakeup, getMessages(localeOf(assistant, config.locale))),
 			origin: 'event',
-			event: { id: wakeup.id, type: wakeup.type }
+			event: {
+				id: wakeup.id,
+				type: wakeup.type,
+				...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
+			}
 		};
 		await enqueueJob(tx, { kind: 'turn', payload, dedupKey: key, groupKey: `turn:${owner}` });
 		return 'woken' as const;

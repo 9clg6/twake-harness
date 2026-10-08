@@ -11,6 +11,7 @@ import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import type { RefusalReason } from './admission.js';
+import { invitationSchema } from './invitation.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
 const turnPayload = z.object({
@@ -20,9 +21,15 @@ const turnPayload = z.object({
 	text: z.string().min(1),
 	// Who started the turn: the owner's message, or an event a dispatcher posted
 	origin: z.enum(['owner', 'event']).optional(),
-	// The event a dispatcher posted, when the turn is an event's: its id and CloudEvent type, so
-	// that the harness can read and check an invitation before the model speaks
-	event: z.object({ id: z.string().min(1), type: z.string().min(1) }).optional()
+	// The event a dispatcher posted, when the turn is an event's: its id and CloudEvent type, and
+	// for an invitation, what the harness checks before the model speaks
+	event: z
+		.object({
+			id: z.string().min(1),
+			type: z.string().min(1),
+			invitation: invitationSchema.optional()
+		})
+		.optional()
 });
 
 export type TurnPayload = z.infer<typeof turnPayload>;

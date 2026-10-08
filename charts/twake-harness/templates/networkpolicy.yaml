@@ -44,7 +44,7 @@ spec:
         - port: {{ $.Values.networkPolicy.databasePort }}
           protocol: TCP
     {{- end }}
-    {{- if and (eq .Values.role "worker") .Values.config.activityEnabled .Values.networkPolicy.rabbitmqNamespace }}
+    {{- if and (include "twake-harness.listens" .) .Values.networkPolicy.rabbitmqNamespace }}
     - to:
         - namespaceSelector:
             matchLabels:

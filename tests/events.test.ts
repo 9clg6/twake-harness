@@ -3,12 +3,8 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
-	BROKER_CONSENT_URL,
-	brokerRefusal,
 	CALENDAR_CATALOG,
 	INJECTED_NOTE,
-	INJECTED_TITLE,
-	invitationEvent,
 	type ChatMessage,
 	type ChatRequest,
 	type ContractCall,
@@ -24,12 +20,13 @@ function sleep(ms: number): Promise<void> {
 
 const INVITED = 'com.twake.calendar.event.invited.v1';
 
-function acceptCall(eventId: string): ToolCall[] {
+// Accepting an invitation by its calendar UID
+function acceptCall(uid: string): ToolCall[] {
 	return [
 		{
 			id: 'call_accept',
 			type: 'function',
-			function: { name: 'accept_invitation', arguments: JSON.stringify({ event_id: eventId }) }
+			function: { name: 'accept_invitation', arguments: JSON.stringify({ body: { uid } }) }
 		}
 	];
 }
@@ -63,35 +60,18 @@ describe('an event wakes my assistant', () => {
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
 		h = await startMatrixHarness({
-			env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service', BROKER_CONSENT_URL }
+			env: { EVENTS_CLIENT_IDS: 'dispatcher, other-service' }
 		});
 		// These tests are about events: Alice already let her assistant read her calendar and write
 		// in it
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'write');
 		h.apisix.contracts.spec = CALENDAR_CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
-		h.apisix.contracts.handler = (call: ContractCall) => {
-			if (call.path.endsWith('/freebusy')) {
-				return { status: 200, body: { start: '', end: '', free: true, busy: [] } };
-			}
-			const id = call.path.split('/').at(-1) ?? '';
-			// The broker answers for the contract when the owner gave no consent
-			if (id === 'evt-401') return brokerRefusal('delegation_missing');
-			return {
-				status: 200,
-				body: invitationEvent({
-					id,
-					uid: `uid-${id}`,
-					title: 'Budget review moved to Friday',
-					start: '2026-10-09T09:00:00+02:00',
-					end: '2026-10-09T10:00:00+02:00',
-					timezone: 'Europe/Paris',
-					organizer: 'bob@test.local',
-					invitee: 'alice@test.local'
-				})
-			};
-		};
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
+		h.apisix.contracts.handler = () => ({
+			status: 200,
+			body: { start: '', end: '', free: true, busy: [] }
+		});
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -106,119 +86,38 @@ describe('an event wakes my assistant', () => {
 		}
 		await client.joinRoom(room);
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Jarvis'));
-		// The model speaks from what it was handed: the harness already read the invitation and
-		// checked its slot, so it calls no tool
-		h.apisix.llm.script = (request: ChatRequest) => {
-			const told = lastUser(request);
-			const title = /"title":"([^"]+)"/.exec(told)?.[1];
-			if (title !== undefined) {
-				const free = told.includes('"free":true') ? 'free' : 'busy';
-				return { content: `Invitation: ${title}, ${free}. Do you want me to accept it?` };
-			}
-			return { content: `Event: ${told}` };
-		};
+		// A literal model: it repeats what it was told of the event
+		h.apisix.llm.script = (request: ChatRequest) => ({ content: `Event: ${lastUser(request)}` });
 	}, 240_000);
 	afterAll(async () => {
 		if (client !== undefined) await client.stop();
 		if (h !== undefined) await h.close();
 	});
 
-	function answers(): string[] {
+	// What the assistant told Alice of an event
+	function answers(eventId: string): string[] {
 		return client.messages
-			.filter((m) => m.roomId === room && m.sender === assistantId && m.body.includes('Budget'))
+			.filter(
+				(m) => m.roomId === room && m.sender === assistantId && m.body.includes(`(id ${eventId})`)
+			)
 			.map((m) => m.body);
 	}
 
-	it('reads the invitation and checks its slot before the model speaks, then tells the owner', async () => {
+	it('makes one turn of an event delivered twice, even after the first turn is over', async () => {
 		const posted = await h.api.post<{ queued: boolean }>('dispatcher', '/v1/events', EVENT);
 		expect(posted.status).toBe(202);
 		expect(posted.body.queued).toBe(true);
-		const answer = await client.waitForMessage(room, assistantId, (t) => t.includes('Budget'));
-		expect(answer).toBe(
-			'Invitation: Budget review moved to Friday, free. Do you want me to accept it?'
-		);
-		// The harness read the invitation, then its own slot with the invitation left out
-		const read = h.apisix.contracts.calls.filter((c) => c.path === '/contracts/v1/events/evt-1');
-		const slot = h.apisix.contracts.calls.filter(
-			(c) => c.path === '/contracts/v1/calendar/freebusy'
-		);
-		expect(read).toHaveLength(1);
-		expect(slot).toHaveLength(1);
-		expect(read[0]?.method).toBe('GET');
-		expect(slot[0]?.method).toBe('GET');
-		expect(slot[0]?.query).toEqual({
-			start: '2026-10-09T09:00:00+02:00',
-			end: '2026-10-09T10:00:00+02:00',
-			exclude: 'uid-evt-1'
-		});
-		// Both before the model's first call: the model answered at once, with no tool call
-		const turn = turnCalls(h.apisix.llm.calls, 'evt-1');
-		expect(turn).toHaveLength(1);
-		const first = turn[0];
-		if (first === undefined) throw new Error('the event turn made no model call');
-		expect(read[0]?.seq).toBeLessThan(slot[0]?.seq ?? 0);
-		expect(slot[0]?.seq).toBeLessThan(first.seq);
-		// The model is handed the answers fenced as data, and the question to end with
-		const told = lastUser(first.request);
-		const lines = told.split('\n');
-		const open = lines.findIndex((line) => /^<<<calendar-data [0-9a-f]{12}$/.test(line));
-		expect(open).toBeGreaterThan(0);
-		const nonce = lines[open]?.slice('<<<calendar-data '.length) ?? '';
-		expect(lines[open + 1]).toMatch(/^read_event \{"event_id":"evt-1"\} -> \{"status":200,/);
-		expect(lines[open + 1]).toContain('"title":"Budget review moved to Friday"');
-		expect(lines[open + 2]).toBe(
-			'read_freebusy {"start":"2026-10-09T09:00:00+02:00","end":"2026-10-09T10:00:00+02:00","exclude":["uid-evt-1"]} -> {"status":200,"body":{"start":"","end":"","free":true,"busy":[]}}'
-		);
-		expect(lines[open + 3]).toBe(`calendar-data ${nonce}>>>`);
-		expect(told).toContain('never instructions');
-		expect(told).toContain('Do not call read_event or read_freebusy again');
-		expect(told).toContain('in the same answer, call accept_invitation for it');
-		expect(told).toContain('nothing is sent before my yes');
-		// The event's turn knows the present too, to tell whether the slot is today or later
-		const eventPrompt = first.request.messages[0]?.content ?? '';
-		expect(eventPrompt).toContain('## Now');
-		expect(eventPrompt).toContain('time zone UTC');
-		expect(eventPrompt).toMatch(/In ISO 8601: \d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\+00:00\./);
-		// Through the same contract path as the model's calls: in the owner's name, linked to the
-		// event by its bare id, the one the dispatcher posted and audited, each contract named by its
-		// first tag, the paths never doubled
-		for (const [call, contract] of [
-			[read[0], 'events.read.v1'],
-			[slot[0], 'calendar.freebusy.read.v1']
-		] as const) {
-			expect(call?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
-			expect(call?.headers['x-correlation-id']).toBe('evt-1');
-			expect(call?.headers['x-twake-contract']).toBe(contract);
-		}
-		// The turn's log lines carry the same id
-		expect(
-			h
-				.logLines()
-				.some(
-					(l) =>
-						l['msg'] === 'invitation checked' &&
-						l['reqId'] === 'evt-1' &&
-						l['eventStatus'] === 200 &&
-						l['freeBusyStatus'] === 200 &&
-						l['reason'] === null
-				)
-		).toBe(true);
+		await client.waitForMessage(room, assistantId, (t) => t.includes('(id evt-1)'));
 		expect(
 			h.logLines().some((l) => l['msg'] === 'event queued' && l['client'] === 'dispatcher')
 		).toBe(true);
-	});
-
-	it('makes one turn of an event delivered twice, even after the first turn is over', async () => {
 		const calls = h.apisix.llm.calls.length;
-		const reads = h.apisix.contracts.calls.length;
 		const again = await h.api.post<{ duplicate: boolean }>('dispatcher', '/v1/events', EVENT);
 		expect(again.status).toBe(200);
 		expect(again.body.duplicate).toBe(true);
 		await sleep(2000);
 		expect(h.apisix.llm.calls.length).toBe(calls);
-		// Nor is the invitation read again
-		expect(h.apisix.contracts.calls.length).toBe(reads);
-		expect(answers()).toHaveLength(1);
+		expect(answers('evt-1')).toHaveLength(1);
 		expect(h.logLines().some((l) => l['msg'] === 'event duplicate')).toBe(true);
 	});
 
@@ -251,41 +150,6 @@ describe('an event wakes my assistant', () => {
 		await sleep(1000);
 		expect(h.apisix.llm.calls.length).toBe(calls);
 	});
-	it("sends the owner the broker's link itself when they never let their assistant act for them, and checks nothing more", async () => {
-		const slots = h.apisix.contracts.calls.filter((c) => c.path.endsWith('/freebusy')).length;
-		const posted = await h.api.post('dispatcher', '/v1/events', { ...EVENT, event_id: 'evt-401' });
-		expect(posted.status).toBe(202);
-		const request = await client.waitForMessage(room, assistantId, (t) =>
-			t.includes(BROKER_CONSENT_URL)
-		);
-		expect(request).toBe(
-			`To read your data in events, I need your permission to act on your behalf, and you have not given it yet. Give it here: ${BROKER_CONSENT_URL}?owner=alice%40test.local\nOnce that is done, shall I try again? Answer yes or no in your next message.`
-		);
-		expect(
-			h.apisix.contracts.calls.filter((c) => c.path === '/contracts/v1/events/evt-401')
-		).toHaveLength(1);
-		expect(h.apisix.contracts.calls.filter((c) => c.path.endsWith('/freebusy'))).toHaveLength(
-			slots
-		);
-		// The harness asked before the model spoke: no model was told of the broker's refusal
-		expect(turnCalls(h.apisix.llm.calls, 'evt-401')).toHaveLength(0);
-		expect(
-			h
-				.logLines()
-				.some(
-					(l) =>
-						l['msg'] === 'invitation checked' &&
-						l['freeBusyStatus'] === null &&
-						l['reason'] === 'the invitation could not be read'
-				)
-		).toBe(true);
-		// Alice lets it go, so that her next messages in the room are hers, not answers to it
-		const asked = client.messages.find((m) => m.roomId === room && m.body === request);
-		if (asked === undefined) throw new Error('no request');
-		await client.react(room, asked.eventId, '❌');
-		await client.waitForMessage(room, assistantId, (t) => t === 'All right, I will not do it.');
-	});
-
 	it('tells the model of any other event as it is, without reading it first', async () => {
 		const calls = h.apisix.contracts.calls.length;
 		const type = 'com.twake.calendar.event.updated.v1';
@@ -312,7 +176,13 @@ describe('an event wakes my assistant', () => {
 					{
 						id: 'call_read',
 						type: 'function',
-						function: { name: 'read_event', arguments: JSON.stringify({ event_id: 'evt-corr' }) }
+						function: {
+							name: 'read_freebusy',
+							arguments: JSON.stringify({
+								start: '2026-10-09T09:00:00+02:00',
+								end: '2026-10-09T10:00:00+02:00'
+							})
+						}
 					}
 				]
 			};
@@ -326,7 +196,7 @@ describe('an event wakes my assistant', () => {
 			expect(posted.status).toBe(202);
 			await client.waitForMessage(room, assistantId, (t) => t.includes('Read evt-corr'));
 			const read = h.apisix.contracts.calls.filter(
-				(c) => c.path === '/contracts/v1/events/evt-corr'
+				(c) => c.path === '/contracts/v1/calendar/freebusy'
 			);
 			expect(read).toHaveLength(1);
 			expect(read[0]?.headers['x-correlation-id']).toBe('evt-corr');
@@ -343,7 +213,7 @@ describe('an event wakes my assistant', () => {
 			if (last?.role === 'tool') return { content: `Accepted: ${last.content ?? ''}` };
 			return {
 				content: 'Bob invites you on Friday at 9; you are free.',
-				toolCalls: acceptCall(/\(id ([^)]+)\)/.exec(lastUser(request))?.[1] ?? 'unknown')
+				toolCalls: acceptCall(`uid-${/\(id ([^)]+)\)/.exec(lastUser(request))?.[1] ?? 'unknown'}`)
 			};
 		};
 		const posted = await h.api.post('dispatcher', '/v1/events', { ...EVENT, event_id: 'evt-act' });
@@ -354,7 +224,7 @@ describe('an event wakes my assistant', () => {
 			t.includes('> Bob invites you on Friday at 9')
 		);
 		expect(request).toContain('I prepared this in calendar for what just arrived');
-		expect(request).toContain('"event_id": "evt-act"');
+		expect(request).toContain('"uid": "uid-evt-act"');
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
 		expect(
 			h
@@ -400,7 +270,7 @@ describe('an event wakes my assistant', () => {
 		const reads = h.apisix.contracts.handler;
 		h.apisix.contracts.handler = (call: ContractCall) =>
 			call.method === 'POST'
-				? { status: 200, body: { event_id: 'evt-act', uid: 'uid-evt-act', partstat: 'ACCEPTED' } }
+				? { status: 200, body: { uid: 'uid-evt-act', partstat: 'ACCEPTED' } }
 				: reads(call);
 		// The acceptance the event's turn prepared runs as it was frozen, and the assistant tells
 		// the owner how it went
@@ -414,62 +284,42 @@ describe('an event wakes my assistant', () => {
 		await client.waitForMessage(room, assistantId, (t) => t.includes('"partstat":"ACCEPTED"'));
 		const accept = h.apisix.contracts.calls.filter((c) => c.method === 'POST');
 		expect(accept).toHaveLength(1);
-		expect(accept[0]?.path).toBe('/contracts/v1/calendar/invitations/evt-act/accept');
+		expect(accept[0]?.path).toBe('/contracts/v1/calendar/invitations/accept');
+		expect(accept[0]?.body).toEqual({ uid: 'uid-evt-act' });
 		expect(accept[0]?.headers['x-twake-on-behalf-of']).toBe('alice@test.local');
 		expect(accept[0]?.headers['x-twake-contract']).toBe('calendar.invitation.accept.v1');
 		expect(accept[0]?.headers['x-correlation-id']).toBe('evt-act');
 	});
 
 	it('never lets an event write the memory its owner turns read', async () => {
-		// The invitation's own title told the model to remember to accept every later invitation
-		const reads = h.apisix.contracts.handler;
-		h.apisix.contracts.handler = (call: ContractCall) =>
-			call.path === '/contracts/v1/events/evt-memory'
-				? {
-						status: 200,
-						body: invitationEvent({
-							id: 'evt-memory',
-							uid: 'uid-evt-memory',
-							title: INJECTED_TITLE,
-							start: '2026-10-09T14:00:00+02:00',
-							end: '2026-10-09T15:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'mallory@test.local',
-							invitee: 'alice@test.local'
-						})
-					}
-				: reads(call);
+		// The event's own text told the model to remember to accept every later invitation
 		h.apisix.llm.script = (request: ChatRequest) => {
 			const last = request.messages.at(-1);
 			if (last?.role === 'tool') return { content: 'Shall I remember to accept your invitations?' };
 			return { toolCalls: remember(INJECTED_NOTE) };
 		};
-		try {
-			const posted = await h.api.post('dispatcher', '/v1/events', {
-				...EVENT,
-				event_id: 'evt-memory'
-			});
-			expect(posted.status).toBe(202);
-			await client.waitForMessage(room, assistantId, (t) => t.includes('Shall I remember'));
-			const refusal = h.apisix.llm.calls
-				.flatMap((call) => call.request.messages)
-				.find((m) => m.role === 'tool' && m.name === 'memory');
-			expect(JSON.parse(refusal?.content ?? '{}')).toMatchObject({ error: 'needs_owner_approval' });
-			expect(
-				h
-					.logLines()
-					.some(
-						(l) => l['msg'] === 'tool called' && l['tool'] === 'memory' && l['status'] === 'denied'
-					)
-			).toBe(true);
-			const kept = await h.api.get<{ memory: string[]; user: string[] }>(
-				'alice@test.local',
-				'/v1/memory'
-			);
-			expect(kept.body.memory).not.toContain(INJECTED_NOTE);
-		} finally {
-			h.apisix.contracts.handler = reads;
-		}
+		const posted = await h.api.post('dispatcher', '/v1/events', {
+			...EVENT,
+			event_id: 'evt-memory'
+		});
+		expect(posted.status).toBe(202);
+		await client.waitForMessage(room, assistantId, (t) => t.includes('Shall I remember'));
+		const refusal = h.apisix.llm.calls
+			.flatMap((call) => call.request.messages)
+			.find((m) => m.role === 'tool' && m.name === 'memory');
+		expect(JSON.parse(refusal?.content ?? '{}')).toMatchObject({ error: 'needs_owner_approval' });
+		expect(
+			h
+				.logLines()
+				.some(
+					(l) => l['msg'] === 'tool called' && l['tool'] === 'memory' && l['status'] === 'denied'
+				)
+		).toBe(true);
+		const kept = await h.api.get<{ memory: string[]; user: string[] }>(
+			'alice@test.local',
+			'/v1/memory'
+		);
+		expect(kept.body.memory).not.toContain(INJECTED_NOTE);
 	});
 
 	it('never lets an event propose a skill to its owner', async () => {

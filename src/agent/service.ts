@@ -31,7 +31,12 @@ import {
 import { makeAdmission, type Admission, type RefusalReason } from './admission.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
-import { checkInvitation, isInvitationEvent, type ToolRunner } from './invitation.js';
+import {
+	carriesInvitation,
+	checkAvailability,
+	type Invitation,
+	type ToolRunner
+} from './invitation.js';
 import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
@@ -162,8 +167,13 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
-	// The event a dispatcher posted, for a turn of origin event: its id and CloudEvent type
-	readonly event?: { readonly id: string; readonly type: string };
+	// The event of a turn of origin event: its id and CloudEvent type, and for an invitation, what
+	// the harness checks before the model speaks
+	readonly event?: {
+		readonly id: string;
+		readonly type: string;
+		readonly invitation?: Invitation | undefined;
+	};
 	// The call its owner just allowed: the turn runs it as frozen, then goes on from there, with
 	// no new message
 	readonly resume?: ResumeInput;
@@ -247,10 +257,6 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// answers each member in their own language, as it always did
 	const withLanguage = (persona: string, messages: Messages): string =>
 		withAddressing(`${persona} ${messages.language.speak}`, messages);
-	// The owner's own assistant may need an invitation the conversation does not hold; the
-	// organization agent has no calendar of its own to search
-	const withLookup = (persona: string, messages: Messages): string =>
-		`${persona} ${messages.lookup}`;
 	const llm =
 		deps.llm ??
 		makeLlmClient({
@@ -286,21 +292,20 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const gate = makeTurnGate();
 	const admission = makeAdmission(config, db, deps.log);
 
-	// What the model is told. An invitation an event brings is read and its slot checked by the
-	// harness before the model speaks, through the same tools and context as the model's calls,
-	// and handed to it as data; any other message is told as it is. A read of that check that
-	// waits for its owner, such as the first read of their calendar, ends the turn on the
-	// harness's question.
+	// What the model is told. An invitation an event brings has its slot checked by the harness
+	// before the model speaks, from the UID and the times its wake-up carries, through the same
+	// tools and context as the model's calls: what the calendar answered follows what the wake-up
+	// told, as data. Any other message is told as it is. A read of that check that waits for its
+	// owner, such as the first read of their calendar, ends the turn on the harness's question.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
 		log: FastifyBaseLogger,
 		messages: Messages
 	): Promise<Told> {
-		const event = input.event;
-		if (input.origin !== 'event' || event === undefined || !isInvitationEvent(event.type)) {
-			return { message: input.message, question: null };
-		}
+		const event = input.origin === 'event' ? input.event : undefined;
+		if (!carriesInvitation(event)) return { message: input.message, question: null };
+		const { invitation } = event;
 		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
 			const tool = tools.find(name);
@@ -309,16 +314,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question ??= questionOf(outcome);
 			return outcome;
 		};
-		const check = await checkInvitation(run, event.id, { timeZone: config.timeZone });
-		log.info(
-			{
-				eventStatus: check.eventStatus,
-				freeBusyStatus: check.freeBusyStatus,
-				reason: check.reason
-			},
-			'invitation checked'
-		);
-		return { message: messages.events.invitation(event.id, check.data), question };
+		const check = await checkAvailability(run, invitation, { timeZone: config.timeZone });
+		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
+		const availability = messages.events.availability(check.data);
+		return {
+			message: input.message === null ? availability : `${input.message}\n${availability}`,
+			question
+		};
 	}
 
 	// Runs the call its owner allowed, exactly as it was frozen. A tool that no longer stands for
@@ -647,12 +649,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 											messages
 										)
 									: withLanguage(
-											withLookup(
-												input.assistantName === undefined
-													? DEFAULT_SYSTEM_PROMPT
-													: assistantPrompt(input.assistantName),
-												messages
-											),
+											input.assistantName === undefined
+												? DEFAULT_SYSTEM_PROMPT
+												: assistantPrompt(input.assistantName),
 											messages
 										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),

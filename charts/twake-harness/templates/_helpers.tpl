@@ -16,3 +16,8 @@ app.kubernetes.io/instance: {{ .Release.Name }}
 {{- define "twake-harness.secretName" -}}
 {{ .Values.existingSecret | default (printf "%s-env" .Release.Name) }}
 {{- end }}
+
+{{- /* Whether this release is a worker that listens to RabbitMQ, to the activity exchange or to Calendar's fanout: "true", or nothing */}}
+{{- define "twake-harness.listens" -}}
+{{- if and (eq .Values.role "worker") (or .Values.config.activityEnabled .Values.config.calendarEnabled) }}true{{- end }}
+{{- end }}
