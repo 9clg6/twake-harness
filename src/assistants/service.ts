@@ -62,13 +62,21 @@ export interface AssistantServiceDeps {
 	readonly log: FastifyBaseLogger;
 }
 
-const NAME = /^[^\p{C}]{1,64}$/u;
+// The longest name of an assistant, in characters
+const MAX_NAME_LENGTH = 64;
+const NAME = /^[^\p{C}]+$/u;
 
 // The name every provisioned assistant had before it took its owner's
 const LEGACY_DEFAULT_NAME = 'Assistant';
 
 export function isValidAssistantName(name: string): boolean {
-	return NAME.test(name.trim()) && name.trim().length > 0;
+	const trimmed = name.trim();
+	return NAME.test(trimmed) && [...trimmed].length <= MAX_NAME_LENGTH;
+}
+
+// The first characters of a name, as many as the name of an assistant holds, none cut in half
+function shortened(name: string): string {
+	return [...name].slice(0, MAX_NAME_LENGTH).join('').trim();
 }
 
 function matrixLink(userId: string): string {
@@ -87,12 +95,16 @@ function toView(record: Pick<AssistantRecord, 'userId' | 'name' | 'roomId'>): As
 export function makeAssistantService(deps: AssistantServiceDeps): AssistantService {
 	const { config, db, admin, log } = deps;
 
-	// « Assistant de <owner> », after the owner's Matrix name, their localpart when they have none
+	// « Assistant de <first name> », after the owner's Matrix name; after their localpart when they
+	// have none, or when the name it gives could not be an assistant's
 	async function defaultName(owner: string, ownerLocalpart: string): Promise<string> {
 		const ownerUserId = `@${ownerLocalpart}:${config.matrix.serverName}`;
-		const ownerName = (await admin.displayName(ownerUserId).catch(() => null)) ?? ownerLocalpart;
+		const ownerName = await admin.displayName(ownerUserId).catch(() => null);
 		const messages = await fetchOwnerMessages(db, owner, config.locale);
-		return messages.defaultAssistantName(ownerName).slice(0, 64);
+		const named = ownerName === null ? null : shortened(messages.defaultAssistantName(ownerName));
+		return named !== null && isValidAssistantName(named)
+			? named
+			: shortened(messages.defaultAssistantName(ownerLocalpart));
 	}
 
 	// An assistant provisioned under the former default name takes its owner's, once. Best effort:

@@ -176,8 +176,8 @@ describe('a provisioned assistant', () => {
 
 		const mine = await provisionUntilReady(h.api, bob.userId);
 		expect(mine.userId).toBe('@twake-space-assistant-bob:test.local');
-		// Named after its owner's Matrix name, not its identifier
-		expect(await h.synapse.displayName(mine.userId)).toBe("Bob MARTIN's assistant");
+		// Named after its owner's first name in their Matrix name, not its identifier
+		expect(await h.synapse.displayName(mine.userId)).toBe("Bob's assistant");
 
 		// What the owner's client compares before it trusts the assistant
 		const keys = await keysOf(bob, mine.userId);
@@ -330,9 +330,9 @@ describe('a provisioned assistant', () => {
 		expect(answer).toContain('hello, assistant');
 	});
 
-	// The greeting of an assistant, named after its owner, whose Matrix name is their localpart here
-	const greetingOf = (assistantId: string): string =>
-		`Hello, I am ${/^@twake-space-assistant-([^:]+):/.exec(assistantId)?.[1] ?? ''}'s assistant, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`;
+	// The greeting of an assistant named after its owner, whose Matrix name is their localpart here
+	const greetingOf = (ownerName: string): string =>
+		`Hello, I am ${ownerName}'s assistant, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`;
 
 	it('greets its owner in the first direct room they open with it, readable by their device', async () => {
 		const vera = await h.synapse.registerUser('vera');
@@ -347,10 +347,10 @@ describe('a provisioned assistant', () => {
 		const welcome = await client.waitForMessage(room, mine.userId, (text) =>
 			text.startsWith('Hello')
 		);
-		expect(welcome).toBe(greetingOf(mine.userId));
+		expect(welcome).toBe(greetingOf('vera'));
 		// It went through the homeserver encrypted, as everything in the room
 		const greeting = client.messages.find(
-			(m) => m.roomId === room && m.body === greetingOf(mine.userId)
+			(m) => m.roomId === room && m.body === greetingOf('vera')
 		);
 		const raw = await h.synapse.request(
 			vera,
@@ -472,10 +472,10 @@ describe('a provisioned assistant', () => {
 			await release();
 		}
 
-		await client.waitForMessage(room, mine.userId, (text) => text === greetingOf(mine.userId));
+		await client.waitForMessage(room, mine.userId, (text) => text === greetingOf('kate'));
 		await askForHelp(client, room, mine.userId);
 		const said = client.messages.filter((m) => m.roomId === room && m.sender === mine.userId);
-		expect(said[0]?.body).toBe(greetingOf(mine.userId));
+		expect(said[0]?.body).toBe(greetingOf('kate'));
 	});
 
 	it('greets its owner once, whatever comes after: the room named, a restart, another room', async () => {
@@ -486,19 +486,19 @@ describe('a provisioned assistant', () => {
 		const mine = await provisionUntilReady(h.api, wendy.userId);
 
 		const first = await client.createDirectRoom(mine.userId);
-		await client.waitForMessage(first, mine.userId, (text) => text === greetingOf(mine.userId));
+		await client.waitForMessage(first, mine.userId, (text) => text === greetingOf('wendy'));
 		const named = await h.api.put(PROVISIONER, `${provisioningPath(wendy.userId)}/home`, {
 			roomId: first
 		});
 		expect(named.status).toBe(204);
 		await h.restartRole();
 		await askForHelp(client, first, mine.userId);
-		expect(greetedIn(client, mine.userId, greetingOf(mine.userId))).toEqual([first]);
+		expect(greetedIn(client, mine.userId, greetingOf('wendy'))).toEqual([first]);
 
 		await bringIn(wendy, xavier, first, mine.userId);
 		const second = await openRoom(client, mine.userId);
 		await askForHelp(client, second, mine.userId);
-		expect(greetedIn(client, mine.userId, greetingOf(mine.userId))).toEqual([first]);
+		expect(greetedIn(client, mine.userId, greetingOf('wendy'))).toEqual([first]);
 	});
 
 	it('greets its owner once, whether they invite it again or leave for another room', async () => {
@@ -508,7 +508,7 @@ describe('a provisioned assistant', () => {
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, lena.userId);
 		const room = await openRoom(client, mine.userId);
-		await client.waitForMessage(room, mine.userId, (text) => text === greetingOf(mine.userId));
+		await client.waitForMessage(room, mine.userId, (text) => text === greetingOf('lena'));
 		const roomPath = `/_matrix/client/v3/rooms/${encodeURIComponent(room)}`;
 
 		// Someone else comes in and the assistant leaves; the owner takes that invitation back, and
@@ -524,13 +524,13 @@ describe('a provisioned assistant', () => {
 		expect(invited.status).toBe(200);
 		await heldAsItsRoom(room, 2);
 		await askForHelp(client, room, mine.userId);
-		expect(greetedIn(client, mine.userId, greetingOf(mine.userId))).toEqual([room]);
+		expect(greetedIn(client, mine.userId, greetingOf('lena'))).toEqual([room]);
 
 		// The owner leaves the room, and opens another one with it
 		expect((await h.synapse.request(lena, 'POST', `${roomPath}/leave`, {})).status).toBe(200);
 		const other = await openRoom(client, mine.userId);
 		await askForHelp(client, other, mine.userId);
-		expect(greetedIn(client, mine.userId, greetingOf(mine.userId))).toEqual([room]);
+		expect(greetedIn(client, mine.userId, greetingOf('lena'))).toEqual([room]);
 	});
 
 	it('greets its owner anew once they deleted it and their client asked for one again', async () => {
@@ -539,14 +539,14 @@ describe('a provisioned assistant', () => {
 		clients.push(client);
 		const mine = await provisionUntilReady(h.api, mia.userId);
 		const first = await openRoom(client, mine.userId);
-		await client.waitForMessage(first, mine.userId, (text) => text === greetingOf(mine.userId));
+		await client.waitForMessage(first, mine.userId, (text) => text === greetingOf('mia'));
 
 		expect((await h.api.delete('mia@test.local', '/v1/assistants/me')).status).toBe(204);
 		const again = await provisionUntilReady(h.api, mia.userId);
 		expect(again.userId).toBe(mine.userId);
 		const second = await openRoom(client, again.userId);
-		await client.waitForMessage(second, again.userId, (text) => text === greetingOf(mine.userId));
-		expect(greetedIn(client, mine.userId, greetingOf(mine.userId))).toEqual([first, second]);
+		await client.waitForMessage(second, again.userId, (text) => text === greetingOf('mia'));
+		expect(greetedIn(client, mine.userId, greetingOf('mia'))).toEqual([first, second]);
 	});
 
 	it('greets the owner who created it in the room it opened only, even once a provisioner asked for it', async () => {
@@ -875,7 +875,7 @@ describe('a provisioned assistant', () => {
 
 		const room = await openRoom(client, mine.userId);
 		await askForHelp(client, room, mine.userId);
-		expect(greetedIn(client, mine.userId, greetingOf(mine.userId))).toEqual([]);
+		expect(greetedIn(client, mine.userId, greetingOf('nora'))).toEqual([]);
 	});
 });
 
