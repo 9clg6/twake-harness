@@ -115,10 +115,6 @@ function wrapUpInstruction(deps: TurnDeps, reached: TurnLimit): string {
 // up to this
 export const MAX_RETRY_TOKENS = 32_768;
 
-function usedTokens(completion: LlmCompletion): number {
-	return (completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
-}
-
 // A reasoning model can spend its whole budget deliberating and stop before it writes a word: the
 // reasoning is stripped, so nothing visible is left
 function ranOutOfBudget(completion: LlmCompletion): boolean {
@@ -177,6 +173,24 @@ function parseArguments(raw: string): unknown {
 // The tokens the model calls of a turn spent, as the model reports them
 interface Spent {
 	tokens: number;
+	// An answer of the turn reported no usage, which the log tells once
+	unreported: boolean;
+}
+
+// Adds the tokens of an answer to those its turn spent. An answer that reports none counts for
+// nothing, against the limit of its turn as against the owner's day: the log warns of it once a turn
+function spend(
+	log: FastifyBaseLogger,
+	iteration: number,
+	completion: LlmCompletion,
+	spent: Spent
+): void {
+	if (completion.usage === null) {
+		if (!spent.unreported) log.warn({ iteration }, 'model reported no usage');
+		spent.unreported = true;
+		return;
+	}
+	spent.tokens += completion.usage.promptTokens + completion.usage.completionTokens;
 }
 
 interface Asked {
@@ -202,7 +216,7 @@ async function askModel(
 	);
 	deps.log.debug({ iteration, messages: prompt }, 'model asked');
 	let completion = await deps.llm.complete(prompt, tools);
-	spent.tokens += usedTokens(completion);
+	spend(deps.log, iteration, completion, spent);
 	logAnswer(deps.log, iteration, completion);
 	if (ranOutOfBudget(completion)) {
 		if (tools.length > 0 && spent.tokens >= deps.maxTurnTokens) return { completion, cut: true };
@@ -215,7 +229,7 @@ async function askModel(
 				'model ran out of budget'
 			);
 			completion = await deps.llm.complete(prompt, tools, { maxTokens: retryBudget });
-			spent.tokens += usedTokens(completion);
+			spend(deps.log, iteration, completion, spent);
 			logAnswer(deps.log, iteration, completion);
 		}
 	}
@@ -252,7 +266,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	let toolCalls = 0;
 	// The calls that reached their tool, and those of the turn before the model spoke
 	let actions = input.actionsBefore;
-	const spent: Spent = { tokens: 0 };
+	const spent: Spent = { tokens: 0, unreported: false };
 	let iteration = 0;
 	// The calls the model made past the limit of the message, which never run
 	let notRun = 0;

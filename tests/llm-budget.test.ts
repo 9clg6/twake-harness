@@ -269,4 +269,20 @@ describe('the token budget of a turn', () => {
 		// The model is told of the read that did not run
 		expect(h.apisix.llm.calls[1]?.request.messages[0]?.content).toMatch(/limit of 6 tool calls/);
 	});
+
+	it('counts nothing for the answers that report no usage, and warns of them once', async () => {
+		// Neither of the two answers, a read then the answer, reports what it read and wrote: the turn
+		// counts them as nothing, against its limit as against the owner's day
+		h.apisix.llm.script = (_request, index) =>
+			index === 0 ? { toolCalls: [readCall(0)], usage: null } : { content: 'Read.', usage: null };
+		const { status, body } = await chat(h, 'ivy', 'Read them', 'turn-unreported');
+		expect(status).toBe(200);
+		expect(body.answer).toBe('Read.');
+		expect(h.apisix.llm.calls).toHaveLength(2);
+		const lines = h.logLines().filter((line) => line['reqId'] === 'turn-unreported');
+		expect(lines.filter((line) => line['msg'] === 'model reported no usage')).toEqual([
+			expect.objectContaining({ level: 40, iteration: 0 })
+		]);
+		expect(lines.find((line) => line['msg'] === 'turn finished')).toMatchObject({ tokens: 0 });
+	});
 });
