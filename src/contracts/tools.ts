@@ -48,7 +48,9 @@ export function joinPath(base: URL, ...segments: string[]): URL {
 	return new URL(kept.join('/'), root);
 }
 
-function parseBody(text: string): unknown {
+// The body of an answer through the gateway: its JSON, the text itself when it is no JSON, or
+// null when there is none
+export function parseBody(text: string): unknown {
 	if (text.length === 0) return null;
 	try {
 		return JSON.parse(text) as unknown;

@@ -7,12 +7,16 @@ function isDelegationCode(value: unknown): value is DelegationCode {
 	return typeof value === 'string' && (DELEGATION_CODES as readonly string[]).includes(value);
 }
 
+// The code by which an RFC 9457 problem of the broker says why it holds no permission it can use,
+// if it says so
+export function readProblemCode(body: unknown): DelegationCode | null {
+	if (typeof body !== 'object' || body === null || !('code' in body)) return null;
+	return isDelegationCode(body.code) ? body.code : null;
+}
+
 // The broker's refusal of a contract call, as the gateway relays it: a 401 whose RFC 9457 problem
 // says why in its code. Nothing else of it is read: a contract could write the same answer, so
 // the link it carries is never shown to the owner.
 export function readDelegationCode(status: number, body: unknown): DelegationCode | null {
-	if (status !== 401 || typeof body !== 'object' || body === null || !('code' in body)) {
-		return null;
-	}
-	return isDelegationCode(body.code) ? body.code : null;
+	return status === 401 ? readProblemCode(body) : null;
 }

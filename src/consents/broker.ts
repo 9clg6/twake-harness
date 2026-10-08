@@ -1,7 +1,8 @@
 import { z } from 'zod';
 
 import type { Config } from '../config.js';
-import { joinPath } from '../contracts/tools.js';
+import { joinPath, parseBody } from '../contracts/tools.js';
+import { readProblemCode } from './delegation.js';
 
 // An owner's permission for their assistant to act for them, as the platform's token broker holds
 // it: when they gave it and when it expires, and the broker's consent link, where they renew it
@@ -19,24 +20,10 @@ const heldSchema = z.object({
 	consent_url: z.url({ protocol: /^https$/ })
 });
 
-function parseBody(text: string): unknown {
-	try {
-		return JSON.parse(text) as unknown;
-	} catch {
-		return null;
-	}
-}
-
 // Whether an answer is the broker's own word that it holds no permission of the owner: an RFC
 // 9457 problem whose code says so. A 404 of the gateway, which has no such route, is none.
 function isMissing(status: number, body: unknown): boolean {
-	return (
-		status === 404 &&
-		typeof body === 'object' &&
-		body !== null &&
-		'code' in body &&
-		body.code === 'delegation_missing'
-	);
+	return status === 404 && readProblemCode(body) === 'delegation_missing';
 }
 
 // What the broker holds of an owner's permission, asked through the gateway the way a contract
