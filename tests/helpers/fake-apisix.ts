@@ -190,6 +190,24 @@ function escapeRegExp(text: string): string {
 	return text.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
 }
 
+// The path a gateway publishes for segments under its root, each without the slashes at its ends,
+// the empty ones left out
+function routePath(segments: readonly string[]): string {
+	return `/${segments
+		.map((segment) => segment.replace(/^\/+|\/+$/g, ''))
+		.filter((segment) => segment.length > 0)
+		.join('/')}`;
+}
+
+// The headers of a request that carry one value each, as the upstream of a route reads them
+function headersOf(req: IncomingMessage): Record<string, string> {
+	const headers: Record<string, string> = {};
+	for (const [name, value] of Object.entries(req.headers)) {
+		if (typeof value === 'string') headers[name] = value;
+	}
+	return headers;
+}
+
 // The routes a gateway publishes for a catalog, one per operation: the document's server path (its
 // path part when the server is an absolute URL, the root when there is none) and the operation
 // path, under the mount. A path parameter matches one segment.
@@ -206,12 +224,8 @@ function contractRoutes(spec: unknown, mount: string): ContractRoute[] {
 		: serverUrl;
 	const routes: ContractRoute[] = [];
 	for (const [path, item] of Object.entries(document.paths ?? {})) {
-		const full = [mount, serverPath, path]
-			.map((segment) => segment.replace(/^\/+|\/+$/g, ''))
-			.filter((segment) => segment.length > 0)
-			.join('/');
 		const pattern = new RegExp(
-			`^/${full
+			`^${routePath([mount, serverPath, path])
 				.split(/\{[^}]+\}/)
 				.map(escapeRegExp)
 				.join('[^/]+')}$`
@@ -478,15 +492,9 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			sendJson(res, 200, contracts.spec);
 			return;
 		}
-		const delegationPath = `/${[contracts.mount, 'delegation']
-			.map((segment) => segment.replace(/^\/+|\/+$/g, ''))
-			.filter((segment) => segment.length > 0)
-			.join('/')}`;
+		const delegationPath = routePath([contracts.mount, 'delegation']);
 		if (fake.delegation !== null && req.method === 'GET' && url.pathname === delegationPath) {
-			const headers: Record<string, string> = {};
-			for (const [name, value] of Object.entries(req.headers)) {
-				if (typeof value === 'string') headers[name] = value;
-			}
+			const headers = headersOf(req);
 			const owner = headers['x-twake-on-behalf-of'] ?? null;
 			delegationCalls.push({ owner, headers });
 			const reply = fake.delegation(owner);
@@ -506,16 +514,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const chunks: Buffer[] = [];
 			for await (const chunk of req) chunks.push(chunk as Buffer);
 			const text = Buffer.concat(chunks).toString('utf8');
-			const headers: Record<string, string> = {};
-			for (const [name, value] of Object.entries(req.headers)) {
-				if (typeof value === 'string') headers[name] = value;
-			}
 			const call: ContractCall = {
 				seq: ++seq,
 				method: req.method ?? 'GET',
 				path: url.pathname,
 				query: queryOf(url.searchParams),
-				headers,
+				headers: headersOf(req),
 				body: text.length === 0 ? null : (JSON.parse(text) as unknown)
 			};
 			contracts.calls.push(call);
