@@ -34,7 +34,7 @@ import { reactionAnswer } from '../consents/answers.js';
 import type { PendingQuestion } from '../consents/consent.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
 import { findRequest } from '../consents/repository.js';
-import { revocationPayload, revokeOwnerDelegation } from '../consents/revocation.js';
+import { runRevocation } from '../consents/revocation.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { startJobWorker, type JobWorker } from '../jobs/worker.js';
 import { makeAssistantService, type AssistantService } from '../assistants/service.js';
@@ -1445,16 +1445,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		handler: async (job) => {
 			if (job.kind === 'revoke') {
-				const parsed = revocationPayload.safeParse(job.payload);
-				if (!parsed.success) throw new Error('revoke payload is malformed');
-				const { owner, requestedAt } = parsed.data;
-				const outcome = await revokeOwnerDelegation(config, owner, new Date(requestedAt));
-				log.info(
-					{ owner },
-					outcome === 'revoked'
-						? 'delegation revoked'
-						: 'delegation kept: given again since the deletion'
-				);
+				await runRevocation(config, log, job.payload);
 				return null;
 			}
 			if (job.kind === 'recover') {
