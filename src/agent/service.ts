@@ -202,8 +202,7 @@ export type OwnerTurnResult =
 			readonly pendingCallId?: string;
 			// That question in its parts, when the harness laid it out as a request about the call
 			readonly request?: OwnerRequest;
-			// The turn reached its limit of tool calls or of tokens before it answered: there is
-			// more to do
+			// The turn reached one of its limits before it answered: there is more to do
 			readonly atLimit?: true;
 	  }
 	| { readonly kind: 'forbidden' }

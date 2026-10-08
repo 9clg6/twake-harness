@@ -28,9 +28,8 @@ export interface TurnInput {
 	// The actions the turn did before the model spoke: the call its owner allowed, when it resumes
 	// from one
 	readonly actionsBefore: number;
-	// What the owner reads, in their language, when the model answers a limit of the turn, of tool
-	// calls or of tokens, with no words for them: given the actions the turn did, what was done and
-	// how to have it go on
+	// What the owner reads, in their language, when the model answers one of the turn's limits with
+	// no words for them: given the actions the turn did, what was done and how to have it go on
 	limitNotice(actions: number): string;
 	// Told, after each call that ran, the actions the turn has done so far: its owner sees them as
 	// it goes
@@ -45,7 +44,7 @@ export interface TurnOutput {
 	readonly pendingCallId?: string;
 	// That question in its parts, when the harness laid it out as a request about the call
 	readonly request?: OwnerRequest;
-	// The turn reached its limit of tool calls or of tokens before it answered: there is more to do
+	// The turn reached one of its limits before it answered: there is more to do
 	readonly atLimit?: true;
 }
 
