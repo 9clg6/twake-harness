@@ -6,7 +6,7 @@ import type { ConsentMetrics } from '../consents/metrics.js';
 import { listConsents, toConsentView, withdrawConsents } from '../consents/repository.js';
 import type { WaitReason } from '../consents/consent.js';
 import type { OwnerRequest } from '../consents/request.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, isLocale, LOCALES, type Locale } from '../i18n/messages.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import {
@@ -16,7 +16,12 @@ import {
 	toMemoryTarget
 } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
-import { findSession, listSessionIds, searchSessions } from '../sessions/repository.js';
+import {
+	findSession,
+	holdSession,
+	listSessionIds,
+	searchSessions
+} from '../sessions/repository.js';
 import {
 	findSkill,
 	insertSkill,
@@ -90,6 +95,18 @@ export interface ToolContext {
 	// For that call, when its contract showed them what it would do: the digest of that preview,
 	// which the call carries so that its contract refuses it should what it acts on have changed
 	readonly previewDigest?: string;
+}
+
+// What the model reads when its turn's conversation was erased with its assistant while the turn
+// ran: nothing was kept
+export const CONVERSATION_GONE = { error: 'conversation_gone' } as const;
+
+// Whether the turn's conversation still stands, held until the transaction ends: an erasure that
+// comes meanwhile waits for what the transaction keeps, then erases it too, and one that came first
+// leaves the transaction nothing to keep. A direct call through the API has no conversation: it is
+// its owner's own.
+export async function holdConversation(tx: Tx, context: ToolContext): Promise<boolean> {
+	return context.sessionId === undefined || holdSession(tx, context.sessionId);
 }
 
 export interface Tool {
@@ -267,6 +284,8 @@ export const memoryTool: Tool = {
 		if (target === null) return { result: ACCESS_DENIED, denied: true };
 		const { action, content, old_text: oldText, new_text: newText } = parsed.data;
 		const result = await withPrincipal(context.db, { id: context.principalId }, async (tx) => {
+			if (!(await holdConversation(tx, context)))
+				return { success: false as const, ...CONVERSATION_GONE };
 			if (action === 'add') return addMemoryEntry(tx, context.principalId, target, content ?? '');
 			if (oldText === undefined) return { success: false as const, error: 'old_text is required' };
 			if (action === 'remove') return removeMemoryEntry(tx, context.principalId, target, oldText);
@@ -437,14 +456,17 @@ export const skillsProposeTool: Tool = {
 	run: async (args, context) => {
 		const parsed = skillProposeArgs.safeParse(args);
 		if (!parsed.success) return { result: { error: 'name, description and content are required' } };
-		const skill = await withPrincipal(context.db, { id: context.principalId }, (tx) =>
-			insertSkill(tx, {
-				scope: 'user',
-				owner: context.principalId,
-				status: 'proposed',
-				...parsed.data
-			})
+		const skill = await withPrincipal(context.db, { id: context.principalId }, async (tx) =>
+			(await holdConversation(tx, context))
+				? insertSkill(tx, {
+						scope: 'user',
+						owner: context.principalId,
+						status: 'proposed',
+						...parsed.data
+					})
+				: null
 		);
+		if (skill === null) return { result: CONVERSATION_GONE };
 		return { result: { proposed: skill.id, status: 'proposed' } };
 	}
 };

@@ -54,6 +54,13 @@ export async function saveSessionMessages(
 	return result.count === 1;
 }
 
+// Holds a session until the transaction ends, so that its erasure waits for what the transaction
+// keeps in its name: false once it is gone
+export async function holdSession(tx: Tx, id: string): Promise<boolean> {
+	const rows = await tx.sql`select 1 from sessions where id = ${id} for key share`;
+	return rows.length === 1;
+}
+
 export async function listSessionIds(tx: Tx): Promise<string[]> {
 	const rows = await tx.sql<{ id: string }[]>`select id from sessions order by updated_at desc`;
 	return rows.map((row) => row.id);

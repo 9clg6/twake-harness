@@ -343,6 +343,57 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 			'Found: {"sessions":[]}'
 		);
 	});
+
+	it('keeps nothing of a turn that ran while I deleted my assistant, and sends nothing as it', async () => {
+		const room = (await r.h.api.get<CreatedAssistant>(ALICE, '/v1/assistants/me')).body.roomId;
+		const words = 'Remember that I moved to Lyon';
+		// What the harness logs from my words on
+		const logged = r.h.logLines().length;
+		const since = (): Record<string, unknown>[] => r.h.logLines().slice(logged);
+		let reached = (): void => undefined;
+		const asked = new Promise<void>((resolve) => {
+			reached = resolve;
+		});
+		let release = (): void => undefined;
+		const held = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		// The model keeps the turn waiting before it asks to remember what I said, proposes a skill
+		// and reads my mail, which I never allowed
+		r.h.apisix.llm.script = (request) => {
+			if (lastUser(request) !== words || request.messages.at(-1)?.role !== 'user') {
+				return literal(request);
+			}
+			reached();
+			return {
+				toolCalls: [
+					...call('memory', { action: 'add', target: 'user', content: 'Alice moved to Lyon' }),
+					...call('skills_propose', PROPOSAL),
+					...call('search_mail', { q: 'budget' })
+				],
+				hold: held
+			};
+		};
+		try {
+			await r.client.sendText(room, words);
+			await asked;
+			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+		} finally {
+			release();
+		}
+		await until('the turn ended', () =>
+			since().some((line) => line['msg'] === 'turn did not succeed' && line['roomId'] === room)
+		);
+		expect(await myRoutes()).toEqual(NOTHING);
+		// What it would have answered as the assistant I deleted goes nowhere
+		await until('its answer was dropped', () =>
+			since().some(
+				(line) =>
+					line['msg'] === 'send dropped: no assistant for this room' && line['roomId'] === room
+			)
+		);
+		r.h.apisix.llm.script = literal;
+	});
 });
 
 describe('deleting my assistant once my day is spent', () => {

@@ -22,6 +22,9 @@ export async function eraseAssistant(
 	await markAssistantDeleted(tx, owner);
 	await tx.sql`delete from assistant_rooms where owner = ${owner}`;
 	await tx.sql`delete from assistant_provisioned where owner = ${owner}`;
+	// The conversations go before what a turn keeps in their name, which holds its conversation as
+	// it writes: such a write that came first is erased below, and one that comes later finds its
+	// conversation gone and keeps nothing
 	await tx.sql`delete from sessions where owner = ${owner}`;
 	await tx.sql`delete from memory_entries where owner = ${owner}`;
 	await tx.sql`delete from skills where owner = ${owner} and scope = 'user'`;

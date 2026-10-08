@@ -1478,9 +1478,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				return null;
 			}
 			if (!isSendJob(job.payload)) throw new Error('send payload is malformed');
+			// What an assistant would say in a room the index no longer names it in goes nowhere, such
+			// as the answer of a turn that ran while it was deleted: it left the room. The creator
+			// speaks in rooms of its own, which the index never holds.
+			const room = await assistantRoom(job.payload.roomId);
+			if (job.payload.asUserId !== creator && room?.userId !== job.payload.asUserId) {
+				log.info(
+					{ roomId: job.payload.roomId, asUserId: job.payload.asUserId },
+					'send dropped: no assistant for this room'
+				);
+				return null;
+			}
 			const intent = appservice.getIntentForUserId(job.payload.asUserId);
 			await ensureEncryption(intent);
-			const room = await assistantRoom(job.payload.roomId);
 			if (room !== null) await onEncryptionReady(intent, room.owner);
 			await refreshMembersDevices(intent, job.payload.roomId);
 			const turn = turnOf(job.payload);
