@@ -165,4 +165,45 @@ describe('my assistant asks before it first uses an application', () => {
 		expect(await h.db.sql`select 1 from pending_calls`).toHaveLength(0);
 		expect(await h.db.sql`select 1 from consents`).toHaveLength(0);
 	});
+
+	it('asks every owner again before it reads their calendar, now that reading it covers their events', async () => {
+		// Alice and Dave read Calendar on the pilot's grant, run again above; Erin allowed it herself
+		// when reading it meant her free and busy times alone; Alice also lets her assistant write there
+		const allow = (owner: string, level: string, source: string): Promise<unknown> =>
+			withPrincipal(
+				h.db,
+				{ id: owner },
+				(tx) =>
+					tx.sql`insert into consents (owner, domain, level, granted_by)
+						values (${owner}, 'calendar', ${level}, ${source})`
+			);
+		await allow('erin@test.local', 'read', 'chat');
+		await allow('alice@test.local', 'write', 'api');
+		await h.db.sql`delete from schema_migrations where name = '0067_consents_calendar_reask.sql'`;
+		expect((await runMigrations(h.db)).applied).toEqual(['0067_consents_calendar_reask.sql']);
+		const consentsOf = async (owner: string): Promise<string[]> =>
+			withPrincipal(h.db, { id: owner }, async (tx) =>
+				(await tx.sql<{ domain: string; level: string }[]>`select domain, level from consents`).map(
+					(row) => `${row.domain} ${row.level}`
+				)
+			);
+		// Calendar read went, whoever gave it; what else an owner allowed stays
+		expect(await consentsOf('alice@test.local')).toEqual(['calendar write']);
+		expect(await consentsOf('dave@test.local')).toEqual([]);
+		expect(await consentsOf('erin@test.local')).toEqual([]);
+		// Dave's next read of his calendar waits for his answer, as a first read does
+		const slot = { start: '2026-10-07T17:00:00+02:00', end: '2026-10-07T18:00:00+02:00' };
+		h.apisix.llm.script = () => ({ toolCalls: call('read_freebusy', slot) });
+		const res = await h.api.post<{ answer: string }>('dave@test.local', '/v1/chat', {
+			message: 'Am I free tomorrow at 5?'
+		});
+		expect(res.body.answer).toBe(
+			[
+				'This is the first time I need to read your data in calendar. Do you allow it? I would start with this:',
+				JSON.stringify(slot, null, 2),
+				'Answer yes or no in your next message.'
+			].join('\n\n')
+		);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
 });
