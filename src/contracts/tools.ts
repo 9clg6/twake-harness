@@ -516,8 +516,11 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
 			}
-			// A read of the owner's calendar refreshes the zone their turns state the present in
-			const zone = OWNER_ZONE_READS.includes(contract.toolName) ? zoneOf(answered.body) : null;
+			// A read of the owner's calendar that succeeded refreshes the zone their turns state the
+			// present in: an error says nothing of their calendar, whatever zone it names
+			const succeeded = answered.status >= 200 && answered.status < 300;
+			const zone =
+				succeeded && OWNER_ZONE_READS.includes(contract.toolName) ? zoneOf(answered.body) : null;
 			if (zone !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				await withPrincipal(context.db, { id: owner }, (tx) => keepOwnerTimeZone(tx, owner, zone));
 			}

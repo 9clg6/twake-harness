@@ -228,6 +228,22 @@ describe('the present moment in the system prompt', () => {
 			}
 		});
 
+		it('keeps the zone it had when a read of my calendar fails, whatever zone its error names', async () => {
+			clock.set('2026-10-06T23:30:00Z');
+			h.apisix.contracts.handler = calendarIn('America/New_York');
+			await readCalendar(h, 'alice', 'list_calendar_events', { from: '2026-10-07', days: 1 });
+			// The event is gone, and the contract's error names a zone all the same
+			h.apisix.contracts.handler = () => ({
+				status: 404,
+				body: { error: 'not_found', time_zone: 'Asia/Tokyo' }
+			});
+			const failed = await makeClient(h).tool('alice', 'read_calendar_event', { uid: 'uid-gone' });
+			expect(failed.body).toMatchObject({ status: 404 });
+			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
+				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
+			);
+		});
+
 		it('states the present in the zone of the first read of my calendar, in the turn my yes resumes', async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('America/New_York');
