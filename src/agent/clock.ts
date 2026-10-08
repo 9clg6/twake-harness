@@ -60,6 +60,12 @@ function wallClock(
 	return (type) => parts.get(type) ?? '00';
 }
 
+// The date a person in the zone reads at an instant, as ISO 8601 writes it: "2026-10-06"
+export function dateIn(instant: Date, timeZone: string): string {
+	const field = wallClock(instant, timeZone);
+	return `${field('year')}-${field('month')}-${field('day')}`;
+}
+
 // The zone's offset at that instant, in minutes, daylight saving time included, whatever the
 // server's own zone: the distance from the instant to the zone's wall clock then
 export function offsetMinutesAt(instant: Date, timeZone: string): number {

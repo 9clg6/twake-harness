@@ -290,7 +290,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		() => contracts.tools
 	);
 	const gate = makeTurnGate();
-	const admission = makeAdmission(config, db, deps.log);
+	const admission = makeAdmission(config, db, deps.log, clock);
 
 	// What the model is told. An invitation an event brings has its slot checked by the harness
 	// before the model speaks, from the UID and the times its wake-up carries, through the same
