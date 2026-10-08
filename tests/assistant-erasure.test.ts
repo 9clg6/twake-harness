@@ -6,6 +6,7 @@ import {
 	startActivityExchange,
 	turnCalls,
 	until,
+	type ActivityEvent,
 	type ActivityExchange
 } from './helpers/activity.js';
 import { makeSettableClock } from './helpers/clock.js';
@@ -14,6 +15,8 @@ import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 
 const ALICE = 'alice@test.local';
+const CAROL = 'carol@test.local';
+const CAROLS_ASSISTANT = '@twake-space-assistant-carol:test.local';
 
 // What I tell my assistant and keep for it, which no assistant of mine finds once I deleted it
 const WORDS = 'My cat is called Tigrou';
@@ -145,6 +148,15 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		return room;
 	}
 
+	// The accounts whose sends failed for good, as the queue keeps them, each payload the JSON text
+	// of its fields: no route shows them, so this is the one place a test reads the database
+	async function failedSends(): Promise<string[]> {
+		const rows = await r.h.db.sql<{ as_user_id: string }[]>`
+			select (payload #>> '{}')::jsonb ->> 'asUserId' as as_user_id from jobs
+			where status = 'failed' and kind = 'send' order by id`;
+		return rows.map((row) => row.as_user_id);
+	}
+
 	// Everything my owner routes show of what I told my assistant and kept for it
 	async function myRoutes(): Promise<Record<string, unknown>> {
 		const [sessions, memory, skills, proposals, consents, pending] = await Promise.all(
@@ -224,6 +236,30 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		expect(pinned).toMatchObject({ pinned_by: 'first_use' });
 	});
 
+	it('keeps the jobs that failed for good, mine and those of others, while I have it', async () => {
+		const carol = await r.h.synapse.registerUser('carol');
+		// The homeserver refuses what my assistant and Carol's send
+		const failing = new Set([r.assistantId, CAROLS_ASSISTANT]);
+		r.h.apisix.matrixFault = (c) =>
+			c.method === 'PUT' &&
+			/\/rooms\/[^/]+\/send\/m\.room\./.test(c.path) &&
+			failing.has(new URL(c.path, 'http://synapse').searchParams.get('user_id') ?? '')
+				? 500
+				: null;
+		try {
+			await r.client.sendText(secondRoom, 'Can you hear me?');
+			const carols = await r.h.api.post<CreatedAssistant>(CAROL, '/v1/assistants', {
+				name: 'Friday'
+			});
+			expect(carols.status).toBe(201);
+			await r.h.synapse.joinRoom(carol, carols.body.roomId);
+			await until('both sends failed for good', async () => (await failedSends()).length === 2);
+		} finally {
+			r.h.apisix.matrixFault = null;
+		}
+		expect((await failedSends()).sort()).toEqual([CAROLS_ASSISTANT, r.assistantId].sort());
+	});
+
 	it('erases our conversations, what I kept for it, what I allowed and what waited for me, once I confirm /delete', async () => {
 		expect(await answerTo('/delete')).toContain('Delete Jarvis?');
 		expect(await answerTo('yes')).toBe(
@@ -244,6 +280,10 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 				async () => !(await r.h.synapse.joinedMembers(r.alice, room)).includes(r.assistantId)
 			);
 		}
+	});
+
+	it("erases my jobs that failed for good, and keeps Carol's", async () => {
+		expect(await failedSends()).toEqual([CAROLS_ASSISTANT]);
 	});
 
 	it('gives me a new assistant under the same Matrix identifier, which greets me in a new room and remembers nothing', async () => {
@@ -340,6 +380,23 @@ describe('deleting my assistant once my day is spent', () => {
 		return room;
 	}
 
+	// The lines by which the turn workers deferred the turn of an event, so far
+	function deferrals(event: ActivityEvent): Record<string, unknown>[] {
+		return r.h
+			.logLines()
+			.filter((line) => line['msg'] === 'event turn deferred' && line['reqId'] === event.id);
+	}
+
+	// What my assistant answers me next in a room, whatever it says
+	async function answerIn(room: string, text: string): Promise<string> {
+		const said = (): DecryptedMessage[] =>
+			r.client.messages.filter((m) => m.roomId === room && m.sender === r.assistantId);
+		const seen = said().length;
+		await r.client.sendText(room, text);
+		await until(`my assistant answered « ${text} »`, () => said().length > seen);
+		return said()[seen]?.body ?? '';
+	}
+
 	it('keeps my day spent for the assistant I create again', async () => {
 		await r.client.sendText(r.room, 'Hello');
 		await r.client.waitForMessage(r.room, r.assistantId, (t) => t === 'Heard: Hello');
@@ -348,4 +405,41 @@ describe('deleting my assistant once my day is spent', () => {
 		await r.client.sendText(second, 'Hello again');
 		await r.client.waitForMessage(second, r.assistantId, (t) => t.startsWith(DAY_SPENT));
 	});
+
+	it('never runs the turn of an event deferred before I deleted my assistant, even once the next one is back in the room the event was for', async () => {
+		// My day is spent: the turn of this assignment waits for the next one
+		const deferred = activityEvent({ id: 'erasure-deferred', recipient: ALICE });
+		await activity.publish(deferred);
+		await until('the turn of the event was deferred', () => deferrals(deferred).length > 0);
+		// The turn workers stop while I delete my assistant and bring the next one back into the room
+		// the event was for, so that no retry of the turn finds it gone meanwhile
+		await r.h.stopTurnWorkers();
+		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+		await newAssistant();
+		const invited = await r.h.synapse.request(
+			r.alice,
+			'POST',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(second)}/invite`,
+			{ user_id: r.assistantId }
+		);
+		expect(invited.status).toBe(200);
+		await until('the assistant is back in the room', () =>
+			r.h
+				.logLines()
+				.some(
+					(line) =>
+						line['msg'] === 'assistant room opened by its owner' && line['roomId'] === second
+				)
+		);
+		// Due again once its last delay passed: the turn workers, back, would queue it ahead of my words
+		const last = deferrals(deferred).at(-1);
+		const due = Number(last?.['time']) + Number(last?.['retryInMs']) + 1000;
+		await until('the turn of the event is due again', () => Date.now() > due);
+		// The next day: the turn of the event would now be admitted, and spend the day before my words
+		clock.set('2026-10-09T09:00:00Z');
+		r.h.startTurnWorkers();
+		expect(await answerIn(second, 'Still there?')).toBe('Heard: Still there?');
+		expect(turnCalls(r.h.apisix.llm.calls, deferred.id)).toHaveLength(0);
+		expect(r.client.messages.some((m) => m.body === `Told of ${deferred.id}`)).toBe(false);
+	}, 180_000);
 });
