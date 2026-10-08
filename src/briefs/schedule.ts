@@ -21,9 +21,11 @@ export interface BriefDeps extends WakeDeps {
 	readonly clock: Clock;
 }
 
-// The date of each owner's brief a scheduler is done with, sent, skipped, or not to send: its next
-// passes look no further at that owner until their next date
-export type SettledBriefs = Map<string, string>;
+// What a scheduler knows of each owner's brief between its passes: the date it is done with, sent,
+// skipped, or not to send, which its next passes look no further at until the owner's next date;
+// or the date of the brief their hourly cap held back, which its next passes try again without
+// saying so again
+export type SettledBriefs = Map<string, { readonly date: string; readonly capped: boolean }>;
 
 // Monday to Friday, for a date as dateIn gives it
 function isWorkingDay(date: string): boolean {
@@ -51,33 +53,40 @@ async function wasWoken(deps: BriefDeps, owner: string, id: string): Promise<boo
 // One owner's brief at this pass, on their wall clock: from eight on a working day, their
 // assistant is woken for the brief of that date, which wake() keeps from going twice, as it keeps
 // any wake-up, and counts in their hourly wake-ups. One their cap held back is tried again at the
-// next pass. Three hours past eight, the day is theirs no more: a brief that never went is skipped,
-// which a line says. Their wall clock is read first, as it is all most passes need of them.
+// next pass, the first one alone saying so. Three hours past eight, the day is theirs no more: a
+// brief that never went is skipped, which a line says. Their wall clock is read first, as it is all
+// most passes need of them.
 async function briefOwner(deps: BriefDeps, owner: string, settled: SettledBriefs): Promise<void> {
 	const { config, db, clock, log } = deps;
 	const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 	const { date, hour } = wallDayAt(clock.now(), timeZone);
-	if (settled.get(owner) === date || !isWorkingDay(date) || hour < BRIEF_HOUR) return;
+	const known = settled.get(owner);
+	const done = known?.date === date && !known.capped;
+	if (done || !isWorkingDay(date) || hour < BRIEF_HOUR) return;
 	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 	if (!isActiveAssistant(assistant)) return;
 	const id = briefId(owner, date);
 	if (hour >= BRIEF_HOUR + BRIEF_WINDOW_HOURS) {
-		settled.set(owner, date);
+		settled.set(owner, { date, capped: false });
 		if (!(await wasWoken(deps, owner, id))) {
 			log.info({ owner, date, timeZone, id }, 'morning brief skipped');
 		}
 		return;
 	}
-	const outcome = await wake(deps, {
-		source: BRIEF_SOURCE,
-		id,
-		type: BRIEF_EVENT_TYPE,
-		recipient: { email: owner, uuid: null, reason: 'owner' },
-		actor: { email: null, uuid: null },
-		shown: { computed: { type: BRIEF_EVENT_TYPE, source: BRIEF_SOURCE, id }, untrusted: {} },
-		brief: { date }
-	});
-	if (outcome !== 'capped') settled.set(owner, date);
+	const outcome = await wake(
+		deps,
+		{
+			source: BRIEF_SOURCE,
+			id,
+			type: BRIEF_EVENT_TYPE,
+			recipient: { email: owner, uuid: null, reason: 'owner' },
+			actor: { email: null, uuid: null },
+			shown: { computed: { type: BRIEF_EVENT_TYPE, source: BRIEF_SOURCE, id }, untrusted: {} },
+			brief: { date }
+		},
+		{ logCapped: known?.date !== date }
+	);
+	settled.set(owner, { date, capped: outcome === 'capped' });
 }
 
 // One pass over the owners whose assistant is in its room, one after the other: an owner whose

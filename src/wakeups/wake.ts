@@ -50,6 +50,12 @@ export interface WakeDeps {
 	readonly log: FastifyBaseLogger;
 }
 
+export interface WakeOptions {
+	// Whether a wake-up the owner's hourly cap holds back is logged: the scheduler tries a brief
+	// again at each pass, and says so at the first alone
+	readonly logCapped?: boolean;
+}
+
 // The event as the model is handed it: what its source computed, apart from what people wrote
 function eventData(wakeup: Wakeup): string {
 	return fenced('event-data', { ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
@@ -80,7 +86,11 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 // the recipient by their email, which is their principal: only a person of the instance's mail
 // domain has one, nobody is woken for their own action, and nobody more often in an hour than the
 // deployment allows.
-export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome> {
+export async function wake(
+	deps: WakeDeps,
+	wakeup: Wakeup,
+	options: WakeOptions = {}
+): Promise<WakeOutcome> {
 	const { config, db } = deps;
 	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
 	if (owner === null || matrixLocalpartOfPrincipal(config, owner) === null) return 'ignored';
@@ -134,6 +144,6 @@ export async function wake(deps: WakeDeps, wakeup: Wakeup): Promise<WakeOutcome>
 	const logged = { source: wakeup.source, eventId: wakeup.id, type: wakeup.type, owner };
 	if (outcome === 'woken') deps.log.info(logged, 'event queued');
 	// Taken all the same, for no turn: nothing tells the owner of an event past their cap
-	if (outcome === 'capped') deps.log.info(logged, 'event capped');
+	if (outcome === 'capped' && options.logCapped !== false) deps.log.info(logged, 'event capped');
 	return outcome;
 }

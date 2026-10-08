@@ -276,8 +276,10 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		// Wednesday at 10:59
 		await pass('2026-10-14T08:59:00Z');
 		await nextBrief(seen);
-		// Thursday at eleven: too late
-		await pass('2026-10-15T09:00:00Z');
+		// Thursday at eleven: too late, which a replica says once, however often it passes
+		const settled: SettledBriefs = new Map();
+		await pass('2026-10-15T09:00:00Z', settled);
+		await pass('2026-10-15T09:01:00Z', settled);
 		expect(logged('morning brief skipped')).toContainEqual(
 			expect.objectContaining({ owner: ALICE, date: '2026-10-15', timeZone: 'Europe/Paris' })
 		);
@@ -289,7 +291,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(logged('morning brief skipped').map((line) => line['date'])).toEqual(['2026-10-15']);
 	});
 
-	it('tries a brief my hourly wake-ups held back again at the next pass, and logs why it waited', async () => {
+	it('tries a brief my hourly wake-ups held back again at the next pass, and logs why it waited once', async () => {
 		const seen = briefs().length;
 		// The passes of one replica, one after the other
 		const settled: SettledBriefs = new Map();
@@ -299,12 +301,14 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 			select 'filler', 'filler-' || n, ${ALICE} from generate_series(1, 20) as n`;
 		try {
 			await pass('2026-10-20T06:00:00Z', settled);
+			// Still held back a minute later: the replica tries it again, and says so only once
+			await pass('2026-10-20T06:01:00Z', settled);
 			expect(wakeUpLines('event capped', '2026-10-20')).toHaveLength(1);
 			expect(wakeUpLines('event queued', '2026-10-20')).toHaveLength(0);
 		} finally {
 			await r.h.db.sql`delete from wakeups where source = 'filler'`;
 		}
-		await pass('2026-10-20T06:01:00Z', settled);
+		await pass('2026-10-20T06:02:00Z', settled);
 		const brief = await nextBrief(seen);
 		expect(dateOf(brief)).toBe('2026-10-20');
 		expect(wakeUpLines('event queued', '2026-10-20')).toHaveLength(1);
