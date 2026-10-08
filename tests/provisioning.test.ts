@@ -261,6 +261,27 @@ describe('a provisioned assistant', () => {
 		expect((await h.api.get('max@test.local', '/v1/assistants/me')).status).toBe(404);
 	});
 
+	it('has its recovery queued anew after one that failed for good, whoever asks for it', async () => {
+		const ned = await h.synapse.registerUser('ned');
+		const fay = await h.synapse.registerUser('fay');
+		await provisionUntilReady(h.api, ned.userId);
+		await provisionUntilReady(h.api, fay.userId);
+		// A recovery whose job failed for good, as the queue leaves it after its last attempt
+		for (const owner of ['ned@test.local', 'fay@test.local']) {
+			await h.db.sql`
+				insert into jobs (kind, payload, dedup_key, status, attempts, last_error, finished_at)
+				values ('recover', ${JSON.stringify({ owner })}::jsonb, ${`recover:${owner}`}, 'failed', 3,
+					'the homeserver was unreachable', now())`;
+		}
+
+		const queued = { status: 202, body: { queued: true } };
+		// Its provisioner asks for it on the owner's behalf, or the owner themselves
+		expect(await h.api.post(PROVISIONER, `${provisioningPath(ned.userId)}/recover`, {})).toEqual(
+			queued
+		);
+		expect(await h.api.post('fay@test.local', '/v1/assistants/me/recover', {})).toEqual(queued);
+	});
+
 	it('becomes ready after a failed preparation, without its provisioner calling again', async () => {
 		const kim = await h.synapse.registerUser('kim');
 		// The homeserver refuses the first upload of the assistant's identity

@@ -48,6 +48,16 @@ export async function enqueueJob(db: Db | Tx, input: EnqueueInput): Promise<bool
 	return result.count === 1;
 }
 
+// Queued anew even after a job of the same key failed for good, which keeps its key and would
+// refuse every later one: that job goes first. A job of the key still queued or running keeps it.
+export async function enqueueJobAnew(
+	db: Db,
+	input: EnqueueInput & { readonly dedupKey: string }
+): Promise<boolean> {
+	await db.sql`delete from jobs where dedup_key = ${input.dedupKey} and status = 'failed'`;
+	return enqueueJob(db, input);
+}
+
 // Claims the oldest runnable job of the given kinds, skipping what other workers hold. A job
 // whose group has an earlier job still queued or running waits for it, so a group keeps its
 // order even when its jobs are spread over several replicas.

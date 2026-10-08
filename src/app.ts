@@ -13,7 +13,7 @@ import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
 import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
-import { readIdentity, requestPreparation } from './assistants/provisioning.js';
+import { readIdentity, requestPreparation, requestRecovery } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
@@ -483,12 +483,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		if (assistant === null || assistant.deletedAt !== null) {
 			return reply.code(404).send(NO_ASSISTANT);
 		}
-		const queued = await enqueueJob(db, {
-			kind: 'recover',
-			payload: { owner },
-			dedupKey: `recover:${owner}`,
-			groupKey: `send:${assistant.roomId ?? owner}`
-		});
+		const queued = await requestRecovery(db, owner, assistant.roomId);
 		request.log.info({ client, owner, queued }, 'recovery requested for a client');
 		return reply.code(202).send({ queued });
 	});
@@ -571,12 +566,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				const principal = principalOf(request);
 				const assistant = await assistants.find(principal.id);
 				if (assistant === null) return reply.code(404).send(RESOURCE_UNAVAILABLE);
-				const queued = await enqueueJob(db, {
-					kind: 'recover',
-					payload: { owner: principal.id },
-					dedupKey: `recover:${principal.id}`,
-					groupKey: `send:${assistant.roomId ?? principal.id}`
-				});
+				const queued = await requestRecovery(db, principal.id, assistant.roomId);
 				request.log.info({ principal: principal.id, queued }, 'recovery requested');
 				return reply.code(202).send({ queued });
 			});
