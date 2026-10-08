@@ -94,6 +94,9 @@ export interface ContractReply {
 	readonly headers?: Readonly<Record<string, string>>;
 	// A wait before the answer: a contract slower than the harness waits for
 	readonly delayMs?: number;
+	// The answer goes out only once this settles: a test keeps a call open to observe what runs
+	// meanwhile
+	readonly hold?: Promise<unknown>;
 }
 
 export interface FakeApisix {
@@ -139,12 +142,17 @@ export interface FakeApisix {
 	// once it is set: what the broker answers about the owner the caller names, as a contract call
 	// names them (x-twake-on-behalf-of), or null for a connection that drops
 	delegation: ((owner: string | null) => ContractReply | null) | null;
-	// The calls of that route, oldest first
+	// The same route asked to revoke, with DELETE, which the gateway publishes once it is set: what
+	// the broker answers for the owner the caller names, or null for a connection that drops
+	revocation: ((owner: string | null) => ContractReply | null) | null;
+	// The calls of either, oldest first
 	readonly delegationCalls: DelegationCall[];
 	close(): Promise<void>;
 }
 
 export interface DelegationCall {
+	// GET to read the owner's permission, DELETE to revoke it
+	readonly method: string;
 	// The owner the caller named, if any
 	readonly owner: string | null;
 	readonly headers: Record<string, string>;
@@ -404,6 +412,28 @@ export function brokerNoDelegation(consentUrl: string = BROKER_CONSENT_URL): Con
 	};
 }
 
+// What the broker answers once it revoked an owner's permission, if it held one, and left their
+// Drive instance: no content
+export function brokerRevoked(): ContractReply {
+	return { status: 204, body: null };
+}
+
+// What it answers when the owner's Drive instance did not answer: the permission is revoked all
+// the same, and the broker stays on the instance until it is asked again
+export function brokerDriveUnavailable(): ContractReply {
+	return {
+		status: 502,
+		body: {
+			type: 'urn:twake:problem:drive_unavailable',
+			title: 'Drive unavailable',
+			status: 502,
+			detail:
+				"The owner's Drive instance did not answer: their delegation is revoked, but the broker stays on the instance until the revocation is tried again.",
+			code: 'drive_unavailable'
+		}
+	};
+}
+
 // The operation that gives the owner's answer to an invitation as the calendar contracts publish
 // it, accepting or declining, named by the UID of its event, and for the whole series of a
 // recurring one with series true: a low-risk write that tells what it would do, unless preview is
@@ -490,7 +520,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		matrixFault: null as FakeApisix['matrixFault'],
 		matrixHold: null as FakeApisix['matrixHold'],
 		matrixHoldReply: null as FakeApisix['matrixHoldReply'],
-		delegation: null as FakeApisix['delegation']
+		delegation: null as FakeApisix['delegation'],
+		revocation: null as FakeApisix['revocation']
 	};
 	const matrixCalls: FakeApisix['matrixCalls'] = [];
 	const delegationCalls: DelegationCall[] = [];
@@ -628,18 +659,32 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			sendJson(res, 200, contracts.spec);
 			return;
 		}
-		const delegationPath = routePath([contracts.mount, 'delegation']);
-		if (fake.delegation !== null && req.method === 'GET' && url.pathname === delegationPath) {
+		// The broker's route, by method: GET reads the owner's permission, DELETE revokes it
+		const delegationRoutes: Record<string, FakeApisix['delegation']> = {
+			GET: fake.delegation,
+			DELETE: fake.revocation
+		};
+		const delegationRoute =
+			url.pathname === routePath([contracts.mount, 'delegation'])
+				? (delegationRoutes[req.method ?? 'GET'] ?? null)
+				: null;
+		if (delegationRoute !== null) {
 			const headers = headersOf(req);
 			const owner = headers['x-twake-on-behalf-of'] ?? null;
-			delegationCalls.push({ owner, headers });
-			const reply = fake.delegation(owner);
+			delegationCalls.push({ method: req.method ?? 'GET', owner, headers });
+			const reply = delegationRoute(owner);
 			if (reply === null) {
 				res.destroy();
 				return;
 			}
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
+			if (reply.hold !== undefined) await reply.hold;
 			if (res.destroyed) return;
+			if (reply.body === null) {
+				res.statusCode = reply.status;
+				res.end();
+				return;
+			}
 			sendJson(res, reply.status, reply.body);
 			return;
 		}
@@ -661,6 +706,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			contracts.calls.push(call);
 			const reply = contracts.handler(call);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
+			if (reply.hold !== undefined) await reply.hold;
 			// The caller may have given up meanwhile
 			if (res.destroyed) return;
 			for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
@@ -767,6 +813,12 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		},
 		set delegation(value: FakeApisix['delegation']) {
 			fake.delegation = value;
+		},
+		get revocation() {
+			return fake.revocation;
+		},
+		set revocation(value: FakeApisix['revocation']) {
+			fake.revocation = value;
 		},
 		delegationCalls,
 		close: () =>
