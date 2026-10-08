@@ -5,6 +5,7 @@ import { loadConfig } from '../src/config.js';
 import { withPrincipal } from '../src/db/client.js';
 import {
 	modelFor,
+	QUESTION_CONTENT_KEY,
 	readCatalog,
 	startConsentRoom,
 	type ConsentRoom
@@ -250,17 +251,19 @@ const UNVERIFIED_MESSAGE =
 const UNVERIFIED_ANSWER =
 	'I did not take your answer, so my question still waits: it came from a session of yours that I cannot verify. In another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify; then answer again.';
 const CHANGED_MESSAGE =
-	"I did not act on your last message: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity); until then I act on none of your messages.";
+	"I did not act on your last message: your encryption identity changed, and I act only on the one I know. If you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity): for your safety, no message can do it. If you did not, change your password and warn your administrator. Until then I act on none of your messages.";
 const UNENCRYPTED_MESSAGE =
 	'I did not act on your last message: it reached me unencrypted, and I act only on what your verified sessions encrypt.';
 const NO_IDENTITY_MESSAGE =
 	'I did not act on your last message: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then send it again.';
 const OLD_SESSION_MESSAGE =
-	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then send it again.';
+	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. Send /discardsession in this room so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
-const CHANGED_REPORT =
-	"Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (PUT /v1/assistants/me/owner-identity) so that I keep doing so.";
+const CHANGED_QUESTION =
+	'Your encryption identity is not the one I know. Did you reset your identity yourself? Answer yes or no in your next message.';
+const UNSIGNED_REPORT =
+	'Your encryption identity changed, and the new one did not sign this session. I act on what you write for now; so that I can ask you whether you reset it yourself, write to me from a session it signed, or verify this one: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 
 describe('the setting of how my sessions are held to my identity', () => {
 	const base = {
@@ -702,6 +705,9 @@ describe('my assistant acts only on what the sessions my identity signed write',
 			matchesPin: false
 		});
 		expect(await r.nextSaying('I did not act on your last message', notices)).toBe(CHANGED_MESSAGE);
+		// It asks me nothing to answer: no message of mine can make it hold another identity
+		const notice = r.saying('I did not act on your last message').at(-1);
+		expect(notice?.content).not.toHaveProperty([QUESTION_CONTENT_KEY]);
 		expect(await heldIdentity(r)).toEqual({ master_public_key: before, pinned_by: 'first_use' });
 		// Through the API, with my own token, I see both, and accept only the one my words came with
 		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
@@ -842,7 +848,7 @@ describe('while the harness only reports the sessions it would not act on', () =
 		).toBe('Heard: Plain hello');
 	});
 
-	it('acts on my words after my identity changed all the same, and tells me how to accept it', async () => {
+	it('acts on my words after my identity changed all the same, and asks me whether I reset it', async () => {
 		const before = await r.client.masterKey();
 		const after = await r.client.resetIdentity();
 		expect(after).not.toBe(before);
@@ -857,8 +863,10 @@ describe('while the harness only reports the sessions it would not act on', () =
 			matchesPin: false
 		});
 		expect(await r.nextSaying('Your encryption identity is not the one I know', 0)).toBe(
-			CHANGED_REPORT
+			CHANGED_QUESTION
 		);
+		const question = r.saying('Your encryption identity is not the one I know').at(-1);
+		expect(question?.content).toHaveProperty([QUESTION_CONTENT_KEY]);
 		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
 		expect(view.body).toMatchObject({
 			pinned: { master_key: before },
@@ -1045,5 +1053,28 @@ describe('while the harness only reports the sessions it would not act on', () =
 		});
 		expect(said('I did not act on your last message: your app')).toEqual([OLD_SESSION_MESSAGE]);
 		expect(said('I am your assistant.')).toHaveLength(1);
+	});
+
+	it('tells me to write from a session my new identity signed, or to verify this one, so that it can ask me about it', async () => {
+		const held = (await r.h.api.get(OWNER, IDENTITY_ROUTE)).body['pinned'];
+		// Another session of mine replaces my identity with a new one that signs it alone
+		const other = await startE2eeClient(r.h.synapse.url, await r.h.synapse.login('alice'));
+		sessions.push(other);
+		await other.resetIdentity();
+		// My words from my first session, which the new identity did not sign, are acted on, and I am
+		// told what to do, with nothing to answer
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'From my first session');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: From my first session');
+		expect(await r.nextSaying('Your encryption identity changed', 0)).toBe(UNSIGNED_REPORT);
+		const notice = r.saying('Your encryption identity changed').at(-1);
+		expect(notice?.content).not.toHaveProperty([QUESTION_CONTENT_KEY]);
+		// From the session it signed, my assistant asks me
+		const asked = r.saying('Your encryption identity is not the one I know').length;
+		await other.sendText(r.room, 'From the session it signed');
+		expect(await r.nextSaying('Your encryption identity is not the one I know', asked)).toBe(
+			CHANGED_QUESTION
+		);
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body['pinned']).toEqual(held);
 	});
 });
