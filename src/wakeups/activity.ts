@@ -1,10 +1,17 @@
-import { DeadLetterError } from '@linagora/rabbitmq-client';
+import type { RabbitMQMessage, RabbitMQMessageProperties } from '@linagora/rabbitmq-client';
 import { z } from 'zod';
 
 import type { ActivitySource } from '../config.js';
 import { cut } from '../llm/data.js';
-import { listenOnOwnQueue, ownQueueName, type Listener } from './listener.js';
-import { wake, type WakeDeps, type Wakeup } from './wake.js';
+import {
+	listenOnOwnQueue,
+	ownQueueName,
+	type Identity,
+	type Listener,
+	type Reading
+} from './listener.js';
+import type { RecipientOutcome } from './outcomes.js';
+import type { WakeDeps, Wakeup } from './wake.js';
 
 // Where the applications publish what happens to people, as CloudEvents routed by their type
 const ACTIVITY_EXCHANGE = 'activity';
@@ -96,6 +103,31 @@ function leftOutFields(message: unknown, event: ActivityEvent): string[] {
 
 type ActivityEvent = z.infer<typeof activityEventSchema>;
 
+// The attributes that identify an event, as far as a message the listener does not read has them
+const IDENTITY = { source: 'source', eventId: 'id', type: 'type' } as const;
+
+function identityOf(message: unknown, routingKey: string): Identity {
+	const identity: { source?: string; eventId?: string; type?: string; recipients?: number } = {
+		type: routingKey
+	};
+	for (const [field, attribute] of Object.entries(IDENTITY)) {
+		const value = valueAt(message, [attribute]);
+		if (typeof value === 'string' && value.length > 0 && value.length <= 200) {
+			identity[field as keyof typeof IDENTITY] = value;
+		}
+	}
+	const recipients = valueAt(message, ['data', 'recipients']);
+	if (Array.isArray(recipients)) identity.recipients = recipients.length;
+	return identity;
+}
+
+// Why a message is no event of the activity exchange: the attribute at fault, never its value
+function malformedReason(message: unknown, error: z.ZodError): string {
+	const path = (error.issues[0]?.path ?? []).map(String);
+	if (path.length === 0) return 'not a CloudEvent';
+	return `${valueAt(message, path) === undefined ? 'no' : 'invalid'} ${path.join('.')}`;
+}
+
 // A recipient left out, by their place among the event's recipients and the names of the fields
 // the application got wrong: never what it wrote there
 interface SkippedRecipient {
@@ -170,11 +202,57 @@ function wakeupsOf(event: ActivityEvent): {
 
 // Listens to the activity exchange on the instance's own queue, bound to the types the deployment
 // lists alone, and wakes the assistant of each recipient of an event
-export async function startActivityListener(
+export function startActivityListener(
 	deps: WakeDeps,
-	source: ActivitySource
-): Promise<Listener> {
+	source: ActivitySource,
+	options: { readonly retryDelayMs?: number } = {}
+): Listener {
 	const queue = ownQueueName(deps.config, ACTIVITY_EXCHANGE);
+	const read = (message: RabbitMQMessage, { routingKey }: RabbitMQMessageProperties): Reading => {
+		// A type the deployment no longer lists keeps its binding, since the library removes none:
+		// its events are taken and dropped. An event comes by the queue's own name when its dead
+		// letters are moved back into it.
+		if (routingKey !== queue && !source.types.includes(routingKey)) {
+			return {
+				kind: 'ignored',
+				identity: identityOf(message, routingKey),
+				reason: 'type not listened to'
+			};
+		}
+		const parsed = activityEventSchema.safeParse(message);
+		if (!parsed.success) {
+			return {
+				kind: 'malformed',
+				identity: identityOf(message, routingKey),
+				reason: malformedReason(message, parsed.error)
+			};
+		}
+		const event = parsed.data;
+		const identity: Identity = {
+			source: event.source,
+			eventId: event.id,
+			type: event.type,
+			recipients: (event.data.recipients ?? []).length
+		};
+		const fields = leftOutFields(message, event);
+		if (fields.length > 0) deps.log.warn({ ...identity, fields }, 'event fields left out');
+		const { wakeups, skipped, ignored } = wakeupsOf(event);
+		if (ignored > 0) deps.log.warn({ ...identity, ignored }, 'recipients ignored');
+		for (const { index, fields } of skipped) {
+			deps.log.warn({ ...identity, recipient: index, fields }, 'recipient skipped');
+		}
+		return {
+			kind: 'wakeups',
+			identity,
+			wakeups,
+			// Those left out count among the recipients of the event: past the most it reads, as
+			// ignored, and those it cannot read, as invalid
+			leftOut: [
+				...skipped.map((): RecipientOutcome => 'invalid'),
+				...Array.from({ length: ignored }, (): RecipientOutcome => 'ignored')
+			]
+		};
+	};
 	return listenOnOwnQueue(
 		deps,
 		{
@@ -183,29 +261,7 @@ export async function startActivityListener(
 			exchange: ACTIVITY_EXCHANGE,
 			routingKeys: source.types
 		},
-		async (message, { routingKey }) => {
-			// A type the deployment no longer lists keeps its binding, since the library removes none:
-			// its events are taken and dropped. An event comes by the queue's own name when its dead
-			// letters are moved back into it.
-			if (routingKey !== queue && !source.types.includes(routingKey)) return;
-			const parsed = activityEventSchema.safeParse(message);
-			if (!parsed.success) throw new DeadLetterError('not a CloudEvent of the activity exchange');
-			const event = parsed.data;
-			const fields = leftOutFields(message, event);
-			if (fields.length > 0) {
-				deps.log.warn({ source: event.source, eventId: event.id, fields }, 'event fields left out');
-			}
-			const { wakeups, skipped, ignored } = wakeupsOf(event);
-			if (ignored > 0) {
-				deps.log.warn({ source: event.source, eventId: event.id, ignored }, 'recipients ignored');
-			}
-			for (const { index, fields } of skipped) {
-				deps.log.warn(
-					{ source: event.source, eventId: event.id, recipient: index, fields },
-					'recipient skipped'
-				);
-			}
-			for (const wakeup of wakeups) await wake(deps, wakeup);
-		}
+		read,
+		options
 	);
 }

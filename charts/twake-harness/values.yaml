@@ -112,6 +112,9 @@ config:
   # whatever their source (worker role); past it, an event wakes them no more. Empty means the
   # harness default, 20
   wakeupsPerHour: ''
+  # How long the worker role keeps a wake-up, in milliseconds, so that an event delivered again or
+  # replayed from its dead letter queue wakes nobody twice; empty means the harness default, 30 days
+  wakeupsRetentionMs: ''
   # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
   # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new
   # invitation who has an assistant is told of it in their room. The worker then needs

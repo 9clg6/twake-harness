@@ -37,6 +37,8 @@ export interface TestBroker {
 	readonly channel: ConfirmChannel;
 	// The address of the broker for one of its users
 	urlFor(user: string, password: string, vhost?: string): string;
+	// Where the broker takes AMQP connections now: a restart may move it
+	address(): { readonly host: string; readonly port: number };
 	// Creates a user, who may do this much on the default vhost
 	addUser(user: string, password: string, permissions: Permissions): Promise<void>;
 	// Creates a vhost, which the platform's own user may do everything on, and resolves to the
@@ -56,15 +58,55 @@ export interface TestBroker {
 	prefetchOf(queue: string, vhost?: string): Promise<number[]>;
 	// The user of each connection open, one entry per connection: on every vhost unless one is named
 	connectedUsers(vhost?: string): Promise<string[]>;
+	// Closes every connection of a user, as the broker does when a node goes down
+	closeConnectionsOf(user: string): Promise<void>;
 	// Publishes as an application does, persistent and under its id, once the broker took it
 	publish(exchange: string, routingKey: string, body: unknown, messageId?: string): Promise<void>;
+	// Moves every message of a queue to another, as an operator replays a dead letter queue once
+	// its cause is fixed, with a shovel or the management UI: through the default exchange, under
+	// the name of the queue it goes to. Resolves to how many it moved.
+	replay(from: string, to: string): Promise<number>;
+	// Restarts the broker as a rolling upgrade does, letting it stop on its own, which drops every
+	// connection and may move its address, then opens the platform's own channel again; the other
+	// vhosts' channels stay closed. Killed instead, a broker can lose a quorum queue declared a
+	// moment before, which then never elects a leader again.
+	restart(): Promise<void>;
 	stop(): Promise<void>;
 }
 
-export async function startTestBroker(): Promise<TestBroker> {
-	const container: StartedRabbitMQContainer = await new RabbitMQContainer(IMAGE).start();
-	const admin: ChannelModel = await connect(container.getAmqpUrl());
-	const channel = await admin.createConfirmChannel();
+// The platform's own connection: a broker that goes down closes it with an error, which nobody
+// handles but the test that took the broker down
+async function connectAsPlatform(url: string): Promise<ChannelModel> {
+	const connection = await connect(url);
+	connection.on('error', () => undefined);
+	return connection;
+}
+
+export interface TestBrokerOptions {
+	// The consumer timeout of the broker, past which it takes a message back from a consumer that
+	// holds it unacknowledged, its default half an hour unless set; set, the broker checks it
+	// every second rather than every minute
+	readonly consumerTimeoutMs?: number;
+}
+
+export async function startTestBroker(options: TestBrokerOptions = {}): Promise<TestBroker> {
+	const image = new RabbitMQContainer(IMAGE);
+	if (options.consumerTimeoutMs !== undefined) {
+		image
+			.withCopyContentToContainer([
+				{
+					content: `consumer_timeout = ${options.consumerTimeoutMs}\n`,
+					target: '/etc/rabbitmq/conf.d/90-consumer-timeout.conf'
+				}
+			])
+			// Not a setting of rabbitmq.conf: the check of the consumer timeout runs on this tick
+			.withEnvironment({
+				RABBITMQ_SERVER_ADDITIONAL_ERL_ARGS: '-rabbit channel_tick_interval 1000'
+			});
+	}
+	const container: StartedRabbitMQContainer = await image.start();
+	let admin: ChannelModel = await connectAsPlatform(container.getAmqpUrl());
+	let channel = await admin.createConfirmChannel();
 	// The platform's own connections to the other vhosts, closed with the broker
 	const vhosts: ChannelModel[] = [];
 
@@ -155,13 +197,17 @@ export async function startTestBroker(): Promise<TestBroker> {
 			.map((row) => row.prefetch_count);
 	}
 
-	async function connectionsOf(): Promise<{ user: string; vhost: string }[]> {
+	// Every connection open on the broker, by its user and its vhost
+	async function openConnections(): Promise<{ user: string; vhost: string }[]> {
 		return listed<{ user: string; vhost: string }>('list_connections', 'user', 'vhost');
 	}
 
 	return {
-		channel,
+		get channel() {
+			return channel;
+		},
 		urlFor: (user, password, vhost = '/') => urlOn(vhost, user, password),
+		address: () => ({ host: container.getHost(), port: container.getMappedPort(5672) }),
 		addUser: async (user, password, permissions) => {
 			await rabbitmqctl('add_user', user, password);
 			await allowOn('/', user, permissions);
@@ -172,9 +218,12 @@ export async function startTestBroker(): Promise<TestBroker> {
 		waitForMessages: (name, count, vhost = '/') => messagesOn(vhost, name, count),
 		prefetchOf: (queue, vhost = '/') => prefetchOn(vhost, queue),
 		connectedUsers: async (vhost) =>
-			(await connectionsOf())
+			(await openConnections())
 				.filter((row) => vhost === undefined || row.vhost === vhost)
 				.map((row) => row.user),
+		closeConnectionsOf: async (user) => {
+			await rabbitmqctl('close_all_user_connections', user, 'closed by the test');
+		},
 		publish: async (exchange, routingKey, body, messageId) => {
 			channel.publish(exchange, routingKey, Buffer.from(JSON.stringify(body)), {
 				persistent: true,
@@ -187,12 +236,33 @@ export async function startTestBroker(): Promise<TestBroker> {
 			await rabbitmqctl('add_vhost', name);
 			// The default user the platform's channel connects as, which a new vhost grants nothing
 			await allowOn(name, 'guest', { configure: '.*', write: '.*', read: '.*' });
-			const connection = await connect(urlOn(name, 'guest', 'guest'));
+			const connection = await connectAsPlatform(urlOn(name, 'guest', 'guest'));
 			vhosts.push(connection);
 			return connection.createConfirmChannel();
 		},
+		replay: async (from, to) => {
+			for (let moved = 0; ; moved += 1) {
+				const message = await channel.get(from, { noAck: false });
+				if (message === false) return moved;
+				const { messageId, contentType, headers } = message.properties;
+				channel.sendToQueue(to, message.content, {
+					persistent: true,
+					messageId,
+					contentType,
+					headers
+				});
+				await channel.waitForConfirms();
+				channel.ack(message);
+			}
+		},
+		restart: async () => {
+			await container.restart({ timeout: 30_000 });
+			admin = await connectAsPlatform(container.getAmqpUrl());
+			channel = await admin.createConfirmChannel();
+		},
 		stop: async () => {
-			for (const connection of vhosts) await connection.close();
+			// A restart closed those it found open
+			for (const connection of vhosts) await connection.close().catch(() => undefined);
 			await channel.close();
 			await admin.close();
 			await container.stop();

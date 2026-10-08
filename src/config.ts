@@ -3,6 +3,7 @@ import { z } from 'zod';
 import { findTimeZone } from './agent/clock.js';
 import { LOCALES, type Locale } from './i18n/messages.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './wakeups/event-types.js';
+import { HOUR_MS } from './wakeups/retention.js';
 
 const ROLES = ['api', 'matrix', 'worker'] as const;
 export type Role = (typeof ROLES)[number];
@@ -130,6 +131,9 @@ export interface Config {
 		// How many times events from the broker may wake one owner's assistant in a rolling hour,
 		// whatever their source, counted in the database: past it, an event wakes that owner no more
 		readonly perHour: number;
+		// How long the worker role keeps a wake-up, by which an event delivered again wakes nobody
+		// twice: an event replayed after it is a new one
+		readonly retentionMs: number;
 	};
 	// Calendar's fanout of the notifications it sends each invitee, which the worker role listens
 	// to when it is set, for the new invitations
@@ -223,6 +227,13 @@ const envSchema = z.object({
 	WAKEUPS_PER_HOUR: z.coerce.number().int().min(1).default(20),
 	CALENDAR_ENABLED: z.enum(['true', 'false']).default('false'),
 	CALENDAR_AMQP_URL: z.string().default(''),
+	// 30 days unless set, and an hour at least: an event that comes back after a restart of the
+	// worker or of the broker, or an outage of the database, still wakes nobody twice
+	WAKEUPS_RETENTION_MS: z.coerce
+		.number()
+		.int()
+		.min(HOUR_MS)
+		.default(30 * 24 * HOUR_MS),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -421,7 +432,7 @@ export function loadConfig(env: Env): Config {
 		},
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
-		wakeups: { perHour: values.WAKEUPS_PER_HOUR },
+		wakeups: { perHour: values.WAKEUPS_PER_HOUR, retentionMs: values.WAKEUPS_RETENTION_MS },
 		calendar: values.CALENDAR_ENABLED === 'true' ? calendarSource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null

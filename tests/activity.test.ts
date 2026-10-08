@@ -16,6 +16,7 @@ import {
 	startActivityBroker,
 	toldOf,
 	turnCalls,
+	whenListening,
 	type ActivityEvent
 } from './helpers/activity.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
@@ -126,11 +127,13 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			// The suite wakes Alice's assistant more often than an owner may start turns by default
 			ADMISSION_USER_PER_MINUTE: '120'
 		});
-		worker = await startWorkerRole({
-			config: { ...r.h.config, role: 'worker' },
-			db: r.h.db,
-			logStream: workerLogs.stream
-		});
+		worker = await whenListening(
+			await startWorkerRole({
+				config: { ...r.h.config, role: 'worker' },
+				db: r.h.db,
+				logStream: workerLogs.stream
+			})
+		);
 		// A literal model: it tells the owner what the event it was handed says
 		r.h.apisix.llm.script = (request: ChatRequest) => {
 			const told = lastUser(request);
@@ -480,7 +483,10 @@ describe('an assignment published on the activity exchange wakes the assignee’
 			'x-dead-letter-strategy': 'at-least-once',
 			'x-overflow': 'reject-publish',
 			'x-single-active-consumer': true,
-			'x-delivery-limit': 5
+			'x-delivery-limit': 5,
+			// Held a day while it is tried again, rather than half an hour, before the broker takes
+			// it back
+			'x-consumer-timeout': 86_400_000
 		});
 		expect(await broker.bindingsOf(DEAD_LETTERS)).toEqual([
 			{ source: `${PREFIX}.dlx`, routingKey: queue?.arguments['x-dead-letter-routing-key'] }
@@ -615,17 +621,19 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		// An instance of its own on the broker, whose types the deployment changes between two starts
 		const prefix = `${PREFIX}.retyped`;
 		const queue = `${prefix}.activity`;
-		const listening = (types: readonly string[]): Promise<WorkerRole> =>
-			startWorkerRole({
-				config: {
-					...r.h.config,
-					role: 'worker',
-					rabbitmq: { prefix },
-					activity: { amqpUrl: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD), types }
-				},
-				db: r.h.db,
-				logStream: silent()
-			});
+		const listening = async (types: readonly string[]): Promise<WorkerRole> =>
+			whenListening(
+				await startWorkerRole({
+					config: {
+						...r.h.config,
+						role: 'worker',
+						rabbitmq: { prefix },
+						activity: { amqpUrl: broker.urlFor(HARNESS_USER, HARNESS_PASSWORD), types }
+					},
+					db: r.h.db,
+					logStream: silent()
+				})
+			);
 		try {
 			await (await listening([ASSIGNED])).stop();
 			const retyped = await listening([MENTIONED, ASSIGNED]);

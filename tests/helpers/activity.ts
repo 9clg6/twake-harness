@@ -9,7 +9,12 @@ import {
 	type FakeApisix,
 	type RecordedCall
 } from './fake-apisix.js';
-import { startTestBroker, type TestBroker } from './rabbitmq.js';
+import {
+	startTestBroker,
+	type Permissions,
+	type TestBroker,
+	type TestBrokerOptions
+} from './rabbitmq.js';
 
 // Where the applications publish what happens to people, and what Twake Tasks publishes there
 // when someone assigns a task
@@ -25,17 +30,20 @@ export const PREFIX = 'twake-harness-test';
 export const HARNESS_USER = 'twake-harness-test';
 export const HARNESS_PASSWORD = 'harness-test-password';
 
+// What the platform lets the instance's user do where the activity exchange is: declare and write
+// its own names only, and read the activity exchange and its own queues
+export const HARNESS_PERMISSIONS: Permissions = {
+	configure: `^${PREFIX}\\.`,
+	write: `^${PREFIX}\\.`,
+	read: `^(${ACTIVITY}|${PREFIX}\\..+)$`
+};
+
 // The platform's broker with the exchange the applications publish on, as the platform declares
-// it, and the instance's user, as the platform creates it: it may declare and write its own names
-// only, and read the activity exchange and its own queues
-export async function startActivityBroker(): Promise<TestBroker> {
-	const broker = await startTestBroker();
+// it, and the instance's user, as the platform creates it
+export async function startActivityBroker(options: TestBrokerOptions = {}): Promise<TestBroker> {
+	const broker = await startTestBroker(options);
 	await broker.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-	await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, {
-		configure: `^${PREFIX}\\.`,
-		write: `^${PREFIX}\\.`,
-		read: `^(${ACTIVITY}|${PREFIX}\\..+)$`
-	});
+	await broker.addUser(HARNESS_USER, HARNESS_PASSWORD, HARNESS_PERMISSIONS);
 	return broker;
 }
 
@@ -61,6 +69,30 @@ export async function toldOf(
 		await new Promise((resolve) => setTimeout(resolve, 250));
 	}
 	throw new Error(`fewer than ${count} turns of ${eventId}`);
+}
+
+// Resolves to a worker role once each of its listeners reads its queue: it listens in the
+// background, and an event published before its queue is there would reach no queue
+export async function whenListening(role: WorkerRole): Promise<WorkerRole> {
+	for (let i = 0; i < 240; i += 1) {
+		const health = await role.app.inject({ method: 'GET', url: '/health' });
+		const { status: _status, ...listeners } = health.json<Record<string, unknown>>();
+		if (Object.values(listeners).every((state) => state === 'connected')) return role;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	throw new Error('a listener of the worker role never read its queue');
+}
+
+// Waits for what a condition tells, a minute at most
+export async function until(
+	what: string,
+	condition: () => Promise<boolean> | boolean
+): Promise<void> {
+	for (let i = 0; i < 240; i += 1) {
+		if (await condition()) return;
+		await new Promise((resolve) => setTimeout(resolve, 250));
+	}
+	throw new Error(`${what}: not within a minute`);
 }
 
 // A log stream that keeps nothing, for a role whose logs a test does not read
@@ -127,11 +159,13 @@ export async function startActivityExchange(
 			RABBITMQ_PREFIX: PREFIX
 		},
 		listen: async (h) => {
-			worker = await startWorkerRole({
-				config: { ...h.config, role: 'worker' },
-				db: h.db,
-				logStream: silent()
-			});
+			worker = await whenListening(
+				await startWorkerRole({
+					config: { ...h.config, role: 'worker' },
+					db: h.db,
+					logStream: silent()
+				})
+			);
 		},
 		publish: (event) => broker.publish(ACTIVITY, event.type, event, event.id),
 		close: async () => {
@@ -143,8 +177,10 @@ export async function startActivityExchange(
 
 export interface ActivityEventOptions {
 	readonly id: string;
-	// The email of the person it is for
-	readonly recipient: string;
+	// The email of the person it is for, unless recipients lists everyone it is for, as
+	// data.recipients does
+	readonly recipient?: string;
+	readonly recipients?: readonly Record<string, unknown>[];
 	// Bob assigning them the task ROAD-12 of the Roadmap board, unless told otherwise
 	readonly type?: string;
 	readonly source?: string;
@@ -168,7 +204,9 @@ export function activityEvent(options: ActivityEventOptions): ActivityEvent {
 				title: 'Write the quarterly report',
 				board: { id: '3c4d5e6f-7a8b-4c9d-8e0f-a1b2c3d4e5f6', name: 'Roadmap' }
 			},
-			recipients: [{ email: options.recipient, reason: options.reason ?? 'assigned' }]
+			recipients: options.recipients ?? [
+				{ email: options.recipient, reason: options.reason ?? 'assigned' }
+			]
 		}
 	};
 }
