@@ -609,6 +609,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				return deferral;
 			}
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
+			// An activity the assistant found nothing useful in leaves nothing in the room
+			if (origin === 'event' && result.kind === 'ok' && result.silent === true) {
+				await settle(owner, parsed.data.event, 'nothing_useful', turnLog);
+				return null;
+			}
 			// Read once the turn is over: the owner may have changed their language in it
 			const { notices } = await fetchOwnerMessages(db, owner, locale);
 			const send = {
