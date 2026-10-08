@@ -526,8 +526,11 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		// The room of the assistant I create again while the turn waits
 		let next = '';
 		try {
-			await r.client.sendText(room, words);
+			const sent = await r.client.sendText(room, words);
 			await asked;
+			// The eyes the harness put on my words as it queued my turn reach the room first: sent
+			// while the assistant leaves the room, the homeserver may place them after the leave
+			expect(await r.client.waitForReactions(room, sent, r.assistantId, 1)).toEqual(['👀']);
 			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
 			expect((await r.h.api.post(ALICE, '/v1/assistants', { name: 'Iris' })).status).toBe(201);
 			next = await meetNewAssistant('Iris', [room]);
