@@ -8,7 +8,7 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { LlmError, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { fenced } from '../llm/data.js';
-import { escapeHtml } from '../matrix/format.js';
+import { escapeHtml, renderQuotedMarkdown } from '../matrix/format.js';
 import type { Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import { ensureRoomSession, saveSessionMessages } from '../sessions/repository.js';
@@ -85,8 +85,9 @@ export interface BriefInput {
 }
 
 export type BriefResult =
-	// The brief, as the model wrote it, or as the harness lays it out when the model wrote nothing
-	| { readonly kind: 'ok'; readonly text: string; readonly html?: string }
+	// The brief, as the model wrote it, or as the harness lays it out when the model wrote nothing,
+	// and its HTML, which the harness lays out either way
+	| { readonly kind: 'ok'; readonly text: string; readonly html: string }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
 	// Admission refused it, as it would a turn
@@ -287,15 +288,17 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			nudgeInterval: 0
 		});
 		const model = await written(system, told, log);
-		// Its date in words, as the owner reads it: the brief's own, whatever day it goes out on
-		const brief: { readonly text: string; readonly html?: string } =
+		// Its date in words, as the owner reads it: the brief's own, whatever day it goes out on. The
+		// model's brief repeats titles people wrote, unasked, every morning: its Markdown renders with
+		// nothing that acts, as the harness quotes the model in its requests, never their HTML or links
+		const brief: { readonly text: string; readonly html: string } =
 			model.text === null
 				? template(
 						read,
 						describeMoment(new Date(`${date}T12:00:00Z`), 'UTC', locale).date,
 						messages.brief.template
 					)
-				: { text: model.text };
+				: { text: model.text, html: renderQuotedMarkdown(model.text) };
 		const saved = await withPrincipal(db, principal, (tx) =>
 			saveSessionMessages(tx, session.id, [
 				...session.messages,
@@ -313,11 +316,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			},
 			'brief written'
 		);
-		return {
-			kind: 'ok',
-			text: brief.text,
-			...(brief.html === undefined ? {} : { html: brief.html })
-		};
+		return { kind: 'ok', text: brief.text, html: brief.html };
 	}
 
 	return {

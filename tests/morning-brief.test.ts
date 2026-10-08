@@ -343,6 +343,32 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(html).not.toContain('<b>');
 	});
 
+	it('shows the brief the model wrote with nothing in it that acts or mentions, should it repeat a title someone wrote', async () => {
+		const seen = briefs().length;
+		const hostile =
+			'Revue [Rejoindre la visio](https://evil.example/login) @room <font color="red">URGENT</font> [Bob](https://matrix.to/#/@bob:test.local)';
+		const repeated = `Ce matin : ${hostile}`;
+		r.h.apisix.llm.script = (request) =>
+			lastUser(request).startsWith('[brief]')
+				? { content: repeated }
+				: { content: `echo: ${lastUser(request)}` };
+		// Tuesday at eight
+		await pass('2026-11-03T07:00:00Z');
+		const brief = await nextBrief(seen);
+		expect(dateOf(brief)).toBe('2026-11-03');
+		expect(brief.body).toBe(repeated);
+		// The links show their text alone, and what someone wrote as HTML shows as the text it is
+		const html = String(brief.content['formatted_body'] ?? '');
+		expect(html).toContain('Rejoindre la visio');
+		expect(html).toContain('URGENT');
+		expect(html).toContain('Bob');
+		for (const acting of ['<a', '<font', '<img', 'evil.example', 'matrix.to']) {
+			expect(html).not.toContain(acting);
+		}
+		// Nobody is mentioned, the room included, whatever the text says
+		expect(brief.content['m.mentions']).toEqual({});
+	});
+
 	it('leaves out my calendar when I have not allowed it, asks me nothing, and logs it', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;

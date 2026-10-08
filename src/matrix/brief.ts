@@ -15,12 +15,21 @@ export function isBriefMarker(value: unknown): value is BriefMarker {
 	return typeof (value as Record<string, unknown>)['date'] === 'string';
 }
 
-// A text that is a brief, and says under that key of which date
-type BriefText = RichText & { readonly [BRIEF_CONTENT_KEY]: BriefMarker };
+// A text that is a brief, and says under that key of which date. It mentions nobody, in the
+// intentional mentions of Matrix: its titles are what other people wrote, an @room included, which
+// would otherwise notify as a mention of the room
+type BriefText = RichText & {
+	readonly [BRIEF_CONTENT_KEY]: BriefMarker;
+	readonly 'm.mentions': Record<string, never>;
+};
 
 // The content of a message as it goes out: its text as it is, and the brief it is when it is one
 export function markBrief(content: RichText, brief: BriefMarker | undefined): RichText {
 	if (brief === undefined) return content;
-	const marked: BriefText = { ...content, [BRIEF_CONTENT_KEY]: { date: brief.date } };
+	const marked: BriefText = {
+		...content,
+		[BRIEF_CONTENT_KEY]: { date: brief.date },
+		'm.mentions': {}
+	};
 	return marked;
 }

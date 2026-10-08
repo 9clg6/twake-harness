@@ -491,7 +491,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				asUserId: assistant.userId,
 				roomId,
 				text: result.text,
-				...(result.html === undefined ? {} : { html: result.html }),
+				html: result.html,
 				brief: { date: brief.date }
 			} satisfies SendPayload,
 			dedupKey: `send:${eventId}`,
