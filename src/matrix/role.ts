@@ -194,6 +194,9 @@ const MAX_INBOX_PAGES = 1_000;
 // writes its position through the database pool
 const MAX_START_READS = 4;
 
+// How long a room the creator is not in stays known as such before its members are read again
+const NOT_CREATOR_ROOM_MS = 30_000;
+
 // Whether a caller joined a read of an inbox during the page under way
 interface InboxJoins {
 	during: boolean;
@@ -453,12 +456,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		createUser(false);
 	});
 
-	// The creator answers only in rooms it was invited to; a message can arrive before its join
-	// of a fresh invitation has settled, so an invitation counts as presence.
-	// The rooms the creator is in, which stay so, and for a moment those it is not in: the channels
-	// the listener is in are pushed too, and the creator is in none of them
+	// The creator answers only in the rooms it joined, which it does on an invitation, and never
+	// joins one on a message: the channels the listener is in are pushed too, public ones among
+	// them, and the creator is in none of them. The rooms it is in stay known as such, and those it
+	// is not in for a moment, before their members are read again.
 	const creatorRooms = new Map<string, true | number>();
-	const NOT_CREATOR_ROOM_MS = 30_000;
 	async function creatorIsInRoom(roomId: string): Promise<boolean> {
 		const known = creatorRooms.get(roomId);
 		if (known === true) return true;
