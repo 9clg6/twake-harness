@@ -10,7 +10,7 @@ import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { CALENDAR_CATALOG } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
-import { PROVISIONER, provisionUntilReady } from './helpers/provisioning.js';
+import { PROVISIONER, provisioningPath, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
 describe('a deployment that speaks French', () => {
@@ -97,6 +97,25 @@ describe('a deployment that speaks French', () => {
 			);
 		} finally {
 			await brunoClient.stop();
+		}
+	});
+
+	it("names an assistant a provisioner asks for after its owner's first name, in French", async () => {
+		const owners = [
+			{ localpart: 'michel', name: 'Michel-Marie MAUDET', expected: 'Assistant de Michel-Marie' },
+			{ localpart: 'alicem', name: 'Alice Martin', expected: "Assistant d'Alice Martin" },
+			{ localpart: 'helene', name: 'Hélène DURAND', expected: "Assistant d'Hélène" },
+			{ localpart: 'emile', name: 'Émile ZOLA', expected: "Assistant d'Émile" }
+		];
+		for (const { localpart, name, expected } of owners) {
+			const owner = await h.synapse.registerUser(localpart, name);
+			const asked = await h.api.put(PROVISIONER, provisioningPath(owner.userId), {});
+			expect([200, 503]).toContain(asked.status);
+			const mine = await h.api.get<{ name: string }>(
+				`${localpart}@test.local`,
+				'/v1/assistants/me'
+			);
+			expect(mine.body.name).toBe(expected);
 		}
 	});
 

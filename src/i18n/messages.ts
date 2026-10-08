@@ -22,9 +22,11 @@ export interface Messages {
 	readonly language: { readonly name: string; readonly speak: string };
 	// The assistant's first message in its room with the owner
 	welcome(name: string): string;
-	// The name of an assistant a provisioner creates, after its owner's Matrix name, which its
-	// owner may change
-	defaultAssistantName(owner: string): string;
+	// The name of an assistant a provisioner creates, after the first name in its owner's Matrix
+	// name, which its owner may change
+	defaultAssistantName(ownerName: string): string;
+	// The default name such an assistant had before, after its owner's whole Matrix name
+	formerDefaultAssistantName(ownerName: string): string;
 	readonly creator: {
 		readonly helpHeader: string;
 		readonly commands: readonly CreatorCommand[];
@@ -74,9 +76,9 @@ export interface Messages {
 		readonly noEscrow: string;
 		// Why an assistant leaves a room where others than its owner are: everyone there reads it
 		readonly directRoomsOnly: string;
-		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
-		// owner: the actions it did, and how to have it carry on
-		callLimit(actions: number): string;
+		// A turn that reached one of its limits, whose model then wrote no words for its owner: the
+		// actions it did, and how to have it carry on
+		turnLimit(actions: number): string;
 		// The owner's permission for their assistant to act for them expires within days: on what
 		// date and at what time, and where to renew it. No question: nothing waits for an answer
 		delegationExpiring(date: string, time: string, link: string): string;
@@ -90,7 +92,7 @@ export interface Messages {
 		// The turn answered, or failed or was refused, its answer or notice a message of its own
 		readonly done: string;
 		readonly notDone: string;
-		// The turn answered once it reached its limit of tool calls: there is more to do
+		// The turn answered once it reached one of its limits: there is more to do
 		readonly limited: string;
 		// The turn ended on a question to the owner, which follows as a message of its own
 		readonly asking: string;
@@ -139,6 +141,9 @@ export interface Messages {
 			code: DelegationCode,
 			link: string | null
 		): string;
+		// The contract answers a recurring invitation only for the whole series: whether to answer
+		// for every occurrence of it, in the application named as for writing
+		series(application: string): string;
 		// The words that answer a question, alone in a message
 		readonly yes: string;
 		readonly no: string;
@@ -192,12 +197,24 @@ export interface Messages {
 		refused(via: OwnerWordsKind, reason: DeviceShortfall): string;
 		// Taken all the same, the deployment only reporting: why the session falls short, and what
 		// the owner can do about it
-		reported(reason: DeviceShortfall): string;
+		reported(reason: Exclude<DeviceShortfall, 'changed'>): string;
+		// Taken all the same, the deployment only reporting, from a session of another identity than
+		// the one held, when no question asks the owner whether they reset it: why, and what they can
+		// do about it. Never through the API, which only a deployment that enforces it needs.
+		reportedIdentity(report: IdentityReport): string;
 		// Not taken: the message came in clear, in a room that reads as clear
 		readonly unencrypted: string;
 		// Not taken: the owner's client encrypted the words with a Megolm session it has used for longer
 		// than the harness keeps what it received, and how to have it start a new one
 		oldSession(via: OwnerWordsKind): string;
+		// Taken all the same, the deployment only reporting, from a session another identity than the
+		// one held signed: whether the owner reset their identity themselves, to answer yes or no
+		readonly identityQuestion: string;
+		// The owner answered yes: the identity asked about is the one held from now on
+		readonly identityAdopted: string;
+		// The owner answered no: what to do, someone else possibly using their account, and the
+		// identity held stays the same
+		readonly identityRejected: string;
 	};
 }
 
@@ -208,6 +225,21 @@ function firstUse(asked: string, level: string, covers: string | null, question:
 	return covers === null
 		? `${asked} ${question}`
 		: [asked, `${level} ${covers}`, question].join('\n');
+}
+
+// The words of a name before its first word in capitals, the family name in « Michel-Marie
+// MAUDET »; the whole name when no word comes before one
+function firstNameOf(name: string): string {
+	const words = name.trim().split(/\s+/u);
+	const family = words.findIndex((word) => /\p{Lu}/u.test(word) && !/\p{Ll}/u.test(word));
+	return family > 0 ? words.slice(0, family).join(' ') : name.trim();
+}
+
+// The name after « de », or after « d' » before a vowel or an h, accented or not: « d'Hélène »,
+// « d'Émile », « de Michel »
+function withDeOrDApostrophe(name: string): string {
+	const initial = name.normalize('NFD').charAt(0).toLowerCase();
+	return /[aeiouyhæœ]/u.test(initial) ? `d'${name}` : `de ${name}`;
 }
 
 // How an owner answers a request, the sentence every request ends with, in each language: in
@@ -225,7 +257,8 @@ const ENGLISH: Messages = {
 	language: { name: 'English', speak: 'Speak English with the person writing to you.' },
 	welcome: (name) =>
 		`Hello, I am ${name}, your Twake Space assistant. Tell me what you need; I remember what matters and I ask before I act.`,
-	defaultAssistantName: (owner) => `${owner}'s assistant`,
+	defaultAssistantName: (ownerName) => `${firstNameOf(ownerName)}'s assistant`,
+	formerDefaultAssistantName: (ownerName) => `${ownerName}'s assistant`,
 	creator: {
 		helpHeader: 'I create and manage your Twake Space assistant. Commands:',
 		commands: [
@@ -293,7 +326,7 @@ const ENGLISH: Messages = {
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
 		directRoomsOnly:
 			'For now I work only in a private conversation with the person I assist, so I am leaving this room.',
-		callLimit: (actions) =>
+		turnLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`,
 		delegationExpiring: (date, time, link) =>
 			`The permission to act on your behalf that you gave me expires on ${date} at ${time}. Renew it before then so that I can keep acting for you: ${link}`
@@ -351,6 +384,8 @@ const ENGLISH: Messages = {
 				? `${why}\nShall I try again? ${answer}`
 				: `${why} Give it ${expired ? 'again ' : ''}here: ${link}\nOnce that is done, shall I try again? ${answer}`;
 		},
+		series: (application) =>
+			`This is a series in ${application}: shall I answer for the whole series?`,
 		yes: 'yes',
 		no: 'no',
 		refused: 'All right, I will not do it.',
@@ -414,7 +449,7 @@ const ENGLISH: Messages = {
 				case 'no_identity':
 					return `${what}: your account has no encryption identity yet, so I cannot verify any of your sessions. Sign out of Twake Chat and sign in again to set it up; then ${again}.`;
 				case 'changed':
-					return `${what}: your encryption identity is not the one I know. If you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}); until then I act on none of your messages.`;
+					return `${what}: your encryption identity changed, and I act only on the one I know. If you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}): for your safety, no message can do it. If you did not, change your password and warn your administrator. Until then I act on none of your messages.`;
 			}
 		},
 		reported: (reason) => {
@@ -423,8 +458,18 @@ const ENGLISH: Messages = {
 					return 'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 				case 'no_identity':
 					return 'Your account has no encryption identity yet, so I cannot verify your sessions. I act on what you write for now; set one up so that I keep doing so: sign out of Twake Chat and sign in again.';
-				case 'changed':
-					return `Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}) so that I keep doing so.`;
+			}
+		},
+		reportedIdentity: (report) => {
+			switch (report) {
+				case 'unsigned':
+					return 'Your encryption identity changed, and the new one did not sign this session. I act on what you write for now; so that I can ask you whether you reset it yourself, write to me from a session it signed, or verify this one: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
+				case 'assistant_asks':
+					return 'Your encryption identity changed. I act on what you write for now; write to your assistant, which will ask you in its room whether you reset it yourself.';
+				case 'no_assistant':
+					return 'Your encryption identity changed. I act on what you write for now; if you did not reset it yourself, change your password and warn your administrator.';
+				case 'denied':
+					return 'You told me you did not reset your encryption identity: I keep flagging what you write with the new one, and act on it for now. If you did reset it after all, answer yes when I ask you again, once my question expires.';
 			}
 		},
 		unencrypted:
@@ -435,8 +480,13 @@ const ENGLISH: Messages = {
 					? 'I did not act on your last message'
 					: 'I did not take your answer, so my question still waits';
 			const again = via === 'message' ? 'send it again' : 'answer again';
-			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. In Twake Chat, send /discardsession in this conversation so that it uses new ones; then ${again}.`;
-		}
+			return `${what}: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. Send /discardsession in this room so that it uses new ones; then ${again}.`;
+		},
+		identityQuestion: `Your encryption identity is not the one I know. Did you reset your identity yourself? ${ENGLISH_HOW_TO_ANSWER}`,
+		identityAdopted:
+			'Noted: your new identity is now the one I know, and I no longer flag your messages.',
+		identityRejected:
+			'Then someone else may have reset it: change your password now and warn your administrator. I keep the identity I knew, and I go on answering you as before.'
 	}
 };
 
@@ -446,7 +496,8 @@ const FRENCH: Messages = {
 	language: { name: 'Français', speak: "Parle français avec la personne qui t'écrit." },
 	welcome: (name) =>
 		`Bonjour, je m'appelle ${name} et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir.`,
-	defaultAssistantName: (owner) => `Assistant de ${owner}`,
+	defaultAssistantName: (ownerName) => `Assistant ${withDeOrDApostrophe(firstNameOf(ownerName))}`,
+	formerDefaultAssistantName: (ownerName) => `Assistant de ${ownerName}`,
 	creator: {
 		helpHeader: 'Je crée et je gère ton assistant Twake Space :',
 		commands: [
@@ -519,7 +570,7 @@ const FRENCH: Messages = {
 		directRoomsOnly:
 			"Pour l'instant, je ne travaille que dans une conversation privée avec la personne que j'assiste : je quitte ce salon.",
 		// One action, or none, is singular in French
-		callLimit: (actions) =>
+		turnLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`,
 		delegationExpiring: (date, time, link) =>
 			`L'autorisation d'agir en ton nom que tu m'as donnée expire le ${date} à ${time}. Renouvelle-la d'ici là pour que je continue à agir pour toi : ${link}`
@@ -579,6 +630,8 @@ const FRENCH: Messages = {
 				? `${why}\nJe réessaie ? ${answer}`
 				: `${why} Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;
 		},
+		series: (application) =>
+			`C'est une série dans ${application} : je réponds pour toute la série ?`,
 		yes: 'oui',
 		no: 'non',
 		refused: "D'accord, je ne le fais pas.",
@@ -645,7 +698,7 @@ const FRENCH: Messages = {
 				case 'no_identity':
 					return `${what} : ton compte n'a pas encore d'identité de chiffrement, je ne peux donc vérifier aucune de tes sessions. Déconnecte-toi de Twake Chat et reconnecte-toi pour la créer ; puis ${again}.`;
 				case 'changed':
-					return `${what} : ton identité de chiffrement n'est pas celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) ; d'ici là, je ne donne suite à aucun de tes messages.`;
+					return `${what} : ton identité de chiffrement a changé, et je ne donne suite qu'à celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) : par sécurité, aucun message ne le peut. Sinon, change ton mot de passe et préviens ton administrateur. D'ici là, je ne donne suite à aucun de tes messages.`;
 			}
 		},
 		reported: (reason) => {
@@ -654,8 +707,18 @@ const FRENCH: Messages = {
 					return "Cette session n'est pas vérifiée. Je donne suite à ce que tu y écris pour l'instant ; vérifie-la pour que cela continue : dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier ».";
 				case 'no_identity':
 					return "Ton compte n'a pas encore d'identité de chiffrement, je ne peux donc pas vérifier tes sessions. Je donne suite à ce que tu écris pour l'instant ; crée-la pour que cela continue : déconnecte-toi de Twake Chat et reconnecte-toi.";
-				case 'changed':
-					return `Ton identité de chiffrement n'est pas celle que je connais. Je donne suite à ce que tu écris pour l'instant ; si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) pour que cela continue.`;
+			}
+		},
+		reportedIdentity: (report) => {
+			switch (report) {
+				case 'unsigned':
+					return "Ton identité de chiffrement a changé, et la nouvelle n'a pas signé cette session. Je donne suite à ce que tu écris pour l'instant ; pour que je puisse te demander si tu l'as réinitialisée toi-même, écris-moi depuis une session qu'elle a signée, ou vérifie celle-ci : dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier ».";
+				case 'assistant_asks':
+					return "Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; écris à ton assistant, qui te demandera dans son salon si tu l'as réinitialisée toi-même.";
+				case 'no_assistant':
+					return "Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; si tu ne l'as pas réinitialisée toi-même, change ton mot de passe et préviens ton administrateur.";
+				case 'denied':
+					return "Tu m'as dit ne pas avoir réinitialisé ton identité de chiffrement : je continue de signaler ce que tu écris avec la nouvelle, et j'y donne suite pour l'instant. Si tu l'as bien réinitialisée, réponds oui quand je te reposerai la question, une fois qu'elle aura expiré.";
 			}
 		},
 		unencrypted:
@@ -667,8 +730,13 @@ const FRENCH: Messages = {
 					: "Je n'ai pas pris ta réponse en compte, ma question attend donc toujours";
 			const encrypted = via === 'message' ? "l'a chiffré" : "l'a chiffrée";
 			const again = via === 'message' ? 'renvoie-le' : 'réponds à nouveau';
-			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Dans Twake Chat, envoie /discardsession dans cette conversation pour qu'elle en utilise de nouvelles ; puis ${again}.`;
-		}
+			return `${what} : ton application ${encrypted} avec des clés qu'elle utilise depuis plus de trente jours, que je n'accepte plus. Envoie /discardsession dans ce salon pour qu'elle en utilise de nouvelles ; puis ${again}.`;
+		},
+		identityQuestion: `Ton identité de chiffrement n'est pas celle que je connais. C'est toi qui as réinitialisé ton identité ? ${FRENCH_HOW_TO_ANSWER}`,
+		identityAdopted:
+			"C'est noté : ta nouvelle identité est désormais celle que je connais, et je ne signale plus tes messages.",
+		identityRejected:
+			"Alors quelqu'un d'autre l'a peut-être réinitialisée : change ton mot de passe dès maintenant et préviens ton administrateur. Je garde l'identité que je connaissais, et je continue de te répondre comme avant."
 	}
 };
 
@@ -682,8 +750,17 @@ export function getMessages(locale: Locale): Messages {
 export type OwnerWordsKind = 'message' | 'answer';
 
 // Why a session of the owner falls short: their identity did not sign it, they have no identity,
-// or their identity is not the one their assistant holds
+// or their identity is not one their assistant counts: not the one it holds, or, where the
+// deployment enforces, one it holds by their yes in the chat alone
 export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
 
-// Where an owner confirms an identity they reset themselves, which no message in the chat can do
+// Why the owner is told about another identity than the one held rather than asked whether they
+// reset it, while the deployment only reports: it did not sign the session their words came from;
+// they wrote to the creator, while they have an assistant, whose room asks them, or none yet; or
+// they told their assistant they did not reset it, while that question lasts
+export type IdentityReport = 'unsigned' | 'assistant_asks' | 'no_assistant' | 'denied';
+
+// Where an owner confirms an identity they reset themselves while the deployment enforces their
+// sessions' identity: no message in the chat confirms one then, nor does a yes they gave their
+// assistant while it only reported
 const OWNER_IDENTITY_ROUTE = 'PUT /v1/assistants/me/owner-identity';

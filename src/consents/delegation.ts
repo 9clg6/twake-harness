@@ -1,3 +1,5 @@
+import { problemCode } from '../contracts/problem.js';
+
 // Why the platform's broker refused to act for an owner: they never gave their assistant the
 // permission to act for them, or the one they gave expired
 const DELEGATION_CODES = ['delegation_missing', 'delegation_expired'] as const;
@@ -10,8 +12,8 @@ function isDelegationCode(value: unknown): value is DelegationCode {
 // The code by which an RFC 9457 problem of the broker says why it holds no permission it can use,
 // if it says so
 export function readProblemCode(body: unknown): DelegationCode | null {
-	if (typeof body !== 'object' || body === null || !('code' in body)) return null;
-	return isDelegationCode(body.code) ? body.code : null;
+	const code = problemCode(body);
+	return isDelegationCode(code) ? code : null;
 }
 
 // The broker's refusal of a contract call, as the gateway relays it: a 401 whose RFC 9457 problem

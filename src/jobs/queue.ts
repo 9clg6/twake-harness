@@ -1,7 +1,7 @@
 import type { Db, Tx } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
-export type JobKind = 'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare';
+export type JobKind = 'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare' | 'name';
 
 export interface Job {
 	readonly id: number;
@@ -67,6 +67,17 @@ export async function enqueueJobReplacingFailed(
 			locked_at = null, last_error = null, created_at = now(), finished_at = null
 		where jobs.status = 'failed'`;
 	return result.count === 1;
+}
+
+// Queued at the back of its group, whose jobs that failed for good are dropped: the new one does
+// their work over again. No key keeps it out, so one queued while a job of its group runs still
+// runs after it, and sees what changed meanwhile.
+export async function enqueueJobDroppingFailed(
+	db: Db | Tx,
+	input: Omit<EnqueueInput, 'dedupKey'> & { readonly groupKey: string }
+): Promise<boolean> {
+	await db.sql`delete from jobs where group_key = ${input.groupKey} and status = 'failed'`;
+	return enqueueJob(db, input);
 }
 
 // Claims the oldest runnable job of the given kinds, skipping what other workers hold. A job

@@ -93,6 +93,8 @@ function hasNoArguments(args: unknown): boolean {
 // prepared, about that very call; and the first of either in its application about both. Unless
 // a summary stands in its place, a call without arguments shows its tool instead, where the
 // question asks about that very call, and nothing under a first use's, whose words say it all.
+// A recurring invitation asks about that very call whether to answer for the whole series: its yes
+// runs the call the usual way of writes.
 function questionFor(
 	call: RequestedCall,
 	consent: Messages['consent']
@@ -106,6 +108,7 @@ function questionFor(
 	};
 	// What a question about that very call shows of it
 	const itself: ShownCall = bare ? { kind: 'tool', text: call.tool } : frozen;
+	if (call.reasons.includes('series')) return { question: consent.series(name), call: itself };
 	// A high-risk write asks every time, whoever started the turn: its question also holds for one
 	// that a turn an event started prepared
 	if (call.reasons.includes('high_risk')) {

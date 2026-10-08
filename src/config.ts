@@ -50,6 +50,9 @@ export interface Config {
 	};
 	readonly turn: {
 		readonly maxToolCalls: number;
+		// The tokens one turn may spend, the prompts and answers of all its model calls summed: once
+		// they are spent, the turn ends on a last call, without tools
+		readonly maxTokens: number;
 		readonly memoryNudgeInterval: number;
 		// The most characters of past conversation a turn shows the model
 		readonly historyMaxChars: number;
@@ -180,6 +183,8 @@ const envSchema = z.object({
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
+	// About a dozen model calls, which can each read some 20,000 tokens
+	TURN_MAX_TOKENS: z.coerce.number().int().min(1).default(250_000),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
 	// 24,000 characters is about 6,000 to 8,000 tokens at 3 to 4 characters a token: in a 32K-token
 	// context it leaves room for the system prompt and its memory, the tool definitions, the turn's own
@@ -388,6 +393,7 @@ export function loadConfig(env: Env): Config {
 		},
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
+			maxTokens: values.TURN_MAX_TOKENS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
 			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,
 			statusDelayMs: values.TURN_STATUS_DELAY_MS,

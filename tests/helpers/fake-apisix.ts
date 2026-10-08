@@ -32,6 +32,9 @@ export interface ScriptedReply {
 	// Why the model stopped: stop or tool_calls unless told otherwise, such as length when it ran
 	// out of tokens, in which case it reports the whole budget as spent
 	finishReason?: string;
+	// The tokens the model reports it read and wrote for this answer, over the fake's own, or null
+	// when it reports none
+	usage?: { readonly promptTokens: number; readonly completionTokens: number } | null;
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -162,6 +165,38 @@ export function lastUserContent(request: ChatRequest): string {
 export const echoScript: LlmScript = (request) => ({
 	content: `echo: ${lastUserContent(request)}`
 });
+
+// A read of the owner's consents, the call a model makes in each answer of pastTheLimit
+export function readCall(index: number): ToolCall {
+	return {
+		id: `read_${index}`,
+		type: 'function',
+		function: { name: 'consents_list', arguments: '{}' }
+	};
+}
+
+// What one answer of the model reports it read and wrote: three of them go past the tokens a turn
+// may spend when its deployment sets none
+export const A_HUNDRED_THOUSAND_TOKENS = { promptTokens: 90_000, completionTokens: 10_000 };
+
+// A model that makes one call after another for as long as it has tools, so that it goes past a
+// limit of its message, of tool calls or of the tokens each answer reports when they are given,
+// then gives the answer given once it has none. Each answer with tools waits for `hold` when it is
+// given, such as a status the test needs shown before the turn goes on
+export function pastTheLimit(
+	last: ScriptedReply,
+	usage?: ScriptedReply['usage'],
+	hold?: Promise<unknown>
+): LlmScript {
+	return (request, index) =>
+		request.tools === undefined
+			? last
+			: {
+					toolCalls: [readCall(index)],
+					...(usage === undefined ? {} : { usage }),
+					...(hold === undefined ? {} : { hold })
+				};
+}
 
 async function readJson(req: IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
@@ -368,6 +403,83 @@ export function brokerNoDelegation(consentUrl: string = BROKER_CONSENT_URL): Con
 		}
 	};
 }
+
+// The operation that gives the owner's answer to an invitation as the calendar contracts publish
+// it, accepting or declining, named by the UID of its event, and for the whole series of a
+// recurring one with series true: a low-risk write that tells what it would do, unless preview is
+// false
+function invitationAnswerOperation(
+	verb: 'accept' | 'decline',
+	preview: boolean
+): Record<string, unknown> {
+	return {
+		post: {
+			operationId: `${verb}_invitation`,
+			summary: `${verb === 'accept' ? 'Accept' : 'Decline'} an invitation on the user's behalf`,
+			tags: [`calendar.invitation.${verb}.v1`],
+			'x-twake-risk': 'low',
+			'x-twake-preview': preview,
+			requestBody: {
+				required: true,
+				content: {
+					'application/json': {
+						schema: {
+							type: 'object',
+							properties: { uid: { type: 'string' }, series: { type: 'boolean', default: false } },
+							required: ['uid'],
+							additionalProperties: false
+						}
+					}
+				}
+			}
+		}
+	};
+}
+
+// The catalog of both operations
+function invitationAnswersCatalog(preview: boolean): Record<string, unknown> {
+	return {
+		openapi: '3.1.0',
+		paths: {
+			'/contracts/v1/calendar/invitations/accept': invitationAnswerOperation('accept', preview),
+			'/contracts/v1/calendar/invitations/decline': invitationAnswerOperation('decline', preview)
+		}
+	};
+}
+
+export const INVITATION_ANSWERS_CATALOG = invitationAnswersCatalog(true);
+
+// The same answers from a calendar that cannot tell what they would do
+export const UNPREVIEWED_INVITATION_ANSWERS_CATALOG = invitationAnswersCatalog(false);
+
+// What a calendar contract answers a call about a recurring invitation, or a copy that holds
+// several occurrences of a series, that does not say it answers for the whole series, as the user
+// said: an RFC 9457 problem whose code says why
+export const RECURRING_INVITATION: ContractReply = {
+	status: 409,
+	body: {
+		type: 'urn:twake:problem:recurring_invitation',
+		title: 'Recurring invitation',
+		status: 409,
+		detail:
+			'The invitation repeats, or holds several occurrences of a series: once the user said yes to answering for the whole series, call again with series true; else they answer it in Calendar.',
+		code: 'recurring_invitation'
+	}
+};
+
+// What it answers about an invitation whose organizer cancelled the event, before anything is
+// checked of a series
+export const INVITATION_CANCELLED: ContractReply = {
+	status: 409,
+	body: {
+		type: 'urn:twake:problem:invitation_cancelled',
+		title: 'Invitation cancelled',
+		status: 409,
+		detail:
+			'The organizer cancelled the event, the whole series if it repeats, or each occurrence of it the user was invited to: there is nothing to answer.',
+		code: 'invitation_cancelled'
+	}
+};
 
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
@@ -576,6 +688,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			};
 			if (reply.reasoning !== undefined) message['reasoning_content'] = reply.reasoning;
 			if (reply.toolCalls !== undefined) message['tool_calls'] = reply.toolCalls;
+			const promptTokens = reply.usage?.promptTokens ?? 10;
+			const completionTokens =
+				reply.usage?.completionTokens ??
+				(reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5);
 			sendJson(res, 200, {
 				id: `chatcmpl-${llm.calls.length}`,
 				object: 'chat.completion',
@@ -588,11 +704,15 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 							reply.finishReason ?? (reply.toolCalls === undefined ? 'stop' : 'tool_calls')
 					}
 				],
-				usage: {
-					prompt_tokens: 10,
-					completion_tokens: reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5,
-					total_tokens: 15
-				}
+				...(reply.usage === null
+					? {}
+					: {
+							usage: {
+								prompt_tokens: promptTokens,
+								completion_tokens: completionTokens,
+								total_tokens: promptTokens + completionTokens
+							}
+						})
 			});
 			return;
 		}

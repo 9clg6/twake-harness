@@ -1,10 +1,17 @@
 import { createHash } from 'node:crypto';
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Clock } from '../agent/clock.js';
 import type { OwnerDeviceTrust } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import type { DeviceShortfall, Messages, OwnerWordsKind } from '../i18n/messages.js';
+import type {
+	DeviceShortfall,
+	IdentityReport,
+	Messages,
+	OwnerWordsKind
+} from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
+import type { IdentityQuestions } from './identity-questions.js';
 import {
 	claimDeviceNotice,
 	clearSeen,
@@ -13,7 +20,9 @@ import {
 	receiveWords,
 	recordSeen,
 	seeSession,
-	type DeviceNoticeReason
+	type DeviceNotice,
+	type DeviceNoticeReason,
+	type OwnerCrossSigning
 } from './owner-cross-signing-repository.js';
 import { readPublishedKeys, senderDevice, type EventSender } from './owner-keys.js';
 
@@ -41,6 +50,10 @@ function sealOf(
 	return { sessionId, digest };
 }
 
+// Whom the owner's words went to: their assistant, in a room where it asks them questions to answer
+// yes or no, or the creator
+export type OwnerConversation = 'assistant' | 'creator';
+
 // The owner's words as they reached their assistant encrypted: a message, or a reaction that
 // answers one of the harness's questions
 export interface OwnerWords {
@@ -50,6 +63,7 @@ export interface OwnerWords {
 	readonly assistantUserId: string;
 	readonly eventId: string;
 	readonly via: OwnerWordsKind;
+	readonly conversation: OwnerConversation;
 	// The event as it arrived, still encrypted, null when it was not kept
 	readonly encrypted: Record<string, unknown> | null;
 }
@@ -58,11 +72,21 @@ export interface OwnerWords {
 // held already or seen for the first time just now, another one, or none on either side
 type IdentityState = 'pinned' | 'first_seen' | 'changed' | 'none';
 
-// Why a device falls short, as the owner is told and as the notices are counted
+// Why a device falls short, as the owner is told and as the notices are counted: another identity
+// than the one held as the refusal of their words, which the deployment reports otherwise
 const SHORTFALLS: Readonly<Record<DeviceShortfall, DeviceNoticeReason>> = {
 	unverified: 'unverified',
 	no_identity: 'no_identity',
-	changed: 'identity_changed'
+	changed: 'identity_refused'
+};
+
+// Each report of another identity than the one held is counted apart, so that being told one never
+// keeps the owner from being told another
+const IDENTITY_REPORTS: Readonly<Record<IdentityReport, DeviceNoticeReason>> = {
+	unsigned: 'identity_unsigned',
+	assistant_asks: 'identity_assistant_asks',
+	no_assistant: 'identity_no_assistant',
+	denied: 'identity_denied'
 };
 
 interface DeviceVerdict {
@@ -73,6 +97,8 @@ interface DeviceVerdict {
 	// Whether the owner's identity, as published, signed the device
 	readonly signed: boolean;
 	readonly identity: IdentityState;
+	// The owner's identity as published, by its public master key, null when they publish none
+	readonly masterKey: string | null;
 }
 
 // An event the assistant's encryption engine decrypted for the check: who encrypted it, and what it
@@ -97,6 +123,8 @@ export interface OwnerDeviceGateDeps {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
 	readonly mode: OwnerDeviceTrust;
+	// The present, by which the owner's words are forgotten and their sessions grow old
+	readonly clock: Clock;
 	// Decrypts the event again with the assistant's encryption engine, which tells who encrypted it
 	decrypt(
 		assistantUserId: string,
@@ -106,12 +134,17 @@ export interface OwnerDeviceGateDeps {
 	// The homeserver's answer to a keys query for the owner, made as their assistant
 	queryKeys(assistantUserId: string, ownerUserId: string): Promise<unknown>;
 	fetchMessages(owner: string): Promise<Messages>;
+	// Where the owner is asked whether they reset their identity themselves
+	readonly questions: Pick<IdentityQuestions, 'ask'>;
+	// Whether the owner has an assistant, whose room asks them about a new identity of theirs
+	hasAssistant(owner: string): Promise<boolean>;
 }
 
 export interface OwnerDeviceGate {
 	// Whether the owner's words count: in enforce mode only when the device that encrypted them is
-	// signed by the identity the harness holds for the owner, in report mode always. Either way the
-	// device is logged without the words, and the owner is told when it falls short.
+	// signed by the identity the harness holds for the owner, unless it holds that one by their yes
+	// in the chat alone; in report mode always. Either way the device is logged without the words,
+	// and the owner is told when it falls short.
 	admit(words: OwnerWords): Promise<Admission>;
 	// Whether the owner's words that came in clear count: never in enforce mode, where the owner is
 	// told, and as before in report mode; the reason says where they came in clear
@@ -121,6 +154,13 @@ export interface OwnerDeviceGate {
 export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate {
 	const { db, log, mode } = deps;
 
+	// Whether the identity held counts as the owner's: one they said yes to in the chat counts only
+	// while the deployment reports, as no message confirms an identity where it enforces; there it
+	// waits, as any other one, for the owner to accept it through the API
+	function counts(held: OwnerCrossSigning): boolean {
+		return mode === 'report' || held.pinnedBy !== 'chat';
+	}
+
 	async function judge(words: OwnerWords, sender: EventSender): Promise<DeviceVerdict> {
 		const { owner, ownerUserId } = words;
 		const keys = readPublishedKeys(
@@ -129,7 +169,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		);
 		const found = senderDevice(sender, keys, ownerUserId);
 		// The first identity seen is held. Another one is kept aside for the owner to accept, once it
-		// signed the session their words came from
+		// signed the session their words came from, and so is the one held when it does not count
 		const identity = await withPrincipal(db, { id: owner }, async (tx): Promise<IdentityState> => {
 			const held = await findOwnerCrossSigning(tx, owner);
 			if (held === null) {
@@ -138,7 +178,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				if (pinned.masterPublicKey === keys.masterKey) {
 					return pinned.pinnedNow ? 'first_seen' : 'pinned';
 				}
-			} else if (held.masterPublicKey === keys.masterKey) {
+			} else if (held.masterPublicKey === keys.masterKey && counts(held)) {
 				if (held.seen !== null) await clearSeen(tx, owner);
 				return 'pinned';
 			}
@@ -149,25 +189,27 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			deviceId: found.deviceId,
 			device: found.deviceId ?? sender.curve25519Key ?? 'unknown',
 			signed: found.signed,
-			identity
+			identity,
+			masterKey: keys.masterKey
 		};
 	}
 
 	// Tells the owner in the room: once a minute at most per device when their words were not
 	// taken, in either mode, so that words refused again are told again; once per device when they
-	// were taken all the same. Whether the owner could be told never changes whether their words
-	// count.
+	// were taken all the same. A notice about another identity than the one held counts for that
+	// identity alone, so that each new one is told anew. Whether the owner could be told never
+	// changes whether their words count.
 	async function tell(
 		words: OwnerWords,
-		device: string,
-		reason: DeviceNoticeReason,
+		notice: DeviceNotice,
 		taken: boolean,
 		text: (messages: Messages) => string
 	): Promise<void> {
 		const { owner, roomId, eventId } = words;
+		const { reason } = notice;
 		try {
 			const claimed = await withPrincipal(db, { id: owner }, (tx) =>
-				claimDeviceNotice(tx, owner, device, reason, taken ? null : REFUSAL_NOTICE_INTERVAL_MS)
+				claimDeviceNotice(tx, owner, notice, taken ? null : REFUSAL_NOTICE_INTERVAL_MS)
 			);
 			if (!claimed) return;
 			const messages = await deps.fetchMessages(owner);
@@ -182,6 +224,49 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		}
 	}
 
+	// Why the owner is told about the identity that is not the one held, whose session their words
+	// came from: null when their assistant asked them whether they reset it themselves instead, or
+	// waits for their answer
+	async function identityReport(
+		words: OwnerWords,
+		verdict: DeviceVerdict
+	): Promise<IdentityReport | null> {
+		const { roomId, owner, eventId, assistantUserId } = words;
+		// Only an assistant asks, in its room: the creator sends the owner there when they have one
+		if (words.conversation === 'creator') {
+			return (await deps.hasAssistant(owner)) ? 'assistant_asks' : 'no_assistant';
+		}
+		// It asks only about the identity that signed the session the words came from
+		if (!verdict.signed || verdict.masterKey === null) return 'unsigned';
+		const question = await deps.questions.ask(
+			{ roomId, owner, assistantUserId },
+			eventId,
+			verdict.masterKey
+		);
+		// The owner told it they did not reset that identity: what they write with it is still
+		// reported to them, until the question expires and is asked again
+		return question === 'denied' ? 'denied' : null;
+	}
+
+	// The owner's words came from a session of another identity than the one held, the deployment
+	// only reporting: their assistant asks them whether they reset it themselves, or they are told
+	// what they can do about it, never to accept it through the API, which only a deployment that
+	// enforces needs. Whether they could be asked or told never changes whether their words count.
+	async function reportIdentity(words: OwnerWords, verdict: DeviceVerdict): Promise<void> {
+		const { roomId, owner, eventId } = words;
+		const report = await identityReport(words, verdict).catch((err: unknown) => {
+			log.error({ roomId, owner, eventId, mode, err }, 'owner identity report failed');
+			return null;
+		});
+		if (report === null) return;
+		const notice = {
+			device: verdict.device,
+			reason: IDENTITY_REPORTS[report],
+			identity: verdict.masterKey ?? ''
+		};
+		await tell(words, notice, true, (m) => m.ownerDevices.reportedIdentity(report));
+	}
+
 	return {
 		admit: async (words) => {
 			const { roomId, owner, eventId, via } = words;
@@ -192,9 +277,10 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Words that cannot be told apart from others cannot be checked at all
 				const seal = sealOf(words.encrypted);
 				if (seal === null) throw new Error('the encrypted words cannot be told apart');
+				const now = deps.clock.now();
 				// The same encrypted words under another event are no new words, whatever the mode
 				const copyOf = await withPrincipal(db, { id: owner }, (tx) =>
-					receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS)
+					receiveWords(tx, owner, seal.digest, eventId, WORDS_KEPT_MS, now)
 				);
 				if (copyOf !== null) {
 					log.info(
@@ -207,7 +293,7 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Nor are the words of a session whose first words the check decrypted longer ago than
 				// copies are remembered, whatever the mode: a session counts from there
 				const old = await withPrincipal(db, { id: owner }, (tx) =>
-					seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS)
+					seeSession(tx, owner, seal.sessionId, WORDS_KEPT_MS, now)
 				);
 				if (old) {
 					const { deviceId, curve25519Key } = checked.sender;
@@ -215,7 +301,8 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 						{ roomId, owner, eventId, via, mode, deviceId },
 						'assistant ignored words of an old session'
 					);
-					await tell(words, deviceId ?? curve25519Key ?? 'unknown', 'old_session', false, (m) =>
+					const device = deviceId ?? curve25519Key ?? 'unknown';
+					await tell(words, { device, reason: 'old_session' }, false, (m) =>
 						m.ownerDevices.oldSession(via)
 					);
 					return REFUSED;
@@ -227,7 +314,12 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				// Report mode takes the words only once the check decrypted them and knew them for new
 				// words, whatever it found after
 				if (mode === 'report' && fresh !== null) return { admitted: true, event: fresh.event };
-				await tell(words, '*', 'check_failed', false, (messages) => messages.notices.turnFailed);
+				await tell(
+					words,
+					{ device: '*', reason: 'check_failed' },
+					false,
+					(messages) => messages.notices.turnFailed
+				);
 				return REFUSED;
 			}
 			const admitted: Admission = { admitted: true, event: fresh.event };
@@ -253,16 +345,23 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 					: verdict.identity === 'none'
 						? 'no_identity'
 						: 'unverified';
-			const reason = SHORTFALLS[shortfall];
+			// A notice about another identity than the one held is about the one published
+			const notice: DeviceNotice = {
+				device: verdict.device,
+				reason: SHORTFALLS[shortfall],
+				identity: shortfall === 'changed' ? (verdict.masterKey ?? '') : ''
+			};
 			if (mode === 'report') {
 				log.info(fields, 'owner device unverified');
-				await tell(words, verdict.device, reason, true, (m) => m.ownerDevices.reported(shortfall));
+				if (shortfall === 'changed') {
+					await reportIdentity(words, verdict);
+				} else {
+					await tell(words, notice, true, (m) => m.ownerDevices.reported(shortfall));
+				}
 				return admitted;
 			}
 			log.info(fields, 'assistant ignored an unverified device');
-			await tell(words, verdict.device, reason, false, (m) =>
-				m.ownerDevices.refused(via, shortfall)
-			);
+			await tell(words, notice, false, (m) => m.ownerDevices.refused(via, shortfall));
 			return REFUSED;
 		},
 		admitUnencrypted: async (words, reason) => {
@@ -273,7 +372,12 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 				return true;
 			}
 			log.info(fields, 'assistant ignored an unencrypted message');
-			await tell(words, '*', 'unencrypted', false, (m) => m.ownerDevices.unencrypted);
+			await tell(
+				words,
+				{ device: '*', reason: 'unencrypted' },
+				false,
+				(m) => m.ownerDevices.unencrypted
+			);
 			return false;
 		}
 	};

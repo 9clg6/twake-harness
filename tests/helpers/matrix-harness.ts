@@ -20,8 +20,9 @@ import { reservePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } 
 
 export interface MatrixTestHarness {
 	// Stops and starts the matrix role again on the same database and encryption stores, or
-	// with the stores and the devices' tokens lost, as a volume would be
-	restartRole(options?: { wipeCryptoStore?: boolean }): Promise<void>;
+	// with the stores and the devices' tokens lost, as a volume would be; with settings over this
+	// harness's, as a deployment whose values changed, the api role keeping its own
+	restartRole(options?: { wipeCryptoStore?: boolean; env?: Record<string, string> }): Promise<void>;
 	readonly synapse: TestSynapse;
 	readonly apisix: FakeApisix;
 	role: MatrixRole;
@@ -48,11 +49,14 @@ export interface MatrixTestHarness {
 export interface MatrixStartOptions {
 	// Settings of this harness, over the defaults
 	readonly env?: Record<string, string>;
+	// Settings of its homeserver, over the suites' own
+	readonly synapse?: Readonly<Record<string, unknown>>;
 	// How long the role lets the SDK process a push before it gives the push up
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
 	readonly statusMaxMs?: number;
-	// The present the agent and the creator read, set by the test instead of the system clock
+	// The present the agent, the creator and the check of the owner's devices read, set by the test
+	// instead of the system clock
 	readonly clock?: Clock;
 }
 
@@ -77,7 +81,7 @@ export async function startMatrixHarness(
 	const hsToken = 'hs-token-test';
 	const apisix = await startFakeApisix();
 	const issuer = await startTestIssuer();
-	const config = loadConfig({
+	const settings: Record<string, string> = {
 		HARNESS_ROLE: 'matrix',
 		DATABASE_URL: TEST_DATABASE_URL,
 		AUTH_JWKS_URL: issuer.jwksUrl.toString(),
@@ -94,10 +98,12 @@ export async function startMatrixHarness(
 		// the runner, a turn answers with a message of its own as before
 		TURN_STATUS_DELAY_MS: '600000',
 		...(options.env ?? {})
-	});
-	const synapse = await startTestSynapse({
-		file: buildRegistrationFile(config, `http://host.docker.internal:${port}`)
-	});
+	};
+	const config = loadConfig(settings);
+	const synapse = await startTestSynapse(
+		{ file: buildRegistrationFile(config, `http://host.docker.internal:${port}`) },
+		options.synapse
+	);
 	apisix.matrixUpstream = synapse.url;
 	apisix.matrixAsToken = asToken;
 	const db = makeDb(config.databaseUrl);
@@ -144,9 +150,9 @@ export async function startMatrixHarness(
 	startTurnWorkers();
 	const app = apps[0];
 	if (app === undefined) throw new Error('no replica started');
-	const startRole = (): Promise<MatrixRole> =>
+	const startRole = (roleConfig: Config = config): Promise<MatrixRole> =>
 		startMatrixRole({
-			config,
+			config: roleConfig,
 			db,
 			log: app.log,
 			port,
@@ -233,7 +239,9 @@ export async function startMatrixHarness(
 				await rm(config.matrix.cryptoStorePath, { recursive: true, force: true });
 				await db.sql`delete from matrix_user_storage`;
 			}
-			role = await startRole();
+			role = await startRole(
+				options.env === undefined ? config : loadConfig({ ...settings, ...options.env })
+			);
 			harness.role = role;
 		},
 		synapse,

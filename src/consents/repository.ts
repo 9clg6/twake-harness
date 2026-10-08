@@ -179,7 +179,8 @@ const WAIT_REASONS: Readonly<Record<WaitReason, true>> = {
 	consent: true,
 	event_turn: true,
 	high_risk: true,
-	delegation: true
+	delegation: true,
+	series: true
 };
 
 function isWaitReason(value: string): value is WaitReason {
@@ -291,6 +292,22 @@ export async function findRequestOpenToWords(
 		order by asked_at desc
 		limit 1`;
 	return foundRequest(rows[0]);
+}
+
+// Whether a request asked in the room since that moment, or asked there again since, is open to an
+// answer in words still, whenever its call froze
+export async function isRequestOpenToWordsSince(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	since: Date
+): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from pending_calls
+		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
+			and words_closed_at is null and asked_at > ${since}
+		limit 1`;
+	return rows.length > 0;
 }
 
 // The owner wrote in the room: its requests are no longer open to an answer in words

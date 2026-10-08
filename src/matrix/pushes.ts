@@ -6,6 +6,7 @@ import {
 } from 'matrix-bot-sdk';
 
 import type { EnsureEncryption } from './encryption.js';
+import { isRecord } from './json.js';
 
 // The fields of a pushed transaction the SDK sets the encryption of their users up for (MSC2409
 // for the to-device and ephemeral events, MSC3202 for the key counts), under the names it reads
@@ -35,10 +36,6 @@ export interface PushDeps {
 	readonly storage: IAppserviceStorageProvider;
 	readonly ensureEncryption: EnsureEncryption;
 	readonly deadlineMs: number;
-}
-
-function isRecord(value: unknown): value is Record<string, unknown> {
-	return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 function eventsOf(value: unknown): Record<string, unknown>[] {

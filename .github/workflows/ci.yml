@@ -118,6 +118,12 @@ jobs:
           printf 'config:\n  turnMaxToolCalls: 20\n' > /tmp/tools.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/tools.yaml > /tmp/tools-rendered.yaml
           grep -A1 TURN_MAX_TOOL_CALLS /tmp/tools-rendered.yaml | grep -q '"20"'
+      # TURN_MAX_TOKENS is rendered only when config.turnMaxTokens is set, as an integer
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOKENS /tmp/default.yaml
+      - run: |
+          printf 'config:\n  turnMaxTokens: 1000000\n' > /tmp/turn-tokens.yaml
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/turn-tokens.yaml > /tmp/turn-tokens-rendered.yaml
+          grep -A1 TURN_MAX_TOKENS /tmp/turn-tokens-rendered.yaml | grep -q '"1000000"'
       # TURN_STATUS_DELAY_MS is rendered only when config.turnStatusDelayMs is set, as an integer
       - run: helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/default.yaml && ! grep -q TURN_STATUS_DELAY_MS /tmp/default.yaml
       - run: |
@@ -329,5 +335,10 @@ jobs:
       - uses: actions/checkout@v4
       - uses: azure/setup-helm@v4
       - run: echo "${{ secrets.GITHUB_TOKEN }}" | helm registry login ghcr.io --username ${{ github.actor }} --password-stdin
-      - run: helm package charts/twake-harness --destination /tmp/chart
+      # Each build publishes the chart under a version of its own, 0.1.0-sha- and the seven
+      # characters of the commit that name its image, which is the chart's appVersion: a release
+      # pins the chart of the image it runs, and no later build changes it
+      - run: |
+          commit=$(echo "$GITHUB_SHA" | cut -c1-7)
+          helm package charts/twake-harness --version "0.1.0-sha-$commit" --app-version "sha-$commit" --destination /tmp/chart
       - run: helm push /tmp/chart/twake-harness-*.tgz oci://ghcr.io/linagora

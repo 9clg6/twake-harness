@@ -29,7 +29,11 @@ export function matrixLocalpartOfPrincipal(config: Config, principal: string): s
 	return LOCALPART.test(localpart) ? localpart : null;
 }
 
+export function matrixUserIdOfLocalpart(config: Config, localpart: string): string {
+	return `@${localpart}:${config.matrix.serverName}`;
+}
+
 export function matrixUserIdOfPrincipal(config: Config, principal: string): string | null {
 	const localpart = matrixLocalpartOfPrincipal(config, principal);
-	return localpart === null ? null : `@${localpart}:${config.matrix.serverName}`;
+	return localpart === null ? null : matrixUserIdOfLocalpart(config, localpart);
 }
