@@ -284,14 +284,26 @@ describe('the assistant proposes from the messages of channels', () => {
 	});
 
 	it('proposes once a day at most three times, and once per room per twelve hours', async () => {
-		// Alice has one suggestion from the channel now: another message in it proposes nothing to her
+		const logged = h.logLines().length;
+		// Alice's suggestion from this exchange of hers, which a cap kept from her
+		const skipped = (reason: string) => (): boolean =>
+			h
+				.logLines()
+				.slice(logged)
+				.some(
+					(line) =>
+						line['msg'] === 'suggestion skipped' &&
+						line['owner'] === ALICE &&
+						line['reason'] === reason
+				);
+		// Alice has one suggestion from the channel now: another exchange of hers in it proposes
+		// nothing to her
 		const before = space.calls.length;
+		await say(alice, channel, 'Et toi ?');
 		await say(bob, channel, 'on se voit mardi à 10h ?');
-		await sleep(3000);
-		expect(
-			space.calls.slice(before).filter((c) => c.body['matrixUserId'] === '@alice:test.local')
-		).toHaveLength(0);
-		// Three in a day is the most
+		await until(skipped('room_window'));
+		// Three in a day is the most: an exchange of hers in another channel proposes nothing to her,
+		// and still to Bob, who has one
 		await withPrincipal(h.db, { id: ALICE }, async (tx) => {
 			for (let i = 0; i < 2; i += 1) {
 				await tx.sql`insert into suggestions (pending_call_id, owner, room_id, starts_at, ends_at)
@@ -299,13 +311,19 @@ describe('the assistant proposes from the messages of channels', () => {
 			}
 		});
 		const other = await openChannel(bob, [alice]);
-		const calls = llmCalls();
+		await say(alice, other, 'On se voit quand ?');
 		await say(bob, other, 'on se voit mercredi à 10h ?');
-		await sleep(3000);
+		await until(skipped('daily_cap'));
+		await until(() =>
+			space.calls
+				.slice(before)
+				.some(
+					(c) => c.body['matrixUserId'] === '@bob:test.local' && c.body['matrixRoomId'] === other
+				)
+		);
 		expect(
 			space.calls.slice(before).filter((c) => c.body['matrixUserId'] === '@alice:test.local')
 		).toHaveLength(0);
-		void calls;
 	});
 
 	it('leaves alone a room muted by its member, and the words of a member who opted out', async () => {
