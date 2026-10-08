@@ -3,7 +3,14 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { loadConfig } from '../src/config.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeSettableClock } from './helpers/clock.js';
-import { echoScript } from './helpers/fake-apisix.js';
+import { grantConsent } from './helpers/consents.js';
+import {
+	CALENDAR_CATALOG,
+	echoScript,
+	type ContractCall,
+	type ContractReply,
+	type LlmScript
+} from './helpers/fake-apisix.js';
 
 // The system prompt the scripted model received for one chat turn of this user
 async function systemPromptOfTurn(h: TestHarness, sub: string, message: string): Promise<string> {
@@ -19,6 +26,67 @@ async function systemPromptOfTurn(h: TestHarness, sub: string, message: string):
 	const system = h.apisix.llm.calls[before]?.request.messages[0];
 	expect(system?.role).toBe('system');
 	return system?.content ?? '';
+}
+
+// The calendar of an owner whose settings put it in this zone: both reads of their events answer
+// in it, and name it in time_zone
+function calendarIn(timeZone: unknown): (call: ContractCall) => ContractReply {
+	return (call) => ({
+		status: 200,
+		body:
+			call.path === '/contracts/v1/calendar/events'
+				? { time_zone: timeZone, events: [], truncated: false }
+				: { time_zone: timeZone, uid: call.query['uid'] }
+	});
+}
+
+// A model that reads its owner's calendar with one call, then answers
+function readingCalendar(tool: string, args: Record<string, unknown>): LlmScript {
+	return (request) =>
+		request.messages.at(-1)?.role === 'tool'
+			? { content: 'Lu.' }
+			: {
+					toolCalls: [
+						{
+							id: `call_${tool}`,
+							type: 'function',
+							function: { name: tool, arguments: JSON.stringify(args) }
+						}
+					]
+				};
+}
+
+// One chat turn of this user in which the model reads their calendar with one call, then answers
+async function turnReadingCalendar(
+	h: TestHarness,
+	sub: string,
+	tool: string,
+	args: Record<string, unknown>
+): Promise<void> {
+	h.apisix.llm.script = readingCalendar(tool, args);
+	const res = await h.app.inject({
+		method: 'POST',
+		url: '/v1/chat',
+		headers: { authorization: `Bearer ${await h.issuer.mint({ sub })}` },
+		payload: { message: 'Que dit mon agenda ?' }
+	});
+	expect(res.statusCode).toBe(200);
+	expect(res.json<{ answer: string }>().answer).toBe('Lu.');
+}
+
+// The block of the system prompt that states the present, right after the persona
+function nowBlock(prompt: string): string | undefined {
+	return prompt.split('\n\n')[1];
+}
+
+// That block in French, for this date and time in words, this zone and this ISO 8601 instant
+function frenchNow(words: string, timeZone: string, iso: string): string {
+	return [
+		'## Maintenant',
+		`Date et heure : ${words}, fuseau ${timeZone}.`,
+		`En ISO 8601 : ${iso}.`,
+		"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
+	].join('\n');
 }
 
 describe('the present moment in the system prompt', () => {
@@ -101,6 +169,144 @@ describe('the present moment in the system prompt', () => {
 					'In ISO 8601: 2026-10-06T11:26:00+00:00.'
 				].join('\n')
 			);
+		});
+	});
+
+	describe("a deployment in Europe/Paris, its owners' calendars in other zones", () => {
+		const clock = makeSettableClock('2026-10-06T23:30:00Z');
+		let h: TestHarness;
+		beforeAll(async () => {
+			h = await startTestHarness({
+				env: {
+					ASSISTANT_TIMEZONE: 'Europe/Paris',
+					ASSISTANT_LOCALE: 'fr',
+					// Alice takes more turns in a minute than an owner may by default
+					ADMISSION_USER_PER_MINUTE: '100'
+				},
+				clock
+			});
+			h.apisix.contracts.spec = CALENDAR_CATALOG;
+			for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
+			// These owners already let their assistant read their calendar
+			for (const owner of ['alice', 'bob']) await grantConsent(h.db, owner, 'calendar', 'read');
+		});
+		afterAll(async () => {
+			await h.close();
+		});
+
+		it('states the present in the zone a list of my events returned, from my next turn on', async () => {
+			clock.set('2026-10-06T23:30:00Z');
+			h.apisix.contracts.handler = calendarIn('America/New_York');
+			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+				from: '2026-10-07',
+				days: 1
+			});
+			// Still Tuesday evening in New York, when it is already Wednesday in Paris
+			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
+				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
+			);
+		});
+
+		it("keeps an owner's zone to them: one whose calendar no read named yet has the deployment's", async () => {
+			clock.set('2026-10-06T23:30:00Z');
+			h.apisix.contracts.handler = calendarIn('America/New_York');
+			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+				from: '2026-10-07',
+				days: 1
+			});
+			expect(nowBlock(await systemPromptOfTurn(h, 'bob', 'Et demain ?'))).toBe(
+				frenchNow('mercredi 7 octobre 2026, 01:30', 'Europe/Paris', '2026-10-07T01:30:00+02:00')
+			);
+		});
+
+		it('follows the zone of my calendar to the last read of an event that named it', async () => {
+			clock.set('2026-10-06T23:30:00Z');
+			h.apisix.contracts.handler = calendarIn('America/New_York');
+			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+				from: '2026-10-07',
+				days: 1
+			});
+			// Alice moved her calendar to Tokyo since
+			h.apisix.contracts.handler = calendarIn('Asia/Tokyo');
+			await turnReadingCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
+			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(
+				frenchNow('mercredi 7 octobre 2026, 08:30', 'Asia/Tokyo', '2026-10-07T08:30:00+09:00')
+			);
+		});
+
+		it('keeps the zone it had when a read names one the runtime does not know, and a known one by its canonical name', async () => {
+			clock.set('2026-10-06T23:30:00Z');
+			h.apisix.contracts.handler = calendarIn('america/new_york');
+			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+				from: '2026-10-07',
+				days: 1
+			});
+			const newYork = frenchNow(
+				'mardi 6 octobre 2026, 19:30',
+				'America/New_York',
+				'2026-10-06T19:30:00-04:00'
+			);
+			expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(newYork);
+			for (const named of ['Mars/Olympus', '', 7, null]) {
+				h.apisix.contracts.handler = calendarIn(named);
+				await turnReadingCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
+				expect(nowBlock(await systemPromptOfTurn(h, 'alice', 'Et demain ?'))).toBe(newYork);
+			}
+		});
+
+		it('states the present in the zone of the first read of my calendar, in the turn my yes resumes', async () => {
+			clock.set('2026-10-06T23:30:00Z');
+			h.apisix.contracts.handler = calendarIn('America/New_York');
+			h.apisix.llm.script = readingCalendar('list_calendar_events', {
+				from: '2026-10-07',
+				days: 1
+			});
+			const authorization = `Bearer ${await h.issuer.mint({ sub: 'carol' })}`;
+			// Carol never let her assistant read her calendar: its first read waits for her
+			const asked = await h.app.inject({
+				method: 'POST',
+				url: '/v1/chat',
+				headers: { authorization },
+				payload: { message: "Qu'ai-je demain ?" }
+			});
+			expect(asked.statusCode).toBe(200);
+			const { pending_call: pending } = asked.json<{ pending_call: { id: string } }>();
+			const before = h.apisix.llm.calls.length;
+			const resumed = await h.app.inject({
+				method: 'POST',
+				url: `/v1/pending-calls/${pending.id}/approve`,
+				headers: { authorization },
+				payload: {}
+			});
+			expect(resumed.statusCode).toBe(200);
+			expect(resumed.json<{ answer: string }>().answer).toBe('Lu.');
+			// The model read the events with the present of their zone
+			expect(nowBlock(h.apisix.llm.calls[before]?.request.messages[0]?.content ?? '')).toBe(
+				frenchNow('mardi 6 octobre 2026, 19:30', 'America/New_York', '2026-10-06T19:30:00-04:00')
+			);
+		});
+
+		it('logs at info the days each list of my events reads, and none of its other arguments', async () => {
+			h.apisix.contracts.handler = calendarIn('America/New_York');
+			const before = h.logLines().length;
+			await turnReadingCalendar(h, 'alice', 'list_calendar_events', {
+				from: '2026-10-08',
+				days: 2,
+				limit: 17
+			});
+			await turnReadingCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
+			const lines = h.logLines().slice(before);
+			const windows = lines.filter((line) => 'from' in line || 'days' in line);
+			expect(windows).toEqual([
+				expect.objectContaining({
+					level: 30,
+					msg: 'contract called',
+					principal: 'alice',
+					from: '2026-10-08',
+					days: '2'
+				})
+			]);
+			expect(lines.filter((line) => 'limit' in line || 'uid' in line)).toEqual([]);
 		});
 	});
 

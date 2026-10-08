@@ -239,7 +239,8 @@ function contractRoutes(spec: unknown, mount: string): ContractRoute[] {
 
 // The calendar contracts as the contracts service publishes them, behind the gateway: absolute
 // paths, the versioned contract in tags[0], the verbs as operationIds, exclude a plain array of
-// UIDs, the only list shape APISIX's validator turns a query value into, and accepting a low-risk
+// UIDs, the only list shape APISIX's validator turns a query value into, the reads of the user's
+// events, whose answers give the zone of their calendar in time_zone, and accepting a low-risk
 // write, the owner's own answer to an invitation, which names it by its calendar UID
 export const CALENDAR_CATALOG = {
 	openapi: '3.1.0',
@@ -258,6 +259,29 @@ export const CALENDAR_CATALOG = {
 						required: false,
 						schema: { type: 'array', items: { type: 'string' } }
 					}
+				]
+			}
+		},
+		'/contracts/v1/calendar/events': {
+			get: {
+				operationId: 'list_calendar_events',
+				summary: "List the user's events over whole days of their calendar's zone",
+				tags: ['calendar.event.read.v1'],
+				parameters: [
+					{ name: 'from', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'days', in: 'query', required: true, schema: { type: 'integer' } },
+					{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }
+				]
+			}
+		},
+		'/contracts/v1/calendar/event': {
+			get: {
+				operationId: 'read_calendar_event',
+				summary: "Read one of the user's events, or one occurrence of it",
+				tags: ['calendar.event.read.v1'],
+				parameters: [
+					{ name: 'uid', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'recurrence_id', in: 'query', required: false, schema: { type: 'string' } }
 				]
 			}
 		},

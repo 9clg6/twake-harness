@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import { findTimeZone } from '../agent/clock.js';
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { WaitReason } from '../consents/consent.js';
@@ -10,6 +11,7 @@ import { makeOwnerRequest, requestText } from '../consents/request.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
+import { keepOwnerTimeZone } from '../settings/repository.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import type { Tool, ToolContext, ToolOutcome } from '../agent/tools.js';
 import { makeOptionalOwnerConsentLink } from './consent-link.js';
@@ -91,6 +93,29 @@ const MADE_WITHOUT_OWNER = {
 	status: 'made_without_owner',
 	hint: "Asked what this call would do, the application did it instead: the call was made, without the owner's yes, and the harness told the owner so. Do not make it again."
 } as const;
+
+// The read of the owner's events over whole days of their calendar's zone, from a date
+const LIST_CALENDAR_EVENTS = 'list_calendar_events';
+
+// The calendar reads whose answer names, in time_zone, the zone of the owner's calendar: the
+// contract reads it from their calendar's settings, and gives every time in it
+const OWNER_ZONE_READS: readonly string[] = [LIST_CALENDAR_EVENTS, 'read_calendar_event'];
+
+// What the info line of a call carries of its arguments: of a list of calendar events, the days it
+// reads, from and days as it sent them, which the gateway's audit does not keep while an
+// end-to-end test checks the model's "tomorrow" by them; of any other call, nothing
+function loggedArguments(toolName: string, url: URL): Record<string, string | null> {
+	if (toolName !== LIST_CALENDAR_EVENTS) return {};
+	return { from: url.searchParams.get('from'), days: url.searchParams.get('days') };
+}
+
+// The zone an answer names in time_zone, by its canonical name: null when it names none the runtime
+// knows
+function zoneOf(body: unknown): string | null {
+	if (typeof body !== 'object' || body === null) return null;
+	const zone = (body as Record<string, unknown>)['time_zone'];
+	return typeof zone === 'string' ? findTimeZone(zone) : null;
+}
 
 // A call as the model wrote it, ready to go on the gateway: the operation's address, with its
 // parameters, and its body
@@ -236,9 +261,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		return { url, body };
 	}
 
-	// Calls the contract through APISIX, and logs the call, never what it sent or got back. Only a
-	// preview carries the header that asks for one, and the action carries the digest of the
-	// preview its owner allowed, never that header.
+	// Calls the contract through APISIX, and logs the call, never what it sent or got back but the
+	// days a list of calendar events reads. Only a preview carries the header that asks for one, and
+	// the action carries the digest of the preview its owner allowed, never that header.
 	async function send(
 		request: ContractRequest,
 		context: ToolContext,
@@ -291,6 +316,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				method: contract.method,
 				status,
 				principal: context.principalId,
+				...loggedArguments(contract.toolName, request.url),
 				...(sending.kind === 'preview' ? { preview: true } : {}),
 				...(delegation === null ? {} : { delegation })
 			},
@@ -484,6 +510,11 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
+			}
+			// A read of the owner's calendar refreshes the zone their turns state the present in
+			const zone = OWNER_ZONE_READS.includes(contract.toolName) ? zoneOf(answered.body) : null;
+			if (zone !== null && owner !== ORGANIZATION_PRINCIPAL) {
+				await withPrincipal(context.db, { id: owner }, (tx) => keepOwnerTimeZone(tx, owner, zone));
 			}
 			return { result: answered.result };
 		}
