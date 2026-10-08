@@ -8,7 +8,17 @@ export type PinnedBy = 'first_use' | 'api' | 'chat';
 // How the owner accepted the identity the harness holds for them
 export type AcceptedBy = Exclude<PinnedBy, 'first_use'>;
 
-const ACCEPTED_BY: readonly AcceptedBy[] = ['api', 'chat'];
+// Every way an identity may be held, so that one read back is known for one: a way added to
+// PinnedBy and missing here fails the build
+const PINNED_BY: Readonly<Record<PinnedBy, true>> = {
+	first_use: true,
+	api: true,
+	chat: true
+};
+
+function isPinnedBy(value: string): value is PinnedBy {
+	return Object.hasOwn(PINNED_BY, value);
+}
 
 // The identity that signed the session the owner's words last came from, when it was another one
 // than the one held, and when
@@ -47,7 +57,7 @@ function normalize(row: OwnerCrossSigningRow): OwnerCrossSigning {
 	return {
 		owner: row.owner,
 		masterPublicKey: row.master_public_key,
-		pinnedBy: ACCEPTED_BY.find((by) => by === row.pinned_by) ?? 'first_use',
+		pinnedBy: isPinnedBy(row.pinned_by) ? row.pinned_by : 'first_use',
 		pinnedAt: row.pinned_at,
 		seen:
 			row.seen_master_public_key === null || row.seen_at === null
