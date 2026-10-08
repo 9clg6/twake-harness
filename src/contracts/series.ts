@@ -40,7 +40,7 @@ export function withoutSeries(
 // a code of its own. Whether it refused the call so, and can be told to answer for the whole
 // series: not a contract whose body does not take series, nor a call for the whole series
 // already, whose refusal the model reads as data.
-export function refusedOneOccurrence(
+export function refusedAsRecurring(
 	contract: ContractDefinition,
 	values: Record<string, unknown>,
 	answer: Pick<PreviewAnswer, 'status' | 'body'>

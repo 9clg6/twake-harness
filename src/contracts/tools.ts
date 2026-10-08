@@ -22,7 +22,7 @@ import {
 	type Preview,
 	type PreviewAnswer
 } from './preview.js';
-import { refusedOneOccurrence, wholeSeriesValues, withoutSeries } from './series.js';
+import { refusedAsRecurring, wholeSeriesValues, withoutSeries } from './series.js';
 
 export interface ContractToolDeps {
 	readonly config: Config;
@@ -400,7 +400,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			}
 			// A recurring invitation its contract previews only for the whole series: its owner is
 			// asked about that first, and their yes asks again what still waits
-			if (refusedOneOccurrence(contract, values, answered)) {
+			if (refusedAsRecurring(contract, values, answered)) {
 				return ask(wholeSeriesValues(values), context, ['series']);
 			}
 			const reading = readPreview(answered);
@@ -508,7 +508,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// A recurring invitation its contract answers only for the whole series: the call for every
 			// occurrence, the only one that sets series, waits for its owner, as any call does, the
 			// organization agent having nobody to ask
-			if (owner !== ORGANIZATION_PRINCIPAL && refusedOneOccurrence(contract, values, answered)) {
+			if (owner !== ORGANIZATION_PRINCIPAL && refusedAsRecurring(contract, values, answered)) {
 				return ask(wholeSeriesValues(values), context, ['series']);
 			}
 			return { result: answered.result };
