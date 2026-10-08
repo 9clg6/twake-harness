@@ -251,7 +251,7 @@ describe('the present moment in the system prompt', () => {
 			);
 		});
 
-		it('logs at info the days each list of my events reads, and none of its other arguments', async () => {
+		it('logs at info the days each list of my events reads, as it gives them, and none of its other arguments', async () => {
 			h.apisix.contracts.handler = calendarIn('America/New_York');
 			const before = h.logLines().length;
 			await readCalendar(h, 'alice', 'list_calendar_events', {
@@ -259,6 +259,8 @@ describe('the present moment in the system prompt', () => {
 				days: 2,
 				limit: 17
 			});
+			// A list that gives no number of days reads the contract's own
+			await readCalendar(h, 'alice', 'list_calendar_events', { from: '2026-10-09' });
 			await readCalendar(h, 'alice', 'read_calendar_event', { uid: 'uid-standup' });
 			const lines = h.logLines().slice(before);
 			const windows = lines.filter((line) => 'from' in line || 'days' in line);
@@ -269,8 +271,15 @@ describe('the present moment in the system prompt', () => {
 					principal: 'alice',
 					from: '2026-10-08',
 					days: '2'
+				}),
+				expect.objectContaining({
+					level: 30,
+					msg: 'contract called',
+					principal: 'alice',
+					from: '2026-10-09'
 				})
 			]);
+			expect(windows[1]).not.toHaveProperty('days');
 			expect(lines.filter((line) => 'limit' in line || 'uid' in line)).toEqual([]);
 		});
 	});

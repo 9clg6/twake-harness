@@ -102,11 +102,16 @@ const LIST_CALENDAR_EVENTS = 'list_calendar_events';
 const OWNER_ZONE_READS: readonly string[] = [LIST_CALENDAR_EVENTS, 'read_calendar_event'];
 
 // What the info line of a call carries of its arguments: of a list of calendar events, the days it
-// reads, from and days as it sent them, which the gateway's audit does not keep while an
-// end-to-end test checks the model's "tomorrow" by them; of any other call, nothing
-function loggedArguments(toolName: string, url: URL): Record<string, string | null> {
+// reads, from and days as it sent them, those it gave, which the gateway's audit does not keep while
+// an end-to-end test checks the model's "tomorrow" by them; of any other call, nothing
+function loggedArguments(toolName: string, url: URL): Record<string, string> {
 	if (toolName !== LIST_CALENDAR_EVENTS) return {};
-	return { from: url.searchParams.get('from'), days: url.searchParams.get('days') };
+	const logged: Record<string, string> = {};
+	for (const name of ['from', 'days']) {
+		const value = url.searchParams.get(name);
+		if (value !== null) logged[name] = value;
+	}
+	return logged;
 }
 
 // The zone an answer names in time_zone, by its canonical name: null when it names none the runtime

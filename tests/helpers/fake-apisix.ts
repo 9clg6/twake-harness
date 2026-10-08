@@ -269,7 +269,7 @@ export const CALENDAR_CATALOG = {
 				tags: ['calendar.event.read.v1'],
 				parameters: [
 					{ name: 'from', in: 'query', required: true, schema: { type: 'string' } },
-					{ name: 'days', in: 'query', required: true, schema: { type: 'integer' } },
+					{ name: 'days', in: 'query', required: false, schema: { type: 'integer' } },
 					{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }
 				]
 			}
