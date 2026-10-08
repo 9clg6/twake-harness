@@ -13,13 +13,15 @@ export type RecipientOutcomes = Readonly<Partial<Record<RecipientOutcome, number
 // The outcome of a message is the first of these that one of its recipients had, the one the
 // operator most needs to see; a recipient that cannot be read counts as ignored. Every outcome of
 // a wake-up has its place here, and a new one compiles once it has: one that holds back a turn
-// due, such as a cap on an owner's wake-ups, comes right after woken.
+// due, such as a cap on an owner's wake-ups, comes right after woken, and one kept for the brief
+// after it.
 const PRECEDENCE: Readonly<Record<WakeOutcome, number>> = {
 	woken: 0,
 	capped: 1,
-	duplicate: 2,
-	no_assistant: 3,
-	ignored: 4
+	for_brief: 2,
+	duplicate: 3,
+	no_assistant: 4,
+	ignored: 5
 };
 
 // The outcome of a message from those of its recipients, ignored when it names nobody, and how

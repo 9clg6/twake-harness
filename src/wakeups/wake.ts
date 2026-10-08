@@ -51,7 +51,8 @@ export interface Wakeup {
 // may take: a source may publish any name, this one included
 export const BRIEF_SOURCE = 'schedule';
 
-export type WakeOutcome = 'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped';
+export type WakeOutcome =
+	'woken' | 'duplicate' | 'no_assistant' | 'ignored' | 'capped' | 'for_brief';
 
 export interface WakeDeps {
 	readonly config: Config;
@@ -97,8 +98,8 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 // the recipient by their email, which is their principal: only a person of the instance's mail
 // domain has one, nobody is woken for their own action, and nobody more often in an hour than the
 // deployment allows. Their listening journal notes each event they are woken for or their cap
-// holds back, which neither wakes them twice; a brief, which the scheduler tries again, it never
-// notes.
+// holds back, and of their own actions a task they assigned themselves, for their brief, none of
+// which wakes them twice; a brief, which the scheduler tries again, it never notes.
 export async function wake(
 	deps: WakeDeps,
 	wakeup: Wakeup,
@@ -107,7 +108,10 @@ export async function wake(
 	const { config, db } = deps;
 	const owner = wakeup.recipient.email?.toLowerCase() ?? null;
 	if (owner === null || matrixLocalpartOfPrincipal(config, owner) === null) return 'ignored';
-	if (isOwnAction(wakeup)) return 'ignored';
+	// Of the owner's own actions, only a task they assigned themselves, or that their assistant
+	// assigned them on their yes, as them, is noted
+	const ownAction = isOwnAction(wakeup);
+	if (ownAction && wakeup.type !== TASK_ASSIGNED_EVENT_TYPE) return 'ignored';
 	// A brief comes from the scheduler's source, and that source brings nothing else: an event
 	// published under it is nobody's brief, and takes none of their wake-ups
 	if ((wakeup.source === BRIEF_SOURCE) !== (wakeup.brief !== undefined)) return 'ignored';
@@ -144,6 +148,12 @@ export async function wake(
 				outcome: journaled,
 				noted: wakeup.noted ?? { ids: NOTHING_SHOWN, names: NOTHING_SHOWN }
 			});
+		// A task the owner assigned themselves calls for no word at once and takes none of their
+		// wake-ups: their journal keeps it for their brief
+		if (ownAction) {
+			await noteAs('for_brief');
+			return 'for_brief' as const;
+		}
 		// Nor past their hourly cap: a burst of events, a mass assignment or what piled up during an
 		// outage, drowns neither their room nor their quota
 		if ((prior?.woken ?? 0) >= config.wakeups.perHour) {
@@ -176,7 +186,10 @@ export async function wake(
 	if (outcome === 'woken') deps.log.info(logged, 'event queued');
 	// Taken all the same, for no turn: nothing tells the owner of an event past their cap
 	if (outcome === 'capped' && options.logCapped !== false) deps.log.info(logged, 'event capped');
-	// What came of an activity, once settled: one capped is, one woken once its turn ends
-	if (outcome === 'capped' && isActivity) deps.log.info({ ...logged, outcome }, 'activity noted');
+	// What came of an activity, once settled: one capped or kept for the brief is, one woken once
+	// its turn ends
+	if ((outcome === 'capped' || outcome === 'for_brief') && isActivity) {
+		deps.log.info({ ...logged, outcome }, 'activity noted');
+	}
 	return outcome;
 }
