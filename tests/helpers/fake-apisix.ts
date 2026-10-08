@@ -165,6 +165,25 @@ export const echoScript: LlmScript = (request) => ({
 	content: `echo: ${lastUserContent(request)}`
 });
 
+// A read of the owner's consents, the call a model makes in each answer of pastTheLimit
+export function readCall(index: number): ToolCall {
+	return {
+		id: `read_${index}`,
+		type: 'function',
+		function: { name: 'consents_list', arguments: '{}' }
+	};
+}
+
+// A model that makes one call after another for as long as it has tools, so that it goes past a
+// limit of its message, of tool calls or of the tokens each answer reports when they are given,
+// then gives the answer given once it has none
+export function pastTheLimit(last: ScriptedReply, usage?: ScriptedReply['usage']): LlmScript {
+	return (request, index) =>
+		request.tools === undefined
+			? last
+			: { toolCalls: [readCall(index)], ...(usage === undefined ? {} : { usage }) };
+}
+
 async function readJson(req: IncomingMessage): Promise<unknown> {
 	const chunks: Buffer[] = [];
 	for await (const chunk of req) chunks.push(chunk as Buffer);

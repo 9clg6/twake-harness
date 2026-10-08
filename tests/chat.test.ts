@@ -3,8 +3,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import {
 	echoScript,
+	pastTheLimit,
 	type ChatRequest,
-	type LlmScript,
 	type ScriptedReply,
 	type ToolCall
 } from './helpers/fake-apisix.js';
@@ -319,25 +319,6 @@ async function chatIn(
 		payload
 	});
 	return { status: res.statusCode, body: res.json() };
-}
-
-// A model that makes one call after another for as long as it has tools, so that it goes past a
-// limit of its message, of tool calls or of the tokens each answer reports when they are given,
-// then gives the answer given once it has none
-function pastTheLimit(last: ScriptedReply, usage?: ScriptedReply['usage']): LlmScript {
-	return (request, index) =>
-		request.tools === undefined
-			? last
-			: {
-					toolCalls: [
-						{
-							id: `read_${index}`,
-							type: 'function',
-							function: { name: 'consents_list', arguments: '{}' }
-						}
-					],
-					...(usage === undefined ? {} : { usage })
-				};
 }
 
 // A call the model makes, or writes as text, once it has no tools left

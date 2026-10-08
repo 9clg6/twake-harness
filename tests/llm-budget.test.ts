@@ -2,7 +2,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { MAX_RETRY_TOKENS } from '../src/agent/turn.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
-import { echoScript, type LlmScript, type ToolCall } from './helpers/fake-apisix.js';
+import { echoScript, pastTheLimit, readCall, type LlmScript } from './helpers/fake-apisix.js';
 
 interface ChatReply {
 	readonly answer?: string;
@@ -138,18 +138,9 @@ describe('a deployment already at the ceiling', () => {
 	});
 });
 
-// A read of the owner's consents, the call the model makes in each of its answers
-function readCall(index: number): ToolCall {
-	return {
-		id: `read_${index}`,
-		type: 'function',
-		function: { name: 'consents_list', arguments: '{}' }
-	};
-}
-
 // What one answer of the model reports it read and wrote: three of them go past the tokens a turn
 // may spend when its deployment sets none
-const A_HUNDRED_THOUSAND = { promptTokens: 90_000, completionTokens: 10_000 };
+const A_HUNDRED_THOUSAND_TOKENS = { promptTokens: 90_000, completionTokens: 10_000 };
 
 describe('the token budget of a turn', () => {
 	let h: TestHarness;
@@ -170,10 +161,7 @@ describe('the token budget of a turn', () => {
 		// Each answer reads once and reports 100,000 tokens: after the third, the turn is past its
 		// limit, and asked without tools, the model tells where things stand
 		const progress = 'I read your consents three times; more reads remain. Ask me to continue.';
-		h.apisix.llm.script = (request, index) =>
-			request.tools === undefined
-				? { content: progress }
-				: { toolCalls: [readCall(index)], usage: A_HUNDRED_THOUSAND };
+		h.apisix.llm.script = pastTheLimit({ content: progress }, A_HUNDRED_THOUSAND_TOKENS);
 		const { status, body } = await chat(h, 'erin', 'Read them all', 'turn-tokens');
 		expect(status).toBe(200);
 		expect(body.answer).toBe(progress);
@@ -210,8 +198,8 @@ describe('the token budget of a turn', () => {
 		// the third, which answers, and takes it past
 		h.apisix.llm.script = (_request, index) =>
 			index < 2
-				? { toolCalls: [readCall(index)], usage: A_HUNDRED_THOUSAND }
-				: { content: 'All read.', usage: A_HUNDRED_THOUSAND };
+				? { toolCalls: [readCall(index)], usage: A_HUNDRED_THOUSAND_TOKENS }
+				: { content: 'All read.', usage: A_HUNDRED_THOUSAND_TOKENS };
 		const { status, body } = await chat(h, 'frank', 'Read them all', 'turn-under');
 		expect(status).toBe(200);
 		expect(body.answer).toBe('All read.');
