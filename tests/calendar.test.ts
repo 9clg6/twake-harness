@@ -1147,7 +1147,8 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			organizer: 'bob@test.local'
 		});
 		expect(shownIn(allDay)?.untrusted).toEqual({ title: 'Séminaire', uid: 'all-day' });
-		// Its slot runs from midnight to midnight where the deployment is
+		// Its slot runs from midnight to midnight in the deployment's zone, as no read of Alice's
+		// calendar named its own
 		expect(checkIn(allDay)?.['arguments']).toEqual({
 			start: '2026-10-06T00:00:00+00:00',
 			end: '2026-10-08T00:00:00+00:00',

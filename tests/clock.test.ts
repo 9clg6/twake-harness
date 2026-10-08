@@ -244,6 +244,34 @@ describe('the present moment in the system prompt', () => {
 			);
 		});
 
+		it('checks an all-day invitation from midnight to midnight in the zone of my calendar', async () => {
+			// Alice's calendar is in Auckland, eleven hours ahead of Paris in October
+			h.apisix.contracts.handler = calendarIn('Pacific/Auckland');
+			await readCalendar(h, 'alice', 'list_calendar_events', { from: '2026-10-07', days: 1 });
+			h.apisix.llm.script = echoScript;
+			const before = h.apisix.contracts.calls.length;
+			// An invitation to two whole days wakes her assistant, as the turn worker hands it over
+			const turn = await h.app.agent.runOwnerTurn({
+				principal: { id: 'alice' },
+				target: { kind: 'new' },
+				message: '[event] An invitation has been sent to me.',
+				log: h.app.log,
+				origin: 'event',
+				event: {
+					id: 'invitation-all-day',
+					type: 'com.twake.calendar.event.invited.v1',
+					invitation: { uid: 'all-day', start: '2026-10-06', end: '2026-10-08', timezone: null }
+				}
+			});
+			expect(turn.kind).toBe('ok');
+			const slot = h.apisix.contracts.calls
+				.slice(before)
+				.filter((call) => call.path === '/contracts/v1/calendar/freebusy');
+			expect(slot.map((call) => call.query)).toEqual([
+				{ start: '2026-10-06T00:00:00+13:00', end: '2026-10-08T00:00:00+13:00', exclude: 'all-day' }
+			]);
+		});
+
 		it('states the present in the zone of the first read of my calendar, in the turn my yes resumes', async () => {
 			clock.set('2026-10-06T23:30:00Z');
 			h.apisix.contracts.handler = calendarIn('America/New_York');

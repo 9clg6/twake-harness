@@ -316,7 +316,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question ??= questionOf(outcome);
 			return outcome;
 		};
-		const check = await checkAvailability(run, invitation, { timeZone: config.timeZone });
+		// An all-day invitation's days are those of the owner's calendar, in the zone their turns state
+		// the present in
+		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
+		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
 		const availability = messages.events.availability(check.data);
 		return {

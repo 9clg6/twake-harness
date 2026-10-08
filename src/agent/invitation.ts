@@ -55,7 +55,7 @@ function timeOf(
 	if (AWARE.test(value))
 		return Number.isNaN(Date.parse(value)) ? unreadable : { ok: true, time: value };
 	if (DATE.test(value)) {
-		// An all-day event runs from midnight to midnight where the deployment is
+		// An all-day event runs from midnight to midnight in the zone of its owner's calendar
 		const midnight = wallTimeIn(`${value}T00:00:00`, defaultZone);
 		return midnight === null ? unreadable : { ok: true, time: midnight };
 	}
