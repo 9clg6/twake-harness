@@ -80,8 +80,9 @@ config:
   turnStatusDelayMs: ''
   # How long a turn an event woke, or one an owner's yes resumed, may wait to start once admission
   # first refused it, in milliseconds (api role): it is tried again until then, never answering
-  # that it is busy, and given up past it; at least 1000. Empty means the harness default, 3600000
-  # (an hour)
+  # that it is busy, and given up past it; the status message of a turn a yes resumed waits as
+  # much longer before it gives up (matrix role); at least 1000. Empty means the harness default,
+  # 3600000 (an hour)
   turnEventMaxDelayMs: ''
   # Whether an owner's words count only from a session their cross-signing identity signed
   # (matrix role): report, the harness default when empty, takes them all the same and logs and

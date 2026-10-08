@@ -12,7 +12,18 @@ import {
 } from './helpers/consent-room.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import { lastUserContent, type LlmScript } from './helpers/fake-apisix.js';
-import { eventually } from './helpers/feedback.js';
+import {
+	eventually,
+	inReplyTo,
+	watchFeedback,
+	type RoomFeedback,
+	type ShownMessage
+} from './helpers/feedback.js';
+import type { MatrixStartOptions } from './helpers/matrix-harness.js';
+
+function sleep(ms: number): Promise<void> {
+	return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
 // What my assistant tells me when admission refuses a message of mine for my turns at once
 const TOO_MANY = 'I received too many messages at once';
@@ -40,6 +51,12 @@ const ENDS_BEFORE_MIDNIGHT =
 // What my assistant tells me in French when I answer a request past its end
 const EXPIRED =
 	"Cette demande a expiré, je n'ai donc rien fait. Redemande-moi si tu en as encore besoin.";
+
+// What the status of a turn of mine says while my assistant is on it, once it is done, and when it
+// gave up waiting for an answer
+const WORKING = '⏳ On it…';
+const DONE = '✅ Done';
+const LATE = 'This is taking longer than expected. If no answer follows, ask me again.';
 
 // The requests that wait for my answer, as the API shows my clients
 async function waitingRequests(r: ConsentRoom): Promise<unknown[]> {
@@ -69,9 +86,9 @@ const MAIL_MODEL = modelUsing('search_mail', { q: 'budget' });
 // A room where my assistant may read my mail once I allow it, which finds what it is asked
 async function startMailRoom(
 	env: Record<string, string>,
-	clock?: ReturnType<typeof makeSettableClock>
+	options: Omit<MatrixStartOptions, 'env'> = {}
 ): Promise<ConsentRoom> {
-	const r = await startConsentRoom(env, clock === undefined ? {} : { clock });
+	const r = await startConsentRoom(env, options);
 	r.h.apisix.contracts.spec = readCatalog(['mail', 'drive']);
 	for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(2);
 	r.h.apisix.contracts.handler = (c) => ({ status: 200, body: { found: c.path } });
@@ -201,6 +218,60 @@ describe('my yes while my assistant is busy', () => {
 	});
 });
 
+describe('my yes while my assistant is busy for longer than a status waits', () => {
+	// How long the status of a turn of mine waits for its answer before it gives up
+	const STATUS_MAX_MS = 3000;
+	let r: ConsentRoom;
+	let feedback: RoomFeedback;
+	beforeAll(async () => {
+		// One turn of mine at a time, none waiting behind it, a status after a second, and twenty
+		// seconds for the turn my yes resumes to get through admission
+		r = await startMailRoom(
+			{
+				ADMISSION_USER_QUEUE: '0',
+				ADMISSION_USER_PER_MINUTE: '100',
+				TURN_STATUS_DELAY_MS: '1000',
+				TURN_EVENT_MAX_DELAY_MS: '20000'
+			},
+			{ statusMaxMs: STATUS_MAX_MS }
+		);
+		feedback = watchFeedback({
+			synapse: r.h.synapse,
+			owner: r.alice,
+			client: r.client,
+			room: r.room,
+			assistantId: r.assistantId
+		});
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it('keeps saying it is on my yes while the call waits for room, until it is done', async () => {
+		r.h.apisix.llm.script = MAIL_MODEL;
+		await r.client.sendText(r.room, 'Find the budget in my mail');
+		await r.nextQuestion(0);
+		const release = await busyEverywhere(r, MAIL_MODEL);
+		let yes = '';
+		// The status of the turn my yes resumed, as my client shows it
+		const status = (): ShownMessage | undefined =>
+			feedback.shown().find((m) => inReplyTo(m.original) === yes);
+		try {
+			yes = await r.client.sendText(r.room, 'yes');
+			expect((await eventually(status))?.body).toBe(WORKING);
+			// Past the time a status waits for an answer, it still tells me my assistant is on it
+			await sleep(STATUS_MAX_MS + 2000);
+			expect(logged(r, 'resumed turn deferred')[0]).toMatchObject({ reason: 'user_queue_full' });
+			expect(status()?.body).toBe(WORKING);
+		} finally {
+			await release();
+		}
+		expect(await r.nextSaying('Found:', 0)).toContain('/contracts/v1/mail/items');
+		expect(await eventually(() => status()?.body === DONE)).toBe(true);
+		expect(status()?.edits.map((edit) => edit.content['body'])).not.toContain(LATE);
+	});
+});
+
 describe('my yes held while my assistant asks me something newer', () => {
 	let r: ConsentRoom;
 	beforeAll(async () => {
@@ -271,7 +342,7 @@ describe('my yes once my assistant reached its limit for the day, in Europe/Pari
 				ADMISSION_USER_DAILY_TOKENS: '1',
 				ADMISSION_USER_PER_MINUTE: '100'
 			},
-			clock
+			{ clock }
 		);
 	}, 240_000);
 	afterAll(async () => {
@@ -343,7 +414,7 @@ describe('my yes once my assistant reached its limit for the day, on requests of
 				ADMISSION_USER_PER_MINUTE: '100',
 				CONSENT_REQUEST_LIFETIME_MS: '20000'
 			},
-			clock
+			{ clock }
 		);
 	}, 240_000);
 	afterAll(async () => {

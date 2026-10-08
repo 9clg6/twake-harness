@@ -977,8 +977,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		metrics: consentMetrics,
 		resumeQueued: (room, eventId) => {
 			const { roomId, assistantUserId } = room;
+			// Admission may keep the turn a yes resumed waiting to start this long, which its status
+			// waits out rather than tell the owner to ask again while the turn still waits
 			feedback
-				.turnQueued({ assistantUserId, roomId, eventId })
+				.turnQueued({ assistantUserId, roomId, eventId }, config.turn.eventMaxDelayMs)
 				.catch((err: unknown) => log.warn({ roomId, eventId, err }, 'turn feedback failed'));
 		}
 	});
