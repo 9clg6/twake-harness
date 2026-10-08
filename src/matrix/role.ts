@@ -18,6 +18,7 @@ import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { readIdentity } from '../assistants/provisioning.js';
 import {
+	claimDialogQuestion,
 	claimProvisionedWelcome,
 	clearAssistantRoomId,
 	findAssistant,
@@ -1284,18 +1285,22 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		const state = await withPrincipal(db, { id: owner }, (tx) => findDialog(tx, owner, log));
 		const toOwner = await fetchMessages(owner);
-		let turn: CreatorTurn;
-		try {
-			turn = await runCreatorTurn(
-				{ owner, text: command, state, now: clock.now() },
-				assistants,
-				toOwner
-			);
-		} catch (err: unknown) {
+		const claimAnswer = (questionId: string): Promise<boolean> =>
+			withPrincipal(db, { id: owner }, (tx) => claimDialogQuestion(tx, owner, questionId));
+		const turn = await runCreatorTurn(
+			{ owner, text: command, state, now: clock.now() },
+			{ assistants, claimAnswer },
+			toOwner
+		).catch((err: unknown): CreatorTurn => {
 			// The owner is told, and the dialog starts over: one left waiting for a name would take
 			// their next message for one
 			log.error({ roomId, sender, owner, err }, 'creator turn failed');
-			turn = { command: 'failed', nextState: null, reply: toOwner.creator.requestFailed };
+			return { command: 'failed', nextState: null, reply: toOwner.creator.requestFailed };
+		});
+		if (turn === null) {
+			// Another message answered the question first, and the owner was told what came of it
+			log.info({ roomId, sender, owner }, 'creator answer already taken');
+			return;
 		}
 		await withPrincipal(db, { id: owner }, (tx) => saveDialog(tx, owner, turn.nextState));
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');

@@ -46,16 +46,23 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 		return client.messages.filter((m) => m.roomId === room && m.sender === creatorId);
 	}
 
+	// Waits until the creator wrote me that many messages in all
+	async function untilCreatorWrote(count: number): Promise<void> {
+		for (let i = 0; i < 120; i += 1) {
+			if (fromCreator().length >= count) return;
+			await sleep(250);
+		}
+		throw new Error(`the creator did not write ${count} messages`);
+	}
+
 	// What the creator answers me next, once I wrote it a message
 	async function answerTo(text: string): Promise<DecryptedMessage> {
 		const seen = fromCreator().length;
 		await client.sendText(room, text);
-		for (let i = 0; i < 120; i += 1) {
-			const next = fromCreator().at(seen);
-			if (next !== undefined) return next;
-			await sleep(250);
-		}
-		throw new Error(`the creator did not answer « ${text} »`);
+		await untilCreatorWrote(seen + 1).catch(() => {
+			throw new Error(`the creator did not answer « ${text} »`);
+		});
+		return fromCreator()[seen] as DecryptedMessage;
 	}
 
 	async function myAssistant(): Promise<number> {
@@ -66,6 +73,42 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 	async function newAssistant(name: string): Promise<void> {
 		await h.api.delete(OWNER, '/v1/assistants/me');
 		expect((await h.api.post(OWNER, '/v1/assistants', { name })).status).toBe(201);
+	}
+
+	// Holds my dialog with the creator in a transaction of its own until released, so that two
+	// answers both reach the question before either is done with it
+	async function holdDialog(): Promise<() => Promise<void>> {
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		let held = (): void => undefined;
+		const holding = new Promise<void>((resolve) => {
+			held = resolve;
+		});
+		const transaction = h.db.sql.begin(async (sql) => {
+			await sql`select set_config('app.principal', ${OWNER}, true)`;
+			await sql`select 1 from creator_dialogs where owner = ${OWNER} for update`;
+			held();
+			await released;
+		});
+		await holding;
+		return async () => {
+			release();
+			await transaction;
+		};
+	}
+
+	// Waits until this many of the harness's statements on the dialogs wait for a lock
+	async function untilWaitingOnDialogs(count: number): Promise<void> {
+		for (let i = 0; i < 120; i += 1) {
+			const rows = await h.db.sql<{ n: number }[]>`
+				select count(*)::int as n from pg_stat_activity
+				where wait_event_type = 'Lock' and query ilike '%creator_dialogs%'`;
+			if ((rows[0]?.n ?? 0) >= count) return;
+			await sleep(250);
+		}
+		throw new Error(`no ${count} statements on the dialogs waiting for a lock`);
 	}
 
 	it('answers /delete as before while I have no assistant, and asks me nothing', async () => {
@@ -173,5 +216,35 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 			'This deletion request has expired, so I deleted nothing. Send /delete again if you still want to.'
 		);
 		expect(await myAssistant()).toBe(200);
+	});
+
+	it('answers once when two of my answers reach the question together', async () => {
+		await newAssistant('Jarvis');
+		clock.set('2026-10-08T16:00:00Z');
+		expect((await answerTo('/delete')).body).toContain('Delete Jarvis?');
+		const seen = fromCreator().length;
+		const release = await holdDialog();
+		try {
+			await client.sendText(room, 'yes');
+			await client.sendText(room, 'oui');
+			// Both read the question, and wait for the dialog to answer it
+			await untilWaitingOnDialogs(2);
+		} finally {
+			await release();
+		}
+		await untilCreatorWrote(seen + 1);
+		// What the creator writes next answers my next message: it said nothing of the other answer
+		expect((await answerTo('/mybot')).body).toBe(
+			'You have no assistant yet. Send /newbot to create one.'
+		);
+		expect(
+			fromCreator()
+				.slice(seen)
+				.map((m) => m.body)
+		).toEqual([
+			'Your assistant is deleted. Send /newbot when you want a new one.',
+			'You have no assistant yet. Send /newbot to create one.'
+		]);
+		expect(await myAssistant()).toBe(404);
 	});
 });

@@ -50,12 +50,22 @@ export interface CreatorInput {
 	readonly now: Date;
 }
 
+export interface CreatorDeps {
+	readonly assistants: AssistantService;
+	// Takes the answer to the question the dialog waits on: false when another message took it
+	// first, as the same answer delivered twice, or two answers sent together
+	readonly claimAnswer: (questionId: string) => Promise<boolean>;
+}
+
 // The creator conversation, like a bot factory: one command per message, one question at a time.
+// Null when the message answers a question that another one already answered: the creator then
+// says nothing more.
 export async function runCreatorTurn(
 	input: CreatorInput,
-	assistants: AssistantService,
+	deps: CreatorDeps,
 	messages: Messages
-): Promise<CreatorTurn> {
+): Promise<CreatorTurn | null> {
+	const { assistants } = deps;
 	const say = messages.creator;
 	const text = input.text.trim();
 	const [word = '', ...rest] = text.split(/\s+/);
@@ -63,8 +73,12 @@ export async function runCreatorTurn(
 	const argument = rest.join(' ').trim();
 
 	if (input.state?.step === 'confirming_deletion') {
-		const answered = await answerDeletion(input, input.state, assistants, say);
-		if (answered !== null) return answered;
+		const asked = input.state;
+		const answer = await deletionAnswer(input, asked, assistants);
+		if (answer !== null) {
+			if (!(await deps.claimAnswer(asked.question.id))) return null;
+			return settleDeletion(answer, input.owner, asked, assistants, say);
+		}
 	}
 	// A question that no longer stands leaves nothing to wait for
 	const awaitingName = input.state?.step === 'awaiting_name';
@@ -154,31 +168,41 @@ export async function runCreatorTurn(
 	}
 }
 
-// The owner's message once the creator asked them to confirm the deletion of their assistant. The
-// question stands for the time it gives them, while the assistant it named is still their live
-// one: a yes then deletes that assistant and anything else cancels. Once the question no longer
-// stands, a yes or a no deletes nothing and is told so; anything else answers nothing, null.
-async function answerDeletion(
+type DeletionAnswer = 'confirm' | 'cancel' | 'too_late';
+
+// What the owner's message is to the question that asks them to confirm the deletion of their
+// assistant. The question stands for the time it gives them, while the assistant it named is still
+// their live one: a yes then confirms and anything else cancels. Once the question no longer
+// stands, a yes or a no comes too late, and anything else is no answer, null.
+async function deletionAnswer(
 	input: CreatorInput,
 	asked: ConfirmingDeletion,
-	assistants: AssistantService,
-	say: Messages['creator']
-): Promise<CreatorTurn | null> {
+	assistants: AssistantService
+): Promise<DeletionAnswer | null> {
 	const answer = wordAnswer(input.text);
 	const live = await assistants.identify(input.owner);
 	const stands =
 		input.now.getTime() < asked.question.expiresTs &&
 		live?.createdAt.getTime() === asked.assistantCreatedAt.getTime();
-	const expired: CreatorTurn = {
-		command: 'delete_expired',
-		nextState: null,
-		reply: say.deletionExpired
-	};
-	if (!stands) return answer === null ? null : expired;
-	if (answer !== 'yes') {
+	if (!stands) return answer === null ? null : 'too_late';
+	return answer === 'yes' ? 'confirm' : 'cancel';
+}
+
+// What the answer the message took comes to: a confirmation deletes the assistant the question
+// named and no other, as it may yet have been deleted and created again since; an answer that
+// deletes nothing says so
+async function settleDeletion(
+	answer: DeletionAnswer,
+	owner: string,
+	asked: ConfirmingDeletion,
+	assistants: AssistantService,
+	say: Messages['creator']
+): Promise<CreatorTurn> {
+	if (answer === 'cancel') {
 		return { command: 'delete_cancelled', nextState: null, reply: say.deletionCancelled };
 	}
-	// Deleted only if it is still the one named, as it may yet be deleted and created again
-	if (!(await assistants.remove(input.owner, asked.assistantCreatedAt))) return expired;
-	return { command: 'delete_confirmed', nextState: null, reply: say.deleted };
+	if (answer === 'confirm' && (await assistants.remove(owner, asked.assistantCreatedAt))) {
+		return { command: 'delete_confirmed', nextState: null, reply: say.deleted };
+	}
+	return { command: 'delete_expired', nextState: null, reply: say.deletionExpired };
 }

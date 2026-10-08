@@ -188,6 +188,19 @@ export async function saveDialog(tx: Tx, owner: string, state: DialogState | nul
 			updated_at = now()`;
 }
 
+// Takes the answer to the question the owner's dialog waits on, which leaves the dialog where it
+// starts: true for the one message that took it
+export async function claimDialogQuestion(
+	tx: Tx,
+	owner: string,
+	questionId: string
+): Promise<boolean> {
+	const claimed = await tx.sql`
+		delete from creator_dialogs
+		where owner = ${owner} and state = 'confirming_deletion' and question_id = ${questionId}`;
+	return claimed.count === 1;
+}
+
 // The identifiers of every live assistant, from the room index that carries no user content
 export async function listActiveAssistantUserIds(db: Db): Promise<string[]> {
 	const rows = await db.sql<{ user_id: string }[]>`select distinct user_id from assistant_rooms`;
