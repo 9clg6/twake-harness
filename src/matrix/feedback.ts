@@ -46,7 +46,11 @@ export interface ChatFeedbackOptions {
 // message, a reply to the message, which closes once the turn answered. All of it is best effort:
 // a failure is logged and never holds a turn or an answer back.
 export interface ChatFeedback {
-	turnQueued(turn: TurnRef): Promise<void>;
+	// A turn is in the works on the message. One that admission may keep waiting to start, as the
+	// turn a yes resumes, may wait up to `waitsUpToMs` before it even starts: its status waits that
+	// long too before it gives up, so that it tells the owner it takes longer only once the turn can
+	// no longer be waiting for its turn to come.
+	turnQueued(turn: TurnRef, waitsUpToMs?: number): Promise<void>;
 	// The turn has done this many actions so far: its status shows them, at most one update per
 	// delay
 	turnProgressed(turn: TurnRef, actions: number): void;
@@ -87,6 +91,8 @@ const CLOSINGS: Readonly<Record<TurnOutcome, Closing>> = {
 interface Status {
 	readonly turn: TurnRef;
 	readonly queuedAt: number;
+	// How long after it was queued the turn may go without a reply before its status gives up
+	readonly maxMs: number;
 	// The timer that posts the status once it is due, then the one that gives it up
 	timer: NodeJS.Timeout | null;
 	// Resolves to the status's event id once posted, or to null when it could not be; null until
@@ -138,7 +144,8 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 	const typingTimeoutMs = options.typingTimeoutMs ?? DEFAULT_TYPING_TIMEOUT_MS;
 	const typingRefreshMs = options.typingRefreshMs ?? DEFAULT_TYPING_REFRESH_MS;
 	const typingMaxMs = options.typingMaxMs ?? DEFAULT_TYPING_MAX_MS;
-	// A turn that died never answers: its status gives up when its typing would stop
+	// A turn that died never answers: its status gives up when its typing would stop, or, for a turn
+	// admission may keep waiting to start, that much later than it could still be waiting
 	const statusMaxMs = options.statusMaxMs ?? DEFAULT_TYPING_MAX_MS;
 	// A turn can answer before its eyes went out, when sending them is slow: its check mark waits for
 	// them, so a client never shows it first. The matrix role runs as a single replica, so this
@@ -244,12 +251,14 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 		});
 	}
 
-	// The status of the turn, due once the turn went without an answer for the delay
-	function scheduleStatus(turn: TurnRef, now: number): void {
+	// The status of the turn, due once the turn went without an answer for the delay, and given up
+	// once it went without a reply for `maxMs`
+	function scheduleStatus(turn: TurnRef, now: number, maxMs: number): void {
 		if (statuses.has(turn.eventId)) return;
 		const status: Status = {
 			turn,
 			queuedAt: now,
+			maxMs,
 			timer: null,
 			posted: null,
 			texts: null,
@@ -267,7 +276,7 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 
 	function postStatus(status: Status): void {
 		const { turn } = status;
-		const left = status.queuedAt + statusMaxMs - Date.now();
+		const left = status.queuedAt + status.maxMs - Date.now();
 		// Due only past the bound: the turn has died, it gets no status
 		if (left <= 0) {
 			forget(status);
@@ -374,12 +383,12 @@ export function makeChatFeedback(options: ChatFeedbackOptions): ChatFeedback {
 			status.actions = Math.max(status.actions, actions);
 			scheduleUpdate(status);
 		},
-		turnQueued: async (turn) => {
+		turnQueued: async (turn, waitsUpToMs = 0) => {
 			const now = Date.now();
 			forgetOldAcks(now);
 			// All are registered before anything is awaited: a fast answer finds them in place
 			startTyping(turn);
-			scheduleStatus(turn, now);
+			scheduleStatus(turn, now, statusMaxMs + waitsUpToMs);
 			const eyesSent = react(turn, SEEN);
 			track(eyesSent);
 			acks.set(turn.eventId, { eyesSent, at: now });

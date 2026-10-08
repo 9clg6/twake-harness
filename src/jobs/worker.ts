@@ -22,7 +22,9 @@ export interface Deferral {
 export interface JobWorkerOptions {
 	readonly db: Db;
 	readonly kinds: readonly JobKind[];
-	// Resolves once the job is done, to null, or to a deferral when it could not run yet
+	// Resolves once the job is done, to null, or to a deferral when it could not run yet. A handler
+	// whose work must end with its job, all or nothing, may complete the job itself in the
+	// transaction of that work and resolve to null: the worker's completion then finds nothing left.
 	readonly handler: (job: Job) => Promise<Deferral | null>;
 	readonly log: FastifyBaseLogger;
 	readonly pollIntervalMs?: number;

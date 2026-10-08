@@ -150,6 +150,15 @@ export interface Messages {
 		// The call its owner allowed did not run: its application refused it, as what it acts on
 		// changed since the preview they were shown
 		readonly changed: string;
+		// The call its owner allowed did not run, their assistant's limit for the day reached: their
+		// request waits for an answer again, which this asks for, ending on how to answer as any
+		// request does, and a yes once the limit lifts at midnight runs it
+		readonly heldUntilMidnight: string;
+		// The same when their request ends before the limit lifts: it closed, and nothing ran
+		readonly endsBeforeMidnight: string;
+		// The call its owner allowed did not run, their assistant kept waiting too long for room: their
+		// request waits for an answer again, asked for in the same way, and a yes tries it again
+		readonly heldTooLong: string;
 		// The call was made without its owner's yes: asked only what it would do, its application,
 		// named as a question names it, did it
 		actedOnPreview(application: string): string;
@@ -349,6 +358,10 @@ const ENGLISH: Messages = {
 		superseded: 'A newer request replaced this one, so I did nothing. Answer the latest one.',
 		changed:
 			'What this action affects changed since I showed it to you, so I did not do it. Ask me again if you still need it.',
+		heldUntilMidnight: `I have reached my limit for the day, so I have not done it yet, and your request stays open.\nOnce past midnight, when my limit lifts, shall I do it? ${ENGLISH_HOW_TO_ANSWER}`,
+		endsBeforeMidnight:
+			'I have reached my limit for the day, so I did not do it, and this request expires before my limit lifts at midnight. Ask me again after midnight if you still need it.',
+		heldTooLong: `Too many requests came in at once for me to do it in time, so I have not done it yet, and your request stays open.\nShall I try again? ${ENGLISH_HOW_TO_ANSWER}`,
 		actedOnPreview: (application) =>
 			`I asked ${application} what this action would do, to show you before you decide, but it did the action right away, without waiting for your yes. Check the result in ${application}.`
 	},
@@ -575,6 +588,10 @@ const FRENCH: Messages = {
 			"Une demande plus récente a remplacé celle-ci, je n'ai donc rien fait. Réponds à la dernière.",
 		changed:
 			"Ce sur quoi porte cette action a changé depuis que je te l'ai montrée, je ne l'ai donc pas faite. Redemande-moi si tu en as encore besoin.",
+		heldUntilMidnight: `J'ai atteint ma limite du jour, je ne l'ai donc pas encore fait, et ta demande reste ouverte.\nUne fois minuit passé, quand ma limite se lève, je le fais ? ${FRENCH_HOW_TO_ANSWER}`,
+		endsBeforeMidnight:
+			"J'ai atteint ma limite du jour, je ne l'ai donc pas fait, et cette demande expire avant que ma limite se lève à minuit. Redemande-moi après minuit si tu en as encore besoin.",
+		heldTooLong: `Trop de demandes sont arrivées d'un coup pour que je le fasse à temps, je ne l'ai donc pas encore fait, et ta demande reste ouverte.\nJe réessaie ? ${FRENCH_HOW_TO_ANSWER}`,
 		actedOnPreview: (application) =>
 			`J'ai demandé à ${application} ce que ferait cette action, pour te la montrer avant que tu décides, mais l'action a été faite tout de suite, sans attendre ton accord. Vérifie le résultat dans ${application}.`
 	},

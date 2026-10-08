@@ -145,7 +145,8 @@ export async function insertPendingCall(tx: Tx, input: PendingCallInput): Promis
 }
 
 // The Matrix event and room of the question asked about a call, which its owner's answer points
-// to; false when no such call is stored, so that no answer could ever find it
+// to, and the time it was asked there, a question that asks it again counting from then; false
+// when no such call is stored, so that no answer could ever find it
 export async function recordRequestEvent(
 	tx: Tx,
 	id: string,
@@ -153,7 +154,8 @@ export async function recordRequestEvent(
 	roomId: string
 ): Promise<boolean> {
 	const result = await tx.sql`
-		update pending_calls set request_event_id = ${eventId}, room_id = ${roomId} where id = ${id}`;
+		update pending_calls set request_event_id = ${eventId}, room_id = ${roomId}, asked_at = now()
+		where id = ${id}`;
 	return result.count === 1;
 }
 
@@ -274,8 +276,9 @@ export async function findRequest(
 	return foundRequest(rows[0]);
 }
 
-// The latest request of a room still open to an answer in words, its owner having written nothing
-// else since it was asked. One that expired is found too, so that its answer gets the notice.
+// The request of a room asked there last that is still open to an answer in words, its owner
+// having written nothing else since it was asked. One that expired is found too, so that its
+// answer gets the notice.
 export async function findRequestOpenToWords(
 	tx: Tx,
 	owner: string,
@@ -285,7 +288,7 @@ export async function findRequestOpenToWords(
 		select id, status, domain, level, reasons from pending_calls
 		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
 			and words_closed_at is null
-		order by created_at desc
+		order by asked_at desc
 		limit 1`;
 	return foundRequest(rows[0]);
 }
@@ -298,10 +301,13 @@ export async function closeRequestsToWords(tx: Tx, owner: string, roomId: string
 }
 
 // Whether this event of the owner already answered one of their requests, as an event delivered
-// again would have
+// again would have, even a request the harness asked again since
 export async function isAnswerEvent(tx: Tx, owner: string, eventId: string): Promise<boolean> {
 	const rows = await tx.sql`
-		select 1 from pending_calls where owner = ${owner} and answer_event_id = ${eventId}`;
+		select 1 from pending_calls
+		where owner = ${owner}
+			and (answer_event_id = ${eventId} or ${eventId} = any(earlier_answer_event_ids))
+		limit 1`;
 	return rows.length > 0;
 }
 
@@ -455,6 +461,78 @@ export async function markReplayed(tx: Tx, id: string): Promise<void> {
 		update pending_calls set replayed_at = now(), arguments = null, request_text = null,
 			preview_digest = null
 		where id = ${id}`;
+}
+
+// One of the owner's calls, locked until the transaction ends, so that no answer changes it
+// meanwhile: its state, and whether it waits to run, allowed and not run yet. Null when no such
+// call is stored.
+export async function lockPendingCall(
+	tx: Tx,
+	owner: string,
+	id: string
+): Promise<{ readonly state: RequestState; readonly waitsToRun: boolean } | null> {
+	const rows = await tx.sql<{ status: string; waits_to_run: boolean }[]>`
+		select status, status = 'approved' and replayed_at is null as waits_to_run
+		from pending_calls where id = ${id} and owner = ${owner}
+		for update`;
+	const row = rows[0];
+	return row === undefined ? null : { state: stateOf(row.status), waitsToRun: row.waits_to_run };
+}
+
+// The call its owner allowed, which admission kept from running, waits for their answer again as
+// it did once asked, should its request end after the refusal lifts, in this many milliseconds: no
+// answer is recorded, and the owner's next message may answer it in words. The yes that allowed
+// it is kept among its earlier answers, so that, delivered again, it answers nothing. False when
+// the call no longer waited to run, or its request ends before then.
+export async function reopenRequest(
+	tx: Tx,
+	owner: string,
+	id: string,
+	lifetimeMs: number,
+	liftsInMs: number
+): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set status = 'open', decided_at = null, answer_event_id = null,
+			earlier_answer_event_ids = case when answer_event_id is null then earlier_answer_event_ids
+				else array_append(earlier_answer_event_ids, answer_event_id) end,
+			words_closed_at = null
+		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null
+			and created_at + make_interval(secs => ${lifetimeMs / 1000})
+				> now() + make_interval(secs => ${liftsInMs / 1000})`;
+	return result.count === 1;
+}
+
+// Whether a request other than this one is open in the room, its question gone out or about to:
+// a newer one, as asking a request supersedes those open before it in its room
+export async function hasNewerRequest(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	id: string
+): Promise<boolean> {
+	const rows = await tx.sql`
+		select 1 from pending_calls p left join sessions s on s.id = p.session_id
+		where p.owner = ${owner} and p.id <> ${id} and p.status = 'open'
+			and coalesce(p.room_id, s.room_id) = ${roomId}
+		limit 1`;
+	return rows.length > 0;
+}
+
+// The call its owner allowed, which admission kept from running, is closed: expired past the end
+// of its request, or superseded by a newer request of its room. What it would have sent is erased,
+// with the question and the digest of what its owner was shown. Their yes stays recorded, so that,
+// delivered again, it is not taken for a message. False when the call no longer waited to run.
+export async function closeHeldRequest(
+	tx: Tx,
+	owner: string,
+	id: string,
+	status: 'expired' | 'superseded'
+): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set status = ${status}, decided_at = now(), arguments = null,
+			request_text = null, preview_digest = null
+		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
+	return result.count === 1;
 }
 
 // Where a call was frozen, which is where its owner's answer resumes it: the owner's room, a turn

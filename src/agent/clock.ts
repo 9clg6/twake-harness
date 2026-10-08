@@ -69,6 +69,13 @@ export function dateIn(instant: Date, timeZone: string): string {
 	return `${field('year')}-${field('month')}-${field('day')}`;
 }
 
+// The instant the next day starts in the zone, at its midnight, daylight saving time included
+export function nextMidnightIn(instant: Date, timeZone: string): Date {
+	const today = Date.parse(`${dateIn(instant, timeZone)}T00:00:00Z`);
+	const tomorrow = new Date(today + 86_400_000).toISOString().slice(0, 10);
+	return new Date(wallTimeIn(`${tomorrow}T00:00:00`, timeZone) ?? `${tomorrow}T00:00:00Z`);
+}
+
 // The zone's offset at that instant, in minutes, daylight saving time included, whatever the
 // server's own zone: the distance from the instant to the zone's wall clock then
 export function offsetMinutesAt(instant: Date, timeZone: string): number {

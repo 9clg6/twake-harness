@@ -2,12 +2,18 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { dateIn, type Clock } from './clock.js';
+import { dateIn, nextMidnightIn, type Clock } from './clock.js';
 
 export type RefusalReason = 'user_queue_full' | 'user_rate' | 'user_budget' | 'global_rate';
 
+// Why admission refused a turn, and for a user whose day is spent, how long until the next one
+// starts and lifts the refusal
+export type Refusal =
+	| { readonly reason: 'user_budget'; readonly liftsInMs: number }
+	| { readonly reason: Exclude<RefusalReason, 'user_budget'> };
+
 export type AdmissionDecision =
-	{ readonly ok: true; release(): void } | { readonly ok: false; readonly reason: RefusalReason };
+	{ readonly ok: true; release(): void } | { readonly ok: false; readonly refusal: Refusal };
 
 export interface AdmissionSnapshot {
 	readonly inflight: number;
@@ -102,7 +108,10 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 			{ principal: principalId, reason, inflight, queued: queue.length },
 			'admission refused'
 		);
-		return { ok: false, reason };
+		if (reason !== 'user_budget') return { ok: false, refusal: { reason } };
+		const now = clock.now();
+		const liftsInMs = Math.max(0, nextMidnightIn(now, config.timeZone).getTime() - now.getTime());
+		return { ok: false, refusal: { reason, liftsInMs } };
 	}
 
 	// The next waiter whose user has nothing running goes first; a user with a running turn

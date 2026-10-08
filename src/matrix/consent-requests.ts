@@ -53,9 +53,11 @@ export interface ConsentRequestsOptions {
 // hands over only what it read encrypted from the owner's own device: nothing written in the
 // owner's name on the server side, which cannot encrypt for the room, answers for them.
 export interface ConsentRequests {
-	// A request went out: it supersedes the one still open in the room. It carries no buttons: Twake
-	// Chat sends the reactions a tap on one would repeat in the clear, which answer nothing.
-	asked(room: RequestRoom, pendingCallId: string, eventId: string): Promise<void>;
+	// A request went out, and counts as asked in the room from then: it supersedes the one still
+	// open there, unless it asks again about a call whose yes admission kept from running, which
+	// supersedes nothing. It carries no buttons: Twake Chat sends the reactions a tap on one would
+	// repeat in the clear, which answer nothing.
+	asked(room: RequestRoom, pendingCallId: string, eventId: string, again?: boolean): Promise<void>;
 	// The owner put a bare ✅ or ❌ on an event of the room
 	reacted(
 		room: RequestRoom,
@@ -157,13 +159,14 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	}
 
 	return {
-		asked: async (room, pendingCallId, eventId) => {
+		asked: async (room, pendingCallId, eventId, again = false) => {
 			const { roomId, owner } = room;
 			const { recorded, superseded } = await withPrincipal(db, { id: owner }, async (tx) => {
 				const stored = await recordRequestEvent(tx, pendingCallId, eventId, roomId);
 				return {
 					recorded: stored,
-					superseded: stored ? await supersedeRequests(tx, owner, roomId, pendingCallId) : []
+					superseded:
+						stored && !again ? await supersedeRequests(tx, owner, roomId, pendingCallId) : []
 				};
 			});
 			for (const request of superseded) {
@@ -177,8 +180,18 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 			log.info({ roomId, pendingCallId }, 'question sent');
 		},
 		reacted: async (room, requestEventId, says, reactionEventId) => {
-			const { owner } = room;
-			const request = await lookUp(owner, (tx) => findRequest(tx, owner, requestEventId));
+			const { roomId, owner } = room;
+			// Delivered again, the reaction that answered is still that answer, even to a request the
+			// harness asked again since
+			const request = await lookUp(owner, async (tx) =>
+				(await isAnswerEvent(tx, owner, reactionEventId))
+					? 'again'
+					: findRequest(tx, owner, requestEventId)
+			);
+			if (request === 'again') {
+				log.info({ roomId, owner, eventId: reactionEventId }, 'answer delivered again');
+				return;
+			}
 			if (request === null) return;
 			await settle(room, request, {
 				says,
@@ -190,16 +203,20 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 		wrote: async (room, eventId, text) => {
 			const { roomId, owner } = room;
 			const says = wordAnswer(text);
-			const { answered, request } = await lookUp(owner, async (tx) => {
-				// Delivered again, the message that answered is still that answer
-				const again = says !== null && (await isAnswerEvent(tx, owner, eventId));
-				const found =
-					says === null || again ? null : await findRequestOpenToWords(tx, owner, roomId);
+			const request = await lookUp(owner, async (tx) => {
+				// Delivered again, the message that answered is still that answer, even to a request the
+				// harness asked again since, and no newer message of the owner: the room's requests stay
+				// open to their next one
+				if (says !== null && (await isAnswerEvent(tx, owner, eventId))) return 'again';
+				const found = says === null ? null : await findRequestOpenToWords(tx, owner, roomId);
 				// Whatever it says, this message is the owner's next one after the room's request
 				await closeRequestsToWords(tx, owner, roomId);
-				return { answered: again, request: found };
+				return found;
 			});
-			if (answered) return true;
+			if (request === 'again') {
+				log.info({ roomId, owner, eventId }, 'answer delivered again');
+				return true;
+			}
 			if (says === null || request === null) return false;
 			await settle(room, request, { says, kind: 'words', eventId, message: eventId });
 			return true;

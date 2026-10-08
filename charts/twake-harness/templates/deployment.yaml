@@ -121,8 +121,8 @@ spec:
             - name: TURN_STATUS_DELAY_MS
               value: {{ . | int64 | quote }}
             {{- end }}
-            {{- /* The api role runs the turns, the events' among them */}}
-            {{- if eq .Values.role "api" }}
+            {{- /* The api role runs the turns, the events' among them, and the matrix role keeps the status of a turn a yes resumed while admission may keep it waiting */}}
+            {{- if has .Values.role (list "api" "matrix") }}
             {{- with .Values.config.turnEventMaxDelayMs }}
             - name: TURN_EVENT_MAX_DELAY_MS
               value: {{ . | int64 | quote }}
