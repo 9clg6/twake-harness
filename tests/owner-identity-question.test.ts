@@ -3,6 +3,7 @@ import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 import { makeSettableClock } from './helpers/clock.js';
 import {
 	modelFor,
+	modelUsing,
 	QUESTION_CONTENT_KEY,
 	readCatalog,
 	startConsentRoom,
@@ -35,6 +36,11 @@ const CHANGED_REFUSAL =
 	"Je n'ai pas donné suite à ton dernier message : ton identité de chiffrement a changé, et je ne donne suite qu'à celle que je connais. Si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (PUT /v1/assistants/me/owner-identity) : par sécurité, aucun message ne le peut. Sinon, change ton mot de passe et préviens ton administrateur. D'ici là, je ne donne suite à aucun de tes messages.";
 // What a request about a first call to an application starts with, in French
 const REQUEST_START = "C'est la première fois";
+// What my assistant tells me in French when my limit for the day kept it from doing what I allowed,
+// asking me again about my request
+const OPEN_UNTIL_MIDNIGHT_START = "J'ai atteint ma limite du jour";
+const OPEN_UNTIL_MIDNIGHT =
+	"J'ai atteint ma limite du jour, je ne l'ai donc pas encore fait, et ta demande reste ouverte.\nUne fois minuit passé, quand ma limite se lève, je le fais ? Réponds par oui ou non dans ton prochain message.";
 
 const EN_QUESTION =
 	'Your encryption identity is not the one I know. Did you reset your identity yourself? Answer yes or no in your next message.';
@@ -247,6 +253,60 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		await other.sendText(r.room, 'Et maintenant ?');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Et maintenant ?');
 		expect(r.saying('Heard: Encore moi')).toHaveLength(0);
+	});
+});
+
+describe('my assistant asks me again about a request after asking about my identity, my limit for the day reached in Europe/Paris', () => {
+	// 23:30 in Paris
+	const clock = makeSettableClock('2026-10-08T21:30:00Z');
+	let r: ConsentRoom;
+	beforeAll(async () => {
+		// A day of one turn, and no wait between my turns
+		r = await startConsentRoom(
+			{
+				ASSISTANT_LOCALE: 'fr',
+				ASSISTANT_TIMEZONE: 'Europe/Paris',
+				ADMISSION_USER_DAILY_TOKENS: '1',
+				ADMISSION_USER_PER_MINUTE: '100'
+			},
+			{ clock }
+		);
+		r.h.apisix.contracts.spec = readCatalog(['mail']);
+		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBe(1);
+		r.h.apisix.contracts.handler = (c) => ({ status: 200, body: { found: c.path } });
+		r.h.apisix.llm.script = modelUsing('search_mail', { q: 'budget' });
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it('takes my next yes for that request, the newest question of my room, after midnight', async () => {
+		// My first words hold the identity I have now, and their turn asks me before it reads my mail,
+		// which spends my day
+		const before = await r.client.masterKey();
+		await r.client.sendText(r.room, 'Trouve le budget dans mes mails');
+		await r.nextSaying(REQUEST_START, 0);
+		const request = r.saying(REQUEST_START).at(0)?.eventId ?? '';
+		// My yes comes from an identity I reset: my assistant asks me about it, then asks me again
+		// about my request, which my limit kept it from doing
+		const after = await r.client.resetIdentity();
+		await r.client.sendText(r.room, 'oui');
+		expect(await r.nextSaying(QUESTION_START, 0)).toBe(QUESTION);
+		expect(await r.nextSaying(OPEN_UNTIL_MIDNIGHT_START, 0)).toBe(OPEN_UNTIL_MIDNIGHT);
+		const question = r.saying(QUESTION_START).at(0)?.eventId ?? '';
+		const notice = r.saying(OPEN_UNTIL_MIDNIGHT_START).at(0)?.eventId ?? '';
+		expect(markOf(r, notice)).toEqual(markOf(r, request));
+		const order = r.client.messages.map((m) => m.eventId);
+		expect(order.indexOf(question)).toBeLessThan(order.indexOf(notice));
+		// After midnight, my yes does what I asked, and leaves my identity as it was
+		clock.set('2026-10-08T22:05:00Z');
+		await r.client.sendText(r.room, 'oui');
+		expect(await r.nextSaying('Found:', 0)).toContain('/contracts/v1/mail/items');
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toMatchObject({
+			pinned: { master_key: before, pinned_by: 'first_use' },
+			published: { master_key: after }
+		});
+		expect(r.saying(ADOPTED)).toHaveLength(0);
 	});
 });
 
