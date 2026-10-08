@@ -102,6 +102,10 @@ export interface ToolContext {
 	// For that call, when its contract showed them what it would do: the digest of that preview,
 	// which the call carries so that its contract refuses it should what it acts on have changed
 	readonly previewDigest?: string;
+	// Nobody waits on the turn to answer a question, as on the brief the worker role asks for: a call
+	// that would wait for its owner is not made, or not frozen once the broker refused it, and its
+	// result says why
+	readonly unattended?: true;
 }
 
 // What the model reads when its turn's conversation was erased with its assistant while the turn
