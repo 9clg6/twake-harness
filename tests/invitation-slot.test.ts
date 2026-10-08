@@ -28,7 +28,7 @@ describe("an invitation's slot, for the free/busy check", () => {
 		).toEqual({ ok: true, start: '2026-10-13T15:00:00Z', end: '2026-10-13T16:00:00Z' });
 	});
 
-	it("takes an all-day event from midnight to midnight in the zone of its owner's calendar", () => {
+	it("takes an all-day event from midnight to midnight in the owner's zone, the deployment's when none is kept", () => {
 		expect(
 			invitationSlot({ start: '2026-10-13', end: '2026-10-14', timezone: null }, 'Europe/Paris')
 		).toEqual({ ok: true, start: '2026-10-13T00:00:00+02:00', end: '2026-10-14T00:00:00+02:00' });

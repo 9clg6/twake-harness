@@ -57,8 +57,8 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 		global_rate: 0
 	};
 
-	// The day a user's tokens count in, which starts at midnight in the IANA time zone the assistants
-	// read the present in
+	// The day a user's tokens count in, which starts at midnight in the deployment's zone,
+	// ASSISTANT_TIMEZONE, whatever the zone of their calendar
 	function today(): string {
 		return dateIn(clock.now(), config.timeZone);
 	}

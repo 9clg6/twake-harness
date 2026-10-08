@@ -316,8 +316,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question ??= questionOf(outcome);
 			return outcome;
 		};
-		// An all-day invitation's days are those of the owner's calendar, in the zone their turns state
-		// the present in
+		// An all-day invitation's days are those of the zone the owner's turns state the present in:
+		// theirs, the deployment's when none is kept
 		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
 		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
