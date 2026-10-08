@@ -62,6 +62,12 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 		return (await h.api.get(OWNER, '/v1/assistants/me')).status;
 	}
 
+	// Gives me a new assistant by that name through the API, deleting the one I had, if any
+	async function newAssistant(name: string): Promise<void> {
+		await h.api.delete(OWNER, '/v1/assistants/me');
+		expect((await h.api.post(OWNER, '/v1/assistants', { name })).status).toBe(201);
+	}
+
 	it('answers /delete as before while I have no assistant, and asks me nothing', async () => {
 		const answer = await answerTo('/delete');
 		expect(answer.body).toBe('You have no assistant to delete.');
@@ -141,6 +147,31 @@ describe('the creator asks me to confirm before it deletes my assistant', () => 
 		expect((await answerTo('/delete')).body).toContain('Delete Jarvis?');
 		clock.set('2026-10-08T13:15:00Z');
 		expect((await answerTo('/mybot')).body).toContain('Your assistant Jarvis is');
+		expect(await myAssistant()).toBe(200);
+	});
+
+	it('reads my messages as if nothing were asked once the assistant the question named is gone', async () => {
+		await newAssistant('Jarvis');
+		clock.set('2026-10-08T14:00:00Z');
+		expect((await answerTo('/delete')).body).toContain('Delete Jarvis?');
+		// Deleted from another client, through the API, while the question waits
+		expect((await h.api.delete(OWNER, '/v1/assistants/me')).status).toBe(204);
+		clock.set('2026-10-08T14:01:00Z');
+		expect((await answerTo('/newbot')).body).toBe('Which name do you want for your assistant?');
+		expect((await answerTo('Jarvis')).body).toContain('Done. Your assistant Jarvis is');
+		expect(await myAssistant()).toBe(200);
+	});
+
+	it('deletes nothing when I answer yes about an assistant I deleted and created again since', async () => {
+		await newAssistant('Jarvis');
+		clock.set('2026-10-08T15:00:00Z');
+		expect((await answerTo('/delete')).body).toContain('Delete Jarvis?');
+		// Deleted and created again through the API while the question waits: the account is the same
+		await newAssistant('Iris');
+		clock.set('2026-10-08T15:01:00Z');
+		expect((await answerTo('yes')).body).toBe(
+			'This deletion request has expired, so I deleted nothing. Send /delete again if you still want to.'
+		);
 		expect(await myAssistant()).toBe(200);
 	});
 });

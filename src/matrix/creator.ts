@@ -9,6 +9,8 @@ import type { YesNoQuestion } from './questions.js';
 // How long the owner has to confirm the deletion of their assistant once the creator asked
 const DELETION_CONFIRMATION_MS = 10 * 60_000;
 
+type ConfirmingDeletion = Extract<DialogState, { step: 'confirming_deletion' }>;
+
 export function helpText(messages: Messages): string {
 	const { helpHeader, commands, commandSeparator } = messages.creator;
 	return [helpHeader, ...commands.map((c) => `${c.command}${commandSeparator}${c.help}`)].join(
@@ -61,10 +63,10 @@ export async function runCreatorTurn(
 	const argument = rest.join(' ').trim();
 
 	if (input.state?.step === 'confirming_deletion') {
-		const answered = await answerDeletion(input, input.state.question, assistants, say);
+		const answered = await answerDeletion(input, input.state, assistants, say);
 		if (answered !== null) return answered;
 	}
-	// A deletion that went unconfirmed in time leaves nothing to wait for
+	// A question that no longer stands leaves nothing to wait for
 	const awaitingName = input.state?.step === 'awaiting_name';
 
 	if (awaitingName && !command.startsWith('/')) {
@@ -120,7 +122,7 @@ export async function runCreatorTurn(
 		}
 		case '/delete': {
 			// Nothing is deleted yet: the owner confirms first, in the time the question gives them
-			const assistant = await assistants.find(input.owner);
+			const assistant = await assistants.identify(input.owner);
 			if (assistant === null) return { command, nextState: null, reply: say.nothingToDelete };
 			const question: YesNoQuestion = {
 				id: randomUUID(),
@@ -128,7 +130,11 @@ export async function runCreatorTurn(
 			};
 			return {
 				command,
-				nextState: { step: 'confirming_deletion', question },
+				nextState: {
+					step: 'confirming_deletion',
+					question,
+					assistantCreatedAt: assistant.createdAt
+				},
 				reply: say.confirmDeletion(assistant.name)
 			};
 		}
@@ -148,28 +154,31 @@ export async function runCreatorTurn(
 	}
 }
 
-// The owner's message once the creator asked them to confirm the deletion of their assistant. In
-// the time the question gives them, a yes deletes it and anything else cancels. Once that time is
-// over, a yes or a no deletes nothing and is told so; anything else answers nothing, null.
+// The owner's message once the creator asked them to confirm the deletion of their assistant. The
+// question stands for the time it gives them, while the assistant it named is still their live
+// one: a yes then deletes that assistant and anything else cancels. Once the question no longer
+// stands, a yes or a no deletes nothing and is told so; anything else answers nothing, null.
 async function answerDeletion(
 	input: CreatorInput,
-	question: YesNoQuestion,
+	asked: ConfirmingDeletion,
 	assistants: AssistantService,
 	say: Messages['creator']
 ): Promise<CreatorTurn | null> {
 	const answer = wordAnswer(input.text);
-	if (input.now.getTime() >= question.expiresTs) {
-		return answer === null
-			? null
-			: { command: 'delete_expired', nextState: null, reply: say.deletionExpired };
-	}
+	const live = await assistants.identify(input.owner);
+	const stands =
+		input.now.getTime() < asked.question.expiresTs &&
+		live?.createdAt.getTime() === asked.assistantCreatedAt.getTime();
+	const expired: CreatorTurn = {
+		command: 'delete_expired',
+		nextState: null,
+		reply: say.deletionExpired
+	};
+	if (!stands) return answer === null ? null : expired;
 	if (answer !== 'yes') {
 		return { command: 'delete_cancelled', nextState: null, reply: say.deletionCancelled };
 	}
-	const removed = await assistants.remove(input.owner);
-	return {
-		command: 'delete_confirmed',
-		nextState: null,
-		reply: removed ? say.deleted : say.nothingToDelete
-	};
+	// Deleted only if it is still the one named, as it may yet be deleted and created again
+	if (!(await assistants.remove(input.owner, asked.assistantCreatedAt))) return expired;
+	return { command: 'delete_confirmed', nextState: null, reply: say.deleted };
 }

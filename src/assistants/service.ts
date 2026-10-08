@@ -36,14 +36,23 @@ export type ProvisionResult =
 	| { readonly ok: true; readonly userId: string }
 	| { readonly ok: false; readonly reason: 'not_on_homeserver' | 'failed' };
 
+// The live assistant as its owner names it, with when it was created, which tells it from one they
+// deleted and created again since under the same account
+export interface AssistantIdentity {
+	readonly name: string;
+	readonly createdAt: Date;
+}
+
 export interface AssistantService {
 	create(owner: string, name: string): Promise<CreateResult>;
 	// The owner's assistant as a provisioner asks for it: the live one, or a new one under the
 	// default name, without a room of its own, since the owner's client opens the direct room
 	provision(owner: string): Promise<ProvisionResult>;
 	find(owner: string): Promise<AssistantView | null>;
+	identify(owner: string): Promise<AssistantIdentity | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
-	remove(owner: string): Promise<boolean>;
+	// Deletes the live assistant, only when it is the one created at that time if one is given
+	remove(owner: string, createdAt?: Date): Promise<boolean>;
 }
 
 export interface AssistantServiceDeps {
@@ -223,6 +232,10 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			const record = await current(owner);
 			return record === null ? null : toView(record);
 		},
+		async identify(owner) {
+			const record = await current(owner);
+			return record === null ? null : { name: record.name, createdAt: record.createdAt };
+		},
 		async rename(owner, rawName) {
 			const name = rawName.trim();
 			if (!isValidAssistantName(name)) return null;
@@ -235,9 +248,11 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			log.debug({ owner, userId: record.userId, name }, 'assistant renamed');
 			return toView({ ...record, name });
 		},
-		async remove(owner) {
+		async remove(owner, createdAt) {
 			const record = await current(owner);
 			if (record === null) return false;
+			if (createdAt !== undefined && record.createdAt.getTime() !== createdAt.getTime())
+				return false;
 			// The assistant leaves and goes dormant with its device, which the application service
 			// keeps: a device it no longer drives would fail every later transaction that names it.
 			if (record.roomId !== null) {
