@@ -12,7 +12,8 @@ import {
 	askIdentityQuestion,
 	closeIdentityQuestion,
 	isIdentityAnswerEvent,
-	recordIdentityAnswer
+	recordIdentityAnswer,
+	recordIdentityQuestionEvent
 } from './owner-cross-signing-repository.js';
 
 export interface IdentityQuestionsOptions {
@@ -33,11 +34,27 @@ export interface IdentityQuestions {
 	// Asks the owner in the room, in a question marked for their client: once per identity, and
 	// again once the question expired unanswered
 	ask(room: RequestRoom, eventId: string, masterPublicKey: string): Promise<void>;
+	// The question went out in this event: from then on it is asked, the room's newest question
+	// until another one reaches the room
+	asked(room: RequestRoom, questionId: string, eventId: string): Promise<void>;
 	// The owner wrote in the room: their yes or no answers the question about their identity when
-	// they say it right after it, unless a request was asked in the room since, the newest question,
-	// which takes it then. Words after the question close it to typed answers either way, but for
-	// the words that raised it. Resolves to whether the message was an answer.
+	// they say it right after it, unless a request was asked in the room since, or asked there
+	// again, the newest question, which takes it then. Words after the question close it to typed
+	// answers either way, but for the words that raised it. Resolves to whether the message was an
+	// answer.
 	wrote(room: RequestRoom, eventId: string, text: string): Promise<boolean>;
+}
+
+// A question about a new identity that the harness sends an owner, as the job sending it names it
+export interface PendingIdentityQuestion {
+	readonly questionId: string;
+	readonly owner: string;
+}
+
+export function isPendingIdentityQuestion(value: unknown): value is PendingIdentityQuestion {
+	if (typeof value !== 'object' || value === null) return false;
+	const question = value as Record<string, unknown>;
+	return typeof question['questionId'] === 'string' && typeof question['owner'] === 'string';
 }
 
 // A yes or a no the owner wrote, with the texts that tell them what comes of it
@@ -68,7 +85,8 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 				// Delivered again, the message that answered is still that answer
 				return (await isIdentityAnswerEvent(tx, owner, eventId)) ? 'again' : null;
 			}
-			// The owner answers the newest question of the room, as their client shows it
+			// The owner answers the newest question of the room, as their client shows it: the one
+			// asked there last, a request asked again counting from then
 			if (await isRequestOpenToWordsSince(tx, owner, roomId, question.askedAt)) return null;
 			const { says, texts } = written;
 			await recordIdentityAnswer(tx, owner, question.id, says, eventId);
@@ -100,19 +118,21 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 				const asked = await askIdentityQuestion(tx, owner, {
 					masterPublicKey,
 					roomId,
-					eventId,
+					raisedBy: eventId,
 					lifetimeMs
 				});
 				if (asked === null) return null;
+				const pending: PendingIdentityQuestion = { questionId: asked.id, owner };
 				await enqueueJob(tx, {
 					kind: 'send',
 					payload: {
 						asUserId: assistantUserId,
 						roomId,
 						text: ownerDevices.identityQuestion,
-						questionMarker: asked
+						questionMarker: asked,
+						identityQuestion: pending
 					},
-					dedupKey: `identity-question:${eventId}`,
+					dedupKey: `identity-question:${asked.id}`,
 					groupKey: `send:${roomId}`
 				});
 				return asked;
@@ -123,6 +143,17 @@ export function makeIdentityQuestions(options: IdentityQuestionsOptions): Identi
 					'owner asked about their identity'
 				);
 			}
+		},
+		asked: async (room, questionId, eventId) => {
+			const { roomId, owner } = room;
+			const recorded = await withPrincipal(db, { id: owner }, (tx) =>
+				recordIdentityQuestionEvent(tx, owner, questionId, eventId)
+			);
+			if (!recorded) {
+				log.warn({ roomId, owner, questionId }, 'identity question sent once another replaced it');
+				return;
+			}
+			log.info({ roomId, owner, questionId }, 'identity question sent');
 		},
 		wrote: async (room, eventId, text) => {
 			if (mode !== 'report') return false;

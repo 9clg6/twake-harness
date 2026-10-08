@@ -293,7 +293,8 @@ export async function findRequestOpenToWords(
 	return foundRequest(rows[0]);
 }
 
-// Whether a request created in the room since that moment is open to an answer in words still
+// Whether a request asked in the room since that moment, or asked there again since, is open to an
+// answer in words still, whenever its call froze
 export async function isRequestOpenToWordsSince(
 	tx: Tx,
 	owner: string,
@@ -303,7 +304,7 @@ export async function isRequestOpenToWordsSince(
 	const rows = await tx.sql`
 		select 1 from pending_calls
 		where owner = ${owner} and room_id = ${roomId} and status in ('open', 'expired')
-			and words_closed_at is null and created_at > ${since}
+			and words_closed_at is null and asked_at > ${since}
 		limit 1`;
 	return rows.length > 0;
 }

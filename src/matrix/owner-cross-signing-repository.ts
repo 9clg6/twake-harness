@@ -161,28 +161,30 @@ function toYesNoQuestion(row: IdentityQuestionRow): YesNoQuestion {
 }
 
 // Asks the owner, in the room their words came to, whether they reset their identity themselves:
-// about the identity seen for them, waiting for their answer for `lifetimeMs`. Unless a question
-// about that identity waits for their answer still, or they answered it already: resolves to the
-// question to ask then, and to null otherwise.
+// about the identity seen for them, waiting for their answer for `lifetimeMs` from now, an end
+// stored as its mark tells it to their client before it goes out. Unless a question about that
+// identity waits for their answer still, or they answered it already: resolves to the question to
+// ask then, and to null otherwise. It counts as asked once it reached the room.
 export async function askIdentityQuestion(
 	tx: Tx,
 	owner: string,
 	asked: {
 		readonly masterPublicKey: string;
 		readonly roomId: string;
-		readonly eventId: string;
+		readonly raisedBy: string;
 		readonly lifetimeMs: number;
 	}
 ): Promise<YesNoQuestion | null> {
-	const { masterPublicKey, roomId, eventId, lifetimeMs } = asked;
+	const { masterPublicKey, roomId, raisedBy, lifetimeMs } = asked;
 	const rows = await tx.sql<IdentityQuestionRow[]>`
 		update owner_cross_signing set
 			question_id = gen_random_uuid(),
 			question_master_public_key = ${masterPublicKey},
 			question_room_id = ${roomId},
-			question_event_id = ${eventId},
-			question_asked_at = now(),
+			question_raised_by = ${raisedBy},
 			question_expires_at = now() + make_interval(secs => ${lifetimeMs / 1000}),
+			question_event_id = null,
+			question_asked_at = null,
 			question_closed_at = null,
 			question_answer = null,
 			question_answer_event_id = null
@@ -198,17 +200,32 @@ export async function askIdentityQuestion(
 	return row === undefined ? null : toYesNoQuestion(row);
 }
 
+// The question about their identity reached the owner's room in this event: from then on it is
+// asked, and their next words may answer it. False when another question replaced it meanwhile.
+export async function recordIdentityQuestionEvent(
+	tx: Tx,
+	owner: string,
+	questionId: string,
+	eventId: string
+): Promise<boolean> {
+	const result = await tx.sql`
+		update owner_cross_signing set question_event_id = ${eventId}, question_asked_at = now()
+		where owner = ${owner} and question_id = ${questionId}`;
+	return result.count === 1;
+}
+
 // The question about their identity open to the owner's words: asked in the room, about the
 // identity seen for them still, neither answered nor closed to words, and not expired
 export interface OpenIdentityQuestion {
 	readonly id: string;
 	readonly masterPublicKey: string;
+	// When it reached the room
 	readonly askedAt: Date;
 }
 
 // The owner wrote in the room: the question about their identity asked there is no longer open to
-// an answer in words, unless these are the words that raised it. Resolves to the question that was
-// open to them, null when none was.
+// an answer in words, unless these are the words that raised it, or it had yet to reach the room.
+// Resolves to the question that was open to them, null when none was.
 export async function closeIdentityQuestion(
 	tx: Tx,
 	owner: string,
@@ -219,7 +236,8 @@ export async function closeIdentityQuestion(
 		{ question_id: string; question_master_public_key: string; question_asked_at: Date }[]
 	>`
 		update owner_cross_signing set question_closed_at = now()
-		where owner = ${owner} and question_room_id = ${roomId} and question_event_id <> ${eventId}
+		where owner = ${owner} and question_room_id = ${roomId} and question_asked_at is not null
+			and question_raised_by <> ${eventId}
 			and question_closed_at is null and question_answer is null and question_expires_at > now()
 			and question_master_public_key = seen_master_public_key
 		returning question_id, question_master_public_key, question_asked_at`;

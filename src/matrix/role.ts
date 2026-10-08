@@ -60,7 +60,11 @@ import { buildRegistration, creatorUserId, isAssistantUserId } from './registrat
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
 import { makeLaidOutText, makeRichText } from './format.js';
-import { makeIdentityQuestions } from './identity-questions.js';
+import {
+	isPendingIdentityQuestion,
+	makeIdentityQuestions,
+	type PendingIdentityQuestion
+} from './identity-questions.js';
 import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.js';
 import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
@@ -135,6 +139,9 @@ interface SendJob {
 	// The text asks the owner a question to answer yes or no: what its content is marked with, for
 	// their client to tell which one
 	readonly questionMarker?: YesNoQuestion;
+	// The text asks the owner whether they reset their identity themselves: the event sent is
+	// remembered, from when the question counts as asked
+	readonly identityQuestion?: PendingIdentityQuestion;
 	// The text as HTML, laid out by the harness itself
 	readonly html?: string;
 	// The turn answered once it reached its limit of tool calls
@@ -206,6 +213,7 @@ function isSendJob(value: unknown): value is SendJob {
 			job['outcome'] === 'failed') &&
 		(job['request'] === undefined || isPendingQuestion(job['request'])) &&
 		(job['questionMarker'] === undefined || isYesNoQuestion(job['questionMarker'])) &&
+		(job['identityQuestion'] === undefined || isPendingIdentityQuestion(job['identityQuestion'])) &&
 		(job['html'] === undefined || typeof job['html'] === 'string') &&
 		(job['atLimit'] === undefined || job['atLimit'] === true)
 	);
@@ -1475,7 +1483,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (turn !== null) {
 				await feedback.answerReady(turn, request === undefined ? 'answer' : 'question');
 			}
-			const { text, html, questionMarker } = job.payload;
+			const { text, html, questionMarker, identityQuestion } = job.payload;
 			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
 			const sent = await intent.sendEvent(
 				job.payload.roomId,
@@ -1489,6 +1497,14 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					assistantUserId: job.payload.asUserId
 				};
 				await requests.asked(requestRoom, request.pendingCallId, sent, request.again === true);
+			}
+			if (identityQuestion !== undefined) {
+				const questionRoom = {
+					roomId: job.payload.roomId,
+					owner: identityQuestion.owner,
+					assistantUserId: job.payload.asUserId
+				};
+				await identityQuestions.asked(questionRoom, identityQuestion.questionId, sent);
 			}
 			if (turn !== null) {
 				feedback
