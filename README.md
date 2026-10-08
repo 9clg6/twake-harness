@@ -68,6 +68,8 @@ Tests drive the service through its HTTP boundary against the real PostgreSQL of
 | `WAKEUPS_PER_HOUR`             | times events from the broker may wake one owner's assistant in a rolling hour, whatever their source, `20` by default; past it, an event wakes them no more                                        |
 | `WAKEUPS_RETENTION_MS`         | how long the worker role keeps a wake-up, so that an event delivered again or replayed wakes nobody twice; `2592000000` (30 days) by default, an hour at least                                     |
 
+`TURN_MAX_TOKENS` is meant to stay below `ADMISSION_USER_DAILY_TOKENS`: admission checks the tokens a user spent that day only when a turn starts, so once started, a turn is held by its own limit alone.
+
 Migrations in `migrations/` run at start, under an advisory lock so replicas do not race.
 
 ## Roles
