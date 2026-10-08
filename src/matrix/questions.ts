@@ -24,12 +24,14 @@ type QuestionText = RichText & {
 	readonly [QUESTION_CONTENT_KEY]: { readonly id: string; readonly expires_ts: number };
 };
 
-// The content of a message that asks a yes or no question: its text as it is, and the question it
-// asks. Every yes or no question of the harness goes out this way, whatever it is about, so that
-// the owner's client knows each one without reading its text.
-export function markQuestion(content: RichText, question: YesNoQuestion): QuestionText {
-	return {
+// The content of a message as it goes out: its text as it is, and the question it asks when it asks
+// one to answer yes or no. Every yes or no question of the harness goes out this way, whatever it
+// is about, so that the owner's client knows each one without reading its text.
+export function markQuestion(content: RichText, question: YesNoQuestion | undefined): RichText {
+	if (question === undefined) return content;
+	const marked: QuestionText = {
 		...content,
 		[QUESTION_CONTENT_KEY]: { id: question.id, expires_ts: question.expiresTs }
 	};
+	return marked;
 }

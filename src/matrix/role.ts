@@ -1301,10 +1301,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		log.info({ roomId, sender, owner, command: turn.command }, 'creator command');
 		// A question to answer yes or no goes out marked, as the assistants' do, encrypted with the
 		// rest of the reply when the room is
-		const reply = makeRichText(turn.reply);
 		await appservice.botIntent.sendEvent(
 			roomId,
-			turn.question === undefined ? reply : markQuestion(reply, turn.question)
+			markQuestion(makeRichText(turn.reply), turn.question)
 		);
 	}
 
@@ -1413,7 +1412,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
 			const sent = await intent.sendEvent(
 				job.payload.roomId,
-				questionMarker === undefined ? content : markQuestion(content, questionMarker)
+				markQuestion(content, questionMarker)
 			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (request !== undefined) {
