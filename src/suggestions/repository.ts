@@ -16,6 +16,13 @@ export async function readSettings(tx: Tx, owner: string): Promise<SuggestionSet
 	return { enabled: settings[0]?.enabled ?? true, mutedRooms: muted.map((row) => row.room_id) };
 }
 
+// Turns the switch alone, the rooms muted left as they are
+export async function writeEnabled(tx: Tx, owner: string, enabled: boolean): Promise<void> {
+	await tx.sql`
+		insert into suggestion_settings (owner, enabled) values (${owner}, ${enabled})
+		on conflict (owner) do update set enabled = excluded.enabled`;
+}
+
 // Replaces the switch and the rooms muted for good; a mute with an end, from a refusal, stays
 export async function writeSettings(
 	tx: Tx,

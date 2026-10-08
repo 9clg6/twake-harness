@@ -101,6 +101,29 @@ describe('the provisioning API admits its provisioners only', () => {
 			body: { error: 'no assistant' }
 		});
 	});
+
+	it("turns an owner's suggestions off and on for a provisioner only, their muted rooms kept", async () => {
+		const path = `${provisioningPath('@carol:test.local')}/suggestions`;
+		expect((await api.get('carol@test.local', path)).status).toBe(403);
+		expect((await api.put('carol@test.local', path, { enabled: false })).status).toBe(403);
+		expect((await api.put(PROVISIONER, path, { enabled: 'no' })).status).toBe(400);
+		// On by default, without any assistant
+		expect(await api.get(PROVISIONER, path)).toEqual({ status: 200, body: { enabled: true } });
+		await api.put('carol@test.local', '/v1/suggestions/settings', {
+			enabled: true,
+			mutedRooms: ['!muted:test.local']
+		});
+		expect(await api.put(PROVISIONER, path, { enabled: false })).toEqual({
+			status: 200,
+			body: { enabled: false }
+		});
+		expect((await api.get('carol@test.local', '/v1/suggestions/settings')).body).toEqual({
+			enabled: false,
+			mutedRooms: ['!muted:test.local']
+		});
+		await api.put(PROVISIONER, path, { enabled: true });
+		expect(await api.get(PROVISIONER, path)).toEqual({ status: 200, body: { enabled: true } });
+	});
 });
 
 describe('a provisioned assistant', () => {
