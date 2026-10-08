@@ -478,10 +478,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		const admitted = await admitProvisioner(request, reply);
 		if (admitted === null) return reply;
 		const { client, owner } = admitted;
-		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-		if (assistant === null || assistant.deletedAt !== null) {
-			return reply.code(404).send(NO_ASSISTANT);
-		}
+		const assistant = await assistants.find(owner);
+		if (assistant === null) return reply.code(404).send(NO_ASSISTANT);
 		const queued = await requestRecovery(db, owner, assistant.roomId);
 		request.log.info({ client, owner, queued }, 'recovery requested for a client');
 		return reply.code(202).send({ queued });
