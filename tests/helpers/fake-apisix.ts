@@ -351,6 +351,61 @@ export const CALENDAR_CATALOG = {
 	}
 };
 
+// The calendar contracts with the two a suggestion uses: the slots where the user and the people
+// named are all free, and creating a meeting, a high-risk write
+export const MEETING_CATALOG = {
+	...CALENDAR_CATALOG,
+	paths: {
+		...CALENDAR_CATALOG.paths,
+		'/contracts/v1/calendar/availability/slots': {
+			get: {
+				operationId: 'find_meeting_slots',
+				summary: 'Find slots where the user and the people named are all free',
+				tags: ['calendar.availability.read.v1'],
+				parameters: [
+					{
+						name: 'email',
+						in: 'query',
+						required: true,
+						schema: { type: 'array', items: { type: 'string' } }
+					},
+					{ name: 'duration', in: 'query', required: true, schema: { type: 'integer' } },
+					{ name: 'start', in: 'query', required: true, schema: { type: 'string' } },
+					{ name: 'end', in: 'query', required: true, schema: { type: 'string' } }
+				]
+			}
+		},
+		'/contracts/v1/calendar/meetings': {
+			post: {
+				operationId: 'create_meeting',
+				summary: 'Create a meeting and invite the attendees, once the user has said yes to it',
+				tags: ['calendar.meeting.create.v1'],
+				'x-twake-risk': 'high',
+				requestBody: {
+					required: true,
+					content: {
+						'application/json': {
+							schema: {
+								type: 'object',
+								properties: {
+									title: { type: 'string' },
+									start: { type: 'string' },
+									end: { type: 'string' },
+									time_zone: { type: 'string' },
+									location: { type: 'string' },
+									description: { type: 'string' },
+									attendees: { type: 'array', items: { type: 'string' } }
+								},
+								required: ['title', 'start', 'end', 'attendees']
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+};
+
 // A hostile invitation: a title that tells the assistant what to do, and the note it would have
 // the assistant keep for every later turn of its owner
 export const INJECTED_TITLE: string =

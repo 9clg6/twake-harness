@@ -1,8 +1,17 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { findTimeZone } from '../src/agent/clock.js';
+import { insertPendingCall } from '../src/consents/repository.js';
 import { withPrincipal } from '../src/db/client.js';
+import { enqueueJob } from '../src/jobs/queue.js';
 import { findOwnerTimeZone, saveOwnerTimeZone } from '../src/settings/repository.js';
+import { suggestGroup } from '../src/suggestions/job.js';
+import {
+	DAY_MS,
+	muteRoomFor,
+	recordSuggestion,
+	writeSettings
+} from '../src/suggestions/repository.js';
 import {
 	activityEvent,
 	lastUser,
@@ -610,6 +619,71 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		);
 		const next = await meetNewAssistant('Iris', [room]);
 		await ask(next, 'Hello again after my reset', (t) => t === IDENTITY_QUESTION);
+	});
+
+	it("erases the suggestions it made me and those it was still to make, and keeps the channels I took out of them, and Carol's", async () => {
+		// A suggestion still to make, with the messages of a channel it quotes
+		const toMake = (owner: string) => ({
+			kind: 'suggest' as const,
+			payload: {
+				owner,
+				roomId: '!channel:test.local',
+				eventId: `$lunch-${owner}`,
+				at: Date.now(),
+				quoted: [{ author: '@bob:test.local', email: 'bob@test.local', text: 'Lunch on Friday?' }]
+			},
+			groupKey: suggestGroup(owner)
+		});
+		// No worker takes them while the test looks at them
+		await r.h.stopTurnWorkers();
+		try {
+			// A suggestion made from the channel: its call, which waits for my answer, and the
+			// suggestion that names it; and the channels I took out of them, for good or a while
+			await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
+				const id = await insertPendingCall(tx, {
+					owner: ALICE,
+					tool: 'create_meeting',
+					contract: 'calendar',
+					domain: 'calendar',
+					level: 'write',
+					reasons: ['event_turn', 'high_risk'],
+					arguments: { body: { title: 'Lunch', start: '2026-10-09T10:00:00Z' } },
+					previewDigest: null,
+					correlationId: null,
+					origin: 'suggestion',
+					sessionId: null,
+					request: 'Create the meeting?'
+				});
+				await recordSuggestion(tx, ALICE, {
+					pendingCallId: id,
+					roomId: '!channel:test.local',
+					startsAt: new Date('2026-10-09T10:00:00Z'),
+					endsAt: new Date('2026-10-09T11:00:00Z'),
+					attempt: 0
+				});
+				await writeSettings(tx, ALICE, { enabled: true, mutedRooms: ['!quiet:test.local'] });
+				await muteRoomFor(tx, ALICE, '!noisy:test.local', DAY_MS);
+			});
+			expect(await enqueueJob(r.h.db, toMake(ALICE))).toBe(true);
+			expect(await enqueueJob(r.h.db, toMake(CAROL))).toBe(true);
+			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+			expect(
+				await withPrincipal(r.h.db, { id: ALICE }, async (tx) => ({
+					suggestions: await tx.sql`select 1 from suggestions`,
+					calls: await tx.sql`select 1 from pending_calls`
+				}))
+			).toEqual({ suggestions: [], calls: [] });
+			const owners = await r.h.db.sql<{ owner: string }[]>`
+				select (payload #>> '{}')::jsonb ->> 'owner' as owner from jobs where kind = 'suggest'`;
+			expect(owners.map((row) => row.owner)).toEqual([CAROL]);
+			expect((await r.h.api.get(ALICE, '/v1/suggestions/settings')).body).toEqual({
+				enabled: true,
+				mutedRooms: ['!noisy:test.local', '!quiet:test.local']
+			});
+		} finally {
+			await r.h.db.sql`delete from jobs where kind = 'suggest'`;
+			r.h.startTurnWorkers();
+		}
 	});
 });
 

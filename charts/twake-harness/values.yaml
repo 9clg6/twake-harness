@@ -37,6 +37,10 @@ config:
   authJwksUrl: ''
   authIssuer: ''
   authAudience: ''
+  # The other audiences whose tokens may answer a call that waits for its owner, comma separated,
+  # such as twakespace for Twake Space's buttons: on the approve and refuse routes of the pending
+  # calls, and on no other route; empty for none
+  authAnswerAudiences: ''
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
   # Where the contracts sit under that address: the prefix of their calls and the path of their
@@ -58,6 +62,18 @@ config:
   # broker lacks its owner's permission to act for them, as do the worker role's reminders before
   # that permission expires; an https URL, empty for none, and then the worker reminds nobody
   brokerConsentUrl: ''
+  # Whether the assistants propose actions from the messages of channels that are not encrypted
+  # (see Suggestions in the README). Off, the channel listener declines its invites and leaves the
+  # rooms it is in. On, Synapse must have loaded a registration whose users namespace holds it
+  suggestionsEnabled: false
+  # The localpart of the channel listener, the visible user room admins invite to channels they
+  # want suggestions from; empty means twake-assistant. It must be in the registration
+  suggestionsUserLocalpart: ''
+  # Twake Space's API, where a suggestion is posted to the notifications of its user; empty means
+  # a suggestion reaches the assistant's room alone. Its token, a tws_ API token with the scope
+  # notifications:write, goes in secretEnv as SPACE_API_TOKEN. The harness reaches the outside
+  # only through APISIX: give an APISIX route here, or an egress rule in networkPolicy.extraEgress
+  spaceApiUrl: ''
   # Admission limits; each empty value keeps the harness default
   # Turns in flight on one replica; default 32
   admissionMaxInflight: ''

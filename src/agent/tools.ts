@@ -62,9 +62,16 @@ export function toolCallStatus(outcome: ToolOutcome): ToolCallStatus {
 	return outcome.final === undefined ? 'ok' : 'final';
 }
 
-// Who started a turn: the owner, by a message or a request, or an event the harness took from the
-// broker
-export type TurnOrigin = 'owner' | 'event';
+// Who started a turn: the owner, by a message or a request, an event the harness took from the
+// broker, or a suggestion the harness made from the messages of a channel. The last two come from
+// what other people wrote, so every write they prepare waits for the owner.
+export type TurnOrigin = 'owner' | 'event' | 'suggestion';
+
+// Whether a turn comes from what other people wrote: any but the owner's own, which a turn that
+// names no origin is
+export function comesFromOthers(origin: TurnOrigin | undefined): boolean {
+	return (origin ?? 'owner') !== 'owner';
+}
 
 export interface ToolContext {
 	readonly principalId: string;

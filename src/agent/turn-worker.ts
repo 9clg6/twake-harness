@@ -22,6 +22,15 @@ import type { Locale, Messages } from '../i18n/messages.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
 import type { Refusal, RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
+import { matrixUserIdOfPrincipal } from '../principals/identity.js';
+import {
+	suggestPayloadSchema,
+	SUGGEST_MAX_AGE_MS,
+	type SuggestPayload
+} from '../suggestions/job.js';
+import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
+import type { SpaceNotifications } from '../suggestions/space.js';
+import { proposalSentence } from '../suggestions/text.js';
 import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
 
 const turnPayload = z.object({
@@ -120,6 +129,12 @@ export interface TurnWorkerOptions {
 	readonly turn: Config['turn'];
 	// How long the owner may answer a request, which its question tells their client
 	readonly requestLifetimeMs: number;
+	// Takes the jobs that propose actions from the messages of channels; none without it
+	readonly suggestions?: {
+		readonly config: Config;
+		// Twake Space's notifications, or null to post in the assistant's room alone
+		readonly space: SpaceNotifications | null;
+	};
 	readonly pollIntervalMs?: number;
 	// How many turns this replica runs at once
 	readonly concurrency?: number;
@@ -353,13 +368,109 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return null;
 	}
 
+	// What an owner's assistant proposes from the quotes of a job: the quotes are used here, sent
+	// to the model, and gone with the job. Its handler catches what this throws, so that a failed
+	// job never keeps them.
+	async function suggest(payload: SuggestPayload): Promise<void> {
+		const settings = options.suggestions;
+		if (settings === undefined) return;
+		const { owner, roomId } = payload;
+		const attempt = payload.retry === undefined ? 0 : 1;
+		const jobLog = log.child({ reqId: `suggest:${payload.eventId}`, roomId });
+		// Turned off since the job was queued, as a second try at another time can be
+		if (!settings.config.suggestions.enabled) {
+			jobLog.info({ owner }, 'suggestion dropped: off');
+			return;
+		}
+		if (Date.now() - payload.at > SUGGEST_MAX_AGE_MS) {
+			jobLog.info({ owner }, 'suggestion dropped: too old');
+			return;
+		}
+		const skip = await withPrincipal(db, { id: owner }, (tx) =>
+			mayReceive(tx, owner, roomId, attempt)
+		);
+		if (skip !== null) {
+			jobLog.info({ owner, reason: skip }, 'suggestion skipped');
+			return;
+		}
+		const result = await agent.runSuggestion({ payload, attempt, log: jobLog });
+		if (result.kind !== 'proposed') {
+			jobLog.info(
+				{
+					owner,
+					outcome: result.kind,
+					...(result.kind === 'none' ? { reason: result.reason } : {})
+				},
+				'suggestion decided'
+			);
+			return;
+		}
+		const { pendingCallId, proposal } = result;
+		await withPrincipal(db, { id: owner }, (tx) =>
+			recordSuggestion(tx, owner, {
+				pendingCallId,
+				roomId,
+				startsAt: new Date(proposal.start),
+				endsAt: new Date(proposal.end),
+				attempt
+			})
+		);
+		jobLog.info({ owner, pendingCallId, attempt }, 'suggestion made');
+		const matrixUserId = matrixUserIdOfPrincipal(settings.config, owner);
+		if (settings.space !== null && matrixUserId !== null) {
+			const outcome = await settings.space.suggest({
+				matrixUserId,
+				externalId: pendingCallId,
+				text: proposalSentence(result.locale, proposal),
+				pendingCallId,
+				matrixRoomId: roomId
+			});
+			jobLog.info({ owner, pendingCallId, outcome }, 'suggestion sent to Space');
+		}
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant?.roomId === null || assistant === null) return;
+		const call = await withPrincipal(db, { id: owner }, (tx) =>
+			findPendingCall(tx, owner, pendingCallId)
+		);
+		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId: assistant.roomId,
+				text: result.answer,
+				request: { pendingCallId, owner },
+				...(questionMarker === null ? {} : { questionMarker }),
+				...(result.request === null ? {} : { html: requestHtml(result.request) })
+			} satisfies SendPayload,
+			dedupKey: `send:suggest:${pendingCallId}`,
+			groupKey: `send:${assistant.roomId}`
+		});
+	}
+
 	return startJobWorker({
 		db,
 		log,
-		kinds: ['turn', 'resume'],
+		kinds: options.suggestions === undefined ? ['turn', 'resume'] : ['turn', 'resume', 'suggest'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
 		handler: async (job) => {
+			if (job.kind === 'suggest') {
+				const quoted = suggestPayloadSchema.safeParse(job.payload);
+				if (!quoted.success) {
+					log.warn({ job: job.id }, 'suggestion dropped: malformed');
+					return null;
+				}
+				try {
+					await suggest(quoted.data);
+				} catch (err: unknown) {
+					log.warn(
+						{ job: job.id, reason: err instanceof Error ? err.name : 'error' },
+						'suggestion failed'
+					);
+				}
+				return null;
+			}
 			if (job.kind === 'resume') {
 				const resumed = resumePayload.safeParse(job.payload);
 				if (!resumed.success) throw new Error('resume payload is malformed');

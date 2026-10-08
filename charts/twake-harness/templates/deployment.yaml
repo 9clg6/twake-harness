@@ -69,6 +69,10 @@ spec:
               value: {{ .Values.config.authIssuer | quote }}
             - name: AUTH_AUDIENCE
               value: {{ .Values.config.authAudience | quote }}
+            {{- with .Values.config.authAnswerAudiences }}
+            - name: AUTH_ANSWER_AUDIENCES
+              value: {{ . | quote }}
+            {{- end }}
             - name: APISIX_BASE_URL
               value: {{ .Values.config.apisixBaseUrl | quote }}
             {{- /* Every role refreshes the catalog of contracts and the api role calls them: each needs these */}}
@@ -99,6 +103,18 @@ spec:
             {{- /* The api role shows it when the broker lacks an owner's permission, the worker role in its reminders before that permission expires */}}
             {{- with .Values.config.brokerConsentUrl }}
             - name: BROKER_CONSENT_URL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.config.suggestionsEnabled }}
+            - name: SUGGESTIONS_ENABLED
+              value: "true"
+            {{- end }}
+            {{- with .Values.config.suggestionsUserLocalpart }}
+            - name: SUGGESTIONS_USER_LOCALPART
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.spaceApiUrl }}
+            - name: SPACE_API_URL
               value: {{ . | quote }}
             {{- end }}
             {{- /* Rendered as integers, so 0 counts and a large value from a values file is not 1e+06 */}}

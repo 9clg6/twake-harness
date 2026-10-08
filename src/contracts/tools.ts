@@ -14,6 +14,7 @@ import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { saveOwnerTimeZone } from '../settings/repository.js';
 import type { LlmToolDefinition } from '../llm/client.js';
 import {
+	comesFromOthers,
 	isConversationGone,
 	keepInConversation,
 	type CONVERSATION_GONE,
@@ -230,7 +231,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		) {
 			reasons.push('consent');
 		}
-		if (contract.level === 'write' && context.origin === 'event') reasons.push('event_turn');
+		if (contract.level === 'write' && comesFromOthers(context.origin)) reasons.push('event_turn');
 		if (contract.risk === 'high') reasons.push('high_risk');
 		return reasons;
 	}

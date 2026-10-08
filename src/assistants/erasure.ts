@@ -5,17 +5,18 @@ import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 
 // Erases, in the transaction given under the owner's principal, what the harness keeps of their
 // assistant and of what they told it: their conversations, its memory, their skills, the
-// permissions they gave it, the calls that wait for their answer, the reminders of their
-// delegation, what it told them of their sessions, the question it asked them about their identity
-// with their answer, and the jobs that would still run for it. Its record stays, marked deleted,
-// with the language its owner chose, and its rooms leave the index. What a new assistant needs or
-// must not lose stays: the Matrix account, its device and keys, as a Matrix identifier is never
-// reused, the owner's quota counters, the zone of their calendar, a setting of theirs and not of
-// their assistant, the identity the harness pinned for them and the one it saw last, and what
-// keeps the next assistant from taking anything twice: the wake-ups, which keep an event replayed
-// later from waking it, the owner's words received, which keep a copy of them from counting, and
-// when it first read each session their words came from, which keeps the words of a session older
-// than those it remembers from counting.
+// permissions they gave it, the calls that wait for their answer, the suggestions it made them,
+// the reminders of their delegation, what it told them of their sessions, the question it asked
+// them about their identity with their answer, and the jobs that would still run for it. Its record
+// stays, marked deleted, with the language its owner chose, and its rooms leave the index. What a
+// new assistant needs or must not lose stays: the Matrix account, its device and keys, as a Matrix
+// identifier is never reused, the owner's quota counters, the zone of their calendar, a setting of
+// theirs and not of their assistant, the channels they took out of the suggestions and whether they
+// want them at all, which they chose for themselves, the identity the harness pinned for them and
+// the one it saw last, and what keeps the next assistant from taking anything twice: the wake-ups,
+// which keep an event replayed later from waking it, the owner's words received, which keep a copy
+// of them from counting, and when it first read each session their words came from, which keeps the
+// words of a session older than those it remembers from counting.
 // False when the live assistant is no longer the one created at that time.
 export async function eraseAssistant(
 	tx: Tx,
@@ -40,6 +41,8 @@ export async function eraseAssistant(
 	// calls are erased, and that permission is erased below, and one that comes later finds no call
 	// to allow and grants nothing
 	await tx.sql`delete from pending_calls where owner = ${owner}`;
+	// The suggestions it made name those calls, and the channels they came from
+	await tx.sql`delete from suggestions where owner = ${owner}`;
 	await tx.sql`delete from consents where owner = ${owner}`;
 	await tx.sql`delete from delegation_reminders where owner = ${owner}`;
 	// The next assistant tells its owner of their sessions again, in its own room

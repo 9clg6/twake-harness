@@ -38,6 +38,10 @@ export interface Config {
 		readonly jwksUrl: URL;
 		readonly issuer: string;
 		readonly audience: string;
+		// The other audiences a token may carry to answer a call that waits for its owner, such as
+		// those of Twake Space's buttons: accepted on /v1/pending-calls/:id/approve and /refuse, and
+		// on no other route
+		readonly answerAudiences: readonly string[];
 	};
 	readonly apisix: {
 		readonly baseUrl: URL;
@@ -160,6 +164,16 @@ export interface Config {
 		readonly k8sRole: string;
 		readonly k8sTokenPath: string;
 	};
+	readonly suggestions: {
+		// Whether the assistants propose actions from the messages of channels that are not
+		// encrypted, off unless a deployment turns it on: the matrix role then registers the listener,
+		// which the registration's users namespace must hold
+		readonly enabled: boolean;
+		// The localpart of the one visible user that reads the channels it is invited to
+		readonly userLocalpart: string;
+		// Twake Space's notifications, which receive a suggestion for its user; null for none
+		readonly space: { readonly apiUrl: URL; readonly apiToken: string } | null;
+	};
 	// The language of the fixed texts of the assistants and the creator
 	readonly locale: Locale;
 	// The IANA time zone the assistants read the present in, such as Europe/Paris, until a read of
@@ -176,6 +190,7 @@ const envSchema = z.object({
 	AUTH_JWKS_URL: z.url(),
 	AUTH_ISSUER: z.string().min(1),
 	AUTH_AUDIENCE: z.string().min(1),
+	AUTH_ANSWER_AUDIENCES: z.string().default(''),
 	APISIX_BASE_URL: z.url(),
 	APISIX_CONSUMER_KEY: z.string().min(1),
 	LLM_MODEL: z.string().min(1).default('qwen3.8'),
@@ -255,6 +270,10 @@ const envSchema = z.object({
 		.string()
 		.min(1)
 		.default('/var/run/secrets/kubernetes.io/serviceaccount/token'),
+	SUGGESTIONS_USER_LOCALPART: z.string().min(1).default('twake-assistant'),
+	SUGGESTIONS_ENABLED: z.enum(['true', 'false']).default('false'),
+	SPACE_API_URL: z.string().default(''),
+	SPACE_API_TOKEN: z.string().default(''),
 	ASSISTANT_LOCALE: z.enum(LOCALES).default('en'),
 	ASSISTANT_TIMEZONE: z.string().min(1).default('UTC'),
 	LOG_LEVEL: z.enum(LOG_LEVELS).default('info')
@@ -366,6 +385,22 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: BROKER_CONSENT_URL ${JSON.stringify(values.BROKER_CONSENT_URL)} is not an https URL`
 		);
 	}
+	// The namespace tells the listener from the creator and the assistants by its name alone
+	if (
+		values.SUGGESTIONS_ENABLED === 'true' &&
+		(values.SUGGESTIONS_USER_LOCALPART === values.MATRIX_SENDER_LOCALPART ||
+			values.SUGGESTIONS_USER_LOCALPART.startsWith(values.MATRIX_ASSISTANT_PREFIX))
+	) {
+		throw new Error(
+			`invalid configuration: SUGGESTIONS_USER_LOCALPART must not be MATRIX_SENDER_LOCALPART nor start with ${values.MATRIX_ASSISTANT_PREFIX}`
+		);
+	}
+	if (values.SPACE_API_URL !== '' && !URL.canParse(values.SPACE_API_URL)) {
+		throw new Error('invalid configuration: SPACE_API_URL is not a URL');
+	}
+	if (values.SPACE_API_URL !== '' && values.SPACE_API_TOKEN === '') {
+		throw new Error('invalid configuration: SPACE_API_URL needs SPACE_API_TOKEN');
+	}
 	const timeZone = findTimeZone(values.ASSISTANT_TIMEZONE);
 	if (timeZone === null) {
 		throw new Error(
@@ -380,7 +415,8 @@ export function loadConfig(env: Env): Config {
 		auth: {
 			jwksUrl: new URL(values.AUTH_JWKS_URL),
 			issuer: values.AUTH_ISSUER,
-			audience: values.AUTH_AUDIENCE
+			audience: values.AUTH_AUDIENCE,
+			answerAudiences: listOf(values.AUTH_ANSWER_AUDIENCES)
 		},
 		apisix: {
 			baseUrl: new URL(values.APISIX_BASE_URL),
@@ -457,6 +493,14 @@ export function loadConfig(env: Env): Config {
 			authPath: values.OPENBAO_AUTH_PATH,
 			k8sRole: values.OPENBAO_K8S_ROLE,
 			k8sTokenPath: values.OPENBAO_K8S_TOKEN_PATH
+		},
+		suggestions: {
+			enabled: values.SUGGESTIONS_ENABLED === 'true',
+			userLocalpart: values.SUGGESTIONS_USER_LOCALPART,
+			space:
+				values.SPACE_API_URL === ''
+					? null
+					: { apiUrl: new URL(values.SPACE_API_URL), apiToken: values.SPACE_API_TOKEN }
 		},
 		locale: values.ASSISTANT_LOCALE,
 		timeZone,

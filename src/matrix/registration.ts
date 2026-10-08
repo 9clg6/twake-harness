@@ -10,12 +10,12 @@ export function assistantUserRegex(config: Config): string {
 	return `@${escapeRegex(config.matrix.assistantPrefix)}.*:${escapeRegex(config.matrix.serverName)}`;
 }
 
-// One namespace for the assistants and the creator: Synapse pushes the events of a room only
-// when a member matches a namespace, and the creator must hear what it is told. The SDK accepts
-// a single user namespace, hence the alternation.
+// One namespace for the assistants, the creator and the user that listens to channels: Synapse
+// pushes the events of a room only when a member matches a namespace, and the creator must hear
+// what it is told. The SDK accepts a single user namespace, hence the alternation.
 function namespaceUserRegex(config: Config): string {
 	const server = escapeRegex(config.matrix.serverName);
-	return `@(?:${escapeRegex(config.matrix.assistantPrefix)}.*|${escapeRegex(config.matrix.senderLocalpart)}):${server}`;
+	return `@(?:${escapeRegex(config.matrix.assistantPrefix)}.*|${escapeRegex(config.matrix.senderLocalpart)}|${escapeRegex(config.suggestions.userLocalpart)}):${server}`;
 }
 
 // The registration Synapse loads: the harness owns the assistants' identifiers exclusively and

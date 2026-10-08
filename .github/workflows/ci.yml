@@ -105,6 +105,9 @@ jobs:
           grep -A1 TURN_HISTORY_MAX_CHARS /tmp/history-rendered.yaml | grep -q '"1000000"'
       # PROVISIONER_CLIENT_IDS carries the provisioners config.provisionerClientIds names
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.provisionerClientIds=tom-bots > /tmp/provisioning.yaml && grep -A1 PROVISIONER_CLIENT_IDS /tmp/provisioning.yaml | grep -q '"tom-bots"'
+      # The suggestions and the audiences that answer a call are rendered only when set
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q -e SUGGESTIONS_ENABLED -e AUTH_ANSWER_AUDIENCES /tmp/default.yaml
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.suggestionsEnabled=true --set config.authAnswerAudiences=twakespace > /tmp/suggestions.yaml && grep -A1 SUGGESTIONS_ENABLED /tmp/suggestions.yaml | grep -q '"true"' && grep -A1 AUTH_ANSWER_AUDIENCES /tmp/suggestions.yaml | grep -q '"twakespace"'
       # No role gets EVENTS_CLIENT_IDS, as the harness takes no event over HTTP, and a release that
       # still sets config.eventsClientIds renders as before
       - run: |

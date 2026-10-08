@@ -3,6 +3,7 @@ import { buildApp } from './app.js';
 import { loadConfig } from './config.js';
 import { makeDb } from './db/client.js';
 import { runMigrations } from './db/migrate.js';
+import { spaceFromConfig } from './suggestions/space.js';
 import { startMatrixRole } from './matrix/role.js';
 import { startWorkerRole } from './worker/role.js';
 
@@ -52,7 +53,8 @@ if (config.role === 'worker') {
 		log: app.log,
 		locale: config.locale,
 		turn: config.turn,
-		requestLifetimeMs: config.consent.requestLifetimeMs
+		requestLifetimeMs: config.consent.requestLifetimeMs,
+		suggestions: { config, space: spaceFromConfig(config, app.log) }
 	});
 	const shutdown = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
