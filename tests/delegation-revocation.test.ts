@@ -35,20 +35,6 @@ function dated(at: Date): string {
 	return at.toISOString().replace(/\.\d{3}Z$/, 'Z');
 }
 
-// What the test opens to let a held answer go out
-interface Gate {
-	readonly opened: Promise<void>;
-	open(): void;
-}
-
-function makeGate(): Gate {
-	let open = (): void => undefined;
-	const opened = new Promise<void>((resolve) => {
-		open = resolve;
-	});
-	return { opened, open };
-}
-
 describe('deleting my assistant revokes, at the broker, my permission for it to act for me', () => {
 	let r: ConsentRoom;
 	let creatorId: string;
@@ -139,6 +125,24 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 			}));
 	}
 
+	// Deletes my assistant with `remove` while my Drive instance does not answer the revocation, the
+	// broker holding its 502 until the test lets it go: resolves, once the harness asked for the
+	// revocation, to what lets that answer go out
+	async function deleteWhileBrokerHolds(remove: () => Promise<void>): Promise<() => void> {
+		let release = (): void => undefined;
+		const released = new Promise<void>((resolve) => {
+			release = resolve;
+		});
+		const answers: ContractReply[] = [{ ...brokerDriveUnavailable(), hold: released }];
+		r.h.apisix.revocation = (owner) => revoke(owner, answers.shift());
+		const seen = r.h.apisix.delegationCalls.length;
+		await remove();
+		await until('the broker was asked to revoke my permission', () =>
+			methodsSince(seen).includes('DELETE')
+		);
+		return release;
+	}
+
 	it('asks the broker, through the gateway and in my name, to revoke it once I confirm /delete', async () => {
 		const seen = r.h.apisix.delegationCalls.length;
 		const before = said('delegation revoked');
@@ -169,27 +173,17 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 		expect(consentedAt).toBeNull();
 	});
 
-	it('erases my assistant without waiting for the broker, which it asks again after a 502', async () => {
+	it('tells me my assistant is deleted while the broker fails, then asks the broker again', async () => {
 		await newAssistant('Iris');
-		// My Drive instance does not answer the first revocation, which the broker holds meanwhile
-		const gate = makeGate();
-		const answers: ContractReply[] = [{ ...brokerDriveUnavailable(), hold: gate.opened }];
-		r.h.apisix.revocation = (owner) => revoke(owner, answers.shift());
 		const seen = r.h.apisix.delegationCalls.length;
 		const logged = r.h.logLines().length;
 		const before = said('delegation revoked');
-		const deletion = r.h.api.delete(ALICE, '/v1/assistants/me');
-		await until('the broker was asked to revoke my permission', () =>
-			methodsSince(seen).includes('DELETE')
-		);
-		// The broker has not answered, and my assistant is deleted
-		const status = await Promise.race([
-			deletion.then((reply) => reply.status),
-			sleep(10_000).then(() => 'still waiting for the broker')
-		]);
-		expect(status).toBe(204);
-		expect((await r.h.api.get(ALICE, '/v1/assistants/me')).status).toBe(404);
-		gate.open();
+		// The creator answers me before the broker does
+		const release = await deleteWhileBrokerHolds(async () => {
+			expect(await answerTo('/delete')).toContain('Delete Iris?');
+			expect(await answerTo('yes')).toBe(DELETED);
+		});
+		release();
 		await until('the harness revoked my permission', () => said('delegation revoked') > before);
 		// My permission was gone at the second try: the broker had yet to leave my Drive instance
 		expect(methodsSince(seen)).toEqual(['GET', 'DELETE', 'GET', 'DELETE']);
@@ -238,19 +232,15 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 
 	it('still asks the broker for a deletion of mine once I deleted my next assistant, which erased my jobs', async () => {
 		await newAssistant('Iris');
-		const gate = makeGate();
-		const answers: ContractReply[] = [{ ...brokerDriveUnavailable(), hold: gate.opened }];
-		r.h.apisix.revocation = (owner) => revoke(owner, answers.shift());
 		const seen = r.h.apisix.delegationCalls.length;
 		const before = said('delegation revoked');
-		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
-		await until('the broker was asked to revoke my permission', () =>
-			methodsSince(seen).includes('DELETE')
-		);
+		const release = await deleteWhileBrokerHolds(async () => {
+			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+		});
 		// While the broker holds its answer, I create my next assistant and delete it too
 		await newAssistant('Lucie');
 		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
-		gate.open();
+		release();
 		// The first revocation is tried again, and the second one runs
 		await until(
 			'the harness revoked my permission twice',
@@ -261,22 +251,19 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 
 	it('keeps the permission I give again between two tries, with which my next assistant reads my drive', async () => {
 		await newAssistant('Iris');
-		const gate = makeGate();
-		const answers: ContractReply[] = [{ ...brokerDriveUnavailable(), hold: gate.opened }];
-		r.h.apisix.revocation = (owner) => revoke(owner, answers.shift());
 		const seen = r.h.apisix.delegationCalls.length;
 		const before = said('delegation kept: given again since the deletion');
-		expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
-		const deleted = Date.now();
-		await until('the broker was asked to revoke my permission', () =>
-			methodsSince(seen).includes('DELETE')
-		);
+		let deleted = 0;
+		const release = await deleteWhileBrokerHolds(async () => {
+			expect((await r.h.api.delete(ALICE, '/v1/assistants/me')).status).toBe(204);
+			deleted = Date.now();
+		});
 		// I give it again once the broker erased the one I gave before, in a later second than my
 		// deletion, as the broker dates a permission to the second
 		await sleep(1_000 - (deleted % 1_000));
 		consentedAt = dated(new Date());
 		const given = consentedAt;
-		gate.open();
+		release();
 		await until(
 			'the harness kept my permission',
 			() => said('delegation kept: given again since the deletion') > before
