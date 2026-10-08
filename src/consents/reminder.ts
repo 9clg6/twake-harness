@@ -10,7 +10,7 @@ import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
 import type { WakeDeps } from '../wakeups/wake.js';
-import { fetchDelegation, type Delegation } from './broker.js';
+import { DelegationRouteMissingError, fetchDelegation, type Delegation } from './broker.js';
 
 // How many days of the calendar before a permission expires its owner is reminded of it
 const REMINDER_DAYS = 5;
@@ -77,9 +77,9 @@ async function remindOwner(deps: ReminderDeps, link: string, owner: string): Pro
 
 // The day's pass: each owner whose assistant is in its room, one after the other, is reminded in
 // that room when the broker says their permission for their assistant to act for them expires
-// within five days. An owner the broker could not be asked about, through a gateway without the
-// route or a broker that does not answer, is skipped, and the pass goes on with the next one. A
-// pass told to stop stops before the next owner.
+// within five days. An owner the broker could not be asked about is skipped with a warning, which
+// names the path the gateway publishes no route at when that is why, and the pass goes on with
+// the next one. A pass told to stop stops before the next owner.
 async function remindExpiringDelegations(
 	deps: ReminderDeps,
 	link: string,
@@ -94,7 +94,11 @@ async function remindExpiringDelegations(
 		try {
 			if (await remindOwner(deps, link, owner)) reminded += 1;
 		} catch (err: unknown) {
-			deps.log.warn({ owner, err }, 'delegation reminder skipped');
+			if (err instanceof DelegationRouteMissingError) {
+				deps.log.warn({ owner, path: err.path }, 'delegation route missing');
+			} else {
+				deps.log.warn({ owner, err }, 'delegation reminder skipped');
+			}
 		}
 	}
 	deps.log.info({ owners: owners.length, reminded }, 'delegation reminders passed');

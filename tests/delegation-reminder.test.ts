@@ -2,7 +2,7 @@ import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
 import { loadConfig, type Config } from '../src/config.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
-import { silent, until } from './helpers/activity.js';
+import { logSink, until, type LogSink } from './helpers/activity.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import {
@@ -21,6 +21,8 @@ const ALICE_CONSENT_URL = `${BROKER_CONSENT_URL}?owner=alice%40test.local`;
 const ANSWERED_CONSENT_URL = 'https://agent-consent.test.local/elsewhere';
 // How a reminder starts, in French, the language of the suite
 const REMINDER = "L'autorisation d'agir en ton nom";
+// The level of pino's warnings
+const WARN = 40;
 
 function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
@@ -56,19 +58,29 @@ describe('the hour of the reminders', () => {
 describe('my assistant reminds me to renew my permission for it to act for me before it expires', () => {
 	let r: ConsentRoom;
 	let worker: WorkerRole | null = null;
+	// What the role started last writes
+	let logs: LogSink = logSink();
 	const clock = makeSettableClock('2026-10-08T07:00:00Z');
 
 	// The worker role on the harness's database, reading the suite's clock, and looking often
 	// whether the hour of the reminders has come
 	async function startWorker(consent: Partial<Config['consent']> = {}): Promise<void> {
+		logs = logSink();
 		worker = await startWorkerRole({
 			config: { ...r.h.config, role: 'worker', consent: { ...r.h.config.consent, ...consent } },
 			db: r.h.db,
-			logStream: silent(),
+			logStream: logs.stream,
 			clock,
 			reminderCheckMs: 50
 		});
 	}
+
+	// The warnings the role started last wrote about an owner so far, by message and path
+	const warnedAbout = (owner: string): unknown[] =>
+		logs
+			.lines()
+			.filter((line) => line['owner'] === owner && line['level'] === WARN)
+			.map((line) => ({ msg: line['msg'], path: line['path'] }));
 
 	async function stopWorker(): Promise<void> {
 		await worker?.stop();
@@ -176,28 +188,40 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		const created = await r.h.api.post(BOB, '/v1/assistants', { name: 'Friday' });
 		expect(created.status).toBe(201);
 		const seen = r.saying(REMINDER).length;
-		// What the broker answers about Alice, one pass a day; about Bob, a permission it holds
+		// What the broker answers about Alice, one pass a day, and the warning it leaves about her, if
+		// any; about Bob, a permission it holds
 		let answer: ContractReply | null = null;
 		r.h.apisix.delegation = (owner) =>
 			owner === BOB ? brokerDelegation('2027-01-05T10:00:00Z', '2027-02-04T10:00:00Z') : answer;
-		const answers: (ContractReply | null)[] = [
-			// None, or none any more
-			brokerNoDelegation(),
+		const days: [ContractReply | null, { msg: string; path?: string } | null][] = [
+			// None, or none any more, which is nothing to warn of
+			[brokerNoDelegation(), null],
 			// One that expired the day before
-			brokerDelegation('2027-01-02T08:00:00Z', '2027-02-01T08:00:00Z'),
-			// A gateway without the route, a broker that fails, a connection that drops
-			{ status: 404, body: { error_msg: '404 Route Not Found' } },
-			{ status: 502, body: { error_msg: 'upstream unavailable' } },
-			null
+			[brokerDelegation('2027-01-02T08:00:00Z', '2027-02-01T08:00:00Z'), null],
+			// A gateway without the route, whose path the warning names
+			[
+				{ status: 404, body: { error_msg: '404 Route Not Found' } },
+				{ msg: 'delegation route missing', path: '/delegation' }
+			],
+			// A broker that fails, a connection that drops
+			[
+				{ status: 502, body: { error_msg: 'upstream unavailable' } },
+				{ msg: 'delegation reminder skipped' }
+			],
+			[null, { msg: 'delegation reminder skipped' }]
 		];
-		for (const [index, reply] of answers.entries()) {
+		const warned: { msg: string; path?: string }[] = [];
+		for (const [index, [reply, warning]] of days.entries()) {
 			answer = reply;
 			const before = asked(BOB);
 			// Nine in Paris, from Monday 1 February on
 			clock.set(`2027-02-0${index + 1}T08:00:00Z`);
 			if (worker === null) await startWorker();
 			await until('the pass went on with Bob', () => asked(BOB) > before);
+			if (warning !== null) warned.push(warning);
+			expect(warnedAbout(ALICE)).toEqual(warned);
 		}
+		expect(warnedAbout(BOB)).toEqual([]);
 		// Once the broker holds a permission of mine about to expire, its reminder is the first
 		answer = brokerDelegation('2027-01-08T10:00:00Z', '2027-02-07T10:00:00Z');
 		clock.set('2027-02-06T08:00:00Z');
