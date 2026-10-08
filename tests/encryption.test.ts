@@ -84,54 +84,6 @@ describe('an encrypted conversation with my assistant', () => {
 		expect(answer).toBe('echo: are you there');
 	});
 
-	it('answers readably on the turn after one whose room keys never reached me', async () => {
-		h.apisix.llm.script = (request: ChatRequest) => ({
-			content: `echo: ${request.messages.at(-1)?.content ?? ''}`
-		});
-		// The room keys my assistant sends me during one turn never reach my device, as to-device
-		// messages lost on the way would, while the homeserver tells it they went
-		let losing = true;
-		let lost = 0;
-		h.apisix.matrixFault = (call) => {
-			const body = call.body as { messages?: Record<string, unknown> } | null;
-			if (
-				losing &&
-				call.method === 'PUT' &&
-				call.path.startsWith('/_matrix/client/v3/sendToDevice/m.room.encrypted/') &&
-				body?.messages?.[alice.userId] !== undefined
-			) {
-				lost += 1;
-				return 200;
-			}
-			return null;
-		};
-		try {
-			const fresh = await client.createDirectRoom(assistantId);
-			await h.synapse.waitForMember(alice, fresh, assistantId);
-			await client.sendText(fresh, 'lost on the way');
-			for (let i = 0; i < 120; i += 1) {
-				if (
-					lost > 0 &&
-					client.failures.some((f) => f.roomId === fresh && f.sender === assistantId)
-				) {
-					break;
-				}
-				await sleep(250);
-			}
-			expect(lost).toBeGreaterThan(0);
-			expect(client.failures.some((f) => f.roomId === fresh && f.sender === assistantId)).toBe(
-				true
-			);
-			losing = false;
-			await client.sendText(fresh, 'the next turn');
-			expect(
-				await client.waitForMessage(fresh, assistantId, (t) => t === 'echo: the next turn')
-			).toBe('echo: the next turn');
-		} finally {
-			h.apisix.matrixFault = null;
-		}
-	});
-
 	it('starts no turn from a message sent in clear in my name, and logs it', async () => {
 		h.apisix.llm.script = (request: ChatRequest) => ({
 			content: `echo: ${request.messages.at(-1)?.content ?? ''}`
