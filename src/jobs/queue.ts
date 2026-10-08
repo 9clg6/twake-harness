@@ -1,7 +1,8 @@
 import type { Db, Tx } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
-export type JobKind = 'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare' | 'name';
+export type JobKind =
+	'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare' | 'name' | 'revoke';
 
 export interface Job {
 	readonly id: number;
@@ -148,7 +149,8 @@ export async function requeueStaleJobs(db: Db, leaseMs: number): Promise<number>
 // turns, an event's included, whatever their state, which then keep nothing; its owner's namings,
 // so that none shows the deleted assistant's name again; the recoveries and preparations of its
 // owner that failed for good, which no route shows; and what it was to send, answers and status
-// counts. A kind these lists do not name stays, as one a later build adds.
+// counts. A kind these lists do not name stays, as one a later build adds: so do the revocations
+// of the owner's permission at the broker, the one this erasure queues after them included.
 const OWNER_JOBS: readonly JobKind[] = ['turn', 'resume', 'name'];
 const OWNER_JOBS_FAILED: readonly JobKind[] = ['recover', 'prepare'];
 const ASSISTANT_JOBS: readonly JobKind[] = ['send', 'progress'];

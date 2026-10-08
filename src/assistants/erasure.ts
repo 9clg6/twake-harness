@@ -1,3 +1,4 @@
+import { requestRevocation } from '../consents/revocation.js';
 import type { Tx } from '../db/client.js';
 import { deleteJobsOf } from '../jobs/queue.js';
 import { forgetIdentityQuestion } from '../matrix/owner-cross-signing-repository.js';
@@ -15,11 +16,13 @@ import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 // keeps the next assistant from taking anything twice: the wake-ups, which keep an event replayed
 // later from waking it, the owner's words received, which keep a copy of them from counting, and
 // when it first read each session their words came from, which keeps the words of a session older
-// than those it remembers from counting.
+// than those it remembers from counting. Last, it queues the revocation of the owner's permission
+// for their assistant to act for them at the broker, asked for at requestedAt.
 // False when the live assistant is no longer the one created at that time.
 export async function eraseAssistant(
 	tx: Tx,
-	assistant: Pick<AssistantRecord, 'owner' | 'userId' | 'createdAt'>
+	assistant: Pick<AssistantRecord, 'owner' | 'userId' | 'createdAt'>,
+	requestedAt: Date
 ): Promise<boolean> {
 	const { owner, userId, createdAt } = assistant;
 	// Locked first: a deletion that comes at the same time waits, then finds nothing left to erase
@@ -47,5 +50,8 @@ export async function eraseAssistant(
 	// It asks them again, there too, about an identity of theirs it does not know
 	await forgetIdentityQuestion(tx, owner);
 	await deleteJobsOf(tx, owner, userId);
+	// After the jobs, which never take it: the deletion is done once this commits, whatever the
+	// broker answers later
+	await requestRevocation(tx, owner, requestedAt);
 	return true;
 }

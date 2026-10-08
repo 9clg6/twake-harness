@@ -66,3 +66,17 @@ export async function fetchDelegation(config: Config, owner: string): Promise<De
 		expiresAt: new Date(held.data.expires_at)
 	};
 }
+
+// Revokes an owner's permission at the broker, which erases it, if it holds one, then leaves the
+// owner's Drive instance, as one answer of no content says. A 404 is the gateway's, without the
+// route, and throws a DelegationRouteMissingError. Any other answer throws: a 502 when the Drive
+// instance did not answer, the permission erased all the same and the broker still on the instance,
+// as does a broker down, or none in time, which may have erased it or not.
+export async function revokeDelegation(config: Config, owner: string): Promise<void> {
+	const { url, init } = delegationRoute(config, owner);
+	const response = await fetch(url, { ...init, method: 'DELETE' });
+	await response.text();
+	if (response.ok) return;
+	if (response.status === 404) throw new DelegationRouteMissingError(url.pathname);
+	throw new Error(`the delegation route answered ${response.status} to the revocation`);
+}

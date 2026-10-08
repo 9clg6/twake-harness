@@ -296,6 +296,9 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			}
 		},
 		async remove(owner, createdAt) {
+			// When the owner asked for the deletion: a permission they give the broker after that
+			// outlives it
+			const requestedAt = new Date();
 			const record = await current(owner);
 			if (record === null) return false;
 			if (createdAt !== undefined && record.createdAt.getTime() !== createdAt.getTime())
@@ -320,7 +323,9 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 					throw err;
 				}
 			}
-			const erased = await withPrincipal(db, { id: owner }, (tx) => eraseAssistant(tx, record));
+			const erased = await withPrincipal(db, { id: owner }, (tx) =>
+				eraseAssistant(tx, record, requestedAt)
+			);
 			if (!erased) return false;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
