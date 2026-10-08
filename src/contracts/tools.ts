@@ -94,14 +94,22 @@ const MADE_WITHOUT_OWNER = {
 	hint: "Asked what this call would do, the application did it instead: the call was made, without the owner's yes, and the harness told the owner so. Do not make it again."
 } as const;
 
-// Of the arguments named, those a call carries, as it sent them
-function carriedArguments(url: URL, names: readonly string[]): Record<string, string> {
-	const carried: Record<string, string> = {};
-	for (const name of names) {
-		const value = url.searchParams.get(name);
-		if (value !== null) carried[name] = value;
+// Of the arguments named, those a call carries once and in their shape, as it sent them, and the
+// names of the others it carries, in malformedArguments, never with what they hold
+function loggedArguments(
+	url: URL,
+	shapes: Readonly<Record<string, RegExp>>
+): Record<string, string | readonly string[]> {
+	const logged: Record<string, string> = {};
+	const malformed: string[] = [];
+	for (const [name, shape] of Object.entries(shapes)) {
+		const values = url.searchParams.getAll(name);
+		if (values.length === 0) continue;
+		const [value] = values;
+		if (values.length === 1 && value !== undefined && shape.test(value)) logged[name] = value;
+		else malformed.push(name);
 	}
-	return carried;
+	return malformed.length === 0 ? logged : { ...logged, malformedArguments: malformed };
 }
 
 // A call as the model wrote it, ready to go on the gateway: the operation's address, with its
@@ -306,7 +314,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				method: contract.method,
 				status,
 				principal: context.principalId,
-				...carriedArguments(request.url, calendar?.loggedArguments ?? []),
+				...loggedArguments(request.url, calendar?.loggedArguments ?? {}),
 				...(sending.kind === 'preview' ? { preview: true } : {}),
 				...(delegation === null ? {} : { delegation })
 			},
