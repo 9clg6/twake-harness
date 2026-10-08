@@ -26,16 +26,19 @@ interface Waiter {
 	resolve(): void;
 }
 
+export interface AdmissionDeps {
+	readonly config: Config;
+	readonly db: Db;
+	readonly log: FastifyBaseLogger;
+	readonly clock: Clock;
+}
+
 // Admission runs before any model call. Limits are per user, so one user cannot saturate the
 // replica for the others, and the queue of a full replica is served one user at a time rather
 // than first come first served. The turns per minute and the daily tokens are counted in the
 // database, so they hold across replicas; the turns in flight and the queue are this replica's.
-export function makeAdmission(
-	config: Config,
-	db: Db,
-	log: FastifyBaseLogger,
-	clock: Clock
-): Admission {
+export function makeAdmission(deps: AdmissionDeps): Admission {
+	const { config, db, log, clock } = deps;
 	const limits = config.admission;
 	let inflight = 0;
 	const running = new Map<string, number>();
