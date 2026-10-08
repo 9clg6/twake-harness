@@ -9,8 +9,10 @@ import {
 	failJob,
 	requeueDeferredJobs,
 	requeueStaleJobs,
+	retryDelaysOf,
 	type Job,
-	type JobKind
+	type JobKind,
+	type RetryDelays
 } from './queue.js';
 
 // What a handler asks of a job it could not run yet: to be tried again after a while, out of its
@@ -28,6 +30,9 @@ export interface JobWorkerOptions {
 	readonly handler: (job: Job) => Promise<Deferral | null>;
 	readonly log: FastifyBaseLogger;
 	readonly pollIntervalMs?: number;
+	// How long a job that failed waits before each of its next tries, by kind, over the queue's: a
+	// test makes a revocation's short
+	readonly retryDelaysMs?: Partial<Record<JobKind, RetryDelays>>;
 	readonly concurrency?: number;
 	// How long a claimed job may run before another replica assumes its holder is gone
 	readonly leaseMs?: number;
@@ -40,8 +45,8 @@ export interface JobWorker {
 	stop(): Promise<void>;
 }
 
-// Polls the queue and runs jobs up to a concurrency; a failing job is retried with a backoff, and a
-// deferred one once due.
+// Polls the queue and runs jobs up to a concurrency; a failing job is tried again after the waits of
+// its kind, and a deferred one once due.
 export function startJobWorker(options: JobWorkerOptions): JobWorker {
 	const workerId = randomUUID();
 	const interval = options.pollIntervalMs ?? 500;
@@ -62,7 +67,8 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 		} catch (err: unknown) {
 			const message = err instanceof Error ? err.message : String(err);
 			options.log.error({ job: job.id, kind: job.kind, attempts: job.attempts, err }, 'job failed');
-			await failJob(options.db, job.id, job.attempts, message).catch(() => undefined);
+			const delaysMs = options.retryDelaysMs?.[job.kind] ?? retryDelaysOf(job.kind);
+			await failJob(options.db, job.id, job.attempts, message, delaysMs).catch(() => undefined);
 		}
 	}
 

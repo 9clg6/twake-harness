@@ -6,6 +6,7 @@ import type { FastifyInstance } from 'fastify';
 
 import type { Clock } from '../../src/agent/clock.js';
 import { startTurnWorker } from '../../src/agent/turn-worker.js';
+import type { JobKind, RetryDelays } from '../../src/jobs/queue.js';
 import type { JobWorker } from '../../src/jobs/worker.js';
 import { buildApp } from '../../src/app.js';
 import { loadConfig, type Config } from '../../src/config.js';
@@ -56,6 +57,9 @@ export interface MatrixStartOptions {
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
 	readonly statusMaxMs?: number;
+	// How long a job of the matrix role that failed waits before each of its next tries, by kind,
+	// over the queue's
+	readonly retryDelaysMs?: Partial<Record<JobKind, RetryDelays>>;
 	// The present the agent, the creator and the check of the owner's devices read, set by the test
 	// instead of the system clock
 	readonly clock?: Clock;
@@ -161,6 +165,7 @@ export async function startMatrixHarness(
 			pollIntervalMs: 100,
 			...(options.pushDeadlineMs === undefined ? {} : { pushDeadlineMs: options.pushDeadlineMs }),
 			...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs }),
+			...(options.retryDelaysMs === undefined ? {} : { retryDelaysMs: options.retryDelaysMs }),
 			...(options.clock === undefined ? {} : { clock: options.clock })
 		});
 	await reserved.release();

@@ -1,7 +1,8 @@
 import type { Db, Tx } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
-export type JobKind = 'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare' | 'name';
+export type JobKind =
+	'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare' | 'name' | 'revoke';
 
 export interface Job {
 	readonly id: number;
@@ -148,7 +149,8 @@ export async function requeueStaleJobs(db: Db, leaseMs: number): Promise<number>
 // turns, an event's included, whatever their state, which then keep nothing; its owner's namings,
 // so that none shows the deleted assistant's name again; the recoveries and preparations of its
 // owner that failed for good, which no route shows; and what it was to send, answers and status
-// counts. A kind these lists do not name stays, as one a later build adds.
+// counts. A kind these lists do not name stays, as one a later build adds: so do the revocations
+// of the owner's permission at the broker, the one this erasure queues after them included.
 const OWNER_JOBS: readonly JobKind[] = ['turn', 'resume', 'name'];
 const OWNER_JOBS_FAILED: readonly JobKind[] = ['recover', 'prepare'];
 const ASSISTANT_JOBS: readonly JobKind[] = ['send', 'progress'];
@@ -172,16 +174,40 @@ export async function completeJob(db: Db | Tx, id: number): Promise<void> {
 	await db.sql`delete from jobs where id = ${id}`;
 }
 
-const MAX_ATTEMPTS = 3;
+// How long a job that failed waits before each of its next tries, in milliseconds: it fails for
+// good after one more try than it has waits
+export type RetryDelays = readonly number[];
 
-export async function failJob(db: Db, id: number, attempts: number, error: string): Promise<void> {
-	if (attempts >= MAX_ATTEMPTS) {
+// Any job tries again two seconds later, then four, and gives up after its third try. A revocation
+// at the broker tries again a minute later, then after ten minutes, an hour, six hours and a day,
+// and gives up after its sixth try, about a day and a half on: it outlasts an outage of the broker,
+// of its gateway or of the owner's Drive instance, and a gateway that publishes its route only
+// after the harness starts.
+const DEFAULT_RETRY_DELAYS_MS: RetryDelays = [2_000, 4_000];
+const RETRY_DELAYS_MS: Partial<Record<JobKind, RetryDelays>> = {
+	revoke: [60_000, 10 * 60_000, 60 * 60_000, 6 * 60 * 60_000, 24 * 60 * 60_000]
+};
+
+export function retryDelaysOf(kind: JobKind): RetryDelays {
+	return RETRY_DELAYS_MS[kind] ?? DEFAULT_RETRY_DELAYS_MS;
+}
+
+// A job that failed is queued again after the wait of the try it failed, or fails for good when that
+// try has none
+export async function failJob(
+	db: Db,
+	id: number,
+	attempts: number,
+	error: string,
+	delaysMs: RetryDelays
+): Promise<void> {
+	const delayMs = delaysMs[attempts - 1];
+	if (delayMs === undefined) {
 		await db.sql`update jobs set status = 'failed', last_error = ${error}, finished_at = now() where id = ${id}`;
 		return;
 	}
-	const delaySeconds = 2 ** attempts;
 	await db.sql`
 		update jobs set status = 'queued', locked_by = null, locked_at = null, last_error = ${error},
-			run_after = now() + make_interval(secs => ${delaySeconds})
+			run_after = now() + make_interval(secs => ${delayMs / 1000})
 		where id = ${id}`;
 }

@@ -13,6 +13,7 @@ import {
 	BROKER_CONSENT_URL,
 	brokerDelegation,
 	brokerNoDelegation,
+	gatewayNoRoute,
 	type ContractReply
 } from './helpers/fake-apisix.js';
 
@@ -244,10 +245,7 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 			// One that expired the day before
 			[brokerDelegation('2027-01-02T08:00:00Z', '2027-02-01T08:00:00Z'), null],
 			// A gateway without the route, whose path the warning names
-			[
-				{ status: 404, body: { error_msg: '404 Route Not Found' } },
-				{ msg: 'delegation route missing', path: '/delegation' }
-			],
+			[gatewayNoRoute(), { msg: 'delegation route missing', path: '/delegation' }],
 			// A broker that fails, a connection that drops
 			[
 				{ status: 502, body: { error_msg: 'upstream unavailable' } },
