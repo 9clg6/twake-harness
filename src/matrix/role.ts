@@ -110,6 +110,11 @@ export interface MatrixRole {
 	stop(): Promise<void>;
 }
 
+// Twake Chat's request to bring an assistant into an encrypted direct conversation, and the other
+// member's answer (D132 there)
+const ASSISTANT_REQUEST_TYPE = 'app.twake.chat.assistant_request';
+const ASSISTANT_CONSENT_TYPE = 'app.twake.chat.assistant_consent';
+
 interface RoomEvent {
 	readonly type?: string;
 	readonly sender?: string;
@@ -665,7 +670,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					{ roomId, sender: event.sender, eventId: event.event_id, err },
 					'decryption failed'
 				);
-				const room = await assistantRoom(roomId);
+				const room = (await assistantRoom(roomId)) ?? (await listenedRoom(roomId));
 				if (room === null || event.sender === room.userId) return;
 				try {
 					const fetched = await fetchMissedKeyShares(room.userId, roomId);
@@ -830,6 +835,34 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		} catch (err: unknown) {
 			log.warn({ roomId, invited, err }, 'room members not read');
 		}
+		if (!direct && config.suggestions.enabled) {
+			let listens = false;
+			try {
+				listens = await isOwnersEncryptedPair(intent, roomId, inviter, invited);
+			} catch (err: unknown) {
+				log.warn({ roomId, invited, err }, 'room not read');
+			}
+			if (listens && !(await otherMemberAccepted(intent, roomId, inviter, invited))) {
+				// The other person said no, or was never asked: it leaves without a word
+				log.info({ roomId, invited, reason: 'no_consent' }, 'assistant declined an invite');
+				try {
+					await intent.leaveRoom(roomId);
+				} catch (err: unknown) {
+					log.warn({ roomId, invited, err }, 'invite not declined');
+				}
+				return;
+			}
+			if (listens) {
+				// Invited by its owner, warned, into their encrypted conversation with someone who
+				// accepted it: it reads it for its owner's suggestions, says nothing there, greets no one
+				await db.sql`
+					insert into assistant_listened_rooms (room_id, owner, user_id)
+					values (${roomId}, ${owner}, ${invited})
+					on conflict (room_id) do nothing`;
+				log.info({ roomId, owner, userId: invited }, 'assistant listens for its owner');
+				return;
+			}
+		}
 		if (!direct) {
 			log.info(
 				{ roomId, invited, sender: inviter, reason: 'not_direct' },
@@ -925,6 +958,79 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return row === undefined
 			? null
 			: { owner: row.owner, userId: row.user_id, welcome: row.welcome };
+	}
+
+	// An encrypted direct conversation its owner invited the assistant into, which it only reads
+	async function listenedRoom(roomId: string): Promise<{ owner: string; userId: string } | null> {
+		const rows = await db.sql<{ owner: string; user_id: string }[]>`
+			select owner, user_id from assistant_listened_rooms where room_id = ${roomId}`;
+		const row = rows[0];
+		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
+	}
+
+	// Whether a room the owner invited their assistant into is an encrypted conversation of the owner
+	// and one other person: there it reads, for its owner alone, and never writes
+	async function isOwnersEncryptedPair(
+		intent: Intent,
+		roomId: string,
+		ownerUserId: string,
+		assistantUserId: string
+	): Promise<boolean> {
+		if ((await roomEncryption(assistantUserId, roomId)) !== 'encrypted') return false;
+		const members = await intent.underlyingClient.getRoomMembers(roomId, undefined, [
+			'join',
+			'invite'
+		]);
+		const others = members.filter(
+			(member) => member.membershipFor !== ownerUserId && member.membershipFor !== assistantUserId
+		);
+		return others.length === 1;
+	}
+
+	// Twake Chat's request and answers (D132 there): every member but the owner answered yes after
+	// the owner's request. Each is keyed by its sender, which the homeserver enforces for a key that
+	// is a user id, and holds the assistant in `assistant_id`.
+	async function otherMemberAccepted(
+		intent: Intent,
+		roomId: string,
+		ownerUserId: string,
+		assistantUserId: string
+	): Promise<boolean> {
+		const state = (await intent.underlyingClient.getRoomState(roomId)) as (RoomEvent & {
+			origin_server_ts?: number;
+		})[];
+		const owned = (event: RoomEvent, type: string): boolean =>
+			event.type === type &&
+			event.state_key === event.sender &&
+			event.content?.['assistant_id'] === assistantUserId;
+		const request = state.find(
+			(event) =>
+				owned(event, ASSISTANT_REQUEST_TYPE) &&
+				event.sender === ownerUserId &&
+				event.content?.['requested'] === true
+		);
+		if (request === undefined) return false;
+		const others = state
+			.filter(
+				(event) =>
+					event.type === 'm.room.member' &&
+					['join', 'invite'].includes(String(event.content?.['membership'])) &&
+					event.state_key !== ownerUserId &&
+					event.state_key !== assistantUserId
+			)
+			.map((event) => event.state_key);
+		return (
+			others.length > 0 &&
+			others.every((member) =>
+				state.some(
+					(event) =>
+						owned(event, ASSISTANT_CONSENT_TYPE) &&
+						event.sender === member &&
+						event.content?.['accepted'] === true &&
+						(event.origin_server_ts ?? 0) > (request.origin_server_ts ?? 0)
+				)
+			)
+		);
 	}
 
 	// A room's encryption, as its assistant's device knows it: the SDK reads the room's
@@ -1250,6 +1356,49 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
+	// A conversation the assistant reads for its owner: it is forgotten once the assistant leaves or
+	// is removed, and left, without a word, once a third person comes in
+	appservice.on(
+		'room.event',
+		guard(
+			'listened room',
+			async (roomId: string, event: RoomEvent) => {
+				const consent =
+					event.type === ASSISTANT_REQUEST_TYPE || event.type === ASSISTANT_CONSENT_TYPE;
+				if (event.type !== 'm.room.member' && !consent) return;
+				const listened = await listenedRoom(roomId);
+				if (listened === null) return;
+				const membership = event.content?.['membership'];
+				const forget = async (reason: string): Promise<void> => {
+					await db.sql`delete from assistant_listened_rooms where room_id = ${roomId}`;
+					suggestions.forget(roomId);
+					log.info({ roomId, owner: listened.owner, reason }, 'assistant stopped listening');
+				};
+				if (!consent && event.state_key === listened.userId) {
+					if (membership === 'leave' || membership === 'ban') await forget('removed');
+					return;
+				}
+				if (!consent && membership !== 'join' && membership !== 'invite') return;
+				const intent = appservice.getIntentForUserId(listened.userId);
+				const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
+				// A third person, a withdrawn request or a no: it leaves without a word
+				if (
+					(await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId)) &&
+					(await otherMemberAccepted(intent, roomId, ownerUserId, listened.userId))
+				) {
+					return;
+				}
+				await forget(consent ? 'no_consent' : 'not_a_pair');
+				try {
+					await intent.leaveRoom(roomId);
+				} catch (err: unknown) {
+					log.warn({ roomId, err }, 'listened room not left');
+				}
+			},
+			(roomId: string, event: RoomEvent) => ({ roomId, eventId: event.event_id })
+		)
+	);
+
 	// The listener's rooms: an invite to a channel, its removal from one, a room that turns encrypted
 	appservice.on(
 		'room.event',
@@ -1277,6 +1426,18 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		// Null for a message without words, as an image or a file, which only the creator reads
 		const text = textOf(raw);
+		const listened = await listenedRoom(roomId);
+		if (listened !== null) {
+			// Never a turn there: what it reads proposes to its owner alone
+			if (raw.event_id !== undefined && text !== null) {
+				await suggestions.onMessage(
+					roomId,
+					{ sender, eventId: raw.event_id, text },
+					listened.owner
+				);
+			}
+			return;
+		}
 		const room = await assistantRoom(roomId);
 		if (room !== null) {
 			if (text === null) return;
