@@ -631,8 +631,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			}
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
-			// The names of the tools the model is given: its rules offer only what they can do
-			const offered = tools.definitions.map((tool) => tool.function.name);
+			// The names of the tools the model is given, which its rules are built on
+			const toolNames = tools.definitions.map((tool) => tool.function.name);
 			try {
 				const turn = await runTurn(
 					{
@@ -647,13 +647,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							persona:
 								principal.id === ORGANIZATION_PRINCIPAL
 									? withAddressing(
-											organizationPrompt(config.org.name, config.org.persona, offered),
+											organizationPrompt(config.org.name, config.org.persona, toolNames),
 											messages
 										)
 									: withLanguage(
 											input.assistantName === undefined
-												? defaultPrompt(offered)
-												: assistantPrompt(input.assistantName, offered),
+												? defaultPrompt(toolNames)
+												: assistantPrompt(input.assistantName, toolNames),
 											messages
 										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
