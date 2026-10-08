@@ -179,6 +179,17 @@ describe('my assistant asks before it first uses an application', () => {
 			);
 		await allow('erin@test.local', 'read', 'chat');
 		await allow('alice@test.local', 'write', 'api');
+		// Frank was asked whether his assistant may read his calendar, in the words that meant his free
+		// and busy times alone, and has not answered yet
+		const slot = { start: '2026-10-07T17:00:00+02:00', end: '2026-10-07T18:00:00+02:00' };
+		h.apisix.llm.script = () => ({ toolCalls: call('read_freebusy', slot) });
+		const asked = await h.api.post<{ pending_call: { id: string } }>(
+			'frank@test.local',
+			'/v1/chat',
+			{
+				message: 'Am I free tomorrow at 5?'
+			}
+		);
 		await h.db.sql`delete from schema_migrations where name = '0067_consents_calendar_reask.sql'`;
 		expect((await runMigrations(h.db)).applied).toEqual(['0067_consents_calendar_reask.sql']);
 		const consentsOf = async (owner: string): Promise<string[]> =>
@@ -187,13 +198,30 @@ describe('my assistant asks before it first uses an application', () => {
 					(row) => `${row.domain} ${row.level}`
 				)
 			);
+		const waitingOf = async (owner: string): Promise<string[]> =>
+			withPrincipal(h.db, { id: owner }, async (tx) =>
+				(
+					await tx.sql<{ domain: string; level: string }[]>`
+						select domain, level from pending_calls where status = 'open'`
+				).map((row) => `${row.domain} ${row.level}`)
+			);
 		// Calendar read went, whoever gave it; what else an owner allowed stays
 		expect(await consentsOf('alice@test.local')).toEqual(['calendar write']);
 		expect(await consentsOf('dave@test.local')).toEqual([]);
 		expect(await consentsOf('erin@test.local')).toEqual([]);
+		// A request to read it, asked in the old words, waits no more; Alice's to read her mail does
+		expect(await waitingOf('frank@test.local')).toEqual([]);
+		expect(await waitingOf('alice@test.local')).toEqual(['mail read']);
+		// Frank's yes to it comes too late, and allows nothing
+		expect(
+			await h.api.post(
+				'frank@test.local',
+				`/v1/pending-calls/${asked.body.pending_call.id}/approve`,
+				{}
+			)
+		).toEqual({ status: 409, body: { error: 'pending call closed', state: 'expired' } });
+		expect(await consentsOf('frank@test.local')).toEqual([]);
 		// Dave's next read of his calendar waits for his answer, as a first read does
-		const slot = { start: '2026-10-07T17:00:00+02:00', end: '2026-10-07T18:00:00+02:00' };
-		h.apisix.llm.script = () => ({ toolCalls: call('read_freebusy', slot) });
 		const res = await h.api.post<{ answer: string }>('dave@test.local', '/v1/chat', {
 			message: 'Am I free tomorrow at 5?'
 		});
