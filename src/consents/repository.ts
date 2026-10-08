@@ -457,6 +457,22 @@ export async function markReplayed(tx: Tx, id: string): Promise<void> {
 		where id = ${id}`;
 }
 
+// One of the owner's calls, locked until the transaction ends, so that no answer changes it
+// meanwhile: its state, and whether it waits to run, allowed and not run yet. Null when no such
+// call is stored.
+export async function lockPendingCall(
+	tx: Tx,
+	owner: string,
+	id: string
+): Promise<{ readonly state: RequestState; readonly waitsToRun: boolean } | null> {
+	const rows = await tx.sql<{ status: string; waits_to_run: boolean }[]>`
+		select status, status = 'approved' and replayed_at is null as waits_to_run
+		from pending_calls where id = ${id} and owner = ${owner}
+		for update`;
+	const row = rows[0];
+	return row === undefined ? null : { state: stateOf(row.status), waitsToRun: row.waits_to_run };
+}
+
 // The call its owner allowed, which admission kept from running, waits for their answer again as
 // it did once asked, should its request end after the refusal lifts, in this many milliseconds: no
 // answer is recorded, and the owner's next message may answer it in words. False when the call no

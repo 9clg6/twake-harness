@@ -11,6 +11,7 @@ import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
 import {
 	expireHeldRequest,
 	findPendingCall,
+	lockPendingCall,
 	reopenRequest,
 	toYesNoQuestion,
 	type RequestState
@@ -245,11 +246,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 					}
 				: { liftsInMs: 0, told: { open: consent.heldTooLong, expired: consent.expired } };
 		const settlement = await withPrincipal(db, { id: owner }, async (tx): Promise<Settlement> => {
+			// Locked before anything is read of it: an answer recorded meanwhile waits for this
+			// transaction to end, and finds the call as it left it
+			const held = await lockPendingCall(tx, owner, pendingCallId);
+			if (held === null || !held.waitsToRun) return { settled: false, state: held?.state ?? null };
 			const reopened = await reopenRequest(tx, owner, pendingCallId, requestLifetimeMs, liftsInMs);
-			if (!reopened && !(await expireHeldRequest(tx, owner, pendingCallId))) {
-				const found = await findPendingCall(tx, owner, pendingCallId);
-				return { settled: false, state: found?.state ?? null };
-			}
+			if (!reopened) await expireHeldRequest(tx, owner, pendingCallId);
 			const state = reopened ? 'open' : 'expired';
 			const call = reopened ? await findPendingCall(tx, owner, pendingCallId) : null;
 			const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
