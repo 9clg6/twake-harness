@@ -118,6 +118,10 @@ const OLD_SESSION_MESSAGE =
 	'I did not act on your last message: your app encrypted it with keys it has used for more than thirty days, which I no longer accept. Send /discardsession in this room so that it uses new ones; then send it again.';
 const UNVERIFIED_REPORT =
 	'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
+const CHANGED_REPORT =
+	'Your encryption identity changed. I act on what you write for now; write to your assistant, which will ask you in its room whether you reset it yourself.';
+const CHANGED_REPORT_WITHOUT_ASSISTANT =
+	'Your encryption identity changed. I act on what you write for now; if you did not reset it yourself, change your password and warn your administrator.';
 
 describe('the creator takes my commands only from the sessions my identity signed', () => {
 	let r: CreatorRoom;
@@ -365,6 +369,42 @@ describe('while the harness only reports the sessions the creator would not take
 			r.h.apisix.matrixFault = null;
 		}
 		expect(await assistantName(r)).toBe('Jeeves');
+	});
+
+	it('takes my commands after my identity changed all the same, and tells me my assistant asks me about it', async () => {
+		await r.client.resetIdentity();
+		const helped = r.saying('I create and manage').length;
+		await r.client.sendText(r.room, '/help');
+		expect(await r.nextSaying('I create and manage', helped)).toContain('/newbot');
+		expect(await r.nextSaying('Your encryption identity changed', 0)).toBe(CHANGED_REPORT);
+		expect(await assistantName(r)).toBe('Jeeves');
+	});
+
+	it('takes the commands of someone without an assistant after their identity changed, and only advises them', async () => {
+		const bob = await r.h.synapse.registerUser('bob');
+		const client = await startE2eeClient(r.h.synapse.url, bob);
+		sessions.push(client);
+		const room = await client.createDirectRoom(r.creatorId);
+		await client.waitForMessage(room, r.creatorId, (t) => t.includes('/newbot'));
+		const said = (prefix: string): string[] =>
+			client.messages
+				.filter((m) => m.roomId === room && m.sender === r.creatorId && m.body.startsWith(prefix))
+				.map((m) => m.body);
+		// Once the creator said one more thing that starts so
+		const saysMore = async (prefix: string, seen: number): Promise<void> => {
+			for (let i = 0; i < 120 && said(prefix).length <= seen; i += 1) await sleep(250);
+			expect(said(prefix).length).toBeGreaterThan(seen);
+		};
+		// Its greeting starts as its help does
+		const greeted = said('I create and manage').length;
+		await client.sendText(room, '/help');
+		await saysMore('I create and manage', greeted);
+		await client.resetIdentity();
+		const helped = said('I create and manage').length;
+		await client.sendText(room, '/help');
+		await saysMore('Your encryption identity changed', 0);
+		expect(said('Your encryption identity changed')).toEqual([CHANGED_REPORT_WITHOUT_ASSISTANT]);
+		await saysMore('I create and manage', helped);
 	});
 
 	it('takes no command it cannot check before it decrypts it, and tells me to try again', async () => {

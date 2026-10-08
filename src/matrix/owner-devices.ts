@@ -3,7 +3,12 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { OwnerDeviceTrust } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import type { DeviceShortfall, Messages, OwnerWordsKind } from '../i18n/messages.js';
+import type {
+	DeviceShortfall,
+	IdentityReport,
+	Messages,
+	OwnerWordsKind
+} from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
 import type { IdentityQuestions } from './identity-questions.js';
 import {
@@ -116,6 +121,8 @@ export interface OwnerDeviceGateDeps {
 	fetchMessages(owner: string): Promise<Messages>;
 	// Where the owner is asked whether they reset their identity themselves
 	readonly questions: Pick<IdentityQuestions, 'ask'>;
+	// Whether the owner has an assistant, whose room asks them about a new identity of theirs
+	hasAssistant(owner: string): Promise<boolean>;
 }
 
 export interface OwnerDeviceGate {
@@ -193,15 +200,37 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 		}
 	}
 
-	// Asks the owner in the room their words came to whether they reset their identity themselves.
-	// Whether they could be asked never changes whether their words count.
-	async function ask(words: OwnerWords, newIdentity: string): Promise<void> {
+	// Why the owner is told about the identity that is not the one held, whose session their words
+	// came from: null once their assistant asked them whether they reset it themselves instead
+	async function identityReport(
+		words: OwnerWords,
+		verdict: DeviceVerdict
+	): Promise<IdentityReport | null> {
 		const { roomId, owner, eventId, assistantUserId } = words;
-		try {
-			await deps.questions.ask({ roomId, owner, assistantUserId }, eventId, newIdentity);
-		} catch (err: unknown) {
-			log.error({ roomId, owner, eventId, mode, err }, 'owner identity question failed');
+		// Only an assistant asks, in its room: the creator sends the owner there when they have one
+		if (words.conversation === 'creator') {
+			return (await deps.hasAssistant(owner)) ? 'assistant_asks' : 'no_assistant';
 		}
+		// It asks only about the identity that signed the session the words came from
+		if (!verdict.signed || verdict.masterKey === null) return 'unsigned';
+		await deps.questions.ask({ roomId, owner, assistantUserId }, eventId, verdict.masterKey);
+		return null;
+	}
+
+	// The owner's words came from a session of another identity than the one held, the deployment
+	// only reporting: their assistant asks them whether they reset it themselves, or they are told
+	// what they can do about it, never to accept it through the API, which only a deployment that
+	// enforces needs. Whether they could be asked or told never changes whether their words count.
+	async function reportIdentity(words: OwnerWords, verdict: DeviceVerdict): Promise<void> {
+		const { roomId, owner, eventId } = words;
+		const report = await identityReport(words, verdict).catch((err: unknown) => {
+			log.error({ roomId, owner, eventId, mode, err }, 'owner identity report failed');
+			return null;
+		});
+		if (report === null) return;
+		await tell(words, verdict.device, 'identity_changed', true, (m) =>
+			m.ownerDevices.reportedIdentity(report)
+		);
 	}
 
 	return {
@@ -278,17 +307,13 @@ export function makeOwnerDeviceGate(deps: OwnerDeviceGateDeps): OwnerDeviceGate 
 			const reason = SHORTFALLS[shortfall];
 			if (mode === 'report') {
 				log.info(fields, 'owner device unverified');
-				// The identity that signed the session may be one the owner reset themselves: their
-				// assistant asks them, and their answer may adopt it
-				const newIdentity =
-					shortfall === 'changed' && verdict.signed && words.conversation === 'assistant'
-						? verdict.masterKey
-						: null;
-				if (newIdentity !== null) {
-					await ask(words, newIdentity);
-					return admitted;
+				if (shortfall === 'changed') {
+					await reportIdentity(words, verdict);
+				} else {
+					await tell(words, verdict.device, reason, true, (m) =>
+						m.ownerDevices.reported(shortfall)
+					);
 				}
-				await tell(words, verdict.device, reason, true, (m) => m.ownerDevices.reported(shortfall));
 				return admitted;
 			}
 			log.info(fields, 'assistant ignored an unverified device');

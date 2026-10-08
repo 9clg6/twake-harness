@@ -194,7 +194,11 @@ export interface Messages {
 		refused(via: OwnerWordsKind, reason: DeviceShortfall): string;
 		// Taken all the same, the deployment only reporting: why the session falls short, and what
 		// the owner can do about it
-		reported(reason: DeviceShortfall): string;
+		reported(reason: Exclude<DeviceShortfall, 'changed'>): string;
+		// Taken all the same, the deployment only reporting, from a session of another identity than
+		// the one held, when no question asks the owner whether they reset it: why, and what they can
+		// do about it. Never through the API, which only a deployment that enforces it needs.
+		reportedIdentity(report: IdentityReport): string;
 		// Not taken: the message came in clear, in a room that reads as clear
 		readonly unencrypted: string;
 		// Not taken: the owner's client encrypted the words with a Megolm session it has used for longer
@@ -449,8 +453,16 @@ const ENGLISH: Messages = {
 					return 'This session of yours is not verified. I act on what you write from it for now; verify it so that I keep doing so: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
 				case 'no_identity':
 					return 'Your account has no encryption identity yet, so I cannot verify your sessions. I act on what you write for now; set one up so that I keep doing so: sign out of Twake Chat and sign in again.';
-				case 'changed':
-					return `Your encryption identity is not the one I know. I act on what you write for now; if you reset it yourself, confirm the new one through your assistant's API (${OWNER_IDENTITY_ROUTE}) so that I keep doing so.`;
+			}
+		},
+		reportedIdentity: (report) => {
+			switch (report) {
+				case 'unsigned':
+					return 'Your encryption identity changed, and the new one did not sign this session. I act on what you write for now; so that I can ask you whether you reset it yourself, write to me from a session it signed, or verify this one: in another of your Twake Chat sessions, open Settings > Devices, find this one marked Unverified and tap Verify.';
+				case 'assistant_asks':
+					return 'Your encryption identity changed. I act on what you write for now; write to your assistant, which will ask you in its room whether you reset it yourself.';
+				case 'no_assistant':
+					return 'Your encryption identity changed. I act on what you write for now; if you did not reset it yourself, change your password and warn your administrator.';
 			}
 		},
 		unencrypted:
@@ -686,8 +698,16 @@ const FRENCH: Messages = {
 					return "Cette session n'est pas vérifiée. Je donne suite à ce que tu y écris pour l'instant ; vérifie-la pour que cela continue : dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier ».";
 				case 'no_identity':
 					return "Ton compte n'a pas encore d'identité de chiffrement, je ne peux donc pas vérifier tes sessions. Je donne suite à ce que tu écris pour l'instant ; crée-la pour que cela continue : déconnecte-toi de Twake Chat et reconnecte-toi.";
-				case 'changed':
-					return `Ton identité de chiffrement n'est pas celle que je connais. Je donne suite à ce que tu écris pour l'instant ; si tu l'as réinitialisée toi-même, confirme la nouvelle par l'API de ton assistant (${OWNER_IDENTITY_ROUTE}) pour que cela continue.`;
+			}
+		},
+		reportedIdentity: (report) => {
+			switch (report) {
+				case 'unsigned':
+					return "Ton identité de chiffrement a changé, et la nouvelle n'a pas signé cette session. Je donne suite à ce que tu écris pour l'instant ; pour que je puisse te demander si tu l'as réinitialisée toi-même, écris-moi depuis une session qu'elle a signée, ou vérifie celle-ci : dans une autre de tes sessions Twake Chat, ouvre Réglages > Appareils, repère celle-ci, marquée « Non vérifié », et touche « Vérifier ».";
+				case 'assistant_asks':
+					return "Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; écris à ton assistant, qui te demandera dans son salon si tu l'as réinitialisée toi-même.";
+				case 'no_assistant':
+					return "Ton identité de chiffrement a changé. Je donne suite à ce que tu écris pour l'instant ; si tu ne l'as pas réinitialisée toi-même, change ton mot de passe et préviens ton administrateur.";
 			}
 		},
 		unencrypted:
@@ -721,6 +741,11 @@ export type OwnerWordsKind = 'message' | 'answer';
 // Why a session of the owner falls short: their identity did not sign it, they have no identity,
 // or their identity is not the one their assistant holds
 export type DeviceShortfall = 'unverified' | 'no_identity' | 'changed';
+
+// Why the owner is told about another identity than the one held rather than asked whether they
+// reset it, while the deployment only reports: it did not sign the session their words came from,
+// or they wrote to the creator, while they have an assistant, whose room asks them, or none yet
+export type IdentityReport = 'unsigned' | 'assistant_asks' | 'no_assistant';
 
 // Where an owner confirms an identity they reset themselves while the deployment enforces their
 // sessions' identity, which no message in the chat can do then

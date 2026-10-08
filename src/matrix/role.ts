@@ -1061,6 +1061,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		mode: config.matrix.ownerDeviceTrust,
 		fetchMessages,
 		questions: identityQuestions,
+		hasAssistant: async (owner) => {
+			const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+			return assistant !== null && assistant.deletedAt === null;
+		},
 		decrypt: decryptChecked,
 		queryKeys: async (assistantUserId, ownerUserId) => {
 			const intent = appservice.getIntentForUserId(assistantUserId);
