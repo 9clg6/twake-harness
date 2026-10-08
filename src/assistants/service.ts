@@ -4,6 +4,7 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { fetchOwnerMessages } from './locale.js';
 import type { MatrixAdmin } from '../matrix/admin.js';
+import { announceCommands } from '../matrix/commands.js';
 import { assistantUserId } from '../matrix/registration.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import {
@@ -12,6 +13,7 @@ import {
 	renameAssistant,
 	saveAssistant,
 	saveAssistantRoom,
+	saveProvisioned,
 	setAssistantRoomId,
 	type AssistantRecord
 } from './repository.js';
@@ -30,8 +32,15 @@ export type CreateResult =
 			readonly reason: 'exists' | 'invalid_name' | 'not_on_homeserver' | 'failed';
 	  };
 
+export type ProvisionResult =
+	| { readonly ok: true; readonly userId: string }
+	| { readonly ok: false; readonly reason: 'not_on_homeserver' | 'failed' };
+
 export interface AssistantService {
 	create(owner: string, name: string): Promise<CreateResult>;
+	// The owner's assistant as a provisioner asks for it: the live one, or a new one under the
+	// default name, without a room of its own, since the owner's client opens the direct room
+	provision(owner: string): Promise<ProvisionResult>;
 	find(owner: string): Promise<AssistantView | null>;
 	rename(owner: string, name: string): Promise<AssistantView | null>;
 	remove(owner: string): Promise<boolean>;
@@ -126,12 +135,19 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 				// devices. The room and its index land together or not at all.
 				// A first assistant greets in the deployment's language; one created again, in the
 				// language its owner chose for the one before
-				const welcome = (await fetchOwnerMessages(db, owner, config.locale)).welcome(name);
+				const toOwner = await fetchOwnerMessages(db, owner, config.locale);
+				const welcome = toOwner.welcome(name);
 				await withPrincipal(db, { id: owner }, async (tx) => {
 					await setAssistantRoomId(tx, owner, opened);
 					await saveAssistantRoom(tx, { roomId: opened, owner, userId, welcome });
 				});
 				log.info({ owner, userId, roomId: opened, named, reclaimed }, 'assistant created');
+				// As in every room of the assistant: the client offers them after « / »
+				await announceCommands(
+					{ admin, log },
+					{ roomId: opened, assistantUserId: userId },
+					toOwner
+				);
 				return {
 					ok: true,
 					assistant: toView({ userId, name, roomId: opened })
@@ -139,6 +155,35 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			} catch (err: unknown) {
 				log.error({ owner, userId, roomId, err }, 'assistant creation failed');
 				await undoCreation(owner, userId, roomId, saved);
+				return { ok: false, reason: 'failed' };
+			}
+		},
+		async provision(owner) {
+			const live = await current(owner);
+			if (live !== null) {
+				await saveProvisioned(db, { owner, userId: live.userId, owesWelcome: false });
+				return { ok: true, userId: live.userId };
+			}
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
+			if (ownerLocalpart === null) return { ok: false, reason: 'not_on_homeserver' };
+			const userId = assistantUserId(config, ownerLocalpart);
+			const localpart = `${config.matrix.assistantPrefix}${ownerLocalpart}`;
+			const name = (await fetchOwnerMessages(db, owner, config.locale)).defaultAssistantName;
+			try {
+				// The account is registered once and kept, as for an assistant the owner creates
+				await admin.registerUser(localpart);
+				const named = await admin.setDisplayName(userId, name);
+				// Saved together: an assistant saved alone would be found live by the next call, and would
+				// never owe its owner the greeting
+				const { reclaimed } = await withPrincipal(db, { id: owner }, async (tx) => {
+					const saved = await saveAssistant(tx, { owner, userId, name, roomId: null });
+					await saveProvisioned(tx, { owner, userId, owesWelcome: true });
+					return saved;
+				});
+				log.info({ owner, userId, named, reclaimed }, 'assistant provisioned');
+				return { ok: true, userId };
+			} catch (err: unknown) {
+				log.error({ owner, userId, err }, 'assistant provisioning failed');
 				return { ok: false, reason: 'failed' };
 			}
 		},
@@ -168,6 +213,7 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			}
 			await withPrincipal(db, { id: owner }, (tx) => markAssistantDeleted(tx, owner));
 			await db.sql`delete from assistant_rooms where owner = ${owner}`;
+			await db.sql`delete from assistant_provisioned where owner = ${owner}`;
 			log.info({ owner, userId: record.userId }, 'assistant deleted');
 			return true;
 		}

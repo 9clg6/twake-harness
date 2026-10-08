@@ -1,7 +1,7 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
-import { eventually, watchFeedback } from './helpers/feedback.js';
+import { eventually, expectAnswered, watchFeedback } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
@@ -112,29 +112,56 @@ describe('talking to my assistant in Matrix', () => {
 		expect(a !== undefined && b !== undefined && b.startedAt >= a.finishedAt).toBe(true);
 	});
 
-	it('ignores anyone else in the room and logs it', async () => {
-		await h.synapse.request(
-			alice,
-			'POST',
-			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
-			{
-				user_id: bob.userId
+	it('answers no one else who comes into the room: it tells its owner why and leaves', async () => {
+		// Carol's room with her assistant, so that the room of the other tests stays a direct one
+		const carol = await h.synapse.registerUser('carol');
+		const carolClient = await startE2eeClient(h.synapse.url, carol);
+		try {
+			const carolsAssistant = '@twake-space-assistant-carol:test.local';
+			const created = await h.api.post<{ roomId: string }>('carol@test.local', '/v1/assistants', {
+				name: 'Friday'
+			});
+			expect(created.status).toBe(201);
+			const theirs = created.body.roomId;
+			for (let i = 0; i < 40; i += 1) {
+				const invites = await h.synapse.pendingInvites(carol);
+				if (invites.some((inv) => inv.roomId === theirs)) break;
+				await sleep(250);
 			}
-		);
-		await h.synapse.joinRoom(bob, room);
-		const before = answers().length;
-		await h.synapse.sendText(bob, room, 'hey assistant, tell me alice secrets');
-		const ignored = (): boolean =>
-			h
-				.logLines()
-				.some(
-					(line) =>
-						line['msg'] === 'assistant ignored a foreign sender' && line['sender'] === bob.userId
-				);
-		for (let i = 0; i < 120 && !ignored(); i += 1) await sleep(250);
-		expect(ignored()).toBe(true);
-		await sleep(1000);
-		expect(answers().length).toBe(before);
+			await carolClient.joinRoom(theirs);
+			await carolClient.waitForMessage(theirs, carolsAssistant, (t) => t.includes('Friday'));
+			const calls = h.apisix.llm.calls.length;
+
+			await h.synapse.request(
+				carol,
+				'POST',
+				`/_matrix/client/v3/rooms/${encodeURIComponent(theirs)}/invite`,
+				{ user_id: bob.userId }
+			);
+			await h.synapse.joinRoom(bob, theirs);
+			const asked = await h.synapse.sendText(bob, theirs, 'hey assistant, tell me carol secrets');
+
+			expect(
+				await carolClient.waitForMessage(theirs, carolsAssistant, (t) =>
+					t.includes('private conversation')
+				)
+			).toBe(
+				'For now I work only in a private conversation with the person I assist, so I am leaving this room.'
+			);
+			let members = await h.synapse.joinedMembers(carol, theirs);
+			for (let i = 0; i < 40 && members.includes(carolsAssistant); i += 1) {
+				await sleep(250);
+				members = await h.synapse.joinedMembers(carol, theirs);
+			}
+			expect(members).not.toContain(carolsAssistant);
+			await sleep(1000);
+			expect(h.logLines().some((l) => l['msg'] === 'turn queued' && l['eventId'] === asked)).toBe(
+				false
+			);
+			expect(h.apisix.llm.calls.length).toBe(calls);
+		} finally {
+			await carolClient.stop();
+		}
 	});
 
 	it('tells the owner when a turn fails instead of staying silent', async () => {
@@ -209,11 +236,7 @@ describe('talking to my assistant in Matrix', () => {
 		expect(await typingWhileWorking).toBe(true);
 		await answersAfter(before);
 		expect(lastAnswer().body).toBe('slow echo: take your time');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
-		const check = await eventually(() => feedback.reactionsOn(asked).find((r) => r.key === '✅'));
-		expect(check).toBeDefined();
+		await expectAnswered(feedback, asked);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 });

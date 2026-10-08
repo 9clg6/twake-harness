@@ -46,7 +46,13 @@ if (config.role === 'worker') {
 	const agent = app.agent;
 	app.log.info({ role: config.role, applied: report.applied }, 'harness starting');
 	await agent.contracts.load();
-	const worker = startTurnWorker({ db, agent, log: app.log, locale: config.locale });
+	const worker = startTurnWorker({
+		db,
+		agent,
+		log: app.log,
+		locale: config.locale,
+		turn: config.turn
+	});
 	const shutdown = async (signal: string): Promise<void> => {
 		app.log.info({ signal }, 'harness stopping');
 		agent.contracts.stop();

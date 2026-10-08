@@ -71,6 +71,15 @@ spec:
               value: {{ .Values.config.authAudience | quote }}
             - name: APISIX_BASE_URL
               value: {{ .Values.config.apisixBaseUrl | quote }}
+            {{- /* Every role refreshes the catalog of contracts and the api role calls them: each needs these */}}
+            {{- with .Values.config.contractsBasePath }}
+            - name: CONTRACTS_BASE_PATH
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.contractsOpenapiPath }}
+            - name: CONTRACTS_OPENAPI_PATH
+              value: {{ . | quote }}
+            {{- end }}
             - name: LLM_MODEL
               value: {{ .Values.config.llmModel | quote }}
             {{- with .Values.config.llmMaxTokens }}
@@ -107,6 +116,27 @@ spec:
             - name: TURN_MAX_TOOL_CALLS
               value: {{ . | int64 | quote }}
             {{- end }}
+            {{- with .Values.config.turnStatusDelayMs }}
+            - name: TURN_STATUS_DELAY_MS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- /* The api role runs the turns, the events' among them */}}
+            {{- if eq .Values.role "api" }}
+            {{- with .Values.config.turnEventMaxDelayMs }}
+            - name: TURN_EVENT_MAX_DELAY_MS
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- end }}
+            {{- /* Checked on every role, rendered on the matrix role, the only one that reads owner words */}}
+            {{- with .Values.config.ownerDeviceTrust }}
+            {{- if not (has . (list "report" "enforce")) }}
+            {{- fail "config.ownerDeviceTrust must be report or enforce" }}
+            {{- end }}
+            {{- if eq $.Values.role "matrix" }}
+            - name: OWNER_DEVICE_TRUST
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
             - name: ORG_AGENT_ENABLED
               value: {{ .Values.config.orgAgentEnabled | quote }}
             - name: ORG_AGENT_LOCALPART
@@ -119,8 +149,53 @@ spec:
             {{- end }}
             - name: ORG_AGENT_MEMBERS
               value: {{ .Values.config.orgAgentMembers | quote }}
-            - name: EVENTS_CLIENT_IDS
-              value: {{ .Values.config.eventsClientIds | quote }}
+            - name: PROVISIONER_CLIENT_IDS
+              value: {{ .Values.config.provisionerClientIds | quote }}
+            {{- /* The worker role alone listens to RabbitMQ, and only it gets the broker's address. It wakes the owners by their email on the mail domain, MATRIX_MAIL_DOMAIN or else MATRIX_SERVER_NAME, which every role gets when set */}}
+            {{- if include "twake-harness.listens" . }}
+            {{- if not (or .Values.config.matrixServerName .Values.config.matrixMailDomain) }}
+            {{- fail "config.matrixServerName or config.matrixMailDomain must be set for the worker role to listen to RabbitMQ: it wakes the owners by their email on that mail domain" }}
+            {{- end }}
+            {{- with .Values.config.rabbitmqPrefix }}
+            - name: RABBITMQ_PREFIX
+              value: {{ . | quote }}
+            {{- end }}
+            {{- if .Values.config.activityEnabled }}
+            - name: ACTIVITY_ENABLED
+              value: "true"
+            - name: ACTIVITY_AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.activityAmqpUrlSecret | default (include "twake-harness.secretName" .) }}
+                  key: {{ .Values.config.activityAmqpUrlSecretKey }}
+            {{- with .Values.config.activityTypes }}
+            - name: ACTIVITY_TYPES
+              value: {{ . | quote }}
+            {{- end }}
+            {{- end }}
+            {{- if .Values.config.calendarEnabled }}
+            - name: CALENDAR_ENABLED
+              value: "true"
+            - name: CALENDAR_AMQP_URL
+              valueFrom:
+                secretKeyRef:
+                  name: {{ .Values.config.calendarAmqpUrlSecret | default (include "twake-harness.secretName" .) }}
+                  key: {{ .Values.config.calendarAmqpUrlSecretKey }}
+            {{- end }}
+            {{- end }}
+            {{- /* The worker role wakes the assistants for the events of every source it listens to */}}
+            {{- if eq .Values.role "worker" }}
+            {{- with .Values.config.wakeupsPerHour }}
+            - name: WAKEUPS_PER_HOUR
+              value: {{ . | int64 | quote }}
+            {{- end }}
+            {{- /* The worker role purges the wake-ups, whether it listens or not, and reads it as an integer: 0 counts, as for the admission, for the harness to refuse it */}}
+            {{- $retention := .Values.config.wakeupsRetentionMs }}
+            {{- if and (not (kindIs "invalid" $retention)) (ne (toString $retention) "") }}
+            - name: WAKEUPS_RETENTION_MS
+              value: {{ $retention | int64 | quote }}
+            {{- end }}
+            {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
             {{- with .Values.config.matrixServerName }}
             - name: MATRIX_SERVER_NAME

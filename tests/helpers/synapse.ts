@@ -20,6 +20,8 @@ export interface AppserviceRegistration {
 export interface MatrixUser {
 	readonly userId: string;
 	readonly accessToken: string;
+	// What the user signs in with, and confirms a change of their cross-signing identity with
+	readonly password?: string;
 }
 
 export interface MatrixReply {
@@ -50,6 +52,8 @@ export interface TestSynapse {
 	pendingInvites(user: MatrixUser): Promise<{ roomId: string; inviter: string }[]>;
 	joinRoom(user: MatrixUser, roomId: string): Promise<void>;
 	joinedMembers(user: MatrixUser, roomId: string): Promise<string[]>;
+	// Resolves once `userId` joined the room, as `viewer` sees its members
+	waitForMember(viewer: MatrixUser, roomId: string, userId: string): Promise<void>;
 	displayName(userId: string): Promise<string | null>;
 	whoami(accessToken: string): Promise<number>;
 	logs(): Promise<string>;
@@ -187,7 +191,8 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		}
 		return {
 			userId: res.body['user_id'] as string,
-			accessToken: res.body['access_token'] as string
+			accessToken: res.body['access_token'] as string,
+			password: `${localpart}-password`
 		};
 	}
 
@@ -211,7 +216,8 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		}
 		return {
 			userId: res.body['user_id'] as string,
-			accessToken: res.body['access_token'] as string
+			accessToken: res.body['access_token'] as string,
+			password
 		};
 	}
 
@@ -307,6 +313,14 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		return Object.keys((res.body['joined'] as Record<string, unknown> | undefined) ?? {});
 	}
 
+	async function waitForMember(viewer: MatrixUser, roomId: string, userId: string): Promise<void> {
+		for (let i = 0; i < 80; i += 1) {
+			if ((await joinedMembers(viewer, roomId)).includes(userId)) return;
+			await sleep(250);
+		}
+		throw new Error(`${userId} never joined ${roomId}`);
+	}
+
 	async function displayName(userId: string): Promise<string | null> {
 		const res = await request(
 			null,
@@ -334,6 +348,7 @@ export async function startTestSynapse(registration: AppserviceRegistration): Pr
 		pendingInvites,
 		joinRoom,
 		joinedMembers,
+		waitForMember,
 		displayName,
 		whoami,
 		logs: async () => {

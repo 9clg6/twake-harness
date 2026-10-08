@@ -1,13 +1,18 @@
 import type { Db, Tx } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
-export type JobKind = 'turn' | 'send' | 'recover' | 'resume';
+export type JobKind = 'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare';
 
 export interface Job {
 	readonly id: number;
 	readonly kind: JobKind;
 	readonly payload: unknown;
 	readonly attempts: number;
+	// How many times its handler deferred it so far
+	readonly deferrals: number;
+	// How long ago its handler first deferred it, by the database's clock when it was claimed: 0
+	// for a job never deferred
+	readonly deferredForMs: number;
 }
 
 export interface EnqueueInput {
@@ -24,6 +29,8 @@ interface JobRow {
 	kind: string;
 	payload: unknown;
 	attempts: number;
+	deferrals: number;
+	deferred_for_ms: string;
 }
 
 // Queued in the transaction given, a job goes out with what that transaction writes, or not at all
@@ -61,15 +68,39 @@ export async function claimJob(
 			for update of j skip locked
 			limit 1
 		)
-		returning id, kind, payload, attempts`;
+		returning id, kind, payload, attempts, deferrals,
+			coalesce((extract(epoch from now() - first_deferred_at) * 1000)::bigint, 0)
+				as deferred_for_ms`;
 	const row = rows[0];
 	if (row === undefined) return null;
 	return {
 		id: Number(row.id),
 		kind: row.kind as JobKind,
 		payload: readJsonColumn(row.payload),
-		attempts: Number(row.attempts)
+		attempts: Number(row.attempts),
+		deferrals: Number(row.deferrals),
+		deferredForMs: Number(row.deferred_for_ms)
 	};
+}
+
+// A job its handler could not run yet waits out of its group's way until it is due, holding back
+// none of the jobs queued behind it. Its claim counts as no attempt, which only a failure is.
+export async function deferJob(db: Db, id: number, delayMs: number): Promise<void> {
+	await db.sql`
+		update jobs set status = 'deferred', locked_by = null, locked_at = null,
+			attempts = attempts - 1, deferrals = deferrals + 1,
+			first_deferred_at = coalesce(first_deferred_at, now()),
+			run_after = now() + make_interval(secs => ${delayMs / 1000})
+		where id = ${id}`;
+}
+
+// The deferred jobs that are due come back at the end of their group, as if queued now: a job of
+// the group queued while they waited, which may be running already, keeps its place ahead of them,
+// so that the group still runs one job at a time
+export async function requeueDeferredJobs(db: Db, kinds: readonly JobKind[]): Promise<void> {
+	await db.sql`
+		update jobs set status = 'queued', id = nextval(pg_get_serial_sequence('jobs', 'id'))
+		where kind in ${db.sql([...kinds])} and status = 'deferred' and run_after <= now()`;
 }
 
 // A job still running past its lease was held by a replica that is gone: it goes back to the

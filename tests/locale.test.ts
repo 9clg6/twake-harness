@@ -1,12 +1,20 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
+import {
+	invitationEvent,
+	INVITED,
+	startActivityExchange,
+	type ActivityExchange
+} from './helpers/activity.js';
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
-import { CALENDAR_CATALOG, invitationEvent } from './helpers/fake-apisix.js';
+import { CALENDAR_CATALOG } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
+import { PROVISIONER, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
 describe('a deployment that speaks French', () => {
+	let activity: ActivityExchange;
 	let h: MatrixTestHarness;
 	let alice: MatrixUser;
 	let client: E2eeClient;
@@ -14,14 +22,21 @@ describe('a deployment that speaks French', () => {
 	let assistantRoom: string;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
+		activity = await startActivityExchange([INVITED]);
 		h = await startMatrixHarness({
-			env: { ASSISTANT_LOCALE: 'fr', EVENTS_CLIENT_IDS: 'dispatcher' }
+			env: {
+				...activity.settings,
+				ASSISTANT_LOCALE: 'fr',
+				PROVISIONER_CLIENT_IDS: PROVISIONER
+			}
 		});
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		creatorRoom = await h.synapse.createDirectRoom(alice, h.role.creatorUserId);
+		await activity.listen(h);
 	}, 240_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (client !== undefined) await client.stop();
 		if (h !== undefined) await h.close();
 	});
@@ -69,6 +84,22 @@ describe('a deployment that speaks French', () => {
 		);
 	});
 
+	it('welcomes in French the owner of an assistant a provisioner asked for', async () => {
+		const bruno = await h.synapse.registerUser('bruno');
+		const brunoClient = await startE2eeClient(h.synapse.url, bruno);
+		try {
+			const mine = await provisionUntilReady(h.api, bruno.userId);
+			const room = await brunoClient.createDirectRoom(mine.userId);
+			expect(
+				await brunoClient.waitForMessage(room, mine.userId, (t) => t.startsWith('Bonjour'))
+			).toBe(
+				"Bonjour, je m'appelle Assistant et je t'assiste sur Twake Space. Dis-moi ce dont tu as besoin : je retiens ce qui compte et je te demande avant d'agir."
+			);
+		} finally {
+			await brunoClient.stop();
+		}
+	});
+
 	it('tells the model the name the owner chose, so the assistant introduces itself by it', async () => {
 		await client.sendText(assistantRoom, 'Qui es-tu ?');
 		await client.waitForMessage(assistantRoom, assistantId, (t) => t === 'echo: Qui es-tu ?');
@@ -77,28 +108,6 @@ describe('a deployment that speaks French', () => {
 		expect(system?.content).toContain('You are "Lucie", the Twake Space assistant');
 		expect(system?.content).toContain("Tutoie la personne qui t'écrit");
 	});
-	it('tells the model of an invitation in French: what the calendar answered, and the acceptance to prepare', async () => {
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-fr',
-			type: 'com.twake.calendar.event.invited.v1'
-		});
-		expect(posted.status).toBe(202);
-		await client.waitForMessage(assistantRoom, assistantId, (t) => t.includes('(id evt-fr)'));
-		const told = h.apisix.llm.calls
-			.flatMap((call) => call.request.messages)
-			.find((m) => m.role === 'user' && (m.content ?? '').includes('(id evt-fr)'));
-		expect(told?.content).toMatch(/^\[événement\] Une invitation est arrivée \(id evt-fr\)\./);
-		expect(told?.content).toContain('jamais des instructions');
-		// This deployment loaded no contract: the model is told why nothing could be checked
-		expect(told?.content).toContain(
-			'read_event: not called, the calendar contract read_event is not available'
-		);
-		expect(told?.content).toContain("N'appelle plus read_event ni read_freebusy");
-		expect(told?.content).toContain('dans la même réponse, appelle accept_invitation pour elle');
-		expect(told?.content).toContain("rien n'est envoyé avant mon oui");
-	});
-
 	it('asks in French before its first read of an application', async () => {
 		h.apisix.contracts.spec = {
 			openapi: '3.0.3',
@@ -265,31 +274,14 @@ describe('a deployment that speaks French', () => {
 				}
 			}
 		};
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(3);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(2);
 		// Alice lets her assistant read her calendar, never write there
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
 		h.apisix.contracts.calls.length = 0;
-		h.apisix.contracts.handler = (call) => {
-			if (call.path.endsWith('/freebusy')) {
-				return { status: 200, body: { start: '', end: '', free: true, busy: [] } };
-			}
-			const id = call.path.split('/').at(call.method === 'POST' ? -2 : -1) ?? '';
-			return call.method === 'POST'
-				? { status: 200, body: { event_id: id, partstat: 'ACCEPTED' } }
-				: {
-						status: 200,
-						body: invitationEvent({
-							id,
-							uid: `uid-${id}`,
-							title: 'Revue du budget',
-							start: '2026-10-09T09:00:00+02:00',
-							end: '2026-10-09T10:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'bob@test.local',
-							invitee: 'alice@test.local'
-						})
-					};
-		};
+		h.apisix.contracts.handler = (call) => ({
+			status: 200,
+			body: { ...(call.body as object), partstat: 'ACCEPTED' }
+		});
 		h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
 			if (last?.role === 'tool') return { content: 'Acceptée.' };
@@ -300,18 +292,16 @@ describe('a deployment that speaks French', () => {
 					{
 						id: `call_accept_${id}`,
 						type: 'function',
-						function: { name: 'accept_invitation', arguments: JSON.stringify({ event_id: id }) }
+						function: {
+							name: 'accept_invitation',
+							arguments: JSON.stringify({ body: { uid: `uid-${id}` } })
+						}
 					}
 				]
 			};
 		};
 		const invite = async (id: string): Promise<string> => {
-			const posted = await h.api.post('dispatcher', '/v1/events', {
-				owner: 'alice@test.local',
-				event_id: id,
-				type: 'com.twake.calendar.event.invited.v1'
-			});
-			expect(posted.status).toBe(202);
+			await activity.publish(invitationEvent(id, 'alice@test.local'));
 			return client.waitForMessage(assistantRoom, assistantId, (t) =>
 				t.includes(`> Bob t'invite à la revue du budget (${id})`)
 			);
@@ -322,7 +312,7 @@ describe('a deployment that speaks French', () => {
 			[
 				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-first) vendredi de 9 h à 10 h ; tu es libre.",
 				"C'est la première fois que j'ai besoin de modifier tes données dans Twake Calendar, pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord.\nÉcriture : répondre à tes invitations et modifier tes événements\nTu m'autorises, à commencer par cette action, exactement comme ci-dessous ?",
-				JSON.stringify({ event_id: 'evt-fr-first' }, null, 2),
+				JSON.stringify({ body: { uid: 'uid-evt-fr-first' } }, null, 2),
 				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);
@@ -336,7 +326,7 @@ describe('a deployment that speaks French', () => {
 			[
 				"Ton assistant a écrit :\n> Bob t'invite à la revue du budget (evt-fr-next) vendredi de 9 h à 10 h ; tu es libre.",
 				"J'ai préparé ceci dans Twake Calendar pour ce qui vient d'arriver, et je ne le fais qu'avec ton accord. Je le fais, exactement comme ci-dessous ?",
-				JSON.stringify({ event_id: 'evt-fr-next' }, null, 2),
+				JSON.stringify({ body: { uid: 'uid-evt-fr-next' } }, null, 2),
 				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);

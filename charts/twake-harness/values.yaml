@@ -39,6 +39,12 @@ config:
   authAudience: ''
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
+  # Where the contracts sit under that address: the prefix of their calls and the path of their
+  # curated OpenAPI; empty means the harness defaults, no prefix and contracts/openapi.json.
+  # A harness whose APISIX base sits under a prefix reaches the contracts at the root with
+  # contractsBasePath '..' and contractsOpenapiPath '../contracts/openapi.json'
+  contractsBasePath: ''
+  contractsOpenapiPath: ''
   llmModel: qwen3.8
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
@@ -66,6 +72,18 @@ config:
   turnHistoryMaxChars: ''
   # The most tool calls one turn may make before it stops. Empty means the harness default, 6
   turnMaxToolCalls: ''
+  # How long a turn may go without answering before the assistant posts a status message, which
+  # closes once the turn answered, in milliseconds (matrix role); at least 1000. Empty means the
+  # harness default, 3000
+  turnStatusDelayMs: ''
+  # How long a turn an event woke may wait to start once admission first refused it, in
+  # milliseconds (api role): it is tried again until then, never answering that it is busy, and
+  # given up past it; at least 1000. Empty means the harness default, 3600000 (an hour)
+  turnEventMaxDelayMs: ''
+  # Whether an owner's words count only from a session their cross-signing identity signed
+  # (matrix role): report, the harness default when empty, takes them all the same and logs and
+  # tells the owner what enforce would not take; enforce does not take them
+  ownerDeviceTrust: ''
   # The organization agent, a bot of the harness answering the organization's members, named by
   # their Matrix identifiers (comma separated); its localpart lives in the assistants' namespace
   orgAgentEnabled: false
@@ -73,8 +91,44 @@ config:
   orgAgentName: Twake Space
   orgAgentPersona: ''
   orgAgentMembers: ''
-  # The service clients, by token subject, allowed to post events for an owner (comma separated)
-  eventsClientIds: ''
+  # The activity exchange of RabbitMQ, which the worker role listens to, and it alone: each
+  # recipient of an event of the types below who has an assistant is told of it in their room.
+  # The worker then needs matrixServerName or matrixMailDomain below: it wakes the owners by their
+  # email on that mail domain
+  activityEnabled: false
+  # The Secret and key holding the AMQP URL, its vhost included, which carries the password of the
+  # instance's own RabbitMQ user; an empty name means the chart's own Secret (secretEnv or
+  # existingSecret)
+  activityAmqpUrlSecret: ''
+  activityAmqpUrlSecretKey: ACTIVITY_AMQP_URL
+  # The CloudEvent types that wake an assistant, each exactly (comma separated); empty means the
+  # harness default, com.twake.tasks.task.assigned.v1
+  activityTypes: ''
+  # What the names of the queues and exchanges the instance declares on RabbitMQ start with: its
+  # own, which its RabbitMQ user may configure and write; empty means the harness default,
+  # twake-harness
+  rabbitmqPrefix: ''
+  # How many times events from the broker may wake one owner's assistant in a rolling hour,
+  # whatever their source (worker role); past it, an event wakes them no more. Empty means the
+  # harness default, 20
+  wakeupsPerHour: ''
+  # How long the worker role keeps a wake-up, in milliseconds, so that an event delivered again or
+  # replayed from its dead letter queue wakes nobody twice; empty means the harness default, 30 days
+  wakeupsRetentionMs: ''
+  # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
+  # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new
+  # invitation who has an assistant is told of it in their room. The worker then needs
+  # matrixServerName or matrixMailDomain below: it wakes the owners by their email on that mail
+  # domain
+  calendarEnabled: false
+  # The Secret and key holding the AMQP URL of Calendar's vhost, which carries the password of the
+  # instance's own RabbitMQ user; an empty name means the chart's own Secret (secretEnv or
+  # existingSecret)
+  calendarAmqpUrlSecret: ''
+  calendarAmqpUrlSecretKey: CALENDAR_AMQP_URL
+  # The service clients, by token subject, allowed to provision an owner's assistant through the
+  # provisioning API, such as the identity server Twake Chat asks (comma separated)
+  provisionerClientIds: ''
   # The escrow of the assistants' identities in the platform OpenBao, through the openbao route
   # of APISIX, with the pod's Kubernetes identity (matrix role)
   escrowEnabled: false
@@ -97,7 +151,9 @@ config:
 
 # Rendered into a Secret and injected as environment: DATABASE_URL, APISIX_CONSUMER_KEY, and for the
 # matrix role MATRIX_HS_TOKEN (and MATRIX_AS_TOKEN when APISIX does not inject it)
-# and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards
+# and GATEWAY_SHARED_SECRET on the api role when APISIX sets x-twake-gateway on what it forwards;
+# for the worker role that listens to RabbitMQ, ACTIVITY_AMQP_URL and CALENDAR_AMQP_URL unless
+# another Secret holds them
 secretEnv: {}
 # Or the name of a Secret created elsewhere with the same keys
 existingSecret: ''
@@ -119,6 +175,10 @@ networkPolicy:
   # The managed database, outside the cluster
   databaseCidrs: []
   databasePort: 5432
+  # The RabbitMQ broker's namespace and AMQP port, which the worker role alone reaches, when it
+  # listens to the activity exchange or to Calendar's fanout
+  rabbitmqNamespace: ''
+  rabbitmqPort: 5672
   # Extra egress rules, in NetworkPolicy syntax
   extraEgress: []
 

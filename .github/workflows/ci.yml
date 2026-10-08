@@ -99,12 +99,27 @@ jobs:
           printf 'config:\n  turnHistoryMaxChars: 1000000\n' > /tmp/history.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/history.yaml > /tmp/history-rendered.yaml
           grep -A1 TURN_HISTORY_MAX_CHARS /tmp/history-rendered.yaml | grep -q '"1000000"'
+      # PROVISIONER_CLIENT_IDS carries the provisioners config.provisionerClientIds names
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.provisionerClientIds=tom-bots > /tmp/provisioning.yaml && grep -A1 PROVISIONER_CLIENT_IDS /tmp/provisioning.yaml | grep -q '"tom-bots"'
+      # No role gets EVENTS_CLIENT_IDS, as the harness takes no event over HTTP, and a release that
+      # still sets config.eventsClientIds renders as before
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.eventsClientIds=dispatcher > /tmp/events-$role.yaml
+            if grep -q EVENTS_CLIENT_IDS /tmp/events-$role.yaml; then exit 1; fi
+          done
       # TURN_MAX_TOOL_CALLS is rendered only when config.turnMaxToolCalls is set, as an integer
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOOL_CALLS /tmp/default.yaml
       - run: |
           printf 'config:\n  turnMaxToolCalls: 20\n' > /tmp/tools.yaml
           helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/tools.yaml > /tmp/tools-rendered.yaml
           grep -A1 TURN_MAX_TOOL_CALLS /tmp/tools-rendered.yaml | grep -q '"20"'
+      # TURN_STATUS_DELAY_MS is rendered only when config.turnStatusDelayMs is set, as an integer
+      - run: helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/default.yaml && ! grep -q TURN_STATUS_DELAY_MS /tmp/default.yaml
+      - run: |
+          printf 'config:\n  turnStatusDelayMs: 5000\n' > /tmp/status.yaml
+          helm template agent-matrix charts/twake-harness --set role=matrix --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h -f /tmp/status.yaml > /tmp/status-rendered.yaml
+          grep -A1 TURN_STATUS_DELAY_MS /tmp/status-rendered.yaml | grep -q '"5000"'
       # ADMISSION_* are rendered only when their config.admission* value is set, and as integers:
       # 0 counts, and a large value from a values file comes out whole instead of as 1e+06
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q ADMISSION_ /tmp/default.yaml
@@ -114,6 +129,142 @@ jobs:
           grep -A1 ADMISSION_USER_DAILY_TOKENS /tmp/admission.yaml | grep -q '"1000000"'
           grep -A1 ADMISSION_USER_QUEUE /tmp/admission.yaml | grep -q '"0"'
           kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/admission.yaml
+      # OWNER_DEVICE_TRUST is rendered on the matrix role only, when config.ownerDeviceTrust is set,
+      # and only as report or enforce: left out, the harness reports
+      - run: helm template agent-matrix charts/twake-harness --set role=matrix --set persistence.enabled=true --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/matrix-default.yaml && ! grep -q OWNER_DEVICE_TRUST /tmp/matrix-default.yaml
+      - run: |
+          helm template agent-matrix charts/twake-harness --set role=matrix --set persistence.enabled=true --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.ownerDeviceTrust=enforce > /tmp/matrix-enforce.yaml
+          grep -A1 OWNER_DEVICE_TRUST /tmp/matrix-enforce.yaml | grep -q '"enforce"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/matrix-enforce.yaml
+      - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.ownerDeviceTrust=enforce > /tmp/api-enforce.yaml && ! grep -q OWNER_DEVICE_TRUST /tmp/api-enforce.yaml
+      - run: |
+          if helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.ownerDeviceTrust=strict > /dev/null 2> /tmp/strict.err; then exit 1; fi
+          grep -q 'config.ownerDeviceTrust must be report or enforce' /tmp/strict.err
+      # CONTRACTS_BASE_PATH and CONTRACTS_OPENAPI_PATH are rendered only when config.contractsBasePath
+      # and config.contractsOpenapiPath are set, and then on every role: each refreshes the catalog
+      # of contracts, and the api role calls them
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/contracts-default-$role.yaml
+            if grep -q CONTRACTS_ /tmp/contracts-default-$role.yaml; then exit 1; fi
+          done
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix/b2b/ --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.contractsBasePath=.. --set config.contractsOpenapiPath=../contracts/openapi.json > /tmp/contracts-$role.yaml
+            grep -A1 CONTRACTS_BASE_PATH /tmp/contracts-$role.yaml | grep -q '"\.\."'
+            grep -A1 CONTRACTS_OPENAPI_PATH /tmp/contracts-$role.yaml | grep -q '"\.\./contracts/openapi\.json"'
+            kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/contracts-$role.yaml
+          done
+      # The activity exchange is rendered on the worker role only, once config.activityEnabled is set:
+      # the AMQP URL from the chart's own Secret or another one, the types and the prefix when set,
+      # and an egress rule to the broker's namespace on its AMQP port alone
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set secretEnv.ACTIVITY_AMQP_URL=amqp://u:p@rabbitmq.dbs:5672/ --set config.activityTypes=com.twake.tasks.task.assigned.v1 --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs --set config.matrixServerName=example.org > /tmp/activity-worker.yaml
+          grep -A1 'name: ACTIVITY_ENABLED' /tmp/activity-worker.yaml | grep -q '"true"'
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-worker.yaml | grep -q 'name: agent-worker-env'
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-worker.yaml | grep -q 'key: ACTIVITY_AMQP_URL'
+          grep -A1 'name: ACTIVITY_TYPES' /tmp/activity-worker.yaml | grep -q '"com.twake.tasks.task.assigned.v1"'
+          grep -A1 'name: RABBITMQ_PREFIX' /tmp/activity-worker.yaml | grep -q '"twake-harness-b2b"'
+          grep -A3 'kubernetes.io/metadata.name: dbs' /tmp/activity-worker.yaml | grep -q 'port: 5672'
+          grep -A1 'name: MATRIX_SERVER_NAME' /tmp/activity-worker.yaml | grep -q '"example.org"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/activity-worker.yaml
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set config.activityAmqpUrlSecret=harness-rabbitmq --set config.activityAmqpUrlSecretKey=url --set config.matrixMailDomain=mail.example.org > /tmp/activity-secret.yaml
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-secret.yaml | grep -q 'name: harness-rabbitmq'
+          grep -A4 'name: ACTIVITY_AMQP_URL' /tmp/activity-secret.yaml | grep -q 'key: url'
+          if grep -q -E 'name: (ACTIVITY_TYPES|RABBITMQ_PREFIX)|port: 5672' /tmp/activity-secret.yaml; then exit 1; fi
+          grep -A1 'name: MATRIX_MAIL_DOMAIN' /tmp/activity-secret.yaml | grep -q '"mail.example.org"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/activity-secret.yaml
+      # A worker that listens wakes the owners by their email on the mail domain: it is refused
+      # without config.matrixServerName or config.matrixMailDomain, which would make it wake nobody
+      - run: |
+          if helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true > /dev/null 2> /tmp/activity-domain.err; then exit 1; fi
+          grep -q 'config.matrixServerName or config.matrixMailDomain must be set' /tmp/activity-domain.err
+      # No other role listens, nor gets the broker's address or a way out to it, and neither does a
+      # worker that does not listen
+      - run: |
+          for role in api matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.activityEnabled=true --set config.activityTypes=com.twake.tasks.task.assigned.v1 --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/activity-$role.yaml
+            if grep -q -E 'ACTIVITY_|RABBITMQ_|port: 5672' /tmp/activity-$role.yaml; then exit 1; fi
+          done
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityTypes=com.twake.tasks.task.assigned.v1 --set networkPolicy.rabbitmqNamespace=dbs > /tmp/activity-off.yaml
+          if grep -q -E 'ACTIVITY_|RABBITMQ_|port: 5672' /tmp/activity-off.yaml; then exit 1; fi
+      # WAKEUPS_PER_HOUR is rendered on the worker role alone, which wakes the assistants, only when
+      # config.wakeupsPerHour is set, and as an integer
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/wakeups-default-$role.yaml
+            if grep -q WAKEUPS_PER_HOUR /tmp/wakeups-default-$role.yaml; then exit 1; fi
+          done
+      - run: |
+          printf 'config:\n  wakeupsPerHour: 30\n' > /tmp/wakeups.yaml
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h -f /tmp/wakeups.yaml > /tmp/wakeups-$role.yaml
+            kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/wakeups-$role.yaml
+          done
+          grep -A1 WAKEUPS_PER_HOUR /tmp/wakeups-worker.yaml | grep -q '"30"'
+          if grep -q WAKEUPS_PER_HOUR /tmp/wakeups-api.yaml /tmp/wakeups-matrix.yaml; then exit 1; fi
+      # TURN_EVENT_MAX_DELAY_MS is rendered on the api role alone, which runs the turns, only when
+      # config.turnEventMaxDelayMs is set, and as an integer, so that a large value from a values file
+      # comes out whole
+      - run: |
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h > /tmp/event-delay-default-$role.yaml
+            if grep -q TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-default-$role.yaml; then exit 1; fi
+          done
+      - run: |
+          printf 'config:\n  turnEventMaxDelayMs: 7200000\n' > /tmp/event-delay.yaml
+          for role in api worker matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h -f /tmp/event-delay.yaml > /tmp/event-delay-$role.yaml
+            kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/event-delay-$role.yaml
+          done
+          grep -A1 TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-api.yaml | grep -q '"7200000"'
+          if grep -q TURN_EVENT_MAX_DELAY_MS /tmp/event-delay-worker.yaml /tmp/event-delay-matrix.yaml; then exit 1; fi
+      # Calendar's fanout is rendered on the worker role only, once config.calendarEnabled is set, on
+      # its own or with the activity exchange: its AMQP URL from the chart's own Secret or another
+      # one, the prefix and the mail domain when set, and the egress rule to the broker alone
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.calendarEnabled=true --set secretEnv.CALENDAR_AMQP_URL=amqp://u:p@rabbitmq.dbs:5672/calendar --set config.rabbitmqPrefix=twake-harness-b2b --set config.matrixMailDomain=twake.example --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-worker.yaml
+          grep -A1 'name: CALENDAR_ENABLED' /tmp/calendar-worker.yaml | grep -q '"true"'
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-worker.yaml | grep -q 'name: agent-worker-env'
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-worker.yaml | grep -q 'key: CALENDAR_AMQP_URL'
+          grep -A1 'name: RABBITMQ_PREFIX' /tmp/calendar-worker.yaml | grep -q '"twake-harness-b2b"'
+          grep -A1 'name: MATRIX_MAIL_DOMAIN' /tmp/calendar-worker.yaml | grep -q '"twake.example"'
+          grep -A3 'kubernetes.io/metadata.name: dbs' /tmp/calendar-worker.yaml | grep -q 'port: 5672'
+          if grep -q 'ACTIVITY_' /tmp/calendar-worker.yaml; then exit 1; fi
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/calendar-worker.yaml
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.activityEnabled=true --set config.calendarEnabled=true --set config.calendarAmqpUrlSecret=harness-rabbitmq --set config.calendarAmqpUrlSecretKey=calendar-url --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs --set config.matrixServerName=example.org > /tmp/calendar-both.yaml
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-both.yaml | grep -q 'name: harness-rabbitmq'
+          grep -A4 'name: CALENDAR_AMQP_URL' /tmp/calendar-both.yaml | grep -q 'key: calendar-url'
+          grep -A1 'name: ACTIVITY_ENABLED' /tmp/calendar-both.yaml | grep -q '"true"'
+          test "$(grep -c 'name: RABBITMQ_PREFIX' /tmp/calendar-both.yaml)" -eq 1
+          test "$(grep -c 'port: 5672' /tmp/calendar-both.yaml)" -eq 1
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/calendar-both.yaml
+      # A worker that listens to Calendar is refused without the owners' mail domain, as one that
+      # listens to the activity exchange is
+      - run: |
+          if helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.calendarEnabled=true > /dev/null 2> /tmp/calendar-domain.err; then exit 1; fi
+          grep -q 'config.matrixServerName or config.matrixMailDomain must be set for the worker role to listen to RabbitMQ' /tmp/calendar-domain.err
+      - run: |
+          for role in api matrix; do
+            helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.calendarEnabled=true --set config.rabbitmqPrefix=twake-harness-b2b --set networkPolicy.rabbitmqNamespace=dbs > /tmp/calendar-$role.yaml
+            if grep -q -E 'CALENDAR_|RABBITMQ_|port: 5672' /tmp/calendar-$role.yaml; then exit 1; fi
+          done
+      # WAKEUPS_RETENTION_MS is rendered on the worker role only, listening or not, when
+      # config.wakeupsRetentionMs is set, as an integer: 60 days from a values file is not 5.184e+09
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/retention-default.yaml
+          if grep -q WAKEUPS_RETENTION_MS /tmp/retention-default.yaml; then exit 1; fi
+          printf 'config:\n  wakeupsRetentionMs: 5184000000\n' > /tmp/retention.yaml
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/retention.yaml > /tmp/retention-worker.yaml
+          grep -A1 WAKEUPS_RETENTION_MS /tmp/retention-worker.yaml | grep -q '"5184000000"'
+          kubeconform -strict -summary -kubernetes-version 1.31.0 /tmp/retention-worker.yaml
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k -f /tmp/retention.yaml > /tmp/retention-api.yaml
+          if grep -q WAKEUPS_RETENTION_MS /tmp/retention-api.yaml; then exit 1; fi
+          # 0 is rendered, for the harness to refuse it, rather than left out for its default
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.wakeupsRetentionMs=0 > /tmp/retention-zero.yaml
+          grep -A1 WAKEUPS_RETENTION_MS /tmp/retention-zero.yaml | grep -q '"0"'
 
   image:
     needs: [check, test, chart]

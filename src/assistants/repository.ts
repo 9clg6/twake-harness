@@ -70,6 +70,11 @@ export async function setAssistantLocale(tx: Tx, owner: string, locale: Locale):
 	return result.count === 1;
 }
 
+// The room an assistant wrote its owner in, when it is this one, is no longer its room
+export async function clearAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {
+	await tx.sql`update assistants set room_id = null where owner = ${owner} and room_id = ${roomId}`;
+}
+
 export async function setAssistantRoomId(tx: Tx, owner: string, roomId: string): Promise<void> {
 	await tx.sql`update assistants set room_id = ${roomId} where owner = ${owner} and deleted_at is null`;
 }
@@ -133,5 +138,43 @@ export async function listActiveAssistantUserIds(db: Db): Promise<string[]> {
 export async function listActiveAssistants(db: Db): Promise<{ owner: string; userId: string }[]> {
 	const rows = await db.sql<{ owner: string; user_id: string }[]>`
 		select distinct owner, user_id from assistant_rooms`;
+	return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
+}
+
+// An assistant a provisioner asked for, in an index without user content: the matrix role
+// prepares it at its start even before it has a room. An assistant the provisioner made owes its
+// owner the greeting until it gives it; one that already existed owes no more than it did.
+export async function saveProvisioned(
+	db: Db | Tx,
+	provisioned: { readonly owner: string; readonly userId: string; readonly owesWelcome: boolean }
+): Promise<void> {
+	const { owner, userId, owesWelcome } = provisioned;
+	await db.sql`
+		insert into assistant_provisioned (owner, user_id, owes_welcome)
+		values (${owner}, ${userId}, ${owesWelcome})
+		on conflict (owner) do update set
+			user_id = excluded.user_id,
+			owes_welcome = assistant_provisioned.owes_welcome or excluded.owes_welcome`;
+}
+
+// Takes the greeting a provisioned assistant owes its owner: true for the one call that took it
+export async function claimProvisionedWelcome(
+	tx: Tx,
+	owner: string,
+	userId: string
+): Promise<boolean> {
+	const claimed = await tx.sql`
+		update assistant_provisioned set owes_welcome = false
+		where owner = ${owner} and user_id = ${userId} and owes_welcome`;
+	return claimed.count === 1;
+}
+
+// The provisioned assistants that have no room yet, which the rooms index does not list
+export async function listProvisionedWithoutRoom(
+	db: Db
+): Promise<{ owner: string; userId: string }[]> {
+	const rows = await db.sql<{ owner: string; user_id: string }[]>`
+		select p.owner, p.user_id from assistant_provisioned p
+		where not exists (select 1 from assistant_rooms r where r.owner = p.owner)`;
 	return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
 }

@@ -63,6 +63,36 @@ function forgetSdkSetup(intent: Intent): void {
 	Reflect.deleteProperty(intent, 'cryptoSetupPromise');
 }
 
+// A room key reaches a device of the owner as a to-device message, which the homeserver takes for
+// delivered even when the device never reads it, as when it cannot decrypt what an Olm session
+// carried. The Rust SDK shares a room key with a device once and keeps encrypting with it until
+// the room's rotation, a hundred messages or a week by default: one lost key would leave every
+// later answer of the assistant unreadable on that device. Each message of the assistant starts a
+// room key of its own instead, shared anew with every device of the room's members, so that a lost
+// key leaves that one message unreadable. The SDK reads the rotation from the room's encryption
+// state as it prepares each message, whoever opened the room.
+// The Rust SDK keeps a room key it already started until it expires by its own rotation, or until
+// the history visibility, the algorithm or the devices it goes to change: a new rotation alone
+// would leave every room on the key it had. The assistant also encrypts for a history visible to
+// the joined members only, which its rooms lose nothing by, as they hold the owner and the assistant
+// alone, and which retires at the first message every room key started for the shared history
+// that the rooms' preset sets.
+type PrepareEncrypt = (roomId: string, roomInfo: Record<string, unknown>) => Promise<void>;
+
+function rotateEachMessage(intent: Intent): void {
+	const engine = (
+		intent.underlyingClient.crypto as unknown as { engine?: { prepareEncrypt?: PrepareEncrypt } }
+	).engine;
+	const prepare = engine?.prepareEncrypt;
+	if (engine === undefined || prepare === undefined) return;
+	engine.prepareEncrypt = (roomId, roomInfo) =>
+		prepare.call(engine, roomId, {
+			...roomInfo,
+			rotation_period_msgs: 1,
+			historyVisibility: 'joined'
+		});
+}
+
 // The HTTP status of a failed request, which the SDK carries on what it throws
 function statusOf(err: unknown): number | null {
 	if (typeof err !== 'object' || err === null) return null;
@@ -79,6 +109,7 @@ export function makeEnsureEncryption(deps: EncryptionSetupDeps): EnsureEncryptio
 			await ensureDeviceToSpeakFor(deps, intent);
 			// The SDK's own setup, which routeEncryptionSetups puts this one in front of
 			await Intent.prototype.enableEncryption.call(intent);
+			rotateEachMessage(intent);
 		})().catch((err: unknown) => {
 			setups.delete(intent);
 			forgetSdkSetup(intent);

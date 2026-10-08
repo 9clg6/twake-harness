@@ -3,6 +3,7 @@ import type { Writable } from 'node:stream';
 import Fastify, {
 	type FastifyBaseLogger,
 	type FastifyInstance,
+	type FastifyReply,
 	type FastifyRequest
 } from 'fastify';
 
@@ -11,15 +12,15 @@ import { z } from 'zod';
 import type { Clock } from './agent/clock.js';
 import { makeAgentService, type AgentService, type OwnerTurnResult } from './agent/service.js';
 import { runTool, toolCallStatus, WITHDRAW_OWN_CONSENTS } from './agent/tools.js';
-import type { TurnPayload } from './agent/turn-worker.js';
-import { localeOf } from './assistants/locale.js';
-import { findAssistant } from './assistants/repository.js';
+import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
+import { readIdentity, requestPreparation } from './assistants/provisioning.js';
+import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
 import type { Answer } from './consents/answers.js';
 import { lookUpAnswerable, refusalNoticeJob, resumeJob } from './consents/answering.js';
-import { isBuiltInConsent, isConsentLevel, type ResumeRequest } from './consents/consent.js';
+import { isConsentLevel, type ResumeRequest } from './consents/consent.js';
 import { makeConsentMetrics, type AnswerOutcome, type ConsentMetrics } from './consents/metrics.js';
 import {
 	answerPendingCall,
@@ -40,7 +41,14 @@ import { enqueueJob, type EnqueueInput } from './jobs/queue.js';
 import type { LlmClient } from './llm/client.js';
 import { FAILURE_SERIALIZERS } from './logging/failures.js';
 import { makeMatrixAdmin } from './matrix/admin.js';
+import { announceCommands } from './matrix/commands.js';
+import {
+	findOwnerCrossSigning,
+	pinAccepted,
+	type OwnerCrossSigning
+} from './matrix/owner-cross-signing-repository.js';
 import { listMemory } from './memory/repository.js';
+import { principalOfMatrixUser } from './principals/identity.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
 import { findSession, listSessionIds } from './sessions/repository.js';
@@ -76,9 +84,22 @@ export interface AppOptions {
 	// The consent counters its metrics serve, which the role brings when it counts some of its
 	// own, such as the worker role's expiries; new ones otherwise
 	readonly consentMetrics?: ConsentMetrics;
+	// What the role adds to its health check, such as whether it listens to the broker: never a
+	// reason for the check to fail, which would restart the role
+	readonly health?: () => Readonly<Record<string, unknown>>;
 }
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
+
+// What a provisioner may say of the owner along with its call
+const provisionBodySchema = z.object({ timezone: z.string().min(1).max(64).optional() });
+
+// The direct room the owner's client opened with the assistant
+const homeBodySchema = z.object({ roomId: z.string().min(1).max(255) });
+
+// How long the room a client names may wait for the assistant to join it, and how often it looks
+const HOME_JOIN_WAIT_MS = 5_000;
+const HOME_JOIN_POLL_MS = 250;
 
 const chatBodySchema = z
 	.object({
@@ -102,12 +123,49 @@ const skillBodySchema = z
 	})
 	.strict();
 
+// The identity an owner accepts, given by the master key the harness showed them
+const ownerIdentityBodySchema = z.object({ master_key: z.string().min(1).max(128) }).strict();
+
+// The cross-signing identity an owner's assistant holds for them, and the one that signed the
+// session their words last came from when it was another, as the owner reads them
+interface OwnerIdentityView {
+	readonly pinned: {
+		readonly master_key: string;
+		readonly pinned_by: string;
+		readonly pinned_at: string;
+	} | null;
+	readonly published: { readonly master_key: string; readonly seen_at: string } | null;
+}
+
+function toOwnerIdentityView(held: OwnerCrossSigning | null): OwnerIdentityView {
+	return {
+		pinned:
+			held === null
+				? null
+				: {
+						master_key: held.masterPublicKey,
+						pinned_by: held.pinnedBy,
+						pinned_at: held.pinnedAt.toISOString()
+					},
+		published:
+			held === null || held.seen === null
+				? null
+				: { master_key: held.seen.masterPublicKey, seen_at: held.seen.at.toISOString() }
+	};
+}
+
 const RESOURCE_UNAVAILABLE = { error: 'resource unavailable' } as const;
 const FORBIDDEN = { error: 'forbidden' } as const;
+const NOT_A_PROVISIONER = { error: 'not a provisioner' } as const;
+const NO_ASSISTANT = { error: 'no assistant' } as const;
+// The room a client names is not one the assistant and its owner are both in
+const NOT_A_MEMBER = { error: 'not a member' } as const;
+// Others are in that room: what the assistant writes its owner there would reach them too
+const NOT_A_DIRECT_ROOM = { error: 'not a direct room' } as const;
+// The assistant's escrowed identity waits for its owner's recovery (POST /v1/assistants/me/recover)
+const RECOVERY_NEEDED = { error: 'recovery_needed' } as const;
 // The owner has no account on the homeserver the assistants live on, so no room can be opened
 const OWNER_NOT_ON_HOMESERVER = { error: 'owner not on the homeserver' } as const;
-// The harness builds the consent in: no owner withdraws it
-const CONSENT_BUILT_IN = { error: 'consent built in' } as const;
 
 // An answer to a call no longer waiting: answered already, expired, or replaced by a newer
 // question in its room
@@ -116,12 +174,6 @@ function pendingCallClosed(state: RequestState): { error: string; state: Request
 }
 
 const PENDING_CALL_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
-
-const eventSchema = z.object({
-	owner: z.string().min(1).max(128),
-	event_id: z.string().min(1).max(200),
-	type: z.string().min(1).max(100)
-});
 
 const SESSION_ID = /^[0-9a-f]{32}$/;
 
@@ -243,18 +295,29 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	app.decorate('agent', agent);
 	const tools = agent.tools;
 
+	const matrixAdmin = makeMatrixAdmin({
+		apisixBaseUrl: config.apisix.baseUrl,
+		consumerKey: config.apisix.consumerKey,
+		asToken: config.matrix.asToken
+	});
 	const assistants =
-		options.assistants ??
-		makeAssistantService({
-			config,
-			db,
-			log: app.log,
-			admin: makeMatrixAdmin({
-				apisixBaseUrl: config.apisix.baseUrl,
-				consumerKey: config.apisix.consumerKey,
-				asToken: config.matrix.asToken
-			})
-		});
+		options.assistants ?? makeAssistantService({ config, db, log: app.log, admin: matrixAdmin });
+
+	// The members joined to a room the owner's client names, once the assistant is among them: it
+	// joins as soon as the matrix role takes its owner's invitation, which may come a moment after
+	// the client opened the room. Null when the assistant is not in the room by then.
+	async function membersOnceJoined(
+		assistantUserId: string,
+		roomId: string
+	): Promise<string[] | null> {
+		const deadline = Date.now() + HOME_JOIN_WAIT_MS;
+		for (;;) {
+			const members = await matrixAdmin.joinedMembers(assistantUserId, roomId);
+			if (members?.includes(assistantUserId) === true) return members;
+			if (Date.now() >= deadline) return null;
+			await new Promise((resolve) => setTimeout(resolve, HOME_JOIN_POLL_MS));
+		}
+	}
 
 	app.decorateRequest('principal', null);
 	app.addHook('onSend', async (request, reply) => {
@@ -274,55 +337,107 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 		});
 	}
 
-	app.get('/health', async () => ({ status: 'ok' }));
+	app.get('/health', async () => ({ status: 'ok', ...options.health?.() }));
 
-	// An event the dispatcher posts for an owner wakes their assistant: the turn runs in the
-	// owner's room, reads the event through the contracts and tells the owner, and whatever it
-	// prepares to write waits for the owner's yes. Only the service clients named in the settings
-	// may post one, never a user.
-	app.post('/v1/events', async (request, reply) => {
+	// A provisioner, such as the identity server the Twake Chat clients ask for their assistant,
+	// acts for the owner it names after authenticating them itself. Only the service clients named
+	// in the settings may, never a user. Resolves to the client admitted, or null once refused.
+	async function admitProvisioner(
+		request: FastifyRequest,
+		reply: FastifyReply
+	): Promise<string | null> {
 		const auth = await authenticate(request.headers.authorization);
 		if (!auth.ok) {
-			request.log.info({ reason: auth.reason }, 'event refused');
-			return reply.code(401).send({ error: 'invalid token' });
+			request.log.info({ reason: auth.reason }, 'provisioning refused');
+			await reply.code(401).send({ error: 'invalid token' });
+			return null;
 		}
 		const client = auth.principal.id;
-		if (!config.events.clientIds.includes(client)) {
-			request.log.info({ client, reason: 'not_a_dispatcher' }, 'event refused');
-			return reply.code(403).send(FORBIDDEN);
+		if (!config.provisioning.clientIds.includes(client)) {
+			request.log.info({ client, reason: 'not_a_provisioner' }, 'provisioning refused');
+			await reply.code(403).send(NOT_A_PROVISIONER);
+			return null;
 		}
-		const parsed = eventSchema.safeParse(request.body);
-		if (!parsed.success) return reply.code(400).send({ error: 'invalid event' });
-		const { owner, event_id: eventId, type } = parsed.data;
+		return client;
+	}
+
+	app.put('/v1/provisioning/assistants/:owner', async (request, reply) => {
+		const client = await admitProvisioner(request, reply);
+		if (client === null) return reply;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		// The owner by their Matrix identifier on the assistants' homeserver, as the provisioner
+		// authenticated them: their principal is the platform's email for that account
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		// The zone the owner's client reports is accepted, though the harness keeps none per owner
+		const parsed = provisionBodySchema.safeParse(request.body ?? {});
+		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+		const provisioned = await assistants.provision(owner);
+		if (!provisioned.ok) {
+			return provisioned.reason === 'not_on_homeserver'
+				? reply.code(422).send(OWNER_NOT_ON_HOMESERVER)
+				: reply.code(502).send({ error: 'assistant creation failed' });
+		}
+		const known = await readIdentity(db, owner, provisioned.userId);
+		if (known.state === 'ready') {
+			request.log.info(
+				{ client, owner, userId: known.identity.userId },
+				'assistant provisioned for a client'
+			);
+			return reply.code(200).send(known.identity);
+		}
+		// Only the owner's recovery brings an escrowed identity back: preparing it changes nothing
+		if (known.state === 'awaiting_recovery') {
+			request.log.info(
+				{ client, owner, userId: provisioned.userId },
+				'assistant awaits its recovery'
+			);
+			return reply.code(409).send(RECOVERY_NEEDED);
+		}
+		const queued = await requestPreparation(db, owner);
+		request.log.info({ client, owner, userId: provisioned.userId, queued }, 'assistant not ready');
+		return reply.code(503).header('retry-after', '5').send({ error: 'not_ready' });
+	});
+
+	// The direct room the owner's client opened with the assistant becomes the room the assistant
+	// writes to its owner in, as an event's turn does, and one of the rooms it answers them in. Only
+	// a room where the assistant and its owner are, and nobody else, may be that room.
+	app.put('/v1/provisioning/assistants/:owner/home', async (request, reply) => {
+		const client = await admitProvisioner(request, reply);
+		if (client === null) return reply;
+		const { owner: ownerUserId } = request.params as { owner: string };
+		const owner = principalOfMatrixUser(config, ownerUserId);
+		if (owner === null) return reply.code(422).send(OWNER_NOT_ON_HOMESERVER);
+		const parsed = homeBodySchema.safeParse(request.body);
+		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+		const { roomId } = parsed.data;
 		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
-			request.log.info({ client, owner, eventId, reason: 'no_assistant' }, 'event refused');
-			return reply.code(404).send({ error: 'no assistant' });
+		if (assistant === null || assistant.deletedAt !== null) {
+			return reply.code(404).send(NO_ASSISTANT);
 		}
-		const seen = await db.sql`
-			insert into events_seen (event_id, owner) values (${eventId}, ${owner}) on conflict (event_id) do nothing`;
-		if (seen.count === 0) {
-			request.log.info({ client, owner, eventId, type }, 'event duplicate');
-			return reply.code(200).send({ queued: false, duplicate: true });
+		const members = await membersOnceJoined(assistant.userId, roomId);
+		if (members === null || !members.includes(ownerUserId)) {
+			request.log.info({ client, owner, roomId, reason: 'not_a_member' }, 'room refused');
+			return reply.code(409).send(NOT_A_MEMBER);
 		}
-		const payload: TurnPayload = {
-			owner,
-			roomId: assistant.roomId,
-			eventId: `event:${eventId}`,
-			// Told as it is for most events; an invitation is read and checked by the harness first,
-			// and only its owner's yes to the harness's own request can accept it
-			text: getMessages(localeOf(assistant, config.locale)).events.other(type, eventId),
-			origin: 'event',
-			event: { id: eventId, type }
-		};
-		await enqueueJob(db, {
-			kind: 'turn',
-			payload,
-			dedupKey: `event:${eventId}`,
-			groupKey: `turn:${owner}`
+		if (members.some((member) => member !== ownerUserId && member !== assistant.userId)) {
+			request.log.info({ client, owner, roomId, reason: 'not_a_direct_room' }, 'room refused');
+			return reply.code(409).send(NOT_A_DIRECT_ROOM);
+		}
+		await withPrincipal(db, { id: owner }, async (tx) => {
+			await setAssistantRoomId(tx, owner, roomId);
+			await tx.sql`
+				insert into assistant_rooms (room_id, owner, user_id) values (${roomId}, ${owner}, ${assistant.userId})
+				on conflict (room_id) do update set owner = excluded.owner, user_id = excluded.user_id`;
 		});
-		request.log.info({ client, owner, eventId, type }, 'event queued');
-		return reply.code(202).send({ queued: true, duplicate: false });
+		request.log.info({ client, owner, userId: assistant.userId, roomId }, 'assistant room named');
+		// Announced at the join already, unless the room refused it then
+		await announceCommands(
+			{ admin: matrixAdmin, log: request.log },
+			{ roomId, assistantUserId: assistant.userId },
+			await fetchOwnerMessages(db, owner, config.locale)
+		);
+		return reply.code(204).send();
 	});
 
 	// Prometheus exposition: what the autoscaler and the dashboards read
@@ -411,6 +526,47 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 				});
 				request.log.info({ principal: principal.id, queued }, 'recovery requested');
 				return reply.code(202).send({ queued });
+			});
+
+			// The cross-signing identity the owner's assistant and the creator take their words with,
+			// and the one that signed the session their words last came from when it was another, such
+			// as after they reset theirs: only the owner, with their own token, makes the harness hold
+			// that one instead. The creator holds it before any assistant exists, and so does this
+			// route.
+			scope.get('/assistants/me/owner-identity', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+				const held = await withPrincipal(db, principal, (tx) =>
+					findOwnerCrossSigning(tx, principal.id)
+				);
+				return toOwnerIdentityView(held);
+			});
+
+			scope.put('/assistants/me/owner-identity', async (request, reply) => {
+				const principal = principalOf(request);
+				const record = await loadPrincipal(principal);
+				if (!record.actions.includes('chat')) return reply.code(403).send(FORBIDDEN);
+				const parsed = ownerIdentityBodySchema.safeParse(request.body);
+				if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+				const masterKey = parsed.data.master_key;
+				// Only the identity that signed the session the owner's words last came from, as the
+				// harness showed it to them, and only while it is still the latest one seen
+				const accepted = await withPrincipal(db, principal, async (tx) => {
+					const held = await findOwnerCrossSigning(tx, principal.id);
+					if (held?.seen?.masterPublicKey !== masterKey) return { held, pinned: null };
+					return { held, pinned: await pinAccepted(tx, principal.id, masterKey) };
+				});
+				if (accepted.pinned === null) {
+					return reply
+						.code(409)
+						.send({ error: 'not the identity seen', ...toOwnerIdentityView(accepted.held) });
+				}
+				request.log.info(
+					{ principal: principal.id, replaced: accepted.held?.pinnedBy ?? null },
+					'owner identity accepted'
+				);
+				return toOwnerIdentityView(accepted.pinned);
 			});
 
 			scope.delete('/assistants/me', async (request, reply) => {
@@ -564,8 +720,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			});
 
 			// The owner's consents, which a settings page lists, grants and withdraws with the owner's
-			// own token. The reading of the assistant's own feed of events is built in: it is listed,
-			// never granted nor withdrawn.
+			// own token
 			scope.get('/consents', async (request, reply) => {
 				const principal = principalOf(request);
 				const record = await loadPrincipal(principal);
@@ -586,13 +741,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					const { domain, level } = request.params;
 					const offered =
 						isConsentLevel(level) &&
-						(isBuiltInConsent(domain, level) ||
-							agent.contracts.contracts.some((c) => c.domain === domain && c.level === level));
+						agent.contracts.contracts.some((c) => c.domain === domain && c.level === level);
 					if (!offered) return reply.code(404).send(RESOURCE_UNAVAILABLE);
 					const { created, consent } = await withPrincipal(db, principal, async (tx) => {
-						const created =
-							!isBuiltInConsent(domain, level) &&
-							(await grantConsent(tx, principal.id, domain, level, 'api'));
+						const created = await grantConsent(tx, principal.id, domain, level, 'api');
 						const consents = await listConsents(tx, principal.id);
 						return {
 							created,
@@ -617,7 +769,6 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					}
 					const { domain, level } = request.params;
 					if (!isConsentLevel(level)) return reply.code(404).send(RESOURCE_UNAVAILABLE);
-					if (isBuiltInConsent(domain, level)) return reply.code(409).send(CONSENT_BUILT_IN);
 					// A level the owner never allowed is no consent to withdraw, and changes nothing
 					const withdrawal = await withPrincipal(db, principal, async (tx) => {
 						const allowed = await listConsents(tx, principal.id);

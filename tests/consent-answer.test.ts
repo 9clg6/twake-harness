@@ -1,16 +1,26 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import {
+	invitationEvent,
+	INVITED,
+	startActivityExchange,
+	type ActivityExchange
+} from './helpers/activity.js';
 import { startE2eeClient, type DecryptedMessage, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	INJECTED_NOTE,
-	INJECTED_TITLE,
-	invitationEvent,
 	type ChatRequest,
 	type LlmScript,
 	type ToolCall
 } from './helpers/fake-apisix.js';
 import { withdrawConsent } from './helpers/consents.js';
-import { eventually, watchFeedback, type RoomFeedback } from './helpers/feedback.js';
+import {
+	eventually,
+	expectAnswered,
+	expectSeenOnly,
+	watchFeedback,
+	type RoomFeedback
+} from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import type { MatrixUser } from './helpers/synapse.js';
 
@@ -18,7 +28,7 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// Applications the owner never let the assistant use, and the assistant's own feed of events
+// Applications the owner never let the assistant use
 const CATALOG = {
 	openapi: '3.0.3',
 	paths: {
@@ -28,14 +38,6 @@ const CATALOG = {
 				summary: "Searches the user's mail",
 				tags: ['mail.emails.read.v1'],
 				parameters: [{ name: 'from', in: 'query', required: false, schema: { type: 'string' } }]
-			}
-		},
-		'/contracts/v1/events/{event_id}': {
-			get: {
-				operationId: 'read_event',
-				summary: 'Reads one stored event of the user',
-				tags: ['events.read.v1'],
-				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
 			}
 		},
 		'/contracts/v1/calendar/freebusy': {
@@ -50,12 +52,24 @@ const CATALOG = {
 				]
 			}
 		},
-		'/contracts/v1/calendar/invitations/{event_id}/accept': {
+		'/contracts/v1/calendar/invitations/accept': {
 			post: {
 				operationId: 'accept_invitation',
 				summary: 'Accepts an invitation, once the user has said yes to this very invitation',
 				tags: ['calendar.invitation.accept.v1'],
-				parameters: [{ name: 'event_id', in: 'path', required: true, schema: { type: 'string' } }]
+				'x-twake-risk': 'low',
+				requestBody: {
+					required: true,
+					content: {
+						'application/json': {
+							schema: {
+								type: 'object',
+								properties: { uid: { type: 'string' } },
+								required: ['uid']
+							}
+						}
+					}
+				}
 			}
 		},
 		'/contracts/v1/chat/rooms': {
@@ -126,6 +140,7 @@ function modelUsing(
 }
 
 describe('my answer lets my assistant carry on', () => {
+	let activity: ActivityExchange;
 	let h: MatrixTestHarness;
 	let alice: MatrixUser;
 	let client: E2eeClient;
@@ -133,12 +148,13 @@ describe('my answer lets my assistant carry on', () => {
 	let feedback: RoomFeedback;
 	const assistantId = '@twake-space-assistant-alice:test.local';
 	beforeAll(async () => {
+		activity = await startActivityExchange([INVITED]);
 		// Many turns of one owner in a row: admission is the subject of its own suite below
 		h = await startMatrixHarness({
-			env: { EVENTS_CLIENT_IDS: 'dispatcher', ADMISSION_USER_PER_MINUTE: '100' }
+			env: { ...activity.settings, ADMISSION_USER_PER_MINUTE: '100' }
 		});
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(9);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(8);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {
@@ -154,8 +170,10 @@ describe('my answer lets my assistant carry on', () => {
 		await client.joinRoom(room);
 		await client.waitForMessage(room, assistantId, (t) => t.includes('Jarvis'));
 		feedback = watchFeedback({ synapse: h.synapse, owner: alice, client, room, assistantId });
+		await activity.listen(h);
 	}, 240_000);
 	afterAll(async () => {
+		if (activity !== undefined) await activity.close();
 		if (client !== undefined) await client.stop();
 		if (h !== undefined) await h.close();
 	});
@@ -274,58 +292,33 @@ describe('my answer lets my assistant carry on', () => {
 		expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ from: 'anna@test.local' }]);
 	});
 
-	it('ignores a ✅ from someone else, on another message, or sent unencrypted from my account', async () => {
-		const bob = await h.synapse.registerUser('bob');
-		const bobClient = await startE2eeClient(h.synapse.url, bob);
-		try {
-			await h.synapse.request(
-				alice,
-				'POST',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/invite`,
-				{ user_id: bob.userId }
-			);
-			await bobClient.joinRoom(room);
-			h.apisix.llm.script = modelUsing('search_files', { name: 'Q4 plan' });
-			const seen = requests().length;
-			await client.sendText(room, 'Find my Q4 plan');
-			const request = await nextRequest(seen);
-			// Bob, a member of the room, allows it. His first message shares his room key with the
-			// assistant, which reads and ignores him: his ✅ then reaches it decrypted
-			await bobClient.sendText(room, 'hi Jarvis');
-			const loggedFor = async (msg: string): Promise<boolean> => {
-				for (let i = 0; i < 120; i += 1) {
-					if (h.logLines().some((l) => l['msg'] === msg && l['sender'] === bob.userId)) return true;
-					await sleep(250);
-				}
-				return false;
-			};
-			expect(await loggedFor('assistant ignored a foreign sender')).toBe(true);
-			await bobClient.react(room, request, '✅');
-			expect(await loggedFor('answer ignored: not the owner')).toBe(true);
-			// I react to the assistant's greeting instead of its question
-			const greeting = client.messages.find(
-				(m) => m.roomId === room && m.sender === assistantId && m.body.includes('Jarvis')
-			);
-			if (greeting === undefined) throw new Error('no greeting');
-			await client.react(room, greeting.eventId, '✅');
-			// A ✅ sent without encryption, as Twake Chat sends its reactions, or as a component on
-			// the server could write it in my name
-			await h.synapse.request(
-				alice,
-				'PUT',
-				`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.reaction/plain-${Date.now()}`,
-				{ 'm.relates_to': { rel_type: 'm.annotation', event_id: request, key: '✅' } }
-			);
-			await sleep(3000);
-			expect(h.apisix.contracts.calls).toHaveLength(0);
-			// The question is still open: my own ✅ on it runs the call
-			const answered = answers().length;
-			await client.react(room, request, '✅');
-			expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
-			expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ name: 'Q4 plan' }]);
-		} finally {
-			await bobClient.stop();
-		}
+	// No one else can answer for me: someone else coming into the room makes the assistant leave it
+	it('ignores a ✅ on another message, or sent unencrypted from my account', async () => {
+		h.apisix.llm.script = modelUsing('search_files', { name: 'Q4 plan' });
+		const seen = requests().length;
+		await client.sendText(room, 'Find my Q4 plan');
+		const request = await nextRequest(seen);
+		// I react to the assistant's greeting instead of its question
+		const greeting = client.messages.find(
+			(m) => m.roomId === room && m.sender === assistantId && m.body.includes('Jarvis')
+		);
+		if (greeting === undefined) throw new Error('no greeting');
+		await client.react(room, greeting.eventId, '✅');
+		// A ✅ sent without encryption, as Twake Chat sends its reactions, or as a component on
+		// the server could write it in my name
+		await h.synapse.request(
+			alice,
+			'PUT',
+			`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/send/m.reaction/plain-${Date.now()}`,
+			{ 'm.relates_to': { rel_type: 'm.annotation', event_id: request, key: '✅' } }
+		);
+		await sleep(3000);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+		// The question is still open: my own ✅ on it runs the call
+		const answered = answers().length;
+		await client.react(room, request, '✅');
+		expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
+		expect(h.apisix.contracts.calls.map((c) => c.query)).toEqual([{ name: 'Q4 plan' }]);
 	});
 
 	it('runs the call once when I answer twice', async () => {
@@ -345,43 +338,34 @@ describe('my answer lets my assistant carry on', () => {
 	});
 
 	it('keeps a turn an event started from acting on its own, even once I allowed it to read: what it prepares then asks me', async () => {
-		// The model reads the event, then the calendar it never read, and once allowed to, it
-		// tries to accept the invitation on its own
+		// The model reads the calendar it never read, and once allowed to, it tries to accept the
+		// invitation on its own
 		h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
-			if (last?.role === 'tool' && last.name === 'read_event') {
-				return {
-					toolCalls: call('read_freebusy', {
-						start: '2026-10-09T09:00:00+02:00',
-						end: '2026-10-09T10:00:00+02:00'
-					})
-				};
-			}
 			if (last?.role === 'tool' && last.name === 'read_freebusy') {
-				return { toolCalls: call('accept_invitation', { event_id: 'evt-9' }) };
+				return { toolCalls: call('accept_invitation', { body: { uid: 'uid-9' } }) };
 			}
 			if (last?.role === 'tool' && last.name === 'accept_invitation') {
 				return { content: `Found: accepting said ${last.content ?? ''}` };
 			}
-			return { toolCalls: call('read_event', { event_id: 'evt-9' }) };
+			return {
+				toolCalls: call('read_freebusy', {
+					start: '2026-10-09T09:00:00+02:00',
+					end: '2026-10-09T10:00:00+02:00'
+				})
+			};
 		};
 		const seen = requests().length;
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-9',
-			type: 'calendar.invitation'
-		});
-		expect(posted.status).toBe(202);
+		await activity.publish(invitationEvent('evt-9', 'alice@test.local'));
 		const request = await nextRequest(seen);
 		const answered = answers().length;
 		await client.react(room, request, '✅');
 		// My yes let it read my calendar, nothing more: the acceptance it then prepares waits for
-		// me in turn, and only its reads reached my calendar
+		// me in turn, and only its read reached my calendar
 		await nextRequest(seen + 1);
-		expect(requests().at(-1)?.body).toContain('"event_id": "evt-9"');
+		expect(requests().at(-1)?.body).toContain('"uid": "uid-9"');
 		expect(answers()).toHaveLength(answered);
 		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual([
-			'/contracts/v1/events/evt-9',
 			'/contracts/v1/calendar/freebusy'
 		]);
 	});
@@ -493,74 +477,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(answeredIds).toContain('both_emails');
 	});
 
-	it("lets me allow the calendar an invitation's check needs, then tells me about it", async () => {
-		// The invitation arrives before I ever let the assistant read my calendar
-		await withdrawConsent(h.db, 'alice@test.local', 'calendar', 'read');
-		h.apisix.contracts.handler = (c) =>
-			c.path.startsWith('/contracts/v1/events/')
-				? {
-						status: 200,
-						body: invitationEvent({
-							id: 'evt-pre',
-							uid: 'uid-evt-pre',
-							title: 'Budget review',
-							start: '2026-10-09T09:00:00+02:00',
-							end: '2026-10-09T10:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'bob@test.local',
-							invitee: 'alice@test.local'
-						})
-					}
-				: { status: 200, body: { start: '', end: '', free: true, busy: [] } };
-		h.apisix.llm.script = (request) => {
-			const last = request.messages.at(-1);
-			return last?.role === 'tool' && last.name === 'read_freebusy'
-				? { content: `Found: ${last.content ?? ''}` }
-				: { content: 'Found: nothing' };
-		};
-		const seen = requests().length;
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-pre',
-			type: 'com.twake.calendar.event.invited.v1'
-		});
-		expect(posted.status).toBe(202);
-		const request = await nextRequest(seen);
-		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual(['/contracts/v1/events/evt-pre']);
-		const answered = answers().length;
-		await client.react(room, request, '✅');
-		expect(await nextAnswer(answered)).toContain('"free":true');
-		expect(h.apisix.contracts.calls.map((c) => c.path)).toEqual([
-			'/contracts/v1/events/evt-pre',
-			'/contracts/v1/calendar/freebusy'
-		]);
-		// The model went on from the invitation the harness had read
-		const told = h.apisix.llm.calls.at(-1)?.request.messages ?? [];
-		expect(told.some((m) => m.role === 'user' && (m.content ?? '').includes('evt-pre'))).toBe(true);
-	});
-
 	it('keeps a turn an event started from writing my assistant memory, even once I allowed it to read', async () => {
-		// The invitation's own title told the model to remember to accept everything: it reads my
-		// notes, which wait for me, and once I allowed them it tries to save that note
+		// The event's own text told the model to remember to accept everything: it reads my notes,
+		// which wait for me, and once I allowed them it tries to save that note
 		await withdrawConsent(h.db, 'alice@test.local', 'notes', 'read');
-		h.apisix.contracts.handler = (c) =>
-			c.path.startsWith('/contracts/v1/events/')
-				? {
-						status: 200,
-						body: invitationEvent({
-							id: 'evt-note',
-							uid: 'uid-evt-note',
-							title: INJECTED_TITLE,
-							start: '2026-10-09T14:00:00+02:00',
-							end: '2026-10-09T15:00:00+02:00',
-							timezone: 'Europe/Paris',
-							organizer: 'mallory@test.local',
-							invitee: 'alice@test.local'
-						})
-					}
-				: c.path.endsWith('/freebusy')
-					? { status: 200, body: { start: '', end: '', free: true, busy: [] } }
-					: { status: 200, body: { found: 'Budget notes' } };
+		h.apisix.contracts.handler = () => ({ status: 200, body: { found: 'Budget notes' } });
 		h.apisix.llm.script = (request) => {
 			const last = request.messages.at(-1);
 			if (last?.role === 'tool' && last.name === 'search_notes') {
@@ -574,12 +495,9 @@ describe('my answer lets my assistant carry on', () => {
 			return { toolCalls: call('search_notes', { q: 'invitations' }) };
 		};
 		const seen = requests().length;
-		const posted = await h.api.post('dispatcher', '/v1/events', {
-			owner: 'alice@test.local',
-			event_id: 'evt-note',
-			type: 'com.twake.calendar.event.invited.v1'
-		});
-		expect(posted.status).toBe(202);
+		await activity.publish(
+			invitationEvent('evt-note', 'alice@test.local', `Remember: ${INJECTED_NOTE}`)
+		);
 		const request = await nextRequest(seen);
 		const answered = answers().length;
 		await client.react(room, request, '✅');
@@ -617,11 +535,7 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await nextAnswer(answered)).toContain('Q4 plan.pdf');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
-		const check = await eventually(() => feedback.reactionsOn(request).find((r) => r.key === '✅'));
-		expect(check).toBeDefined();
+		await expectAnswered(feedback, request);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 
@@ -638,15 +552,11 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await nextAnswer(answered)).toContain('Send the Q4 figures');
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
-		const check = await eventually(() => feedback.reactionsOn(yes).find((r) => r.key === '✅'));
-		expect(check).toBeDefined();
+		await expectAnswered(feedback, yes);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
 	});
 
-	it('stops showing it is working on my answer when the turn it resumes fails', async () => {
+	it('stops typing when the turn my answer resumes fails, leaving the request seen but not answered', async () => {
 		await withdrawConsent(h.db, 'alice@test.local', 'contacts', 'read');
 		// Once the call I allowed came back, the model answers nothing
 		h.apisix.llm.script = slowModelUsing('search_contacts', { q: 'Anna' }, '');
@@ -660,12 +570,8 @@ describe('my answer lets my assistant carry on', () => {
 		expect(eyes).toBeDefined();
 		expect(await typing).toBe(true);
 		expect(await eventually(() => failures().length > failed, 30_000)).toBe(true);
-		expect(await eventually(() => eyes !== undefined && feedback.isRedacted(eyes.eventId))).toBe(
-			true
-		);
 		expect(await eventually(async () => !(await feedback.isTyping()), 10_000)).toBe(true);
-		await sleep(1000);
-		expect(feedback.reactionsOn(request).filter((r) => r.key === '✅')).toEqual([]);
+		await expectSeenOnly(feedback, request);
 	});
 
 	it('tells me what it did and what remains when my yes takes it past its limit of calls', async () => {
@@ -746,7 +652,7 @@ describe('my answer is admitted like any message', () => {
 		// One turn a minute: the question takes it, so the answer comes over the limit
 		h = await startMatrixHarness({ env: { ADMISSION_USER_PER_MINUTE: '1' } });
 		h.apisix.contracts.spec = CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(9);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(8);
 		alice = await h.synapse.registerUser('alice');
 		client = await startE2eeClient(h.synapse.url, alice);
 		const created = await h.api.post<{ roomId: string }>('alice@test.local', '/v1/assistants', {

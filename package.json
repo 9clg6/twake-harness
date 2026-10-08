@@ -22,8 +22,10 @@
 		"test:dev": "vitest run -c vitest.dev.config.ts --reporter=default --reporter=json --outputFile=dev-results/vitest.json"
 	},
 	"dependencies": {
+		"@linagora/rabbitmq-client": "^0.6.0",
 		"drizzle-orm": "^0.45.3",
 		"fastify": "^5.12.5",
+		"ical.js": "^2.2.1",
 		"jose": "^6.2.12",
 		"markdown-it": "^15.0.2",
 		"matrix-bot-sdk": "^0.8.0",
@@ -33,9 +35,11 @@
 	},
 	"devDependencies": {
 		"@eslint/js": "^10.0.1",
+		"@testcontainers/rabbitmq": "^12.2.0",
 		"@types/js-yaml": "^4.0.9",
 		"@types/node": "^22.20.5",
 		"@types/sanitize-html": "^2.16.2",
+		"amqplib": "^2.2.0",
 		"eslint": "^10.12.0",
 		"eslint-config-prettier": "^10.1.8",
 		"globals": "^17.13.0",
