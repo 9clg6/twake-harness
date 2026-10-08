@@ -28,6 +28,9 @@ export interface JobWorkerOptions {
 	// whose work must end with its job, all or nothing, may complete the job itself in the
 	// transaction of that work and resolve to null: the worker's completion then finds nothing left.
 	readonly handler: (job: Job) => Promise<Deferral | null>;
+	// What ends a job that failed for good, once it is marked so: whatever it settles is settled
+	// whether or not the handler got that far
+	readonly failedForGood?: (job: Job) => Promise<void>;
 	readonly log: FastifyBaseLogger;
 	readonly pollIntervalMs?: number;
 	// How long a job that failed waits before each of its next tries, by kind, over the queue's: a
@@ -68,7 +71,16 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 			const message = err instanceof Error ? err.message : String(err);
 			options.log.error({ job: job.id, kind: job.kind, attempts: job.attempts, err }, 'job failed');
 			const delaysMs = options.retryDelaysMs?.[job.kind] ?? retryDelaysOf(job.kind);
-			await failJob(options.db, job.id, job.attempts, message, delaysMs).catch(() => undefined);
+			const forGood = await failJob(options.db, job.id, job.attempts, message, delaysMs).catch(
+				() => false
+			);
+			if (forGood && options.failedForGood !== undefined) {
+				await options
+					.failedForGood(job)
+					.catch((failure: unknown) =>
+						options.log.error({ job: job.id, kind: job.kind, err: failure }, 'job end failed')
+					);
+			}
 		}
 	}
 
