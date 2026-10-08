@@ -1,4 +1,5 @@
 import type { FastifyBaseLogger } from 'fastify';
+import { z } from 'zod';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
@@ -6,7 +7,7 @@ import type { Config } from '../config.js';
 import type { ContractCatalog } from '../contracts/catalog.js';
 import { hasConsent } from '../consents/repository.js';
 import type { OwnerRequest } from '../consents/request.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { readJsonColumn, withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
 import { fenced } from '../llm/data.js';
 import { LlmError, type LlmClient } from '../llm/client.js';
@@ -23,8 +24,14 @@ import { runTurn, TurnError } from './turn.js';
 const FIND_SLOTS = 'find_meeting_slots';
 const CREATE_MEETING = 'create_meeting';
 
-// The most calls a suggestion may make: a search for slots, a retry, the meeting
+// The most calls a suggestion may make: a search for slots, a second search, the meeting, and the
+// meeting again once a guard refused it
 const MAX_TOOL_CALLS = 4;
+
+// The longest title and the most attendees of a suggestion's meeting, which its second try at
+// another time carries again
+const MAX_TITLE = 200;
+const MAX_ATTENDEES = 20;
 
 export interface SuggestionInput {
 	readonly payload: SuggestPayload;
@@ -85,61 +92,97 @@ function quotedBlock(payload: SuggestPayload): string {
 	].join('\n');
 }
 
-interface MeetingBody {
-	readonly title: string;
-	readonly start: string;
-	readonly end: string;
-	readonly time_zone?: string;
-	readonly attendees: readonly string[];
-}
+const instant = z.string().refine((value) => !Number.isNaN(Date.parse(value)));
+
+// The meeting a suggestion prepares, as the arguments of create_meeting give it. What the schema
+// does not name is left out, a description or a place among them: the owner approves what their
+// notification shows, the slot, the title and the people invited, and nothing they did not see.
+const meetingSchema = z.object({
+	body: z.object({
+		title: z.string(),
+		start: instant,
+		end: instant,
+		time_zone: z.string().optional(),
+		attendees: z.array(z.string())
+	})
+});
+export type MeetingBody = z.infer<typeof meetingSchema>['body'];
 
 export function readMeeting(args: unknown): MeetingBody | null {
-	const body: unknown =
-		typeof args === 'object' && args !== null ? Reflect.get(args, 'body') : undefined;
-	if (typeof body !== 'object' || body === null) return null;
-	const { title, start, end, attendees } = body as Record<string, unknown>;
-	const zone = (body as Record<string, unknown>)['time_zone'];
+	const parsed = meetingSchema.safeParse(args);
+	return parsed.success ? parsed.data.body : null;
+}
+
+// What a guard tells the model of a call it refused, which the model reads and prepares again
+export interface ToolRefusal {
+	readonly error: string;
+	readonly hint?: string;
+}
+
+// Why a suggestion may not prepare this meeting, or null when it may: only the people who wrote the
+// messages are invited, never an address that only the text of a message names, never on the slot
+// the user declined, and no more than its second try can carry
+export function meetingRefusal(
+	meeting: MeetingBody | null,
+	allowed: ReadonlySet<string>,
+	declined: string | null
+): ToolRefusal | null {
+	if (meeting === null) return { error: 'title, start, end and attendees are required' };
+	if (meeting.title.length > MAX_TITLE || meeting.attendees.length > MAX_ATTENDEES) {
+		return {
+			error: 'too_long',
+			hint: `At most ${MAX_TITLE} characters of title and ${MAX_ATTENDEES} attendees.`
+		};
+	}
 	if (
-		typeof title !== 'string' ||
-		typeof start !== 'string' ||
-		typeof end !== 'string' ||
-		Number.isNaN(Date.parse(start)) ||
-		Number.isNaN(Date.parse(end)) ||
-		!Array.isArray(attendees) ||
-		!attendees.every((a): a is string => typeof a === 'string')
+		meeting.attendees.length === 0 ||
+		!meeting.attendees.every((a) => allowed.has(a.toLowerCase()))
+	) {
+		return { error: 'attendees_not_allowed', hint: `Invite only: ${[...allowed].join(', ')}.` };
+	}
+	if (declined !== null && Date.parse(meeting.start) === Date.parse(declined)) {
+		return { error: 'slot_declined', hint: 'The user declined this slot: choose another.' };
+	}
+	return null;
+}
+
+// Why a suggestion may not look for slots with these people, or null when it may: the user and the
+// people who wrote the messages, by the addresses of the email parameter of find_meeting_slots, and
+// nobody whose calendar only the text of a message names
+export function slotsRefusal(args: unknown, allowed: ReadonlySet<string>): ToolRefusal | null {
+	const email: unknown =
+		typeof args === 'object' && args !== null ? Reflect.get(args, 'email') : undefined;
+	const people: unknown = typeof email === 'string' ? [email] : email;
+	if (
+		Array.isArray(people) &&
+		people.length > 0 &&
+		people.every((p): p is string => typeof p === 'string' && allowed.has(p.toLowerCase()))
 	) {
 		return null;
 	}
-	return { title, start, end, attendees, ...(typeof zone === 'string' ? { time_zone: zone } : {}) };
+	return { error: 'people_not_allowed', hint: `Look only for: ${[...allowed].join(', ')}.` };
 }
 
-// The meeting tool, held to what a suggestion may do: only the people who wrote the messages are
-// invited, never an address that only the text of a message names, and never the slot the user
-// declined; what it refuses the model reads, and prepares again
+// The two contracts held to what a suggestion may do: what a guard refuses never runs
+function guardSlots(tool: Tool, allowed: ReadonlySet<string>): Tool {
+	return {
+		...tool,
+		run: async (args, context) => {
+			const refused = slotsRefusal(args, allowed);
+			return refused === null ? tool.run(args, context) : { result: refused };
+		}
+	};
+}
+
 function guardMeeting(tool: Tool, allowed: ReadonlySet<string>, declined: string | null): Tool {
 	return {
 		...tool,
 		run: async (args, context) => {
 			const meeting = readMeeting(args);
-			if (meeting === null)
-				return { result: { error: 'title, start, end and attendees are required' } };
-			if (
-				meeting.attendees.length === 0 ||
-				!meeting.attendees.every((a) => allowed.has(a.toLowerCase()))
-			) {
-				return {
-					result: {
-						error: 'attendees_not_allowed',
-						hint: `Invite only: ${[...allowed].join(', ')}.`
-					}
-				};
-			}
-			if (declined !== null && Date.parse(meeting.start) === Date.parse(declined)) {
-				return {
-					result: { error: 'slot_declined', hint: 'The user declined this slot: choose another.' }
-				};
-			}
-			return tool.run(args, context);
+			const refused = meetingRefusal(meeting, allowed, declined);
+			if (refused !== null || meeting === null) return { result: refused };
+			// The call frozen for the owner holds the meeting as read, and nothing more
+			return tool.run({ body: meeting }, context);
 		}
 	};
 }
@@ -183,13 +226,14 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 			.map((e) => e.toLowerCase())
 			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
 		if (others.length === 0) return { kind: 'none', reason: 'nobody_else' };
+		const searched = new Set([...others, owner.toLowerCase()]);
 		const registry = makeToolRegistry([], () =>
 			contracts.tools
 				.filter((t) => [FIND_SLOTS, CREATE_MEETING].includes(t.definition.function.name))
 				.map((t) =>
 					t.definition.function.name === CREATE_MEETING
 						? guardMeeting(t, new Set(others), payload.retry?.start ?? null)
-						: t
+						: guardSlots(t, searched)
 				)
 		);
 		const moment = describeMoment(clock.now(), config.timeZone, locale);
@@ -252,11 +296,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						select tool, arguments from pending_calls where id = ${pendingCallId} and owner = ${owner}`
 				);
 				const frozen = call[0];
-				const args: unknown =
-					typeof frozen?.arguments === 'string'
-						? (JSON.parse(frozen.arguments) as unknown)
-						: frozen?.arguments;
-				const body = frozen?.tool === CREATE_MEETING ? readMeeting(args) : null;
+				const body =
+					frozen?.tool === CREATE_MEETING ? readMeeting(readJsonColumn(frozen.arguments)) : null;
 				if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
 				const timeZone =
 					(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? config.timeZone;
