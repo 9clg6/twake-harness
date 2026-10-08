@@ -7,7 +7,7 @@ import { grantConsent } from './helpers/consents.js';
 import { eventually } from './helpers/feedback.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
-	CALENDAR_CATALOG,
+	MEETING_CATALOG,
 	type ChatRequest,
 	type ContractCall,
 	type ScriptedReply
@@ -157,7 +157,7 @@ describe('the assistant proposes from the messages of channels', () => {
 				ASSISTANT_TIMEZONE: 'Europe/Paris'
 			}
 		});
-		h.apisix.contracts.spec = CALENDAR_CATALOG;
+		h.apisix.contracts.spec = MEETING_CATALOG;
 		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
 		h.apisix.llm.script = proposeMonday;
 		alice = await becomeAssistantOwner('alice');

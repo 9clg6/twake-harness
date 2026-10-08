@@ -328,6 +328,35 @@ export const CALENDAR_CATALOG = {
 				]
 			}
 		},
+		'/contracts/v1/calendar/invitations/accept': {
+			post: {
+				operationId: 'accept_invitation',
+				summary: 'Accept an invitation, once the user has said yes to this very invitation',
+				tags: ['calendar.invitation.accept.v1'],
+				'x-twake-risk': 'low',
+				requestBody: {
+					required: true,
+					content: {
+						'application/json': {
+							schema: {
+								type: 'object',
+								properties: { uid: { type: 'string' } },
+								required: ['uid']
+							}
+						}
+					}
+				}
+			}
+		}
+	}
+};
+
+// The calendar contracts with the two a suggestion uses: the slots where the user and the people
+// named are all free, and creating a meeting, a high-risk write
+export const MEETING_CATALOG = {
+	...CALENDAR_CATALOG,
+	paths: {
+		...CALENDAR_CATALOG.paths,
 		'/contracts/v1/calendar/availability/slots': {
 			get: {
 				operationId: 'find_meeting_slots',
@@ -368,26 +397,6 @@ export const CALENDAR_CATALOG = {
 									attendees: { type: 'array', items: { type: 'string' } }
 								},
 								required: ['title', 'start', 'end', 'attendees']
-							}
-						}
-					}
-				}
-			}
-		},
-		'/contracts/v1/calendar/invitations/accept': {
-			post: {
-				operationId: 'accept_invitation',
-				summary: 'Accept an invitation, once the user has said yes to this very invitation',
-				tags: ['calendar.invitation.accept.v1'],
-				'x-twake-risk': 'low',
-				requestBody: {
-					required: true,
-					content: {
-						'application/json': {
-							schema: {
-								type: 'object',
-								properties: { uid: { type: 'string' } },
-								required: ['uid']
 							}
 						}
 					}

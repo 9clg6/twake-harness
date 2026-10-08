@@ -54,7 +54,7 @@ describe('when none of its tools does what is asked', () => {
 	it('the assistant is told to say so and offer what its tools can do instead', async () => {
 		// Its tools read the calendar: none of them looks for a file
 		h.apisix.contracts.spec = CALENDAR_CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
 
 		const prompt = await systemPromptOfTurn(
 			h,

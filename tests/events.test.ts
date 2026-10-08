@@ -76,7 +76,7 @@ describe('an event wakes my assistant', () => {
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'read');
 		await grantConsent(h.db, 'alice@test.local', 'calendar', 'write');
 		h.apisix.contracts.spec = CALENDAR_CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
 		h.apisix.contracts.handler = () => ({
 			status: 200,
 			body: { start: '', end: '', free: true, busy: [] }
