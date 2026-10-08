@@ -147,7 +147,7 @@ describe('the days a list of calendar events reads, at the production log level'
 	beforeAll(async () => {
 		h = await startTestHarness();
 		h.apisix.contracts.spec = CALENDAR_CATALOG;
-		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
 		// Alice already let her assistant read her calendar
 		await grantConsent(h.db, 'alice', 'calendar', 'read');
 		h.apisix.contracts.handler = () => ({

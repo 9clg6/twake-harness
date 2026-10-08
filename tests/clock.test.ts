@@ -164,7 +164,7 @@ describe('the present moment in the system prompt', () => {
 				clock
 			});
 			h.apisix.contracts.spec = CALENDAR_CATALOG;
-			for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(4);
+			for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
 			// These owners already let their assistant read their calendar
 			for (const owner of ['alice', 'bob']) await grantConsent(h.db, owner, 'calendar', 'read');
 		});
