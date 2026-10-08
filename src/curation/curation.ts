@@ -33,9 +33,12 @@ async function dedupeMemory(tx: Tx, owner: string): Promise<number> {
 	return duplicates.length;
 }
 
+// The conversations a proposal comes from are held until the transaction ends, as a turn holds its
+// own: an erasure of the owner's assistant that comes meanwhile waits for the proposals, then
+// erases them too, and one that came first leaves no conversation to propose from
 async function proposeRecurringRequests(tx: Tx, owner: string): Promise<number> {
 	const rows = await tx.sql<{ id: string; messages: unknown }[]>`
-		select id, messages from sessions where owner = ${owner}`;
+		select id, messages from sessions where owner = ${owner} for key share`;
 	const sessionsByRequest = new Map<string, { text: string; sessions: Set<string> }>();
 	for (const row of rows) {
 		const messages = readJsonColumn(row.messages);
