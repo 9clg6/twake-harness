@@ -4,6 +4,7 @@ import { join } from 'node:path';
 import { PassThrough } from 'node:stream';
 import type { FastifyInstance } from 'fastify';
 
+import type { Clock } from '../../src/agent/clock.js';
 import { startTurnWorker } from '../../src/agent/turn-worker.js';
 import type { JobWorker } from '../../src/jobs/worker.js';
 import { buildApp } from '../../src/app.js';
@@ -51,6 +52,8 @@ export interface MatrixStartOptions {
 	readonly pushDeadlineMs?: number;
 	// How long a status message waits for its turn's answer before it gives up
 	readonly statusMaxMs?: number;
+	// The present the agent reads, set by the test instead of the system clock
+	readonly clock?: Clock;
 }
 
 // The lines by which the matrix role tells what it made of a message of an assistant's room
@@ -111,7 +114,12 @@ export async function startMatrixHarness(
 	// The api role, replicated as in the deployment: each replica has its own turn worker
 	const apps: FastifyInstance[] = [];
 	for (let i = 0; i < TEST_REPLICAS; i += 1) {
-		const replica = await buildApp({ config, db, logStream });
+		const replica = await buildApp({
+			config,
+			db,
+			logStream,
+			...(options.clock === undefined ? {} : { clock: options.clock })
+		});
 		await replica.ready();
 		apps.push(replica);
 	}

@@ -1,24 +1,9 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import type { Clock } from '../src/agent/clock.js';
 import { loadConfig } from '../src/config.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
+import { makeSettableClock } from './helpers/clock.js';
 import { echoScript } from './helpers/fake-apisix.js';
-
-interface SettableClock extends Clock {
-	set(iso: string): void;
-}
-
-// A clock the test moves by hand, so the moment the prompt states is known in advance
-function makeSettableClock(iso: string): SettableClock {
-	let current = new Date(iso);
-	return {
-		now: () => new Date(current.getTime()),
-		set: (next) => {
-			current = new Date(next);
-		}
-	};
-}
 
 // The system prompt the scripted model received for one chat turn of this user
 async function systemPromptOfTurn(h: TestHarness, sub: string, message: string): Promise<string> {
