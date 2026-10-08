@@ -44,8 +44,9 @@ export interface OwnerRequest {
 	// The harness's question, in Markdown: the application named as the catalog does
 	readonly question: string;
 	// The call under the question: what its owner reads of it when its contract offers no preview,
-	// and what the conversation keeps of it either way; null when the request shows none, for a
-	// call the model wrote without arguments whose question asks about its application alone
+	// and what the conversation keeps of it either way; null when the request shows none: for a
+	// first read, and for a first write the model wrote without arguments that no preview describes,
+	// whose questions ask about their application alone
 	readonly call: ShownCall | null;
 	// What its contract said the call would do, under the harness's label for it, in Markdown,
 	// which names the application: what its owner reads in the call's place; null for a contract
@@ -78,17 +79,17 @@ function linesOf(text: string): string[] {
 	return text.split(/\r\n|[\n\r\u0085\u2028\u2029]/);
 }
 
-// A call the model wrote without arguments, such as listing the mailboxes, which as JSON would
-// show its owner an empty object
+// A call the model wrote without arguments, which as JSON would show its owner an empty object
 function hasNoArguments(args: unknown): boolean {
 	return typeof args === 'object' && args !== null && Object.keys(args).length === 0;
 }
 
 // The harness's question for the reasons a call waits for, with the call it shows: a first use
 // asks about the application; a high-risk write, or a write that a turn an event started
-// prepared, about that very call; and the first of either in its application about both. Unless
-// a summary stands in its place, a call without arguments shows its tool instead, where the
-// question asks about that very call, and nothing under a first use's, whose words say it all.
+// prepared, about that very call; and the first of either in its application about both. A first
+// read shows no call. Unless a summary stands in its place, a write without arguments shows its
+// tool instead, where the question asks about that very call, and nothing under a first write's,
+// whose words say it all.
 // A recurring invitation asks about that very call whether to answer for the whole series: its yes
 // runs the call the usual way of writes.
 function questionFor(
@@ -119,13 +120,10 @@ function questionFor(
 			call: itself
 		};
 	}
-	return {
-		question:
-			call.level === 'read'
-				? consent.firstRead(name, covers, !bare)
-				: consent.firstWrite(name, covers, !bare),
-		call: bare ? null : frozen
-	};
+	// A first read asks about its application alone, whatever the call: its yes lets the assistant
+	// read there
+	if (call.level === 'read') return { question: consent.firstRead(name, covers), call: null };
+	return { question: consent.firstWrite(name, covers, !bare), call: bare ? null : frozen };
 }
 
 // The request about a frozen call, or null when what it shows of the call, the call or its
@@ -182,10 +180,11 @@ function shownText(request: Pick<OwnerRequest, 'call' | 'summary'>): string[] {
 
 // The request as the conversation keeps it, which later turns of the model read: as its owner
 // read it, with the call in the place of what its application said of it. That is the
-// application's data, which may hold what a third party wrote, and only its owner reads it. A call
-// without arguments shows no empty call there either, the model's own call just before the
-// request saying what would run, unless a summary stood in its place: the call shows there, {}, as
-// any call does.
+// application's data, which may hold what a third party wrote, and only its owner reads it. A
+// request that shows no call, a first read's or a first write's about a call without arguments,
+// shows none there either: what would run comes just before it in the conversation, as the model's
+// own call or, for the harness's own check of an invitation's slot, in what the model is told. A
+// call without arguments whose summary stood in its place shows there, {}, as any call does.
 export function conversationText(request: OwnerRequest): string {
 	return requestText({ ...request, summary: null });
 }

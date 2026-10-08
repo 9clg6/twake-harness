@@ -100,6 +100,11 @@ const WITHOUT_ARGUMENTS: Record<string, string> = {
 	'Quelle place prennent mes fichiers ?': 'read_storage_usage'
 };
 
+// What the owner asks that the model searches for at length: no request could show that call whole,
+// its JSON taking more than 16 KiB of the event
+const LONG_READ = 'Search my notes for every memo';
+const LONG_SEARCH = { q: 'memo '.repeat(4_000) };
+
 function model(request: ChatRequest): ScriptedReply {
 	const last = request.messages.at(-1);
 	const content = last?.content ?? '';
@@ -109,6 +114,7 @@ function model(request: ChatRequest): ScriptedReply {
 	}
 	const read = READS[content];
 	if (read !== undefined) return { toolCalls: call(read, { q: 'budget' }) };
+	if (content === LONG_READ) return { toolCalls: call('search_notes', LONG_SEARCH) };
 	const write = WRITES[content];
 	if (write !== undefined) return { toolCalls: call(write, { item_id: 'newsletter-42' }) };
 	const bare = WITHOUT_ARGUMENTS[content];
@@ -116,14 +122,14 @@ function model(request: ChatRequest): ScriptedReply {
 	return { content: `Heard: ${content}` };
 }
 
-// How the question ends, above the call it shows, and how to answer, under the call, in each
-// language
+// How a first write's question ends, above the call it shows, and how to answer, under the call,
+// in each language
 const ALLOW = {
 	en: 'Do you allow it? I would start with this:',
 	fr: "Tu m'autorises ? Je commencerais par ceci :"
 };
-// How it ends about a call without arguments, which shows nothing below it: the lines before say
-// what the level covers
+// How a first read's ends, and a first write's about a call without arguments, which show nothing
+// below them: the lines before say what the level covers
 const ALLOW_ALONE = { en: 'Do you allow it?', fr: "Tu m'autorises ?" };
 const HOW_TO_ANSWER = {
 	en: 'Answer yes or no in your next message.',
@@ -138,7 +144,7 @@ const ARCHIVE = { item_id: 'newsletter-42' };
 // which only the harness's own lines break; then the call it shows, and how to answer
 function shown(
 	question: readonly string[],
-	call: unknown = SEARCH,
+	call: unknown,
 	language: 'en' | 'fr' = 'en'
 ): { body: string; html: string } {
 	const json = JSON.stringify(call, null, 2);
@@ -152,8 +158,8 @@ function shown(
 	};
 }
 
-// A question about a call without arguments as Alice's client receives it: no call under it,
-// only how to answer
+// A question that shows no call as Alice's client receives it, a first read's or a first write's
+// about a call without arguments: only how to answer under it
 function shownAlone(
 	question: readonly string[],
 	language: 'en' | 'fr' = 'en'
@@ -192,6 +198,20 @@ describe('the question names the application in plain words', () => {
 		return res.body.answer;
 	}
 
+	// In its next turn, the model reads a request as Alice read it, after its own call, which already
+	// says what it would have run
+	function expectToldAfterItsCall(request: string, tool: string, args: unknown): void {
+		const told = r.h.apisix.llm.calls.at(-1)?.request.messages ?? [];
+		expect(told.filter((m) => m.role === 'assistant').map((m) => m.content)).toContain(request);
+		expect(
+			told.some((m) =>
+				m.tool_calls?.some(
+					(c) => c.function.name === tool && c.function.arguments === JSON.stringify(args)
+				)
+			)
+		).toBe(true);
+	}
+
 	beforeAll(async () => {
 		r = await startConsentRoom({ ADMISSION_USER_PER_MINUTE: '100' });
 		r.h.apisix.llm.script = model;
@@ -204,18 +224,37 @@ describe('the question names the application in plain words', () => {
 		r.h.apisix.contracts.calls.length = 0;
 	});
 
-	it('names the application and says what reading covers there', async () => {
-		expect(await askedAfter('Find the budget in my mail')).toEqual(
-			shown([
+	it('names the application and says what reading covers there, under no call: my yes is to reading there', async () => {
+		const read = await askedAfter('Find the budget in my mail');
+		expect(read).toEqual(
+			shownAlone([
 				'This is the first time I need to read your data in Twake Mail.',
 				'Reading: list, search and read your mail',
-				ALLOW.en
+				ALLOW_ALONE.en
 			])
 		);
 		// An application the catalog names without saying what reading covers there
 		expect(await askedAfter('Show my photos')).toEqual(
-			shown([`This is the first time I need to read your data in Twake Photos. ${ALLOW.en}`])
+			shownAlone([
+				`This is the first time I need to read your data in Twake Photos. ${ALLOW_ALONE.en}`
+			])
 		);
+		expectToldAfterItsCall(read.body, 'search_mail', SEARCH);
+		expect(r.h.apisix.contracts.calls).toHaveLength(0);
+	});
+
+	it('asks about a first read however large its call: it shows none, so none is too large', async () => {
+		await serve(DESCRIBED);
+		const logged = r.h.logLines().length;
+		expect(await askedAfter(LONG_READ)).toEqual(
+			shownAlone([`This is the first time I need to read your data in notes. ${ALLOW_ALONE.en}`])
+		);
+		expect(
+			r.h
+				.logLines()
+				.slice(logged)
+				.filter((line) => line['msg'] === 'contract call too large to ask about')
+		).toHaveLength(0);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
@@ -233,7 +272,7 @@ describe('the question names the application in plain words', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
-	it('shows no empty call under a first read or write without arguments: what the level covers says it', async () => {
+	it('shows no call under a first read, nor an empty one under a first write without arguments: what the level covers says it', async () => {
 		await serve(DESCRIBED);
 		const reading = [
 			'This is the first time I need to read your data in Twake Mail.',
@@ -249,17 +288,7 @@ describe('the question names the application in plain words', () => {
 				ALLOW_ALONE.en
 			])
 		);
-		// In its next turn, the model reads the request as I read it, after its own call, which
-		// already says what it would have run
-		const told = r.h.apisix.llm.calls.at(-1)?.request.messages ?? [];
-		expect(told.filter((m) => m.role === 'assistant').map((m) => m.content)).toContain(read.body);
-		expect(
-			told.some((m) =>
-				m.tool_calls?.some(
-					(c) => c.function.name === 'list_mailboxes' && c.function.arguments === '{}'
-				)
-			)
-		).toBe(true);
+		expectToldAfterItsCall(read.body, 'list_mailboxes', {});
 		// Through the API, the chat answers with the same request, and the call that waits shows the
 		// question alone
 		const res = await r.h.api.post<{ answer: string; pending_call: { request: string } }>(
@@ -275,23 +304,23 @@ describe('the question names the application in plain words', () => {
 
 	it("names an application by its id when the catalog names it neither in my language nor in the deployment's", async () => {
 		expect(await askedAfter('Search my notes')).toEqual(
-			shown([`This is the first time I need to read your data in notes. ${ALLOW.en}`])
+			shownAlone([`This is the first time I need to read your data in notes. ${ALLOW_ALONE.en}`])
 		);
 		// Wiki is named in French only, while Alice and the deployment speak English
 		expect(await askedAfter('Open my wiki')).toEqual(
-			shown([`This is the first time I need to read your data in wiki. ${ALLOW.en}`])
+			shownAlone([`This is the first time I need to read your data in wiki. ${ALLOW_ALONE.en}`])
 		);
 	});
 
 	it('takes up the words a refresh of the catalog brings, without a restart', async () => {
 		expect(await askedAfter('Show my tasks')).toEqual(
-			shown([`This is the first time I need to read your data in tasks. ${ALLOW.en}`])
+			shownAlone([`This is the first time I need to read your data in tasks. ${ALLOW_ALONE.en}`])
 		);
 		await serve({ ...DESCRIBED, tasks: TASKS });
-		const described = shown([
+		const described = shownAlone([
 			'This is the first time I need to read your data in Twake Tasks.',
 			'Reading: list and read your tasks and boards',
-			ALLOW.en
+			ALLOW_ALONE.en
 		]);
 		expect(await askedAfter('Show my tasks')).toEqual(described);
 		// A refresh that fails keeps the catalog as it was, its words included
@@ -334,12 +363,16 @@ describe('the question names the application in plain words', () => {
 		};
 		for (const [domain, message] of Object.entries(asked)) {
 			expect(await askedThroughApi(message)).toBe(
-				shown([`This is the first time I need to read your data in ${domain}. ${ALLOW.en}`]).body
+				shownAlone([
+					`This is the first time I need to read your data in ${domain}. ${ALLOW_ALONE.en}`
+				]).body
 			);
 		}
 		// The rest of this catalog holds, a new name included
 		expect(await askedThroughApi('Show my photos')).toBe(
-			shown([`This is the first time I need to read your data in Twake Pictures. ${ALLOW.en}`]).body
+			shownAlone([
+				`This is the first time I need to read your data in Twake Pictures. ${ALLOW_ALONE.en}`
+			]).body
 		);
 		// Descriptions that are no map of domains are ignored whole
 		await serve(['mail']);
@@ -352,7 +385,8 @@ describe('the question names the application in plain words', () => {
 				)
 		).toBe(true);
 		expect(await askedThroughApi('Find the budget in my mail')).toBe(
-			shown([`This is the first time I need to read your data in mail. ${ALLOW.en}`]).body
+			shownAlone([`This is the first time I need to read your data in mail. ${ALLOW_ALONE.en}`])
+				.body
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
@@ -380,7 +414,9 @@ describe('the question names the application in plain words', () => {
 		// Each description is ignored whole, and Twake Chat shows the harness's sentence alone
 		for (const [domain, message] of Object.entries(asked)) {
 			expect(await askedAfter(message)).toEqual(
-				shown([`This is the first time I need to read your data in ${domain}. ${ALLOW.en}`])
+				shownAlone([
+					`This is the first time I need to read your data in ${domain}. ${ALLOW_ALONE.en}`
+				])
 			);
 		}
 		const problems = Object.fromEntries(
@@ -410,13 +446,12 @@ describe('the question names the application in plain words', () => {
 
 		const opening = "C'est la première fois";
 		expect(await askedAfter('Cherche le budget dans mes mails', opening)).toEqual(
-			shown(
+			shownAlone(
 				[
 					"C'est la première fois que j'ai besoin de lire tes données dans Messagerie Twake.",
 					'Lecture : lister, chercher et lire tes mails',
-					ALLOW.fr
+					ALLOW_ALONE.fr
 				],
-				SEARCH,
 				'fr'
 			)
 		);
@@ -434,25 +469,25 @@ describe('the question names the application in plain words', () => {
 		// Drive is described in English only, the deployment's language: a French question takes
 		// its English name, and leaves out what reading covers there rather than say it in English
 		expect(await askedAfter('Cherche le plan dans mon drive', opening)).toEqual(
-			shown(
+			shownAlone(
 				[
-					`C'est la première fois que j'ai besoin de lire tes données dans Twake Drive. ${ALLOW.fr}`
+					`C'est la première fois que j'ai besoin de lire tes données dans Twake Drive. ${ALLOW_ALONE.fr}`
 				],
-				SEARCH,
 				'fr'
 			)
 		);
 		expect(await askedAfter('Ouvre mon wiki', opening)).toEqual(
-			shown(
-				[`C'est la première fois que j'ai besoin de lire tes données dans Wiki Twake. ${ALLOW.fr}`],
-				SEARCH,
+			shownAlone(
+				[
+					`C'est la première fois que j'ai besoin de lire tes données dans Wiki Twake. ${ALLOW_ALONE.fr}`
+				],
 				'fr'
 			)
 		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
-	it('shows no empty call under a first read or write without arguments, in my language', async () => {
+	it('shows no call under a first read, nor an empty one under a first write without arguments, in my language', async () => {
 		await serve(DESCRIBED);
 		const told = r.saying('Tool:').length;
 		await r.client.sendText(r.room, 'Parle-moi en français');
