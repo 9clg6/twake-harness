@@ -83,6 +83,25 @@ export function uniqueToDeviceTransactions(client: MatrixClient): void {
 		) as Promise<void>;
 }
 
+// The Rust SDK keeps a room key it already started until it expires by the room's rotation, a
+// hundred messages or a week by default, or until the history visibility, the algorithm or the
+// devices it goes to change: a key whose share never reached a device of the owner left every later
+// answer unreadable there until then. An assistant encrypts for a history visible to the joined
+// members only, which its rooms lose nothing by, as they hold the owner and the assistant alone, and
+// which retires, at the next message, every room key started for the shared history of the rooms'
+// preset, so that the rooms such a lost share left unreadable read again.
+type PrepareEncrypt = (roomId: string, roomInfo: Record<string, unknown>) => Promise<void>;
+
+function encryptForJoinedHistory(intent: Intent): void {
+	const engine = (
+		intent.underlyingClient.crypto as unknown as { engine?: { prepareEncrypt?: PrepareEncrypt } }
+	).engine;
+	const prepare = engine?.prepareEncrypt;
+	if (engine === undefined || prepare === undefined) return;
+	engine.prepareEncrypt = (roomId, roomInfo) =>
+		prepare.call(engine, roomId, { ...roomInfo, historyVisibility: 'joined' });
+}
+
 // The HTTP status of a failed request, which the SDK carries on what it throws
 function statusOf(err: unknown): number | null {
 	if (typeof err !== 'object' || err === null) return null;
@@ -100,6 +119,7 @@ export function makeEnsureEncryption(deps: EncryptionSetupDeps): EnsureEncryptio
 			// The SDK's own setup, which routeEncryptionSetups puts this one in front of
 			await Intent.prototype.enableEncryption.call(intent);
 			uniqueToDeviceTransactions(intent.underlyingClient);
+			encryptForJoinedHistory(intent);
 		})().catch((err: unknown) => {
 			setups.delete(intent);
 			forgetSdkSetup(intent);
