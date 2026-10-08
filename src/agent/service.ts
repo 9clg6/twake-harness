@@ -37,7 +37,7 @@ import {
 	type Invitation,
 	type ToolRunner
 } from './invitation.js';
-import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
+import { assistantPrompt, defaultPrompt, organizationPrompt } from './persona.js';
 import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
@@ -631,6 +631,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			}
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
+			// The names of the tools the model is given: its rules offer only what they can do
+			const offered = tools.definitions.map((tool) => tool.function.name);
 			try {
 				const turn = await runTurn(
 					{
@@ -645,13 +647,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							persona:
 								principal.id === ORGANIZATION_PRINCIPAL
 									? withAddressing(
-											organizationPrompt(config.org.name, config.org.persona),
+											organizationPrompt(config.org.name, config.org.persona, offered),
 											messages
 										)
 									: withLanguage(
 											input.assistantName === undefined
-												? DEFAULT_SYSTEM_PROMPT
-												: assistantPrompt(input.assistantName),
+												? defaultPrompt(offered)
+												: assistantPrompt(input.assistantName, offered),
 											messages
 										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
