@@ -60,6 +60,12 @@ function captureLogs(): LogCapture {
 	};
 }
 
+// A vhost of its own, as the platform sets one up: its name, and the platform's channel there
+interface OwnVhost {
+	readonly name: string;
+	readonly channel: ConfirmChannel;
+}
+
 // What an application publishes: a CloudEvent naming the people it is for in data.recipients
 interface ActivityEvent extends Record<string, unknown> {
 	readonly id: string;
@@ -215,13 +221,23 @@ describe('an event that fails holds back none of those after it, and is never lo
 		});
 	}
 
+	// A vhost of its own, with the activity exchange unless told otherwise, and the instance's
+	// user there, who may do nothing elsewhere
+	async function vhostOf(name: string, user: string, exchange = true): Promise<OwnVhost> {
+		const channel = await broker.addVhost(name);
+		if (exchange) await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+		await broker.addUser(user, HARNESS_PASSWORD, { configure: '^$', write: '^$', read: '^$' });
+		await broker.allow(user, name, PERMISSIONS);
+		return { name, channel };
+	}
+
 	// Publishes an event as Twake Tasks does, on a vhost of its own
-	async function publishOn(channel: ConfirmChannel, event: ActivityEvent): Promise<void> {
-		channel.publish(ACTIVITY, event.type, Buffer.from(JSON.stringify(event)), {
+	async function publishOn(vhost: OwnVhost, event: ActivityEvent): Promise<void> {
+		vhost.channel.publish(ACTIVITY, event.type, Buffer.from(JSON.stringify(event)), {
 			persistent: true,
 			messageId: event.id
 		});
-		await channel.waitForConfirms();
+		await vhost.channel.waitForConfirms();
 	}
 
 	// The lines of the attempts at an event that failed, once there are that many
@@ -479,16 +495,15 @@ describe('an event that fails holds back none of those after it, and is never lo
 	});
 
 	it('starts without the activity exchange, holds no connection while it waits, and listens once it is there', async () => {
-		const channel = await broker.addVhost('late');
-		await broker.addUser('twake-harness-late', HARNESS_PASSWORD, PERMISSIONS);
-		await broker.allow('twake-harness-late', 'late', PERMISSIONS);
+		const vhost = await vhostOf('late', 'twake-harness-late', false);
 		const lateLogs = captureLogs();
 		const late = await workerOn(
-			broker.urlFor('twake-harness-late', HARNESS_PASSWORD, 'late'),
+			broker.urlFor('twake-harness-late', HARNESS_PASSWORD, vhost.name),
 			lateLogs.stream
 		);
 		const connections = async (): Promise<number> =>
-			(await broker.connectedUsers()).filter((user) => user === 'twake-harness-late').length;
+			(await broker.connectedUsers(vhost.name)).filter((user) => user === 'twake-harness-late')
+				.length;
 		try {
 			expect(await healthOf(late)).toBe('disconnected');
 			await until(
@@ -498,10 +513,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 			// Each attempt closes its connection once it failed, so that none piles up
 			expect(await connections()).toBeLessThanOrEqual(1);
 			// The platform declares the exchange
-			await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+			await vhost.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
 			await until('listening', async () => (await healthOf(late)) === 'connected');
 			const event = activityEvent();
-			await publishOn(channel, event);
+			await publishOn(vhost, event);
 			await toldOf(event);
 		} finally {
 			await late.stop();
@@ -510,17 +525,14 @@ describe('an event that fails holds back none of those after it, and is never lo
 	});
 
 	it('dead-letters an event that brings the worker down whenever it holds it, once past five returns', async () => {
-		const channel = await broker.addVhost('loop');
-		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-		await broker.addUser('twake-harness-loop', HARNESS_PASSWORD, PERMISSIONS);
-		await broker.allow('twake-harness-loop', 'loop', PERMISSIONS);
-		const url = broker.urlFor('twake-harness-loop', HARNESS_PASSWORD, 'loop');
+		const loop = await vhostOf('loop', 'twake-harness-loop');
+		const url = broker.urlFor('twake-harness-loop', HARNESS_PASSWORD, loop.name);
 		// A first life declares the queue, before the event is published
 		await (await workerOn(url, captureLogs().stream)).stop();
 		const event = activityEvent();
 		database.cut();
 		try {
-			await publishOn(channel, event);
+			await publishOn(loop, event);
 			// Each life of the worker takes the event, tries it, and goes down still holding it. Each
 			// has a pool of its own, as a new process would: the driver waits longer and longer
 			// before it connects again where a connection failed.
@@ -543,8 +555,8 @@ describe('an event that fails holds back none of those after it, and is never lo
 			await until(
 				'the event dead-lettered',
 				async () =>
-					(await broker.queue(DEAD_LETTERS, 'loop'))?.messages === 1 &&
-					(await broker.queue(QUEUE, 'loop'))?.messages === 0
+					(await broker.queue(DEAD_LETTERS, loop.name))?.messages === 1 &&
+					(await broker.queue(QUEUE, loop.name))?.messages === 0
 			);
 		} finally {
 			database.restore();
@@ -552,13 +564,10 @@ describe('an event that fails holds back none of those after it, and is never lo
 	});
 
 	it('starts while the broker is out of reach, listens once it is back, and stops while it is gone', async () => {
-		const channel = await broker.addVhost('away');
-		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-		await broker.addUser('twake-harness-away', HARNESS_PASSWORD, PERMISSIONS);
-		await broker.allow('twake-harness-away', 'away', PERMISSIONS);
+		const vhost = await vhostOf('away', 'twake-harness-away');
 		const proxy = await startTcpProxy(() => broker.address());
 		proxy.cut();
-		const url = new URL(broker.urlFor('twake-harness-away', HARNESS_PASSWORD, 'away'));
+		const url = new URL(broker.urlFor('twake-harness-away', HARNESS_PASSWORD, vhost.name));
 		url.hostname = '127.0.0.1';
 		url.port = String(proxy.port);
 		const awayLogs = captureLogs();
@@ -580,7 +589,7 @@ describe('an event that fails holds back none of those after it, and is never lo
 			proxy.restore();
 			await until('listening', async () => (await healthOf(away)) === 'connected');
 			const event = activityEvent();
-			await publishOn(channel, event);
+			await publishOn(vhost, event);
 			await toldOf(event);
 			// The broker goes again, and the role stops meanwhile, as at a rollout
 			proxy.cut();
@@ -594,28 +603,25 @@ describe('an event that fails holds back none of those after it, and is never lo
 	});
 
 	it('tries again when it cannot read its queue again after a reconnection, saying so meanwhile', async () => {
-		const channel = await broker.addVhost('gone');
-		await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
-		await broker.addUser('twake-harness-gone', HARNESS_PASSWORD, PERMISSIONS);
-		await broker.allow('twake-harness-gone', 'gone', PERMISSIONS);
+		const vhost = await vhostOf('gone', 'twake-harness-gone');
 		const goneLogs = captureLogs();
 		const gone = await workerOn(
-			broker.urlFor('twake-harness-gone', HARNESS_PASSWORD, 'gone'),
+			broker.urlFor('twake-harness-gone', HARNESS_PASSWORD, vhost.name),
 			goneLogs.stream
 		);
 		try {
 			expect(await healthOf(gone)).toBe('connected');
 			// The exchange goes, then the broker drops the listener's connection
-			await channel.deleteExchange(ACTIVITY);
+			await vhost.channel.deleteExchange(ACTIVITY);
 			await broker.closeConnectionsOf('twake-harness-gone');
 			await until('disconnected', async () => (await healthOf(gone)) === 'disconnected');
 			await until('tried again', () =>
 				goneLogs.lines().some((line) => line['msg'] === 'listen failed')
 			);
-			await channel.assertExchange(ACTIVITY, 'topic', { durable: true });
+			await vhost.channel.assertExchange(ACTIVITY, 'topic', { durable: true });
 			await until('connected again', async () => (await healthOf(gone)) === 'connected');
 			const event = activityEvent();
-			await publishOn(channel, event);
+			await publishOn(vhost, event);
 			await toldOf(event);
 		} finally {
 			await gone.stop();
