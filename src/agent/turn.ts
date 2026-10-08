@@ -174,18 +174,27 @@ function parseArguments(raw: string): unknown {
 	}
 }
 
-interface Asked {
-	readonly completion: LlmCompletion;
-	readonly tokens: number;
+// The tokens the model calls of a turn spent, as the model reports them
+interface Spent {
+	tokens: number;
 }
 
-// One model call, with the tools it may call: a call that ran out of budget while thinking is made
-// once more with twice the budget, up to the ceiling
+interface Asked {
+	readonly completion: LlmCompletion;
+	// The model ran out of budget while thinking once its turn had spent its tokens: past them, no
+	// call with tools is made, not even this one again
+	readonly cut: boolean;
+}
+
+// One model call, with the tools it may call, whose tokens its turn adds to those it spent: a call
+// that ran out of budget while thinking is made once more with twice the budget, up to the ceiling,
+// unless it has tools and the turn spent all its tokens
 async function askModel(
 	deps: TurnDeps,
 	iteration: number,
 	prompt: readonly LlmMessage[],
-	tools: readonly LlmToolDefinition[]
+	tools: readonly LlmToolDefinition[],
+	spent: Spent
 ): Promise<Asked> {
 	deps.log.info(
 		{ iteration, messageCount: prompt.length, characters: countCharacters(prompt) },
@@ -193,9 +202,10 @@ async function askModel(
 	);
 	deps.log.debug({ iteration, messages: prompt }, 'model asked');
 	let completion = await deps.llm.complete(prompt, tools);
-	let tokens = usedTokens(completion);
+	spent.tokens += usedTokens(completion);
 	logAnswer(deps.log, iteration, completion);
 	if (ranOutOfBudget(completion)) {
+		if (tools.length > 0 && spent.tokens >= deps.maxTurnTokens) return { completion, cut: true };
 		const budget = deps.llm.maxTokens;
 		const retryBudget = Math.min(budget * 2, MAX_RETRY_TOKENS);
 		// Already at the ceiling, a second call would end the same way
@@ -205,11 +215,11 @@ async function askModel(
 				'model ran out of budget'
 			);
 			completion = await deps.llm.complete(prompt, tools, { maxTokens: retryBudget });
-			tokens += usedTokens(completion);
+			spent.tokens += usedTokens(completion);
 			logAnswer(deps.log, iteration, completion);
 		}
 	}
-	return { completion, tokens };
+	return { completion, cut: false };
 }
 
 // The model's answer to its owner, which ends the turn
@@ -242,25 +252,29 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	let toolCalls = 0;
 	// The calls that reached their tool, and those of the turn before the model spoke
 	let actions = input.actionsBefore;
-	let tokens = 0;
+	const spent: Spent = { tokens: 0 };
 	let iteration = 0;
 	// The calls the model made past the limit of the message, which never run
 	let notRun = 0;
 	// Every model answer that calls tools runs at least one of them, until a limit stops the loop:
 	// the tool calls of the message, or the tokens of the turn, checked before each model call
-	while (notRun === 0 && tokens < deps.maxTurnTokens) {
+	while (notRun === 0 && spent.tokens < deps.maxTurnTokens) {
 		const asked = await askModel(
 			deps,
 			iteration,
 			[system, ...past, ...messages],
-			deps.tools.definitions
+			deps.tools.definitions,
+			spent
 		);
-		tokens += asked.tokens;
+		iteration += 1;
+		// The model ran out while thinking past the tokens of the turn: its last call, without tools,
+		// ends it
+		if (asked.cut) break;
 		const { completion } = asked;
 		if (completion.toolCalls.length === 0) {
 			const answer = answerOf(completion);
 			messages.push({ role: 'assistant', content: answer });
-			return { answer, messages: [...input.history, ...messages], tokens };
+			return { answer, messages: [...input.history, ...messages], tokens: spent.tokens };
 		}
 		messages.push({
 			role: 'assistant',
@@ -327,14 +341,13 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				return {
 					answer: outcome.final,
 					messages: [...input.history, ...messages],
-					tokens,
+					tokens: spent.tokens,
 					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId }),
 					...(outcome.request === undefined ? {} : { request: outcome.request })
 				};
 			}
 			if (tool !== null && args !== null) input.actionsDone?.(actions);
 		}
-		iteration += 1;
 	}
 	// The message ran all the calls it may, or the turn spent all its tokens: rather than fail, the
 	// turn ends on the model's own account of what it did and what remains, which only the call that
@@ -343,7 +356,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	if (reached === 'tool_calls') {
 		deps.log.info({ limit: deps.maxToolCalls, toolCalls, notRun }, 'tool call limit reached');
 	} else {
-		deps.log.info({ limit: deps.maxTurnTokens, tokens }, 'token limit reached');
+		deps.log.info({ limit: deps.maxTurnTokens, tokens: spent.tokens }, 'token limit reached');
 	}
 	// In the system prompt rather than a message of its own: some chat templates refuse a system
 	// message after a tool's answer
@@ -351,8 +364,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		role: 'system',
 		content: `${input.systemPrompt}\n\n${wrapUpInstruction(deps, reached)}`
 	};
-	const asked = await askModel(deps, iteration, [instructed, ...past, ...messages], []);
-	tokens += asked.tokens;
+	const asked = await askModel(deps, iteration, [instructed, ...past, ...messages], [], spent);
 	// A model with no tools may still call one, through the API or in its text: those calls are
 	// not for the owner, its words beside them are
 	const written = asked.completion.content ?? '';
@@ -368,5 +380,5 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		answer = input.limitNotice(actions);
 	}
 	messages.push({ role: 'assistant', content: answer });
-	return { answer, messages: [...input.history, ...messages], tokens, atLimit: true };
+	return { answer, messages: [...input.history, ...messages], tokens: spent.tokens, atLimit: true };
 }

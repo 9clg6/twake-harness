@@ -212,4 +212,33 @@ describe('the token budget of a turn', () => {
 			tokens: 300_000
 		});
 	});
+
+	it('makes no call with tools past them, not even the retry of an answer that ran out while thinking', async () => {
+		// Two answers read at 100,000 tokens each; the third runs out while thinking at 100,000 more,
+		// which takes the turn past its limit: asked again, with its tools, it would read once more
+		const progress =
+			'I read your consents twice, then ran out of room to think. Ask me to continue.';
+		h.apisix.llm.script = (request, index) =>
+			request.tools === undefined
+				? { content: progress }
+				: index === 2
+					? { ...THINKS_TOO_LONG, usage: A_HUNDRED_THOUSAND_TOKENS }
+					: { toolCalls: [readCall(index)], usage: A_HUNDRED_THOUSAND_TOKENS };
+		const { status, body } = await chat(h, 'gina', 'Read them all', 'turn-tokens-retry');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(progress);
+		// The answer that ran out is not asked for again: the next call is the last, without tools
+		expect(h.apisix.llm.calls.map((c) => c.request.tools !== undefined)).toEqual([
+			true,
+			true,
+			true,
+			false
+		]);
+		const lines = h.logLines().filter((line) => line['reqId'] === 'turn-tokens-retry');
+		expect(lines.find((line) => line['msg'] === 'token limit reached')).toMatchObject({
+			level: 30,
+			limit: 250_000,
+			tokens: 300_000
+		});
+	});
 });
