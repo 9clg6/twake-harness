@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
-import { withPrincipal } from '../src/db/client.js';
+import { makeSettableClock } from './helpers/clock.js';
 import {
 	modelFor,
 	QUESTION_CONTENT_KEY,
@@ -56,40 +56,6 @@ function sleep(ms: number): Promise<void> {
 // Until a question expired, by the end its mark gives, and a second more
 async function pastExpiry(mark: Mark): Promise<void> {
 	await sleep(Math.max(0, mark.expires_ts - Date.now()) + 1_000);
-}
-
-// Alice's Megolm sessions as the harness sees them a month after it first decrypted words of them,
-// while `run` runs
-async function sessionsAMonthOld(r: ConsentRoom, run: () => Promise<void>): Promise<void> {
-	const age = async (shift: string): Promise<void> => {
-		await withPrincipal(
-			r.h.db,
-			{ id: OWNER },
-			(tx) => tx.sql`
-				update owner_megolm_sessions set first_seen_at = now() - ${shift}::interval
-				where owner = ${OWNER}`
-		);
-	};
-	await age('31 days');
-	try {
-		await run();
-	} finally {
-		await age('0 seconds');
-	}
-}
-
-// The line the matrix role logged with a message, once it did
-async function logged(
-	r: ConsentRoom,
-	msg: string,
-	eventId: string
-): Promise<Record<string, unknown>> {
-	for (let i = 0; i < 120; i += 1) {
-		const line = r.h.logLines().find((l) => l['eventId'] === eventId && l['msg'] === msg);
-		if (line !== undefined) return line;
-		await sleep(250);
-	}
-	throw new Error(`nothing logged as ${msg} for ${eventId}`);
 }
 
 // What tells Alice's client which question a message asks, and until when
@@ -174,21 +140,19 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		await r.client.sendText(r.room, 'oui');
 		expect(await r.nextSaying(ADOPTED, adopted)).toBe(ADOPTED);
 		// The harness holds it now, as the API would once I accepted it there
-		const view = await r.h.api.get(OWNER, IDENTITY_ROUTE);
-		expect(view.body).toEqual({
+		const held = {
 			pinned: { master_key: after, pinned_by: 'chat', pinned_at: expect.any(String) },
 			published: null
-		});
-		// My words from it are verified, and nothing tells me about them any more
+		};
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toEqual(held);
+		// My words from it get their answer alone: a notice or a question about them would reach the
+		// room before it, and none does; nor do they set my identity aside again
 		const said = r.client.messages.filter((m) => m.sender === r.assistantId).length;
 		heard = r.saying('Heard:').length;
-		const thanks = await r.client.sendText(r.room, 'Merci');
+		await r.client.sendText(r.room, 'Merci');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Merci');
-		expect(await logged(r, 'owner device verified', thanks)).toMatchObject({
-			signed: true,
-			identity: 'pinned'
-		});
 		expect(r.client.messages.filter((m) => m.sender === r.assistantId)).toHaveLength(said + 1);
+		expect((await r.h.api.get(OWNER, IDENTITY_ROUTE)).body).toEqual(held);
 		// My yes was an answer: it started no turn of its own
 		expect(r.saying('Heard: oui')).toHaveLength(0);
 	});
@@ -248,17 +212,6 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		});
 	});
 
-	it('tells me in my language to discard a session it first saw over a month ago, then send again', async () => {
-		const heard = r.saying('Heard:').length;
-		await r.client.sendText(r.room, 'Mots récents');
-		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Mots récents');
-		const notices = r.saying(OLD_SESSION_START).length;
-		await sessionsAMonthOld(r, async () => {
-			await r.client.sendText(r.room, "Mots d'une vieille session");
-			expect(await r.nextSaying(OLD_SESSION_START, notices)).toBe(OLD_SESSION);
-		});
-	});
-
 	it('takes my yes for no confirmation once the deployment enforces, until I confirm my identity through the API', async () => {
 		// Another session of mine replaces my identity with a new one that signs it alone, and I
 		// answer yes from it when my assistant asks me about it
@@ -294,6 +247,34 @@ describe('my assistant asks me whether I reset my identity myself, while the har
 		await other.sendText(r.room, 'Et maintenant ?');
 		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Et maintenant ?');
 		expect(r.saying('Heard: Encore moi')).toHaveLength(0);
+	});
+});
+
+describe('my assistant tells me in my language to discard a session it first saw over a month ago', () => {
+	// The present as the harness reads it, which the test moves on by a month
+	const clock = makeSettableClock('2026-10-08T09:00:00Z');
+	let r: ConsentRoom;
+	beforeAll(async () => {
+		r = await startConsentRoom(
+			{ ASSISTANT_LOCALE: 'fr', ADMISSION_USER_PER_MINUTE: '100' },
+			{ clock }
+		);
+		r.h.apisix.llm.script = modelFor({});
+	}, 240_000);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it('takes no words of it, and tells me to send /discardsession in this room, then send again', async () => {
+		const heard = r.saying('Heard:').length;
+		await r.client.sendText(r.room, 'Mots récents');
+		expect(await r.nextSaying('Heard:', heard)).toBe('Heard: Mots récents');
+		// A month and a day later, my app still encrypts with the keys of that session
+		clock.set('2026-11-09T09:00:00Z');
+		const notices = r.saying(OLD_SESSION_START).length;
+		await r.client.sendText(r.room, "Mots d'une vieille session");
+		expect(await r.nextSaying(OLD_SESSION_START, notices)).toBe(OLD_SESSION);
+		expect(r.saying("Heard: Mots d'une vieille session")).toHaveLength(0);
 	});
 });
 
