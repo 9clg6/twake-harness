@@ -104,7 +104,7 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			if (!mayArrangeMeeting(message.text)) return;
 			// Whoever turned suggestions off is not read: not as the message that starts one, nor as its context
 			if (!(await enabled(sender))) {
-				log.info({ roomId, eventId: message.eventId, reason: 'opted out' }, 'channel ignored');
+				log.info({ roomId, eventId: message.eventId, reason: 'opted_out' }, 'channel ignored');
 				return;
 			}
 			let context: Remembered | null =
