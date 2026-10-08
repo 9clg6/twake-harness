@@ -30,6 +30,7 @@ import {
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
+import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -226,6 +227,7 @@ export interface AgentService {
 	runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult>;
 	// What the owner's assistant proposes from the messages of a channel, if anything
 	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
+	runBrief(input: BriefInput): Promise<BriefResult>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -719,6 +721,23 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	const suggestions = makeSuggestionRunner({ config, db, llm, contracts, admission, gate, clock });
 
+	// The brief of the owner's working day, which the worker role's scheduler asks for: the
+	// assistant speaks as in its owner's turns, given no tool
+	const briefs = makeBriefRunner({
+		config,
+		db,
+		llm,
+		tools,
+		admission,
+		gate,
+		clock,
+		persona: (assistantName, messages) =>
+			withLanguage(
+				assistantName === undefined ? defaultPrompt([]) : assistantPrompt(assistantName, []),
+				messages
+			)
+	});
+
 	return {
 		llm,
 		tools,
@@ -727,6 +746,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		admission,
 		runOwnerTurn,
 		runAllowedCall,
-		runSuggestion: suggestions.run
+		runSuggestion: suggestions.run,
+		runBrief: briefs.run
 	};
 }
