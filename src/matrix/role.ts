@@ -134,7 +134,7 @@ interface SendJob {
 	readonly questionMarker?: YesNoQuestion;
 	// The text as HTML, laid out by the harness itself
 	readonly html?: string;
-	// The turn answered once it reached its limit of tool calls
+	// The turn answered once it reached its limit of tool calls or of tokens
 	readonly atLimit?: true;
 }
 

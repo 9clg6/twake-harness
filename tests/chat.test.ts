@@ -321,9 +321,10 @@ async function chatIn(
 	return { status: res.statusCode, body: res.json() };
 }
 
-// A model that makes one call after another for as long as it has tools, so that it goes past the
-// limit of its message, then gives the answer given once it has none
-function pastTheLimit(last: ScriptedReply): LlmScript {
+// A model that makes one call after another for as long as it has tools, so that it goes past a
+// limit of its message, of tool calls or of the tokens each answer reports when they are given,
+// then gives the answer given once it has none
+function pastTheLimit(last: ScriptedReply, usage?: ScriptedReply['usage']): LlmScript {
 	return (request, index) =>
 		request.tools === undefined
 			? last
@@ -334,7 +335,8 @@ function pastTheLimit(last: ScriptedReply): LlmScript {
 							type: 'function',
 							function: { name: 'consents_list', arguments: '{}' }
 						}
-					]
+					],
+					...(usage === undefined ? {} : { usage })
 				};
 }
 
@@ -409,10 +411,56 @@ describe('the last answer of a turn past its limit of tool calls', () => {
 	});
 });
 
+// What each answer of the model reports it read and wrote: the third takes a turn past 1000 tokens
+const FOUR_HUNDRED_TOKENS = { promptTokens: 300, completionTokens: 100 };
+
+describe('the last answer of a turn past its limit of tokens', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		h = await startTestHarness({ env: { TURN_MAX_TOKENS: '1000' } });
+	});
+	afterAll(async () => {
+		await h.close();
+	});
+	beforeEach(() => {
+		h.apisix.llm.calls.length = 0;
+	});
+
+	it("is the harness's own notice of what was done when the model gives no words", async () => {
+		const notice =
+			'I did 3 actions for your request, then reached my limit for this message. Say “continue” and I will carry on.';
+		h.apisix.llm.script = pastTheLimit({ content: LATE_CALL_MARKUP }, FOUR_HUNDRED_TOKENS);
+		const { status, body } = await chatIn(h, { message: 'Read them all' }, 'tokens-notice');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(notice);
+		const lines = h.logLines().filter((line) => line['reqId'] === 'tokens-notice');
+		expect(lines.find((line) => line['msg'] === 'token limit reached')).toMatchObject({
+			level: 30,
+			limit: 1000,
+			tokens: 1200
+		});
+		expect(lines.find((line) => line['msg'] === 'token limit notice')).toMatchObject({
+			level: 30,
+			actions: 3,
+			reason: 'markup'
+		});
+		// The conversation keeps the reads and the notice as the assistant's answer, for the model's
+		// next turn, never the instruction of the call that ended this one
+		h.apisix.llm.script = echoScript;
+		await chatIn(h, { session_id: body.session_id, message: 'continue' }, 'tokens-next');
+		const next = h.apisix.llm.calls[4]?.request.messages ?? [];
+		expect(next.filter((m) => m.role === 'tool')).toHaveLength(3);
+		expect(next.at(-2)).toMatchObject({ role: 'assistant', content: notice });
+		expect(next.some((m) => /ask you to continue/.test(m.content ?? ''))).toBe(false);
+	});
+});
+
 describe('the notice of a turn past its limit in a deployment that speaks French', () => {
 	let h: TestHarness;
 	beforeAll(async () => {
-		h = await startTestHarness({ env: { ASSISTANT_LOCALE: 'fr', TURN_MAX_TOOL_CALLS: '1' } });
+		h = await startTestHarness({
+			env: { ASSISTANT_LOCALE: 'fr', TURN_MAX_TOOL_CALLS: '1', TURN_MAX_TOKENS: '1000' }
+		});
 	});
 	afterAll(async () => {
 		await h.close();
@@ -425,5 +473,22 @@ describe('the notice of a turn past its limit in a deployment that speaks French
 		expect(body.answer).toBe(
 			"J'ai fait 1 action pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive."
 		);
+	});
+
+	it('speaks French at its limit of tokens as well', async () => {
+		// A first read of 1200 tokens takes the turn past its 1000, within its one tool call
+		h.apisix.llm.script = pastTheLimit(
+			{ content: LATE_CALL_MARKUP },
+			{ promptTokens: 1000, completionTokens: 200 }
+		);
+		const { status, body } = await chatIn(h, { message: 'Lis-les toutes' }, 'notice-fr-tokens');
+		expect(status).toBe(200);
+		expect(body.answer).toBe(
+			"J'ai fait 1 action pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive."
+		);
+		const noticed = h
+			.logLines()
+			.find((line) => line['reqId'] === 'notice-fr-tokens' && line['msg'] === 'token limit notice');
+		expect(noticed).toMatchObject({ level: 30, actions: 1, reason: 'markup' });
 	});
 });

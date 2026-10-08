@@ -89,7 +89,7 @@ export interface SendPayload {
 	readonly questionMarker?: YesNoQuestion;
 	// The text as HTML, when the harness laid it out itself rather than the model writing Markdown
 	readonly html?: string;
-	// The turn answered once it reached its limit of tool calls: there is more to do
+	// The turn answered once it reached its limit of tool calls or of tokens: there is more to do
 	readonly atLimit?: true;
 }
 

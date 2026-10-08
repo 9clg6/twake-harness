@@ -74,8 +74,8 @@ export interface Messages {
 		readonly noEscrow: string;
 		// Why an assistant leaves a room where others than its owner are: everyone there reads it
 		readonly directRoomsOnly: string;
-		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
-		// owner: the actions it did, and how to have it carry on
+		// A turn that ran all the tool calls one message may, or spent all its tokens, whose model then
+		// wrote no words for its owner: the actions it did, and how to have it carry on
 		callLimit(actions: number): string;
 		// The owner's permission for their assistant to act for them expires within days: on what
 		// date and at what time, and where to renew it. No question: nothing waits for an answer

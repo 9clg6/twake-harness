@@ -28,8 +28,9 @@ export interface TurnInput {
 	// The actions the turn did before the model spoke: the call its owner allowed, when it resumes
 	// from one
 	readonly actionsBefore: number;
-	// What the owner reads, in their language, when the model answers the limit of tool calls with
-	// no words for them: given the actions the turn did, what was done and how to have it go on
+	// What the owner reads, in their language, when the model answers a limit of the turn, of tool
+	// calls or of tokens, with no words for them: given the actions the turn did, what was done and
+	// how to have it go on
 	limitNotice(actions: number): string;
 	// Told, after each call that ran, the actions the turn has done so far: its owner sees them as
 	// it goes
@@ -44,7 +45,7 @@ export interface TurnOutput {
 	readonly pendingCallId?: string;
 	// That question in its parts, when the harness laid it out as a request about the call
 	readonly request?: OwnerRequest;
-	// The turn reached its limit of tool calls before it answered: there is more to do
+	// The turn reached its limit of tool calls or of tokens before it answered: there is more to do
 	readonly atLimit?: true;
 }
 
@@ -53,6 +54,9 @@ export interface TurnDeps {
 	readonly tools: ToolRegistry;
 	readonly log: FastifyBaseLogger;
 	readonly maxToolCalls: number;
+	// The tokens the turn may spend, the prompts and answers of its model calls summed, checked
+	// before each call: not the budget of one call, which is the client's
+	readonly maxTokens: number;
 	// The most characters of the past conversation the model reads; its stored history keeps all
 	readonly historyMaxChars: number;
 }
@@ -83,10 +87,10 @@ function limitReached(limit: number): { readonly error: string; readonly hint: s
 }
 
 // What the model is told when it is asked for the answer that ends a turn whose message reached
-// its limit of tool calls, with no tool left to call: the owner learns where things stand, and
-// that they can have it go on
-function wrapUpInstruction(limit: number): string {
-	return `You reached the limit of ${limit} tool calls for one message, so the calls you made past it did not run, and no tool is available now. Answer the user now: tell them what you did, what remains to be done, and that they can ask you to continue.`;
+// one of its limits, with no tool left to call: the owner learns where things stand, and that they
+// can have it go on
+function wrapUpInstruction(reached: string): string {
+	return `You reached ${reached}, and no tool is available now. Answer the user now: tell them what you did, what remains to be done, and that they can ask you to continue.`;
 }
 
 // The most one model call may spend: a call that ran out is retried once at twice the budget,
@@ -197,13 +201,14 @@ function answerOf(completion: LlmCompletion): string {
 	return answer;
 }
 
-// One turn: the model answers, possibly through tool calls, within a bounded number of calls. A
-// model that goes past that number is asked once more, without tools, to tell its owner where
-// things stand; should it write no words for them, the harness tells them itself what was done, so
-// that the turn ends on an answer whatever the model writes. Every model call and every tool call
-// is logged at info with its metadata only. The conversation itself (prompt, answer, reasoning,
-// tool arguments and results) goes to debug: messages reach the harness end-to-end encrypted and
-// are decrypted only here, so their text must stay out of the production logs.
+// One turn: the model answers, possibly through tool calls, within a bounded number of calls and of
+// tokens. A model that goes past that number of calls, or a turn that spent those tokens, is asked
+// once more, without tools, to tell its owner where things stand; should it write no words for
+// them, the harness tells them itself what was done, so that the turn ends on an answer whatever
+// the model writes. Every model call and every tool call is logged at info with its metadata only.
+// The conversation itself (prompt, answer, reasoning, tool arguments and results) goes to debug:
+// messages reach the harness end-to-end encrypted and are decrypted only here, so their text must
+// stay out of the production logs.
 export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOutput> {
 	// What this turn adds to the conversation, which the model always reads whole
 	const messages: LlmMessage[] =
@@ -223,8 +228,9 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	let iteration = 0;
 	// The calls the model made past the limit of the message, which never run
 	let notRun = 0;
-	// Every model answer that calls tools runs at least one of them, until the limit stops the loop
-	while (notRun === 0) {
+	// Every model answer that calls tools runs at least one of them, until a limit stops the loop:
+	// the tool calls of the message, or the tokens of the turn, checked before each model call
+	while (notRun === 0 && tokens < deps.maxTokens) {
 		const asked = await askModel(
 			deps,
 			iteration,
@@ -312,14 +318,26 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		}
 		iteration += 1;
 	}
-	// The message ran all the calls it may: rather than fail, the turn ends on the model's own
-	// account of what it did and what remains, which only the call that asks for it is told to give
-	deps.log.info({ limit: deps.maxToolCalls, toolCalls, notRun }, 'tool call limit reached');
+	// The message ran all the calls it may, or the turn spent all its tokens: rather than fail, the
+	// turn ends on the model's own account of what it did and what remains, which only the call that
+	// asks for it is told to give
+	let reached: string;
+	// The line logged when the harness tells the owner itself, the model having no words for them
+	let noticed: string;
+	if (notRun > 0) {
+		deps.log.info({ limit: deps.maxToolCalls, toolCalls, notRun }, 'tool call limit reached');
+		reached = `the limit of ${deps.maxToolCalls} tool calls for one message, so the calls you made past it did not run`;
+		noticed = 'tool call limit notice';
+	} else {
+		deps.log.info({ limit: deps.maxTokens, tokens }, 'token limit reached');
+		reached = `the limit of ${deps.maxTokens} tokens for one message`;
+		noticed = 'token limit notice';
+	}
 	// In the system prompt rather than a message of its own: some chat templates refuse a system
 	// message after a tool's answer
 	const instructed: LlmMessage = {
 		role: 'system',
-		content: `${input.systemPrompt}\n\n${wrapUpInstruction(deps.maxToolCalls)}`
+		content: `${input.systemPrompt}\n\n${wrapUpInstruction(reached)}`
 	};
 	const asked = await askModel(deps, iteration, [instructed, ...past, ...messages], []);
 	tokens += asked.tokens;
@@ -334,7 +352,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				: asked.completion.toolCalls.length > 0
 					? 'tool_calls'
 					: 'empty';
-		deps.log.info({ actions, reason }, 'tool call limit notice');
+		deps.log.info({ actions, reason }, noticed);
 		answer = input.limitNotice(actions);
 	}
 	messages.push({ role: 'assistant', content: answer });

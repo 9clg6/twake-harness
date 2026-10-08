@@ -32,6 +32,8 @@ export interface ScriptedReply {
 	// Why the model stopped: stop or tool_calls unless told otherwise, such as length when it ran
 	// out of tokens, in which case it reports the whole budget as spent
 	finishReason?: string;
+	// The tokens the model reports it read and wrote for this answer, over the fake's own
+	usage?: { readonly promptTokens: number; readonly completionTokens: number };
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -552,6 +554,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			};
 			if (reply.reasoning !== undefined) message['reasoning_content'] = reply.reasoning;
 			if (reply.toolCalls !== undefined) message['tool_calls'] = reply.toolCalls;
+			const promptTokens = reply.usage?.promptTokens ?? 10;
+			const completionTokens =
+				reply.usage?.completionTokens ??
+				(reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5);
 			sendJson(res, 200, {
 				id: `chatcmpl-${llm.calls.length}`,
 				object: 'chat.completion',
@@ -565,9 +571,9 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 					}
 				],
 				usage: {
-					prompt_tokens: 10,
-					completion_tokens: reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5,
-					total_tokens: 15
+					prompt_tokens: promptTokens,
+					completion_tokens: completionTokens,
+					total_tokens: promptTokens + completionTokens
 				}
 			});
 			return;
