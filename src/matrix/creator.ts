@@ -16,12 +16,28 @@ export function helpText(messages: Messages): string {
 	);
 }
 
+// What the owner's message was to the creator, as the matrix role logs it: a command, the name it
+// asked for, an answer to its question, something it did not understand, or a turn that failed
+export type CreatorCommand =
+	| '/newbot'
+	| '/mybot'
+	| '/rename'
+	| '/delete'
+	| '/recover'
+	| '/help'
+	| 'name'
+	| 'delete_confirmed'
+	| 'delete_cancelled'
+	| 'delete_expired'
+	| 'unknown'
+	| 'failed';
+
 export interface CreatorTurn {
 	readonly reply: string;
 	// Where the dialog stands once the owner read the reply: the question it then waits on is the
 	// one the reply asks
 	readonly nextState: DialogState | null;
-	readonly command: string;
+	readonly command: CreatorCommand;
 }
 
 export interface CreatorInput {
