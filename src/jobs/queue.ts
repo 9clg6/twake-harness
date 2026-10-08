@@ -112,7 +112,9 @@ export async function requeueStaleJobs(db: Db, leaseMs: number): Promise<number>
 	return result.count;
 }
 
-export async function completeJob(db: Db, id: number): Promise<void> {
+// A job done is deleted, its dedup key free again: within a transaction, a handler can finish its
+// job with what it wrote, before its worker does
+export async function completeJob(db: Db | Tx, id: number): Promise<void> {
 	await db.sql`delete from jobs where id = ${id}`;
 }
 

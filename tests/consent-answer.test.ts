@@ -673,7 +673,7 @@ describe('my answer is admitted like any message', () => {
 		if (h !== undefined) await h.close();
 	});
 
-	it('tells me it is busy when my answer comes over my limit, and runs nothing', async () => {
+	it('runs the call once my limit lets my answer through, and never tells me it is busy', async () => {
 		h.apisix.contracts.calls.length = 0;
 		h.apisix.llm.script = modelUsing('search_emails', { from: 'paul@test.local' });
 		await client.sendText(room, 'What did Paul send me yesterday?');
@@ -683,9 +683,12 @@ describe('my answer is admitted like any message', () => {
 		);
 		if (request === undefined) throw new Error('no request');
 		await client.react(room, request.eventId, '✅');
-		await client.waitForMessage(room, assistantId, (t) =>
-			t.startsWith('I received too many messages at once')
+		// Over my limit for this minute, my answer waits for the next one
+		await client.waitForMessage(room, assistantId, (t) => t.startsWith('Found:'), 110_000);
+		expect(h.apisix.contracts.calls).toHaveLength(1);
+		const busy = client.messages.filter(
+			(m) => m.roomId === room && m.body.startsWith('I received too many messages at once')
 		);
-		expect(h.apisix.contracts.calls).toHaveLength(0);
-	});
+		expect(busy).toEqual([]);
+	}, 150_000);
 });

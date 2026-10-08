@@ -457,6 +457,38 @@ export async function markReplayed(tx: Tx, id: string): Promise<void> {
 		where id = ${id}`;
 }
 
+// The call its owner allowed, which admission kept from running, waits for their answer again as
+// it did once asked, should its request end after the refusal lifts, in this many milliseconds: no
+// answer is recorded, and the owner's next message may answer it in words. False when the call no
+// longer waited to run, or its request ends before then.
+export async function reopenRequest(
+	tx: Tx,
+	owner: string,
+	id: string,
+	lifetimeMs: number,
+	liftsInMs: number
+): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set status = 'open', decided_at = null, answer_event_id = null,
+			words_closed_at = null
+		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null
+			and created_at + make_interval(secs => ${lifetimeMs / 1000})
+				> now() + make_interval(secs => ${liftsInMs / 1000})`;
+	return result.count === 1;
+}
+
+// The call its owner allowed, which admission kept from running past the end of its request, is
+// closed as expired, erasing what it would have sent, the question and the digest of what its
+// owner was shown. Their yes stays recorded, so that, delivered again, it is not taken for a
+// message. False when the call no longer waited to run.
+export async function expireHeldRequest(tx: Tx, owner: string, id: string): Promise<boolean> {
+	const result = await tx.sql`
+		update pending_calls set status = 'expired', decided_at = now(), arguments = null,
+			request_text = null, preview_digest = null
+		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
+	return result.count === 1;
+}
+
 // Where a call was frozen, which is where its owner's answer resumes it: the owner's room, a turn
 // through the API's chat in its session, or a direct call through the API's tool route. The API's
 // channels say so in their names, apart from the chat in the room that consents record.

@@ -3,12 +3,17 @@ import { z } from 'zod';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { enqueueJob, type Job } from '../jobs/queue.js';
+import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
-import { findPendingCall, toYesNoQuestion } from '../consents/repository.js';
+import {
+	expireHeldRequest,
+	findPendingCall,
+	reopenRequest,
+	toYesNoQuestion
+} from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
@@ -115,25 +120,27 @@ export interface TurnWorkerOptions {
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	const { db, agent, log, locale, turn, requestLifetimeMs } = options;
 
-	// The owner asked for no event's turn, so admission refusing one is not theirs to hear about: it
-	// is tried again later, each time twice as late up to a minute, or given up once it waited too
-	// long since admission first refused it, which is logged. A turn queued long before, during an
-	// outage of the api role, still waits that long once back.
+	// A turn nobody can send again waits out admission refusing it: the owner asked for no event's
+	// turn, and their yes resumes a call they already allowed. It is tried again later, each time
+	// twice as late up to a minute, or given up once it waited too long since admission first
+	// refused it, which is logged. A turn queued long before, during an outage of the api role,
+	// still waits that long once back.
 	function deferOrAbandon(
 		job: Job,
 		reason: RefusalReason,
 		turnLog: FastifyBaseLogger,
-		owner: string
+		owner: string,
+		kind: 'event' | 'resumed'
 	): Deferral | null {
 		const leftMs = turn.eventMaxDelayMs - job.deferredForMs;
 		if (leftMs <= 0) {
-			turnLog.warn({ owner, reason, deferredForMs: job.deferredForMs }, 'event turn abandoned');
+			turnLog.warn({ owner, reason, deferredForMs: job.deferredForMs }, `${kind} turn abandoned`);
 			return null;
 		}
 		const deferral: Deferral = {
 			retryInMs: Math.min(EVENT_TURN_RETRY_MS * 2 ** job.deferrals, EVENT_TURN_RETRY_MAX_MS, leftMs)
 		};
-		turnLog.info({ owner, reason, ...deferral }, 'event turn deferred');
+		turnLog.info({ owner, reason, ...deferral }, `${kind} turn deferred`);
 		return deferral;
 	}
 
@@ -200,13 +207,76 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		};
 	}
 
+	// The call its owner allowed did not run, admission refusing the turn their yes resumed: their
+	// day is spent, or the turn waited for room too long. Their request waits for an answer again,
+	// should it last until the refusal lifts, at midnight or now, which the assistant tells them on
+	// a message marked as the request, for their client to offer the answers again; otherwise it
+	// closes as expired, which the assistant tells them too. The job is done in the same
+	// transaction, so that their next yes queues one again.
+	async function reopen(
+		job: Job,
+		request: ResumeRequest,
+		assistant: AssistantRecord,
+		refusal: Extract<OwnerTurnResult, { kind: 'busy' }>,
+		turnLog: FastifyBaseLogger
+	): Promise<Deferral | null> {
+		const { owner, roomId, pendingCallId } = request;
+		const daySpent = refusal.reason === 'user_budget';
+		const liftsInMs = daySpent ? (refusal.liftsInMs ?? 0) : 0;
+		const { consent } = await fetchOwnerMessages(db, owner, locale);
+		const state = await withPrincipal(db, { id: owner }, async (tx) => {
+			const reopened = await reopenRequest(tx, owner, pendingCallId, requestLifetimeMs, liftsInMs);
+			if (!reopened && !(await expireHeldRequest(tx, owner, pendingCallId))) {
+				const found = await findPendingCall(tx, owner, pendingCallId);
+				return found?.state === 'open' ? 'unanswered' : null;
+			}
+			const call = reopened ? await findPendingCall(tx, owner, pendingCallId) : null;
+			const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+			await enqueueJob(tx, {
+				kind: 'send',
+				payload: {
+					asUserId: assistant.userId,
+					roomId,
+					text: reopened
+						? daySpent
+							? consent.heldUntilMidnight
+							: consent.heldTooLong
+						: daySpent
+							? consent.endsBeforeMidnight
+							: consent.expired,
+					outcome: 'failed',
+					...(reopened ? { request: { pendingCallId, owner } } : {}),
+					...(questionMarker === null ? {} : { questionMarker }),
+					...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
+				} satisfies SendPayload,
+				groupKey: `send:${roomId}`
+			});
+			await completeJob(tx, job.id);
+			return reopened ? 'reopened' : 'expired';
+		});
+		// The matrix role records a yes after it queued its job: a job refused in between waits for the
+		// yes as a turn waits for room, and once given up, leaves the call open to the owner's answer
+		if (state === 'unanswered') {
+			return daySpent ? deferOrAbandon(job, refusal.reason, turnLog, owner, 'resumed') : null;
+		}
+		if (state === null) {
+			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
+		} else {
+			turnLog.info(
+				{ pendingCallId, reason: refusal.reason, liftsInMs, state },
+				'held request settled'
+			);
+		}
+		return null;
+	}
+
 	// Runs the call its owner allowed, then the rest of the turn, and sends the answer
-	async function resume(request: ResumeRequest): Promise<void> {
+	async function resume(job: Job, request: ResumeRequest): Promise<Deferral | null> {
 		const { owner, roomId, pendingCallId, through } = request;
 		const assistant = await roomAssistant(owner, roomId);
 		if (assistant === null) {
 			log.info({ owner, roomId }, 'resume dropped: no assistant for this room');
-			return;
+			return null;
 		}
 		const turnLog = log.child({ reqId: `resume:${pendingCallId}`, roomId });
 		const actionsDone =
@@ -225,7 +295,17 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		// A call already decided, by an answer delivered twice for instance, runs nothing more
 		if (result.kind === 'missing' || result.kind === 'decided') {
 			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
-			return;
+			return null;
+		}
+		// The owner allowed the call already, and sending their yes again would change nothing: a turn
+		// refused for room waits for it, and one refused for their day, or kept waiting too long,
+		// leaves the call to their answer again
+		if (result.kind === 'busy') {
+			if (result.reason !== 'user_budget') {
+				const deferral = deferOrAbandon(job, result.reason, turnLog, owner, 'resumed');
+				if (deferral !== null) return deferral;
+			}
+			return reopen(job, request, assistant, result, turnLog);
 		}
 		if (result.kind !== 'ok') turnLog.warn({ result }, 'resumed turn did not succeed');
 		// Read once the turn is over: the owner may have changed their language in it
@@ -241,6 +321,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			dedupKey: `send:resume:${pendingCallId}`,
 			groupKey: `send:${roomId}`
 		});
+		return null;
 	}
 
 	return startJobWorker({
@@ -253,8 +334,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			if (job.kind === 'resume') {
 				const resumed = resumePayload.safeParse(job.payload);
 				if (!resumed.success) throw new Error('resume payload is malformed');
-				await resume(resumed.data);
-				return null;
+				return resume(job, resumed.data);
 			}
 			const parsed = turnPayload.safeParse(job.payload);
 			if (!parsed.success) throw new Error('turn payload is malformed');
@@ -285,7 +365,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				...(actionsDone === null ? {} : { actionsDone })
 			});
 			if (result.kind === 'busy' && origin === 'event') {
-				return deferOrAbandon(job, result.reason, turnLog, owner);
+				return deferOrAbandon(job, result.reason, turnLog, owner, 'event');
 			}
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			// Read once the turn is over: the owner may have changed their language in it

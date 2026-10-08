@@ -56,8 +56,8 @@ export interface Config {
 		// How long a turn of an owner's message may go without an answer before its assistant posts
 		// a status message, which closes once the turn answered
 		readonly statusDelayMs: number;
-		// How long a turn an event woke may wait to start once admission first refused it: it is tried
-		// again until then, and given up past it
+		// How long a turn an event woke, or one its owner's yes resumed, may wait to start once
+		// admission first refused it: it is tried again until then, and given up past it
 		readonly eventMaxDelayMs: number;
 	};
 	readonly curation: {
