@@ -67,6 +67,12 @@ export function toolCallStatus(outcome: ToolOutcome): ToolCallStatus {
 // what other people wrote, so every write they prepare waits for the owner.
 export type TurnOrigin = 'owner' | 'event' | 'suggestion';
 
+// Whether a turn comes from what other people wrote: any but the owner's own, which a turn that
+// names no origin is
+export function comesFromOthers(origin: TurnOrigin | undefined): boolean {
+	return (origin ?? 'owner') !== 'owner';
+}
+
 export interface ToolContext {
 	readonly principalId: string;
 	// Who started the turn, which a call frozen in it keeps for the turn its owner's answer resumes:

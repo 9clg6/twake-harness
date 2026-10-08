@@ -43,6 +43,7 @@ import { buildSystemPrompt } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
+	comesFromOthers,
 	consentsListTool,
 	languageTool,
 	makeConsentsWithdrawTool,
@@ -540,10 +541,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// a turn an event started prepared, it is still that event's: the owner's yes runs that
 			// call alone, and any other write it prepares waits for them again.
 			const origin = approved?.origin ?? input.origin;
-			const withheld =
-				origin === 'event' || origin === 'suggestion'
-					? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
-					: [];
+			const withheld = comesFromOthers(origin)
+				? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
+				: [];
 			const actions = opened.actions.filter((action) => !withheld.includes(action));
 			const memory = actions.includes('memory.read_own')
 				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
