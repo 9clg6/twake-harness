@@ -1,6 +1,7 @@
 // What the assistants and the creator say to people: in the language each owner chose, or else
 // the deployment's. The model is told to speak it; these are the fixed texts around it.
 
+import type { RefusalReason } from '../agent/admission.js';
 import type { ConsentLevel } from '../consents/consent.js';
 import type { DelegationCode } from '../consents/delegation.js';
 
@@ -56,7 +57,9 @@ export interface Messages {
 	};
 	readonly notices: {
 		readonly turnFailed: string;
-		readonly busy: string;
+		// Why admission refused a turn, and when to send the message again: the owner's limit for the
+		// day, which lifts at midnight in the deployment's time zone
+		busy(reason: RefusalReason): string;
 		readonly recovered: string;
 		readonly noEscrow: string;
 		// Why an assistant leaves a room where others than its owner are: everyone there reads it
@@ -248,7 +251,10 @@ const ENGLISH: Messages = {
 	},
 	notices: {
 		turnFailed: 'Something went wrong on my side. Please try again in a moment.',
-		busy: 'I am busy right now and cannot take this message. Please send it again in a moment.',
+		busy: (reason) =>
+			reason === 'user_budget'
+				? 'I have reached my limit for the day and cannot take this message. It lifts at midnight: please send it again then.'
+				: 'I am busy right now and cannot take this message. Please send it again in a moment.',
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
@@ -452,7 +458,10 @@ const FRENCH: Messages = {
 	},
 	notices: {
 		turnFailed: "Quelque chose s'est mal passé de mon côté. Réessaie dans un instant.",
-		busy: "J'ai trop de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.",
+		busy: (reason) =>
+			reason === 'user_budget'
+				? "J'ai atteint ma limite du jour et je ne peux pas prendre ce message. Elle se lève à minuit : renvoie-le à ce moment-là."
+				: "J'ai trop de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.",
 		recovered:
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:
