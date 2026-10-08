@@ -71,6 +71,9 @@ describe('the provisioning API admits its provisioners only', () => {
 
 	it("asks for the recovery of an owner's assistant for a provisioner only", async () => {
 		const recover = `${provisioningPath(OWNER)}/recover`;
+		expect((await h.app.inject({ method: 'POST', url: recover, payload: {} })).statusCode).toBe(
+			401
+		);
 		expect((await api.post('bob@test.local', recover, {})).status).toBe(403);
 		expect(
 			(await api.post(PROVISIONER, `${provisioningPath('@bob:elsewhere.example')}/recover`, {}))
@@ -251,7 +254,10 @@ describe('a provisioned assistant', () => {
 
 		const none = { status: 404, body: { error: 'no assistant' } };
 		expect(await read(max.userId)).toEqual(none);
-		// Reading did not bring it back: its owner finds none either
+		expect(await h.api.post(PROVISIONER, `${provisioningPath(max.userId)}/recover`, {})).toEqual(
+			none
+		);
+		// Neither call brought it back: its owner finds none either
 		expect((await h.api.get('max@test.local', '/v1/assistants/me')).status).toBe(404);
 	});
 
