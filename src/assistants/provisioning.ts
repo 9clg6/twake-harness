@@ -1,5 +1,5 @@
 import { withPrincipal, type Db } from '../db/client.js';
-import { enqueueJob } from '../jobs/queue.js';
+import { enqueueJobReplacingFailed } from '../jobs/queue.js';
 import { findCrossSigning } from '../matrix/cross-signing-repository.js';
 
 // What a provisioner hands the owner's client, which trusts the assistant's device once the
@@ -34,10 +34,28 @@ export async function readIdentity(db: Db, owner: string, userId: string): Promi
 
 // Asks the matrix role to make the assistant's device and identity now, rather than when it first
 // speaks: one job queued or running per owner, which the queue tries again until the identity is
-// ready. A finished job is deleted, so the next call that finds the assistant unready asks anew; one
-// that failed for good keeps its key, which would refuse every later one: it goes first.
+// ready. A finished job is deleted, so the next call that finds the assistant unready asks anew.
 export async function requestPreparation(db: Db, owner: string): Promise<boolean> {
 	const key = `prepare:${owner}`;
-	await db.sql`delete from jobs where dedup_key = ${key} and status = 'failed'`;
-	return enqueueJob(db, { kind: 'prepare', payload: { owner }, dedupKey: key, groupKey: key });
+	return enqueueJobReplacingFailed(db, {
+		kind: 'prepare',
+		payload: { owner },
+		dedupKey: key,
+		groupKey: key
+	});
+}
+
+// Asks the matrix role to put the owner's assistant back on its escrowed identity after a lost
+// store, in turn with what the assistant sends to its room: one job queued or running per owner
+export async function requestRecovery(
+	db: Db,
+	owner: string,
+	roomId: string | null
+): Promise<boolean> {
+	return enqueueJobReplacingFailed(db, {
+		kind: 'recover',
+		payload: { owner },
+		dedupKey: `recover:${owner}`,
+		groupKey: `send:${roomId ?? owner}`
+	});
 }

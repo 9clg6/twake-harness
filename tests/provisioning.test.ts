@@ -68,22 +68,62 @@ describe('the provisioning API admits its provisioners only', () => {
 		const notAMatrixId = await api.put(PROVISIONER, provisioningPath('bob@test.local'), {});
 		expect(notAMatrixId.status).toBe(422);
 	});
+
+	it("asks for the recovery of an owner's assistant for a provisioner only", async () => {
+		const recover = `${provisioningPath(OWNER)}/recover`;
+		expect((await h.app.inject({ method: 'POST', url: recover, payload: {} })).statusCode).toBe(
+			401
+		);
+		expect((await api.post('bob@test.local', recover, {})).status).toBe(403);
+		expect(
+			(await api.post(PROVISIONER, `${provisioningPath('@bob:elsewhere.example')}/recover`, {}))
+				.status
+		).toBe(422);
+		const none = await api.post(PROVISIONER, recover, {});
+		expect(none.status).toBe(404);
+		expect(none.body).toEqual({ error: 'no assistant' });
+	});
+
+	it("reads an owner's assistant for a provisioner only, and none for an owner without one", async () => {
+		const anonymous = await h.app.inject({ method: 'GET', url: provisioningPath(OWNER) });
+		expect(anonymous.statusCode).toBe(401);
+		// The owner's own token is not a provisioner's either
+		expect(await api.get('bob@test.local', provisioningPath(OWNER))).toEqual({
+			status: 403,
+			body: { error: 'not a provisioner' }
+		});
+		expect(await api.get(PROVISIONER, provisioningPath('@bob:elsewhere.example'))).toEqual({
+			status: 422,
+			body: { error: 'owner not on the homeserver' }
+		});
+		expect(await api.get(PROVISIONER, provisioningPath(OWNER))).toEqual({
+			status: 404,
+			body: { error: 'no assistant' }
+		});
+	});
 });
 
 describe('a provisioned assistant', () => {
 	let h: MatrixTestHarness;
 	const clients: E2eeClient[] = [];
 
+	interface ProvisionerReply {
+		readonly status: number;
+		readonly body: Record<string, unknown>;
+		readonly retryAfter: string | undefined;
+	}
+
 	// The provisioner's call as it goes on the wire, its headers included
-	async function provision(
+	async function provisionerCall(
+		method: 'GET' | 'PUT',
 		owner: string,
-		body: Record<string, unknown> = {}
-	): Promise<{ status: number; body: Record<string, unknown>; retryAfter: string | undefined }> {
+		body?: Record<string, unknown>
+	): Promise<ProvisionerReply> {
 		const res = await h.apps[0]!.inject({
-			method: 'PUT',
+			method,
 			url: provisioningPath(owner),
 			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
-			payload: body
+			...(body === undefined ? {} : { payload: body })
 		});
 		const retryAfter = res.headers['retry-after'];
 		return {
@@ -93,20 +133,13 @@ describe('a provisioned assistant', () => {
 		};
 	}
 
-	async function provisionerPut(
-		url: string,
-		body: Record<string, unknown>
-	): Promise<{ status: number; body: Record<string, unknown> }> {
-		const res = await h.apps[0]!.inject({
-			method: 'PUT',
-			url,
-			headers: { authorization: `Bearer ${await h.issuer.mint({ sub: PROVISIONER })}` },
-			payload: body
-		});
-		return {
-			status: res.statusCode,
-			body: res.body.length === 0 ? {} : (res.json() as Record<string, unknown>)
-		};
+	function provision(owner: string, body: Record<string, unknown> = {}): Promise<ProvisionerReply> {
+		return provisionerCall('PUT', owner, body);
+	}
+
+	// What the provisioner reads of the owner's assistant, which makes none
+	function readAssistant(owner: string): Promise<ProvisionerReply> {
+		return provisionerCall('GET', owner);
 	}
 
 	async function keysOf(viewer: MatrixUser, userId: string): Promise<KeysQuery> {
@@ -157,6 +190,85 @@ describe('a provisioned assistant', () => {
 		const again = await provision(bob.userId);
 		expect(again.status).toBe(200);
 		expect(again.body).toEqual(mine);
+	});
+
+	it('is read without being made: none before the provisioning, then the identity it gave', async () => {
+		const ada = await h.synapse.registerUser('ada');
+
+		expect(await readAssistant(ada.userId)).toEqual({
+			status: 404,
+			body: { error: 'no assistant' }
+		});
+		// Reading made none: its owner finds none either
+		expect((await h.api.get('ada@test.local', '/v1/assistants/me')).status).toBe(404);
+
+		const mine = await provisionUntilReady(h.api, ada.userId);
+		expect(await readAssistant(ada.userId)).toEqual({ status: 200, body: mine });
+	});
+
+	it('is read as not ready while the provisioning says so, then as its identity', async () => {
+		const ivy = await h.synapse.registerUser('ivy');
+		// The homeserver refuses every upload of the identity while the provisioner calls
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/device_signing/upload')
+				? 500
+				: null;
+		try {
+			expect((await provision(ivy.userId)).status).toBe(503);
+			expect(await readAssistant(ivy.userId)).toEqual({
+				status: 503,
+				body: { error: 'not_ready' },
+				retryAfter: '5'
+			});
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+
+		// Read again after each 503, until the harness prepared it
+		let later = await readAssistant(ivy.userId);
+		for (let i = 0; i < 120 && later.status === 503; i += 1) {
+			await sleep(250);
+			later = await readAssistant(ivy.userId);
+		}
+		expect(later.status).toBe(200);
+		expect(later.body).toEqual((await provision(ivy.userId)).body);
+	});
+
+	it('is prepared again when its provisioner reads it after a preparation that failed for good', async () => {
+		const joy = await h.synapse.registerUser('joy');
+		// The homeserver refuses every upload of the identity: the preparation fails for good
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/device_signing/upload')
+				? 500
+				: null;
+		try {
+			expect((await provision(joy.userId)).status).toBe(503);
+			await sleep(12_000);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+
+		// Nobody provisions it again: reading it asks for its preparation, until it is ready
+		let later = await readAssistant(joy.userId);
+		for (let i = 0; i < 120 && later.status === 503; i += 1) {
+			await sleep(250);
+			later = await readAssistant(joy.userId);
+		}
+		expect(later.status).toBe(200);
+	});
+
+	it('is none to its provisioner once its owner deleted it, and stays deleted once read', async () => {
+		const max = await h.synapse.registerUser('max');
+		await provisionUntilReady(h.api, max.userId);
+		expect((await h.api.delete('max@test.local', '/v1/assistants/me')).status).toBe(204);
+
+		const none = { status: 404, body: { error: 'no assistant' } };
+		expect(await readAssistant(max.userId)).toEqual(none);
+		expect(await h.api.post(PROVISIONER, `${provisioningPath(max.userId)}/recover`, {})).toEqual(
+			none
+		);
+		// Neither call brought it back: its owner finds none either
+		expect((await h.api.get('max@test.local', '/v1/assistants/me')).status).toBe(404);
 	});
 
 	it('becomes ready after a failed preparation, without its provisioner calling again', async () => {
@@ -375,7 +487,9 @@ describe('a provisioned assistant', () => {
 
 		const first = await client.createDirectRoom(mine.userId);
 		await client.waitForMessage(first, mine.userId, (text) => text === greetingOf(mine.userId));
-		const named = await provisionerPut(`${provisioningPath(wendy.userId)}/home`, { roomId: first });
+		const named = await h.api.put(PROVISIONER, `${provisioningPath(wendy.userId)}/home`, {
+			roomId: first
+		});
 		expect(named.status).toBe(204);
 		await h.restartRole();
 		await askForHelp(client, first, mine.userId);
@@ -551,7 +665,9 @@ describe('a provisioned assistant', () => {
 			'org.matrix.msc4332.commands': 0
 		};
 		await h.synapse.request(pam, 'PUT', levelsPath, { ...levels, events });
-		const named = await provisionerPut(`${provisioningPath(pam.userId)}/home`, { roomId: room });
+		const named = await h.api.put(PROVISIONER, `${provisioningPath(pam.userId)}/home`, {
+			roomId: room
+		});
 		expect(named.status).toBe(204);
 
 		expect(await announcedCommands(pam, room, mine.userId)).toMatchObject({
@@ -591,7 +707,9 @@ describe('a provisioned assistant', () => {
 		const second = await client.createDirectRoom(mine.userId);
 		await h.synapse.waitForMember(dave, second, mine.userId);
 
-		const named = await provisionerPut(`${provisioningPath(dave.userId)}/home`, { roomId: second });
+		const named = await h.api.put(PROVISIONER, `${provisioningPath(dave.userId)}/home`, {
+			roomId: second
+		});
 		expect(named.status).toBe(204);
 
 		const seen = await h.api.get<{ roomId: string }>('dave@test.local', '/v1/assistants/me');
@@ -694,7 +812,9 @@ describe('a provisioned assistant', () => {
 		await h.synapse.joinRoom(hank, room);
 
 		// Refused whether the assistant has already left the room or is about to
-		const named = await provisionerPut(`${provisioningPath(gina.userId)}/home`, { roomId: room });
+		const named = await h.api.put(PROVISIONER, `${provisioningPath(gina.userId)}/home`, {
+			roomId: room
+		});
 		expect(named.status).toBe(409);
 		expect(['not a member', 'not a direct room']).toContain(named.body['error']);
 	});
@@ -726,14 +846,14 @@ describe('a provisioned assistant', () => {
 		const erin = await h.synapse.registerUser('erin');
 		const alone = await h.synapse.createDirectRoom(erin, '@nobody:test.local');
 
-		const noAssistant = await provisionerPut(`${provisioningPath(erin.userId)}/home`, {
+		const noAssistant = await h.api.put(PROVISIONER, `${provisioningPath(erin.userId)}/home`, {
 			roomId: alone
 		});
 		expect(noAssistant.status).toBe(404);
 		expect(noAssistant.body).toEqual({ error: 'no assistant' });
 
 		await provisionUntilReady(h.api, erin.userId);
-		const notMember = await provisionerPut(`${provisioningPath(erin.userId)}/home`, {
+		const notMember = await h.api.put(PROVISIONER, `${provisioningPath(erin.userId)}/home`, {
 			roomId: alone
 		});
 		expect(notMember.status).toBe(409);
@@ -812,11 +932,60 @@ describe('a provisioned assistant whose identity waits for its recovery', () => 
 		expect(await provisionUntil(rita.userId, 409)).toEqual({ error: 'recovery_needed' });
 		// Asking again changes nothing: only the owner's recovery brings the identity back
 		expect((await provision(rita.userId)).status).toBe(409);
+		// Reading it answers as the provisioning does
+		const read = await h.api.get(PROVISIONER, provisioningPath(rita.userId));
+		expect(read).toEqual({ status: 409, body: { error: 'recovery_needed' } });
 
-		const asked = await h.api.post('rita@test.local', '/v1/assistants/me/recover', {});
-		expect(asked.status).toBe(202);
+		// The provisioner asks for it on the owner's behalf, as the owner would
+		expect(await h.api.post(PROVISIONER, `${provisioningPath(rita.userId)}/recover`, {})).toEqual({
+			status: 202,
+			body: { queued: true }
+		});
 		const after = await provisionUntil(rita.userId, 200);
 		expect(after['masterKey']).toBe(before['masterKey']);
 		expect(after['deviceId']).not.toBe(before['deviceId']);
+		const readAfter = await h.api.get(PROVISIONER, provisioningPath(rita.userId));
+		expect(readAfter).toEqual({ status: 200, body: after });
+	});
+
+	it('has its recovery queued again after one that failed for good, whoever asks for it', async () => {
+		const ned = await h.synapse.registerUser('ned');
+		const fay = await h.synapse.registerUser('fay');
+		const before = [await provisionUntil(ned.userId, 200), await provisionUntil(fay.userId, 200)];
+		// Both identities are escrowed, then the role loses its store
+		const escrowed = ['ned@test.local', 'fay@test.local'].map(
+			(owner) => `twake-harness/assistants/${owner}`
+		);
+		for (let i = 0; i < 120; i += 1) {
+			if (escrowed.every((path) => h.apisix.openbao.store.has(path))) break;
+			await sleep(250);
+		}
+		await h.restartRole({ wipeCryptoStore: true });
+		await provisionUntil(ned.userId, 409);
+		await provisionUntil(fay.userId, 409);
+
+		// Its provisioner asks for it on the owner's behalf, or the owner themselves
+		const askedByProvisioner = `${provisioningPath(ned.userId)}/recover`;
+		const queued = { status: 202, body: { queued: true } };
+		// The homeserver refuses the signature of the recovered device: both recoveries fail for good
+		h.apisix.matrixFault = ({ method, path }) =>
+			method === 'POST' && path.startsWith('/_matrix/client/v3/keys/signatures/upload')
+				? 500
+				: null;
+		try {
+			expect(await h.api.post(PROVISIONER, askedByProvisioner, {})).toEqual(queued);
+			expect(await h.api.post('fay@test.local', '/v1/assistants/me/recover', {})).toEqual(queued);
+			await sleep(12_000);
+		} finally {
+			h.apisix.matrixFault = null;
+		}
+
+		// Asked again, each recovery is queued anew and brings the identity back
+		expect(await h.api.post(PROVISIONER, askedByProvisioner, {})).toEqual(queued);
+		expect(await h.api.post('fay@test.local', '/v1/assistants/me/recover', {})).toEqual(queued);
+		const after = [await provisionUntil(ned.userId, 200), await provisionUntil(fay.userId, 200)];
+		expect(after.map((identity) => identity['masterKey'])).toEqual(
+			before.map((identity) => identity['masterKey'])
+		);
 	});
 });
