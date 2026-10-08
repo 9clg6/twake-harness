@@ -9,6 +9,7 @@ import { makeConsentMetrics } from '../consents/metrics.js';
 import { startReminderScheduler } from '../consents/reminder.js';
 import { startCurationScheduler } from '../curation/curation.js';
 import type { Db } from '../db/client.js';
+import { startSuggestionPurgeScheduler } from '../suggestions/retention.js';
 import { startActivityListener } from '../wakeups/activity.js';
 import { startCalendarListener } from '../wakeups/calendar.js';
 import type { Listener } from '../wakeups/listener.js';
@@ -36,11 +37,12 @@ export interface WorkerRole {
 	stop(): Promise<void>;
 }
 
-// The daily curation, the hourly expiry of the requests nobody answered, the hourly purge of the
-// wake-ups past their retention, each starting with a pass at once, and the daily reminders of
-// the permissions about to expire, at their hour; the expiries are counted on the metrics the role
-// serves. With the activity exchange or Calendar's fanout configured, the role also listens to it,
-// and connects to the broker for that alone, once for each.
+// The daily curation, the hourly expiry of the requests nobody answered, the hourly purges of the
+// wake-ups past their retention and of the suggestions nothing reads any more, each starting with
+// a pass at once, and the daily reminders of the permissions about to expire, at their hour; the
+// expiries are counted on the metrics the role serves. With the activity exchange or Calendar's
+// fanout configured, the role also listens to it, and connects to the broker for that alone, once
+// for each.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const consentMetrics = makeConsentMetrics();
@@ -78,6 +80,11 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		consentMetrics
 	);
 	const purge = startWakeupPurgeScheduler(db, app.log, config.wakeups.retentionMs);
+	const suggestionPurge = startSuggestionPurgeScheduler(
+		db,
+		app.log,
+		config.consent.requestLifetimeMs
+	);
 	const reminders = startReminderScheduler(
 		{ ...deps, clock: options.clock ?? SYSTEM_CLOCK },
 		options.reminderCheckMs ?? REMINDER_CHECK_MS
@@ -89,6 +96,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			curation.stop();
 			expiry.stop();
 			purge.stop();
+			suggestionPurge.stop();
 			await reminders.stop();
 			await app.close();
 		}
