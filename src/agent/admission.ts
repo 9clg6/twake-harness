@@ -51,8 +51,8 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 		global_rate: 0
 	};
 
-	// The day a user's tokens count in, which starts at midnight in the assistants' time zone, the
-	// one their owners read the present in
+	// The day a user's tokens count in, which starts at midnight in the IANA time zone the assistants
+	// read the present in
 	function today(): string {
 		return dateIn(clock.now(), config.timeZone);
 	}
