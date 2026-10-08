@@ -94,8 +94,8 @@ export interface ContractReply {
 	readonly headers?: Readonly<Record<string, string>>;
 	// A wait before the answer: a contract slower than the harness waits for
 	readonly delayMs?: number;
-	// The answer goes out only once this settles: a test keeps a call open to observe what runs
-	// meanwhile
+	// On the broker's delegation route, the answer goes out only once this settles: a test keeps a
+	// call open to observe what runs meanwhile
 	readonly hold?: Promise<unknown>;
 }
 
@@ -434,6 +434,11 @@ export function brokerDriveUnavailable(): ContractReply {
 	};
 }
 
+// What the gateway answers at a path where it publishes no route: the request goes nowhere
+export function gatewayNoRoute(): ContractReply {
+	return { status: 404, body: { error_msg: '404 Route Not Found' } };
+}
+
 // The operation that gives the owner's answer to an invitation as the calendar contracts publish
 // it, accepting or declining, named by the UID of its event, and for the whole series of a
 // recurring one with series true: a low-risk write that tells what it would do, unless preview is
@@ -706,7 +711,6 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			contracts.calls.push(call);
 			const reply = contracts.handler(call);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
-			if (reply.hold !== undefined) await reply.hold;
 			// The caller may have given up meanwhile
 			if (res.destroyed) return;
 			for (const [name, value] of Object.entries(reply.headers ?? {})) res.setHeader(name, value);
@@ -762,8 +766,9 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			});
 			return;
 		}
-		// What APISIX answers when no route matches: the request goes nowhere
-		sendJson(res, 404, { error_msg: '404 Route Not Found' });
+		// What APISIX answers when no route matches
+		const noRoute = gatewayNoRoute();
+		sendJson(res, noRoute.status, noRoute.body);
 	});
 	await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
 	const address = server.address();

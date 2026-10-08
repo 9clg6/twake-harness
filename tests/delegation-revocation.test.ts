@@ -14,14 +14,13 @@ import {
 	brokerNoDelegation,
 	brokerRefusal,
 	brokerRevoked,
+	gatewayNoRoute,
 	type ContractReply
 } from './helpers/fake-apisix.js';
 
 const ALICE = 'alice@test.local';
 // When I gave the broker the permission for my assistant to act for me, long before any deletion
 const GIVEN_BEFORE = '2026-09-20T08:00:00Z';
-// What the gateway answers when it publishes no route at the path asked
-const NO_ROUTE: ContractReply = { status: 404, body: { error_msg: '404 Route Not Found' } };
 // What my creator answers once it deleted my assistant
 const DELETED = 'Your assistant is deleted. Send /newbot when you want a new one.';
 
@@ -200,8 +199,8 @@ describe('deleting my assistant revokes, at the broker, my permission for it to 
 	it('asks again while the gateway publishes no route to the broker', async () => {
 		await newAssistant('Iris');
 		// Neither route on the first try, the read alone on the second, both on the third
-		const reads: ContractReply[] = [NO_ROUTE];
-		const revocations: ContractReply[] = [NO_ROUTE];
+		const reads: ContractReply[] = [gatewayNoRoute()];
+		const revocations: ContractReply[] = [gatewayNoRoute()];
 		r.h.apisix.delegation = (owner) => reads.shift() ?? brokerStatus(owner);
 		r.h.apisix.revocation = (owner) => revocations.shift() ?? revoke(owner);
 		const seen = r.h.apisix.delegationCalls.length;
