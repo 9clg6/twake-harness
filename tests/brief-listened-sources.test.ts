@@ -219,8 +219,8 @@ describe('my brief tells only of the applications my assistant listens to', () =
 		// Until then her assistant listens to her calendar and her tasks, not to her mail
 		expect(await told("Qu'écoutes-tu ?")).toEqual({
 			listened: ['calendar', 'tasks'],
-			not_listened: ['mail'],
-			not_yet_possible: ['drive', 'chat']
+			not_listened: ['mail', 'drive'],
+			not_yet_possible: ['chat']
 		});
 		const seen = said().length;
 		const sent = briefs().length;
@@ -235,8 +235,8 @@ describe('my brief tells only of the applications my assistant listens to', () =
 		expect(handedSince(calls)).toMatchObject({ date: '2026-10-12', mails: { unread: [] } });
 		expect(await told("Qu'écoutes-tu ?")).toEqual({
 			listened: ['calendar', 'tasks', 'mail'],
-			not_listened: [],
-			not_yet_possible: ['drive', 'chat']
+			not_listened: ['drive'],
+			not_yet_possible: ['chat']
 		});
 	});
 

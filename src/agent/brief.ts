@@ -32,6 +32,18 @@ import { BRIEF_NOW_TOOL } from '../briefs/now.js';
 import { briefId } from '../briefs/schedule.js';
 import { fetchBriefSettings } from '../briefs/settings.js';
 import {
+	MAX_SHARES,
+	numberOf,
+	shareListSchema,
+	shareReferences,
+	sharesOf,
+	sharesSince,
+	type ShareReference,
+	type Shares,
+	type ToldItem,
+	type ToldShare
+} from '../briefs/shares.js';
+import {
 	kindOf,
 	MAX_UNTOLD,
 	titleOf,
@@ -72,11 +84,13 @@ import {
 } from '../sessions/repository.js';
 import {
 	findBriefMailsReadAt,
+	findBriefSharesReadAt,
 	findOwnerSettings,
-	saveBriefMailsReadAt
+	saveBriefMailsReadAt,
+	saveBriefSharesReadAt
 } from '../settings/repository.js';
 import { listenUnlessChosen, listListened } from '../sources/repository.js';
-import { publishedUnder } from '../sources/sources.js';
+import { publishedUnder, type Source } from '../sources/sources.js';
 import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
@@ -107,6 +121,13 @@ const LIST_EMAILS = 'list_emails';
 // most tasks the model is handed, late ones first
 const LIST_TASKS = 'list_my_tasks';
 const MAX_TASKS = 30;
+
+// Drive's operation the brief reads the shares other people gave the owner with
+const LIST_SHARES = 'list_received_shares';
+
+// The applications the brief reads, while the owner's assistant listens there: those the question of
+// their first brief asks to read, and Drive, of which it tells the shares made to them
+const READ_SOURCES: readonly Source[] = [...BRIEF_DOMAINS, 'drive'];
 
 // What the brief's reads hand the model, as the invitation check's reads do
 const BRIEF_DATA = 'brief-data';
@@ -178,8 +199,8 @@ interface Invitations {
 
 // What a brief's numbers, its tasks' keys and its emails name, for the owner's next turns: the uid
 // and occurrence of each invitation, the id and sender of each email the brief was handed, in the
-// order the harness lays them out, the ids of each task, and what the numbers and keys of what
-// arrived since their last brief name
+// order the harness lays them out, the ids of each task, what the numbers and keys of what arrived
+// since their last brief name, and the id of each file and folder shared with them that has a number
 interface References {
 	readonly invitations?: readonly {
 		readonly number: number;
@@ -196,6 +217,7 @@ interface References {
 		readonly task_id: string;
 	}[];
 	readonly since_last_brief?: readonly UntoldReference[];
+	readonly shares?: readonly ShareReference[];
 }
 
 // One open task as the tasks' contract lists it: what Tasks computed, then, under untrusted, what
@@ -260,23 +282,27 @@ interface Sections {
 	readonly invitations: Read<Invitations>;
 	readonly mails: Read<Mails>;
 	readonly tasks: Read<Tasks>;
+	readonly shares: Read<Shares>;
 }
 
 // The application each section of the brief reads, which the line of a section not read names
-const DOMAINS: Readonly<Record<keyof Sections, BriefDomain>> = {
+const DOMAINS: Readonly<Record<keyof Sections, Source>> = {
 	calendar: 'calendar',
 	invitations: 'calendar',
 	mails: 'mail',
-	tasks: 'tasks'
+	tasks: 'tasks',
+	shares: 'drive'
 };
 
-// The brief's reads: what it tells, the zone it is written in, the instant it read the owner's mail
-// at, which their next brief reads it from, when it read it, and what arrived since their last
-// brief that their assistant told them nothing of, which their listening journal kept
+// The brief's reads: what it tells, the zone it is written in, the instants it read the owner's mail
+// and the shares made to them at, which their next brief reads them from, when it read them, and
+// what arrived since their last brief that their assistant told them nothing of, which their
+// listening journal kept
 interface Reads {
 	readonly sections: Sections;
 	readonly timeZone: TimeZone;
 	readonly mailsReadAt: Date | null;
+	readonly sharesReadAt: Date | null;
 	readonly untold: Untold;
 }
 
@@ -488,6 +514,25 @@ function meetingLines(
 	});
 }
 
+// What a share gave the owner, as its line says it: a shared drive, a folder, or nothing for a file
+function sharedKind(
+	share: ToldShare,
+	item: ToldItem,
+	words: Messages['brief']['template']
+): string | null {
+	if (share.shared_drive) return words.sharedDrive;
+	return item.type === 'directory' ? words.folder : null;
+}
+
+// Who shared with the owner, as they read it: the name Drive gave them, or else their address, or
+// else someone
+function sharerOf(share: ToldShare, words: Messages['brief']['template']): string {
+	const { name, email } = share.untrusted.shared_by;
+	const named = name?.trim() ?? '';
+	if (named.length > 0) return named;
+	return email !== null && email.length > 0 ? email : words.someone;
+}
+
 // What a section of the brief reads of an application the owner's assistant does not listen to:
 // nothing, which the brief says nothing of
 const NOT_LISTENED = { ok: false, reason: 'not_listened' } as const;
@@ -509,7 +554,7 @@ function template(
 	locale: Locale,
 	words: Messages['brief']['template']
 ): Laid {
-	const { calendar, invitations, mails, tasks } = sections;
+	const { calendar, invitations, mails, tasks, shares } = sections;
 	const laid: Laid[] = [];
 	const examples: string[] = [];
 	const unread = new Set<string>();
@@ -611,6 +656,35 @@ function template(
 			section(words.since, lines, moreOf(lines.length, untold.truncated, words.more), false)
 		);
 	}
+	if (!shares.ok) notRead('shares');
+	else {
+		const told = shares.value.shares.flatMap((share) =>
+			share.items.map((item) => ({ share, item }))
+		);
+		if (told.length > 0) {
+			const lines = told.map(({ share, item }) => {
+				const number = numberOf(item);
+				return words.share(
+					number === null ? null : `${number}.`,
+					item.untrusted.name,
+					sharedKind(share, item, words),
+					sharerOf(share, words)
+				);
+			});
+			laid.push(
+				section(
+					words.shares,
+					lines,
+					moreOf(lines.length, shares.value.truncated, words.more),
+					false
+				)
+			);
+			// The example reads the first file the brief numbers: a folder has nothing to read
+			const file = told.find(({ item }) => item.type === 'file' && numberOf(item) !== null);
+			const number = file === undefined ? null : numberOf(file.item);
+			if (number !== null) examples.push(words.read(number));
+		}
+	}
 	if (examples.length > 0) laid.push(line(words.footer(examples.slice(0, 2))));
 	return {
 		text: laid.map((part) => part.text).join('\n\n'),
@@ -695,12 +769,14 @@ function invitationsOf(events: readonly Meeting[], truncated: boolean): Invitati
 // What the brief's numbers, its tasks' keys and its emails name, or null when it names nothing:
 // each email the model was handed, whichever it shows, and each activity no brief named before
 function referencesOf(sections: Sections, untold: Untold): References | null {
-	const { invitations, mails, tasks } = sections;
+	const { invitations, mails, tasks, shares } = sections;
 	const numbered = invitations.ok ? invitations.value.pending : [];
 	const handed = mails.ok ? mails.value.unread : [];
 	const keyed = tasks.ok ? [...tasks.value.overdue, ...tasks.value.today] : [];
 	const since = untoldReferences(untold);
-	if (numbered.length + handed.length + keyed.length + since.length === 0) return null;
+	const shared = shares.ok ? shareReferences(shares.value) : [];
+	const count = numbered.length + handed.length + keyed.length + since.length + shared.length;
+	if (count === 0) return null;
 	return {
 		...(numbered.length === 0
 			? {}
@@ -717,8 +793,20 @@ function referencesOf(sections: Sections, untold: Untold): References | null {
 		...(keyed.length === 0
 			? {}
 			: { tasks: keyed.map(({ key, board_id, task_id }) => ({ key, board_id, task_id })) }),
-		...(since.length === 0 ? {} : { since_last_brief: since })
+		...(since.length === 0 ? {} : { since_last_brief: since }),
+		...(shared.length === 0 ? {} : { shares: shared })
 	};
+}
+
+// The last number the brief gives before the shares': that of its last invitation, or of the last
+// meeting that arrived since the owner's last brief, or none
+function lastNumber(invitations: Read<Invitations>, untold: Untold): number {
+	const pending = invitations.ok ? invitations.value.pending : [];
+	return Math.max(
+		0,
+		...pending.map(({ number }) => number),
+		...untold.activities.flatMap(({ meeting }) => (meeting === null ? [] : [meeting.number]))
+	);
 }
 
 // A message of the conversation without the references an earlier brief left in it: after the line
@@ -790,8 +878,8 @@ function logSkipped(name: keyof Sections, read: Read<unknown>, log: FastifyBaseL
 
 // The brief of an owner's working day, which the worker role's scheduler asks their assistant for.
 // Admitted as a turn is, it reads the day's meetings of their calendar, the invitations that wait
-// for their answer, their unread mail since their last brief and their late tasks and those of the
-// day itself, through the same tools and checks as the model's calls, with nobody to ask: an
+// for their answer, their unread mail since their last brief, their late tasks and those of the
+// day itself, and the shares made to them since their last brief, through the same tools and checks as the model's calls, with nobody to ask: an
 // application they did not allow is left out, and one their assistant does not listen to is not
 // read. Then one model call, with no tool and no history,
 // writes the brief from those reads, given as data, which the conversation keeps as the assistant's
@@ -928,14 +1016,34 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		};
 	}
 
+	// The shares made to the owner since the instant given, told in the zone given, each file and
+	// folder numbered after the last number given, outside a shared drive
+	async function readShares(
+		context: ToolContext,
+		since: Date,
+		zone: string,
+		last: number
+	): Promise<Read<Shares>> {
+		const after = isoIn(since, zone);
+		const list = await read(
+			context,
+			LIST_SHARES,
+			{ since: after, limit: MAX_SHARES },
+			shareListSchema
+		);
+		if (!list.ok) return list;
+		return { ok: true, value: sharesOf(list.value, after, last) };
+	}
+
 	// The brief's reads after the day's, of the applications given, which the owner's assistant
-	// listens to, alone, the zone it is written in, the instant it read the owner's mail at, when it
-	// did, and the activities of their journal from those applications that no brief named yet
+	// listens to, alone, the zone it is written in, the instants it read the owner's mail and the
+	// shares made to them at, when it did, and the activities of their journal from those
+	// applications that no brief named yet
 	async function readSections(
 		context: ToolContext,
 		date: string,
 		calendar: Read<Day>,
-		listened: readonly BriefDomain[]
+		listened: readonly Source[]
 	): Promise<Reads> {
 		const owner = context.principalId;
 		const listens = (name: keyof Sections): boolean => listened.includes(DOMAINS[name]);
@@ -947,24 +1055,38 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		// counted in, and the brief written in, and the days their brief goes out on
 		const settings = await fetchBriefSettings(db, owner, config.timeZone);
 		// One activity more than the model is handed, which tells there are more
-		const { readAt, activities } = await withPrincipal(db, { id: owner }, async (tx) => ({
-			readAt: await findBriefMailsReadAt(tx, owner),
-			activities: await listUntoldActivities(tx, owner, publishedUnder(listened), MAX_UNTOLD + 1)
-		}));
+		const { readAt, sharesReadAt, activities } = await withPrincipal(
+			db,
+			{ id: owner },
+			async (tx) => ({
+				readAt: await findBriefMailsReadAt(tx, owner),
+				sharesReadAt: await findBriefSharesReadAt(tx, owner),
+				activities: await listUntoldActivities(tx, owner, publishedUnder(listened), MAX_UNTOLD + 1)
+			})
+		);
 		const now = clock.now();
 		const mails: Read<Mails> = listens('mails')
 			? await readMails(context, mailsSince(readAt, now, settings), settings.timeZone, calendar)
 			: NOT_LISTENED;
+		const tasks: Read<Tasks> = listens('tasks')
+			? await readTasks(context, settings.timeZone)
+			: NOT_LISTENED;
+		const untold = untoldOf(activities, invitations.ok ? invitations.value.pending : []);
+		// The shares are numbered after the invitations and the meetings the brief numbers
+		const shares: Read<Shares> = listens('shares')
+			? await readShares(
+					context,
+					sharesSince(sharesReadAt, now, settings),
+					settings.timeZone,
+					lastNumber(invitations, untold)
+				)
+			: NOT_LISTENED;
 		return {
-			sections: {
-				calendar,
-				invitations,
-				mails,
-				tasks: listens('tasks') ? await readTasks(context, settings.timeZone) : NOT_LISTENED
-			},
+			sections: { calendar, invitations, mails, tasks, shares },
 			timeZone: settings.timeZone,
 			mailsReadAt: mails.ok ? now : null,
-			untold: untoldOf(activities, invitations.ok ? invitations.value.pending : [])
+			sharesReadAt: shares.ok ? now : null,
+			untold
 		};
 	}
 
@@ -1073,7 +1195,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		ending: (tx: Tx) => Promise<ClosedRequest | null>
 	): Promise<BriefResult> {
 		const { principal, session, locale, date, log, refusedFor } = writing;
-		const { sections, timeZone, mailsReadAt, untold } = reads;
+		const { sections, timeZone, mailsReadAt, sharesReadAt, untold } = reads;
 		const messages = getMessages(locale);
 		for (const [name, skipped] of readsOf(sections)) logSkipped(name, skipped, log);
 		const told = `${writing.told}\n${messages.brief.day(fenced(BRIEF_DATA, dataOf(date, reads)))}`;
@@ -1117,6 +1239,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			if (!stored) return null;
 			// The owner's next brief reads their mail from the instant this one read it
 			if (mailsReadAt !== null) await saveBriefMailsReadAt(tx, principal.id, mailsReadAt);
+			// and the shares made to them from the instant this one read them
+			if (sharesReadAt !== null) await saveBriefSharesReadAt(tx, principal.id, sharesReadAt);
 			const named = untold.activities.map(({ activity }) => activity);
 			await eraseActivityNames(tx, principal.id, named);
 			// What the owner's quiet hours held, the brief named: no release wakes them for it
@@ -1145,6 +1269,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 					? sections.tasks.value.overdue.length + sections.tasks.value.today.length
 					: null,
 				activities: untold.activities.length,
+				shares: sections.shares.ok ? sections.shares.value.shares.length : null,
 				tokens: model.tokens,
 				...(refusedFor === null ? {} : { refused: refusedFor })
 			},
@@ -1218,9 +1343,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	}
 
 	// The applications of the brief the owner's assistant listens to, which alone it reads
-	async function listenedBy(owner: string): Promise<BriefDomain[]> {
+	async function listenedBy(owner: string): Promise<Source[]> {
 		const listened = await withPrincipal(db, { id: owner }, (tx) => listListened(tx, owner));
-		return BRIEF_DOMAINS.filter((domain) => listened.includes(domain));
+		return READ_SOURCES.filter((source) => listened.includes(source));
 	}
 
 	// The brief once the owner's reads are settled. The day's read asks them nothing, but for the
