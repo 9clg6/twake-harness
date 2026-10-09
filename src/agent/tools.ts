@@ -106,6 +106,9 @@ export interface ToolContext {
 	// that would wait for its owner is not made, or not frozen once the broker refused it, and its
 	// result says why
 	readonly unattended?: true;
+	// For such a turn, the brief: a call the broker refused waits for its owner all the same, and the
+	// turn gives way to the harness's question about what they must give the platform first
+	readonly asksDelegation?: true;
 }
 
 // What the model reads when its turn's conversation was erased with its assistant while the turn

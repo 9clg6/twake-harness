@@ -39,7 +39,12 @@ import {
 	type MeetingScope
 } from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
-import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
+import {
+	makeBriefRunner,
+	type BriefInput,
+	type BriefResult,
+	type BriefResumeInput
+} from './brief.js';
 import { dateIn, describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -301,6 +306,8 @@ export interface AgentService {
 	// What the owner's assistant proposes from the messages of a channel, if anything
 	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
 	runBrief(input: BriefInput): Promise<BriefResult>;
+	// The owner's yes to the question a brief gave way to: that day's brief
+	resumeBrief(input: BriefResumeInput): Promise<BriefResult>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -874,11 +881,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		admission,
 		gate,
 		clock,
+		consentMetrics,
 		persona: (assistantName, messages) =>
 			withLanguage(
 				assistantName === undefined ? defaultPrompt([]) : assistantPrompt(assistantName, []),
 				messages
-			)
+			),
+		runFrozenCall
 	});
 
 	return {
@@ -890,6 +899,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		runOwnerTurn,
 		runAllowedCall,
 		runSuggestion: suggestions.run,
-		runBrief: briefs.run
+		runBrief: briefs.run,
+		resumeBrief: briefs.resume
 	};
 }

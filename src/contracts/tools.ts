@@ -552,9 +552,12 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// The call its owner allowed once they saw its preview carries that preview's digest
 			const previewDigest = context.previewDigest ?? null;
 			const answered = await send(built, context, { kind: 'action', previewDigest });
-			// The organization agent acts for no user: nobody could give it that permission
+			// The organization agent acts for no user: nobody could give it that permission. A turn nobody
+			// attends asks nothing, but for one that gives way to that question, as the brief does.
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
-				if (context.unattended === true) return notAsked(['delegation']);
+				if (context.unattended === true && context.asksDelegation !== true) {
+					return notAsked(['delegation']);
+				}
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
 			}
