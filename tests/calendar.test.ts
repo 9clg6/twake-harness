@@ -923,14 +923,26 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 	it('wakes nobody for an update without a change or a reply, nor for an invitee without an assistant', async () => {
 		// As the calendar producer's tests sent them: an update, which says nothing of being new, and
 		// one that says it is not, neither with a change Calendar computed; Carol's answer to a meeting
-		// Alice organizes; and a new invitation for someone without an assistant
+		// Alice organizes, which waits for Alice's brief; and a new invitation for someone without an
+		// assistant
 		const update = notification({
 			uid: 'uid-update',
 			isNewEvent: null,
 			lines: ['SUMMARY:Point Twake Space', 'DTSTART:20261006T150000Z', 'SEQUENCE:1']
 		});
 		const notNew = notification({ uid: 'uid-not-new', isNewEvent: false });
-		const reply = notification({ uid: 'uid-reply', method: 'REPLY', sender: 'carol@test.local' });
+		const reply = notification({
+			uid: 'uid-reply',
+			method: 'REPLY',
+			sender: 'carol@test.local',
+			lines: [
+				'SUMMARY:Point',
+				'DTSTART:20261006T150000Z',
+				'DTEND:20261006T160000Z',
+				'ORGANIZER;CN=Alice:mailto:alice@test.local',
+				'ATTENDEE;PARTSTAT=ACCEPTED:mailto:carol@test.local'
+			]
+		});
 		const nobody = notification({ uid: 'nobody', recipient: 'nobody@test.local' });
 		// Then a new invitation for Alice, its method in lower case: once she is told of it, the
 		// queue, read in order, has taken every notification before it

@@ -33,6 +33,7 @@ import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
 import {
 	CANCELLED_EVENT_TYPE,
+	COUNTERED_EVENT_TYPE,
 	MOVED_EVENT_TYPE,
 	type MeetingScope
 } from '../wakeups/event-types.js';
@@ -112,16 +113,33 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // what it is about, among those its owner's rights and the rule above leave it: for a move of a
 // meeting or of a whole series, the check of its new slot and the answers to it; for a move of one
 // occurrence of a series, which the answers cannot reach apart from the rest of it, none; for a
-// cancellation, which the model only tells, none. The turn their yes resumes is told of no event,
-// and is not held to them.
+// cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
+// check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
+// their yes resumes is told of no event, and is not held to them.
 const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
+const CHECK_ALONE = ['read_freebusy'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
 	string,
 	Readonly<Record<MeetingScope, readonly string[]>>
 > = new Map([
 	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }],
-	[CANCELLED_EVENT_TYPE, { event: [], series: [], occurrence: [] }]
+	[CANCELLED_EVENT_TYPE, { event: [], series: [], occurrence: [] }],
+	[COUNTERED_EVENT_TYPE, { event: CHECK_ALONE, series: CHECK_ALONE, occurrence: CHECK_ALONE }]
 ]);
+
+// What follows what a meeting's wake-up told once the harness checked it, by its type, which only
+// the calendar listener gives: a move's new slot, a counter-proposal's time, or else a new
+// invitation's slot
+function availabilityOf(
+	type: string,
+	calendarData: string,
+	scope: MeetingScope,
+	messages: Messages
+): string {
+	if (type === MOVED_EVENT_TYPE) return messages.events.movedAvailability(calendarData, scope);
+	if (type === COUNTERED_EVENT_TYPE) return messages.events.counteredAvailability(calendarData);
+	return messages.events.availability(calendarData);
+}
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -213,8 +231,8 @@ export interface OwnerTurnInput {
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
 	// The event of a turn of origin event: its id and CloudEvent type, and for a new invitation, a
-	// move or a cancellation, the meeting, whose slot the harness checks before the model speaks
-	// unless it is cancelled
+	// move, a cancellation or a counter-proposal, the meeting, whose slot, or the time proposed, the
+	// harness checks before the model speaks unless it is cancelled
 	readonly event?: {
 		readonly id: string;
 		readonly type: string;
@@ -350,12 +368,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const gate = makeTurnGate();
 	const admission = makeAdmission({ config, db, log: deps.log, clock });
 
-	// What the model is told. An invitation an event brings, or a move, has its slot checked by the
-	// harness before the model speaks, from the UID and the times its wake-up carries, through the
-	// same tools and context as the model's calls: what the calendar answered follows what the
-	// wake-up told, as data. A cancellation leaves nothing to check, and any other message is told
-	// as it is. A read of that check that waits for its owner, such as the first read of their
-	// calendar, ends the turn on the harness's question.
+	// What the model is told. An invitation an event brings, a move or a counter-proposal has its
+	// slot, or the time proposed, checked by the harness before the model speaks, from the UID and
+	// the times its wake-up carries, through the same tools and context as the model's calls: what
+	// the calendar answered follows what the wake-up told, as data. A cancellation leaves nothing to
+	// check, and any other message is told as it is. A read of that check that waits for its owner,
+	// such as the first read of their calendar, ends the turn on the harness's question.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
@@ -380,11 +398,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
 		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
-		// Only the calendar listener gives an event that carries an invitation, and so a move's type
-		const availability =
-			event.type === MOVED_EVENT_TYPE
-				? messages.events.movedAvailability(check.data, invitation.scope ?? 'event')
-				: messages.events.availability(check.data);
+		const availability = availabilityOf(
+			event.type,
+			check.data,
+			invitation.scope ?? 'event',
+			messages
+		);
 		return {
 			message: input.message === null ? availability : `${input.message}\n${availability}`,
 			question

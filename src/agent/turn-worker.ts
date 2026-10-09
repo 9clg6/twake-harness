@@ -45,8 +45,9 @@ const turnPayload = z.object({
 	origin: z.enum(['owner', 'event', 'brief']).optional(),
 	// The event, when the turn is an event's: its id and CloudEvent type, as its source published
 	// them, that source, by which its owner's listening journal keeps it, and for a new invitation,
-	// a move or a cancellation, the meeting, whose slot the harness checks before the model speaks
-	// unless it is cancelled. A brief is keyed as an event is, by the id the scheduler gave it.
+	// a move, a cancellation or a counter-proposal, the meeting, whose slot, or the time proposed,
+	// the harness checks before the model speaks unless it is cancelled. A brief is keyed as an
+	// event is, by the id the scheduler gave it.
 	event: z
 		.object({
 			id: z.string().min(1),

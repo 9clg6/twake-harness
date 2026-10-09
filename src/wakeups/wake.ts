@@ -21,7 +21,12 @@ import { fenced } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { isListening } from '../sources/repository.js';
 import { sourceOfActivity } from '../sources/sources.js';
-import { CANCELLED_EVENT_TYPE, MOVED_EVENT_TYPE, TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
+import {
+	CANCELLED_EVENT_TYPE,
+	COUNTERED_EVENT_TYPE,
+	MOVED_EVENT_TYPE,
+	TASK_ASSIGNED_EVENT_TYPE
+} from './event-types.js';
 
 // Someone an event names, as its source knows them
 export interface Person {
@@ -42,8 +47,9 @@ export interface Wakeup {
 	// What its owner's listening journal keeps of it beyond its source, type and id, nothing unless
 	// its source says
 	readonly noted?: Noted;
-	// For a new invitation to a meeting, its move or its cancellation, the meeting, whose slot its
-	// turn checks before the model speaks unless it is cancelled
+	// For a new invitation to a meeting, its move, its cancellation or a counter-proposal of another
+	// time, the meeting, whose slot, or the time proposed, its turn checks before the model speaks
+	// unless it is cancelled
 	readonly invitation?: Invitation;
 	// For an activity that calls for no word at once: its owner's journal keeps it for their brief,
 	// and it wakes nobody
@@ -74,6 +80,13 @@ export interface WakeOptions {
 	readonly logCapped?: boolean;
 }
 
+// The message that tells a wake-up that carries a meeting, by its type, beside a new invitation's
+const TOLD_OF_MEETING = new Map<string, 'moved' | 'cancelled' | 'countered'>([
+	[MOVED_EVENT_TYPE, 'moved'],
+	[CANCELLED_EVENT_TYPE, 'cancelled'],
+	[COUNTERED_EVENT_TYPE, 'countered']
+]);
+
 // The event as the model is handed it: what its source computed, apart from what people wrote
 function eventData(wakeup: Wakeup): string {
 	return fenced('event-data', { ...wakeup.shown.computed, untrusted: wakeup.shown.untrusted });
@@ -82,18 +95,14 @@ function eventData(wakeup: Wakeup): string {
 // What the owner's assistant is told, in its owner's language: what arrived, then the event, or
 // that their day starts, for a brief, whose turn reads the rest. Of a wake-up that carries a
 // meeting, which only the calendar listener gives, its type tells whether it is a new invitation,
-// a move or a cancellation.
+// a move, a cancellation or a counter-proposal.
 function told(wakeup: Wakeup, messages: Messages): string {
 	if (wakeup.brief !== undefined) return messages.brief.intro(wakeup.id);
 	if (carriesInvitation(wakeup)) {
-		const scope = wakeup.invitation.scope ?? 'event';
-		if (wakeup.type === MOVED_EVENT_TYPE) {
-			return messages.events.moved(wakeup.id, eventData(wakeup), scope);
-		}
-		if (wakeup.type === CANCELLED_EVENT_TYPE) {
-			return messages.events.cancelled(wakeup.id, eventData(wakeup), scope);
-		}
-		return messages.events.invited(wakeup.id, eventData(wakeup));
+		const kind = TOLD_OF_MEETING.get(wakeup.type);
+		return kind === undefined
+			? messages.events.invited(wakeup.id, eventData(wakeup))
+			: messages.events[kind](wakeup.id, eventData(wakeup), wakeup.invitation.scope ?? 'event');
 	}
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
 		? messages.events.taskAssigned(wakeup.id, eventData(wakeup))
