@@ -34,12 +34,17 @@ export interface TurnInput {
 	// Told, after each call that ran, the actions the turn has done so far: its owner sees them as
 	// it goes
 	readonly actionsDone?: (actions: number) => void;
+	// Whether the model may end the turn on no words at all, as a turn an activity woke may
+	readonly mayStaySilent?: boolean;
 }
 
 export interface TurnOutput {
 	readonly answer: string;
 	readonly messages: readonly LlmMessage[];
 	readonly tokens: number;
+	// The model ended the turn on no words, as it may: the answer is empty, and the conversation is
+	// kept as it was before the turn
+	readonly silent?: true;
 	// The call the harness froze, when the turn ended on its question to the owner
 	readonly pendingCallId?: string;
 	// That question in its parts, when the harness laid it out as a request about the call
@@ -297,6 +302,16 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		if (asked.cut) break;
 		const { completion } = asked;
 		if (completion.toolCalls.length === 0) {
+			// A model that chose to say nothing, rather than one cut off by its budget before a word,
+			// leaves the conversation as it was: an empty answer would follow the activity in every
+			// later prompt, which some providers refuse
+			if (
+				input.mayStaySilent === true &&
+				completion.finishReason !== 'length' &&
+				(completion.content ?? '').trim().length === 0
+			) {
+				return { answer: '', messages: input.history, tokens: spent.tokens, silent: true };
+			}
 			const answer = answerOf(completion);
 			messages.push({ role: 'assistant', content: answer });
 			return { answer, messages: [...input.history, ...messages], tokens: spent.tokens };

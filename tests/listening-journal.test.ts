@@ -93,19 +93,36 @@ function assignment(object?: Record<string, unknown>): ActivityEvent {
 
 // The title of a task whose turn the model fails
 const BREAKING = 'Breaks the model';
+// The title of a task the model finds nothing useful to say of
+const NOTHING_USEFUL = 'Nothing worth a word';
+// The title of a task the model runs out of budget on, before it writes a word
+const CUT_OFF = 'Cut off before a word';
+// What a turn an activity woke is told it may answer, when nothing in it is useful
+const SILENCE_ALLOWED = 'answer with nothing at all';
+// The notice of a failed turn, as Alice reads it
+const FAILED = 'Something went wrong on my side';
 
 // A literal model: it names the activity its turn was told of, reads the journal when its owner
 // asks what it saw, then says what the journal answered, and repeats anything else it hears. Its
-// provider fails on a task of the breaking title.
+// provider fails on a task of the breaking title, it answers nothing on one of the quiet title, and
+// it runs out of budget before a word on one of the cut-off title.
 function listeningModel(request: ChatRequest): ScriptedReply {
 	const last = request.messages.at(-1);
 	if (last?.role === 'tool' && last.name === JOURNAL) return { content: `Saw: ${last.content}` };
 	const told = lastUser(request);
 	if (told.includes(BREAKING)) return { failWith: 502 };
+	if (told.includes(NOTHING_USEFUL)) return { content: '' };
+	if (told.includes(CUT_OFF)) return { content: '', finishReason: 'length' };
 	const id = /\(id ([^)]+)\)/.exec(told)?.[1];
 	if (id !== undefined) return { content: `Told of ${id}` };
 	if (told === ASKED) return { toolCalls: call(JOURNAL, {}) };
 	return { content: `Heard: ${told}` };
+}
+
+// The system prompt of a request to the model
+function systemOf(request: ChatRequest | undefined): string {
+	const first = request?.messages[0];
+	return first?.role === 'system' && typeof first.content === 'string' ? first.content : '';
 }
 
 interface Journal {
@@ -296,6 +313,57 @@ describe('what my assistant saw today', () => {
 				untrusted: { title: BREAKING }
 			})
 		);
+	});
+
+	it('says nothing of an activity it found nothing useful in, which my journal tells me', async () => {
+		const said = l.r.saying('').length;
+		const quiet = assignment({
+			type: 'task',
+			id: 'task-14',
+			key: 'ROAD-14',
+			title: NOTHING_USEFUL
+		});
+		await l.publish(quiet);
+		await until('the turn ended', () => l.noted(quiet.id).length > 0);
+		expect(l.noted(quiet.id)).toEqual([
+			expect.objectContaining({ level: 30, source: 'twake://tasks', outcome: 'nothing_useful' })
+		]);
+		// The turn the activity woke was told it may say nothing
+		const [woken] = await toldOf(l.r.h.apisix, quiet.id, 1);
+		expect(systemOf(woken?.request)).toContain(SILENCE_ALLOWED);
+		expect((await l.ask()).activities).toContainEqual(
+			expect.objectContaining({
+				object: { type: 'task', id: 'task-14', key: 'ROAD-14' },
+				outcome: 'nothing_useful',
+				untrusted: { title: NOTHING_USEFUL }
+			})
+		);
+		// Nothing reached my room but the answer to my question, and my own turn is neither told it
+		// may say nothing nor shown an empty answer of my assistant
+		expect(l.r.saying('').slice(said)).toEqual([
+			expect.objectContaining({ body: expect.stringMatching(/^Saw: /) })
+		]);
+		const mine = l.r.h.apisix.llm.calls.filter((c) => lastUser(c.request) === ASKED).at(-1);
+		expect(systemOf(mine?.request)).not.toContain(SILENCE_ALLOWED);
+		expect(mine?.request.messages).not.toContainEqual(
+			expect.objectContaining({ role: 'assistant', content: '' })
+		);
+		// Nor does my conversation keep what my assistant was told of the activity
+		const asked = l.r.h.apisix.llm.calls
+			.filter((c) => c.request.messages.at(-1)?.role === 'user' && lastUser(c.request) === ASKED)
+			.at(-1);
+		expect(JSON.stringify(asked?.request.messages)).not.toContain(quiet.id);
+	});
+
+	it('tells me it failed, rather than say nothing, when its model ran out of budget before a word', async () => {
+		const notices = l.r.saying(FAILED).length;
+		const cut = assignment({ type: 'task', id: 'task-15', key: 'ROAD-15', title: CUT_OFF });
+		await l.publish(cut);
+		await until('the turn ended', () => l.noted(cut.id).length > 0);
+		expect(l.noted(cut.id)).toEqual([
+			expect.objectContaining({ level: 30, source: 'twake://tasks', outcome: 'failed' })
+		]);
+		expect(await l.r.nextSaying(FAILED, notices)).toBe(`${FAILED}. Please try again in a moment.`);
 	});
 });
 

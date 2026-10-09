@@ -216,6 +216,8 @@ export type OwnerTurnResult =
 			readonly request?: OwnerRequest;
 			// The turn reached one of its limits before it answered: there is more to do
 			readonly atLimit?: true;
+			// A turn an activity woke found nothing useful to say: its answer is empty, for nobody
+			readonly silent?: true;
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -666,6 +668,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const turnTools = comesFromOthers(origin)
 				? withoutTools(tools, TOOLS_HIDDEN_FROM_EVENT_TURNS)
 				: tools;
+			// The turn an activity woke, rather than the one its owner's yes resumed from it, may say
+			// nothing
+			const woken = origin === 'event' && approved === null;
 			// The names of the tools the model is given, which its rules are built on
 			const toolNames = turnTools.definitions.map((tool) => tool.function.name);
 			try {
@@ -693,6 +698,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 											messages
 										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
+							woken,
 							memory,
 							skills,
 							history,
@@ -703,7 +709,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						context,
 						actionsBefore,
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
-						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone })
+						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
+						mayStaySilent: woken
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>
@@ -719,7 +726,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
 					...(turn.request === undefined ? {} : { request: turn.request }),
-					...(turn.atLimit === true ? { atLimit: true } : {})
+					...(turn.atLimit === true ? { atLimit: true } : {}),
+					...(turn.silent === true ? { silent: true } : {})
 				};
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {

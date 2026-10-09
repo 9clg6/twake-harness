@@ -2,10 +2,16 @@ import type { LlmMessage } from '../llm/client.js';
 import { formatMemoryForPrompt, type MemoryView } from '../memory/repository.js';
 import type { SkillSummary } from '../skills/repository.js';
 
+// What a turn an activity woke is told of itself: it may say nothing, and says little otherwise
+const WOKEN_TURN_RULE =
+	"This turn was started by an activity in your user's applications, not by a message from them. If nothing in it is useful to them, answer with nothing at all: they then see nothing. Otherwise suggest it in a few words, and prepare at most one action, which waits for their yes.";
+
 export interface PromptInput {
 	readonly persona: string;
 	// The present, as the turn started: what "today" and "this afternoon" mean
 	readonly moment?: string;
+	// Whether an activity woke the turn, rather than a message of its owner
+	readonly woken?: boolean;
 	readonly memory: MemoryView;
 	readonly skills?: readonly SkillSummary[];
 	readonly history: readonly LlmMessage[];
@@ -41,6 +47,7 @@ export function countTurnsSinceMemory(history: readonly LlmMessage[]): number {
 export function buildSystemPrompt(input: PromptInput): string {
 	const parts: string[] = [input.persona];
 	if (input.moment !== undefined) parts.push(input.moment);
+	if (input.woken === true) parts.push(WOKEN_TURN_RULE);
 	const memory = formatMemoryForPrompt(input.memory);
 	if (memory !== null) parts.push(memory);
 	const skills = formatSkillsForPrompt(input.skills ?? []);
