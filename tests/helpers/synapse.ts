@@ -56,6 +56,10 @@ export interface TestSynapse {
 	// Resolves once `userId` joined the room, as `viewer` sees its members
 	waitForMember(viewer: MatrixUser, roomId: string, userId: string): Promise<void>;
 	displayName(userId: string): Promise<string | null>;
+	// Gives a user a new display name as the homeserver's admin, which a homeserver refusing
+	// display-name changes still lets through, as when a login brings the user's name: a new member
+	// event of theirs in each of their rooms tells it
+	renameUserAsAdmin(userId: string, displayName: string): Promise<void>;
 	whoami(accessToken: string): Promise<number>;
 	logs(): Promise<string>;
 	stop(): Promise<void>;
@@ -202,20 +206,25 @@ export async function startTestSynapse(
 		};
 	}
 
-	async function registerUser(localpart: string, displayName?: string): Promise<MatrixUser> {
+	// A new account, registered with the shared secret, an admin of the homeserver or not
+	async function register(
+		localpart: string,
+		admin: boolean,
+		displayName?: string
+	): Promise<MatrixUser> {
 		const nonce = (await request(null, 'GET', '/_synapse/admin/v1/register')).body[
 			'nonce'
 		] as string;
 		const password = `${localpart}-password`;
 		const mac = createHmac('sha1', SHARED_SECRET)
-			.update(`${nonce}\0${localpart}\0${password}\0notadmin`)
+			.update(`${nonce}\0${localpart}\0${password}\0${admin ? 'admin' : 'notadmin'}`)
 			.digest('hex');
 		// Given at the registration, which a homeserver refusing display-name changes still takes
 		const res = await request(null, 'POST', '/_synapse/admin/v1/register', {
 			nonce,
 			username: localpart,
 			password,
-			admin: false,
+			admin,
 			mac,
 			...(displayName === undefined ? {} : { displayname: displayName })
 		});
@@ -227,6 +236,26 @@ export async function startTestSynapse(
 			accessToken: res.body['access_token'] as string,
 			password
 		};
+	}
+
+	async function registerUser(localpart: string, displayName?: string): Promise<MatrixUser> {
+		return register(localpart, false, displayName);
+	}
+
+	// The homeserver's admin, registered the first time a test needs it
+	let admin: Promise<MatrixUser> | null = null;
+
+	async function renameUserAsAdmin(userId: string, displayName: string): Promise<void> {
+		admin ??= register('homeserver-admin', true);
+		const res = await request(
+			await admin,
+			'PUT',
+			`/_synapse/admin/v2/users/${encodeURIComponent(userId)}`,
+			{ displayname: displayName }
+		);
+		if (res.status !== 200) {
+			throw new Error(`rename of ${userId} failed: ${JSON.stringify(res.body)}`);
+		}
 	}
 
 	async function createDirectRoom(user: MatrixUser, invite: string): Promise<string> {
@@ -358,6 +387,7 @@ export async function startTestSynapse(
 		joinedMembers,
 		waitForMember,
 		displayName,
+		renameUserAsAdmin,
 		whoami,
 		logs: async () => {
 			// The log stream follows the container and never ends: read what is there, then let go

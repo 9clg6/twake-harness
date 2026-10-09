@@ -9,6 +9,7 @@ import {
 import { grantConsent } from './helpers/consents.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import { CALENDAR_CATALOG } from './helpers/fake-apisix.js';
+import { eventually } from './helpers/feedback.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import { PROVISIONER, provisioningPath, provisionUntilReady } from './helpers/provisioning.js';
 import type { MatrixUser } from './helpers/synapse.js';
@@ -117,6 +118,21 @@ describe('a deployment that speaks French', () => {
 			);
 			expect(mine.body.name).toBe(expected);
 		}
+	});
+
+	it("names an assistant that went by its owner's identifier after their first name in French, once the homeserver gives them a name", async () => {
+		// As the platform's homeserver names its users at their first login: after their identifier
+		const owner = await h.synapse.registerUser('e2e.ines', 'e2e.ines');
+		const mine = await provisionUntilReady(h.api, owner.userId);
+		const nameOf = async (): Promise<string> =>
+			(await h.api.get<{ name: string }>('e2e.ines@test.local', '/v1/assistants/me')).body.name;
+		expect(await nameOf()).toBe("Assistant d'e2e.ines");
+		const roomId = await h.synapse.createDirectRoom(owner, mine.userId);
+		await h.synapse.waitForMember(owner, roomId, mine.userId);
+
+		await h.synapse.renameUserAsAdmin(owner.userId, 'Inès DURAND');
+
+		expect(await eventually(async () => (await nameOf()) === "Assistant d'Inès")).toBe(true);
 	});
 
 	it('tells the model the name the owner chose, so the assistant introduces itself by it', async () => {

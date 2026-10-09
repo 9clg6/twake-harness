@@ -146,8 +146,21 @@ export async function renameAssistant(tx: Tx, owner: string, name: string): Prom
 	return result.count === 1;
 }
 
-// Whether the owner's live assistant is flagged to take their first name at the matrix role's start,
-// should it still go by a former default name
+// Flags the owner's live assistant to take their first name, only while it goes by one of the names
+// given, so that a name its owner chose stays. True when it was flagged.
+export async function flagToRenameIfNamed(
+	tx: Tx,
+	owner: string,
+	names: readonly string[]
+): Promise<boolean> {
+	const flagged = await tx.sql`
+		update assistants set rename_if_former_default = true
+		where owner = ${owner} and deleted_at is null and name in ${tx.sql([...names])}`;
+	return flagged.count === 1;
+}
+
+// Whether the owner's live assistant is flagged to take their first name, by its naming job or at
+// the matrix role's start, should it still go by a former default name
 export async function isFlaggedToRenameIfFormerDefault(tx: Tx, owner: string): Promise<boolean> {
 	const rows = await tx.sql<{ flagged: boolean }[]>`
 		select rename_if_former_default as flagged

@@ -377,4 +377,66 @@ describe('an assistant named after its owner, on a homeserver that refuses displ
 		}
 		expect(await nameShown(ana.owner, ana.roomId, ana.assistantId, 'Assistant')).toBe('Assistant');
 	}, 240_000);
+
+	// An owner the homeserver named after their identifier, as the platform's names its users at
+	// their first login, with the assistant a provisioner asked for them and the room they opened
+	// with it
+	async function namedAfterIdentifier(
+		localpart: string
+	): Promise<{ owner: MatrixUser; assistantId: string; roomId: string }> {
+		const { owner, assistant } = await provisioned(h, localpart, localpart);
+		expect(assistant.name).toBe(`${localpart}'s assistant`);
+		const roomId = await h.synapse.createDirectRoom(owner, assistant.userId);
+		expect(await nameShown(owner, roomId, assistant.userId, assistant.name)).toBe(assistant.name);
+		return { owner, assistantId: assistant.userId, roomId };
+	}
+
+	it("takes its owner's first name once the homeserver gives them a name, if it still goes by their identifier", async () => {
+		const { owner, assistantId, roomId } = await namedAfterIdentifier('yann.tiersen');
+
+		await h.synapse.renameUserAsAdmin(owner.userId, 'Yann TIERSEN');
+
+		expect(await nameShown(owner, roomId, assistantId, "Yann's assistant")).toBe(
+			"Yann's assistant"
+		);
+		const mine = await h.api.get<OwnedAssistant>('yann.tiersen@test.local', '/v1/assistants/me');
+		expect(mine.body.name).toBe("Yann's assistant");
+	});
+
+	it("keeps the name its owner gave it, or their first name, when the homeserver changes the owner's name", async () => {
+		const kim = await namedAfterIdentifier('kim.gordon');
+		// « Assistant », chosen by its owner, though a default name before
+		const chosen = await h.api.put('kim.gordon@test.local', '/v1/assistants/me', {
+			name: 'Assistant'
+		});
+		expect(chosen.status).toBe(200);
+		expect(await nameShown(kim.owner, kim.roomId, kim.assistantId, 'Assistant')).toBe('Assistant');
+		const lou = await provisioned(h, 'lou', 'Lou REED');
+		const louRoom = await h.synapse.createDirectRoom(lou.owner, lou.assistant.userId);
+		expect(await nameShown(lou.owner, louRoom, lou.assistant.userId, "Lou's assistant")).toBe(
+			"Lou's assistant"
+		);
+
+		await h.synapse.renameUserAsAdmin(kim.owner.userId, 'Kim GORDON');
+		await h.synapse.renameUserAsAdmin(lou.owner.userId, 'Louis REED');
+		// Renamed last, an assistant that follows its owner's name: once it did, the role went over
+		// the changes before
+		const kurt = await namedAfterIdentifier('kurt.cobain');
+		await h.synapse.renameUserAsAdmin(kurt.owner.userId, 'Kurt COBAIN');
+		expect(await nameShown(kurt.owner, kurt.roomId, kurt.assistantId, "Kurt's assistant")).toBe(
+			"Kurt's assistant"
+		);
+
+		for (const [localpart, expected] of [
+			['kim.gordon', 'Assistant'],
+			['lou', "Lou's assistant"]
+		] as const) {
+			const mine = await h.api.get<OwnedAssistant>(`${localpart}@test.local`, '/v1/assistants/me');
+			expect(mine.body.name).toBe(expected);
+		}
+		expect(await nameShown(kim.owner, kim.roomId, kim.assistantId, 'Assistant')).toBe('Assistant');
+		expect(await nameShown(lou.owner, louRoom, lou.assistant.userId, "Lou's assistant")).toBe(
+			"Lou's assistant"
+		);
+	});
 });
