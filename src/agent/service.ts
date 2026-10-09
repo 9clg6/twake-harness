@@ -80,6 +80,7 @@ import {
 
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
+import { SUGGEST_CALL, makeSuggestionConsentTool } from '../suggestions/consent.js';
 import {
 	makeSuggestionRunner,
 	makeSuggestionTools,
@@ -372,6 +373,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		],
 		() => contracts.tools
 	);
+	// What the owner's yes to a suggestion's question about a permission runs, which no model and no
+	// direct tool call ever finds: the replay of that call alone
+	const suggestionConsent = makeSuggestionConsentTool({ config });
 	const gate = makeTurnGate();
 	const admission = makeAdmission({ config, db, log: deps.log, clock });
 
@@ -419,7 +423,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	// Runs the call its owner allowed, exactly as it was frozen. A tool that no longer stands for
 	// the contract the owner allowed, at the same level, runs nothing; a call of the harness's own,
-	// such as listening to an application, finds its tool by the name it was frozen under. The call
+	// such as listening to an application, finds its tool by the name it was frozen under, and a
+	// suggestion's question about a permission finds the tool kept for it. The call
 	// waits for nothing the owner's yes answered; one that waits for its owner again, such as one
 	// the platform's broker still refuses or one in an application whose writing they took back
 	// since, comes back with the harness's new question. A call whose contract showed its owner what
@@ -431,7 +436,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		log: FastifyBaseLogger
 	): Promise<ToolOutcome> {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
-		const tool = tools.find(approved.tool);
+		const tool = approved.contract === SUGGEST_CALL ? suggestionConsent : tools.find(approved.tool);
 		const unchanged =
 			tool !== null &&
 			(definition === undefined
@@ -844,7 +849,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	const suggestions = makeSuggestionRunner({ config, db, llm, contracts, admission, gate, clock });
+	const suggestions = makeSuggestionRunner({
+		config,
+		db,
+		llm,
+		contracts,
+		admission,
+		gate,
+		clock,
+		consentMetrics
+	});
 
 	// The brief of the owner's working day, which the worker role's scheduler asks for: the
 	// assistant speaks as in its owner's turns, given no tool

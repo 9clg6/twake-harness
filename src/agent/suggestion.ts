@@ -5,14 +5,17 @@ import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import type { ContractCatalog } from '../contracts/catalog.js';
+import type { ContractDefinition } from '../contracts/openapi.js';
 import { hasConsent } from '../consents/repository.js';
-import type { OwnerRequest } from '../consents/request.js';
+import type { ConsentMetrics } from '../consents/metrics.js';
+import { requestText, type OwnerRequest } from '../consents/request.js';
 import { readJsonColumn, withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
 import { fenced } from '../llm/data.js';
 import { LlmError, type LlmClient } from '../llm/client.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
+import { askSuggestionConsent } from '../suggestions/consent.js';
 import type { SuggestPayload } from '../suggestions/job.js';
 import type { Proposal } from '../suggestions/text.js';
 import type { Admission } from './admission.js';
@@ -43,12 +46,24 @@ export interface SuggestionInput {
 	readonly payload: SuggestPayload;
 	// 0 for a first suggestion, 1 for the try at another time
 	readonly attempt: number;
+	// Whether it already waited for its owner to let their assistant read what it needs
+	readonly waited: boolean;
 	readonly log: FastifyBaseLogger;
 }
 
 export type SuggestionResult =
 	| { readonly kind: 'none'; readonly reason: string }
 	| { readonly kind: 'busy' }
+	| {
+			// The first use of an application the suggestion reads, asked of the owner in place of a
+			// proposal
+			readonly kind: 'asked';
+			readonly pendingCallId: string;
+			readonly answer: string;
+			readonly request: OwnerRequest;
+	  }
+	// That question still waits for the owner
+	| { readonly kind: 'waiting' }
 	| {
 			readonly kind: 'proposed';
 			readonly pendingCallId: string;
@@ -67,6 +82,7 @@ export interface SuggestionDeps {
 	readonly admission: Admission;
 	readonly gate: TurnGate;
 	readonly clock: Clock;
+	readonly consentMetrics: ConsentMetrics;
 }
 
 function systemRules(owner: string, others: readonly string[]): string {
@@ -226,7 +242,7 @@ export interface SuggestionRunner {
 }
 
 export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
-	const { config, db, llm, contracts, admission, gate, clock } = deps;
+	const { config, db, llm, contracts, admission, gate, clock, consentMetrics } = deps;
 
 	async function run(input: SuggestionInput): Promise<SuggestionResult> {
 		const { payload, log } = input;
@@ -236,12 +252,27 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		const meeting = contracts.contracts.find((c) => c.toolName === CREATE_MEETING);
 		if (slots === undefined || meeting === undefined)
 			return { kind: 'none', reason: 'no_contracts' };
+		const others = (payload.retry?.attendees ?? payload.quoted.map((q) => q.email))
+			.map((e) => e.toLowerCase())
+			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
+		const other = others[0];
+		if (other === undefined) return { kind: 'none', reason: 'nobody_else' };
 		const prepared = await withPrincipal(db, principal, async (tx) => {
 			const record = await ensurePrincipal(tx, principal);
 			const assistant = await findAssistant(tx, owner);
-			// Reading a calendar for the first time is the owner's to allow, in their own turns
-			const mayRead = await hasConsent(tx, owner, slots.domain, slots.level);
-			return { actions: record.actions, assistant, mayRead };
+			// What the suggestion reads and the owner never allowed: the first one is asked below. A
+			// write needs no consent here, since the meeting always waits for the owner.
+			let lacking: ContractDefinition | null = null;
+			for (const needed of [slots, meeting]) {
+				if (
+					needed.level === 'read' &&
+					!(await hasConsent(tx, owner, needed.domain, needed.level))
+				) {
+					lacking = needed;
+					break;
+				}
+			}
+			return { actions: record.actions, assistant, lacking };
 		});
 		if (
 			!prepared.actions.includes('chat') ||
@@ -250,12 +281,24 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		) {
 			return { kind: 'none', reason: 'no_assistant' };
 		}
-		if (!prepared.mayRead) return { kind: 'none', reason: 'no_calendar_consent' };
 		const locale = localeOf(prepared.assistant, config.locale);
-		const others = (payload.retry?.attendees ?? payload.quoted.map((q) => q.email))
-			.map((e) => e.toLowerCase())
-			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
-		if (others.length === 0) return { kind: 'none', reason: 'nobody_else' };
+		if (prepared.lacking !== null) {
+			const { domain, level } = prepared.lacking;
+			const question = await askSuggestionConsent(
+				{ config, db, domains: contracts.domainDescriptions, consentMetrics },
+				{ owner, other, domain, level, eventId: payload.eventId, waited: input.waited },
+				locale
+			);
+			if (question === 'waiting') return { kind: 'waiting' };
+			return question === null
+				? { kind: 'none', reason: 'no_calendar_consent' }
+				: {
+						kind: 'asked',
+						pendingCallId: question.pendingCallId,
+						request: question.request,
+						answer: requestText(question.request)
+					};
+		}
 		const registry = makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
 		const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 		const now = clock.now();
