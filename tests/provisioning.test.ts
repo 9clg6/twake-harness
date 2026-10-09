@@ -124,6 +124,26 @@ describe('the provisioning API admits its provisioners only', () => {
 		await api.put(PROVISIONER, path, { enabled: true });
 		expect(await api.get(PROVISIONER, path)).toEqual({ status: 200, body: { enabled: true } });
 	});
+
+	it('turns off the suggestions of an owner the harness never saw, as their own settings show', async () => {
+		const path = `${provisioningPath('@dave:test.local')}/suggestions`;
+		expect((await h.app.inject({ method: 'GET', url: path })).statusCode).toBe(401);
+		expect(
+			(
+				await api.put(PROVISIONER, `${provisioningPath('@dave:elsewhere.example')}/suggestions`, {
+					enabled: false
+				})
+			).status
+		).toBe(422);
+		expect(await api.put(PROVISIONER, path, { enabled: false })).toEqual({
+			status: 200,
+			body: { enabled: false }
+		});
+		expect((await api.get('dave@test.local', '/v1/suggestions/settings')).body).toEqual({
+			enabled: false,
+			mutedRooms: []
+		});
+	});
 });
 
 describe('a provisioned assistant', () => {
