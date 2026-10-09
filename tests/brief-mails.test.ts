@@ -16,6 +16,7 @@ import {
 	LIST_TASKS,
 	MAILBOXES,
 	referencesIn,
+	seenEveryDay,
 	type Mail
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
@@ -256,6 +257,7 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 	}, 240_000);
 
 	beforeEach(async () => {
+		await seenEveryDay(r.h.db, ALICE);
 		for (const domain of ['calendar', 'mail', 'tasks']) {
 			await grantConsent(r.h.db, ALICE, domain, 'read');
 		}

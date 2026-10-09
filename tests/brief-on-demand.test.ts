@@ -16,6 +16,7 @@ import {
 	LIST_TASKS,
 	MAILBOXES,
 	referencesIn,
+	seenEveryDay,
 	type Mail
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
@@ -226,6 +227,7 @@ describe('I ask for my brief whenever I want it, and it is the answer of my turn
 	// Her three reads allowed, her brief neither stopped nor paused, her inbox empty
 	beforeEach(async () => {
 		inbox = [];
+		await seenEveryDay(r.h.db, ALICE);
 		for (const domain of DOMAINS) await grantConsent(r.h.db, ALICE, domain, 'read');
 		await hold(false, null);
 	});

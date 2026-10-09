@@ -18,7 +18,8 @@ import {
 	LIST_MAILBOXES,
 	LIST_TASKS,
 	MAILBOXES,
-	referencesIn
+	referencesIn,
+	seenEveryDay
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -396,6 +397,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 	}, 240_000);
 
 	beforeEach(async () => {
+		await seenEveryDay(r.h.db, ALICE);
 		for (const domain of ['calendar', 'mail', 'tasks']) {
 			await grantConsent(r.h.db, ALICE, domain, 'read');
 		}

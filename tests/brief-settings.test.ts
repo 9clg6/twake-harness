@@ -4,6 +4,7 @@ import { runBriefPass, type SettledBriefs } from '../src/briefs/schedule.js';
 import { BRIEF_EVENT_TYPE } from '../src/wakeups/event-types.js';
 import { wake } from '../src/wakeups/wake.js';
 import { ASSIGNED, lastUser, turnCalls, until } from './helpers/activity.js';
+import { seenEveryDay } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { call, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent } from './helpers/consents.js';
@@ -126,6 +127,7 @@ describe('I set my brief in our conversation, and it goes out as I set it', () =
 		for (const domain of ['calendar', 'mail', 'tasks']) {
 			await grantConsent(r.h.db, ALICE, domain, 'read');
 		}
+		await seenEveryDay(r.h.db, ALICE);
 	}, 240_000);
 
 	afterAll(async () => {

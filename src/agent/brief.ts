@@ -3,6 +3,7 @@ import { z } from 'zod';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
+import { isIdleOn, ownerSeenSince } from '../briefs/activity.js';
 import {
 	byImportance,
 	emailListSchema,
@@ -327,8 +328,8 @@ export type BriefResult =
 	// The broker still refuses the read, and a brief waits for the owner's answer to the question it
 	// gave way to, or the question of this date went out already: this one says nothing
 	| { readonly kind: 'withheld' }
-	// The owner left the question of their first brief unanswered twice: their brief stops, and says
-	// so, asking nothing
+	// The owner left the question of their first brief unanswered twice, or went ten working days
+	// without a word or a read in their room: their brief stops, and says so, asking nothing
 	| { readonly kind: 'notice'; readonly text: string }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -1185,19 +1186,18 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return { kind: 'question', text, pendingCallId };
 	}
 
-	// The owner left the question of their first brief unanswered as many times as it goes out: their
-	// brief stops until they resume it, and says so, which the conversation keeps as the assistant's
-	// answer. The question closes as expired.
-	async function pause(writing: Writing): Promise<BriefResult> {
-		const { principal, locale, log } = writing;
-		const text = getMessages(locale).brief.paused;
+	// The owner's brief stops by itself until they resume it, and says why, which the conversation
+	// keeps as the assistant's answer: they left the question of their first brief unanswered as many
+	// times as it goes out, or went ten working days without a word or a read in their room. A
+	// question of their brief that still waits closes as expired.
+	async function pause(writing: Writing, text: string): Promise<BriefResult> {
+		const { principal, log } = writing;
 		const saved = await withPrincipal(db, principal, async (tx) => {
 			const kept = await keep(tx, writing, writing.told, text);
 			return kept ? { closed: await stopBrief(tx, principal.id) } : null;
 		});
 		if (saved === null) return { kind: 'missing' };
 		closedUnanswered(principal.id, saved.closed, log);
-		log.info({}, 'brief stopped: its question went unanswered');
 		return { kind: 'notice', text };
 	}
 
@@ -1228,8 +1228,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return writeBrief(writing, reads, ending);
 	}
 
-	// Until the owner's reads are settled, their brief asks for those they did not allow, once a
-	// date, in its place: on its first day, then once more on their next brief day, then it stops
+	// A brief whose owner went ten working days without a word or a read in their room stops, saying
+	// so. Until the owner's reads are settled, their brief asks for those they did not allow, once a
+	// date, in its place: on its first day, then once more on their next brief day, then it stops.
 	async function runAdmitted(
 		input: BriefInput,
 		refusedFor: SpentReason | null
@@ -1241,13 +1242,16 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			const locale = localeOf(await findAssistant(tx, principal.id), config.locale);
 			const session = await ensureRoomSession(tx, principal.id, roomId);
 			const waiting = await findBriefWait(tx, principal.id);
+			const { timeZone } = await findOwnerSettings(tx, principal.id);
+			const seenAt = await ownerSeenSince(tx, principal.id, clock.now());
+			const idle = isIdleOn(date, seenAt, timeZone ?? config.timeZone);
 			const { settled } = await findBriefReads(tx, principal.id);
 			const missing = settled ? [] : await missingReads(tx, principal.id);
 			const question = await findBriefQuestion(tx, principal.id);
-			return { actions: record.actions, locale, session, waiting, missing, question };
+			return { actions: record.actions, locale, session, waiting, idle, seenAt, missing, question };
 		});
 		if (opened === null) return { kind: 'forbidden' };
-		const { actions, locale, session, waiting, missing, question } = opened;
+		const { actions, locale, session, waiting, idle, seenAt, missing, question } = opened;
 		const log = input.log.child({ session: session.id, principal: principal.id });
 		const writing: Writing = {
 			principal,
@@ -1261,12 +1265,19 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			inTurn: false,
 			restOfDay: false
 		};
+		if (idle) {
+			log.info({ seenAt: seenAt.toISOString() }, 'brief stopped: its owner was not seen');
+			return pause(writing, getMessages(locale).brief.idle);
+		}
 		if (missing.length > 0) {
 			if (question?.date === date) {
 				log.info({ pendingCallId: question.pendingCallId, since: date }, 'brief withheld');
 				return { kind: 'withheld' };
 			}
-			if (question !== null && question.asked >= MAX_ASKED) return pause(writing);
+			if (question !== null && question.asked >= MAX_ASKED) {
+				log.info({}, 'brief stopped: its question went unanswered');
+				return pause(writing, getMessages(locale).brief.paused);
+			}
 			return ask(writing, input.correlationId, missing, question?.asked ?? 0);
 		}
 		const context: ToolContext = {
