@@ -25,7 +25,7 @@ import {
 	startConsentRoom,
 	type ConsentRoom
 } from './helpers/consent-room.js';
-import { grantConsent, withdrawConsent } from './helpers/consents.js';
+import { allowBriefReads, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
 	toolsOf,
@@ -223,10 +223,11 @@ describe('I ask for my brief whenever I want it, and it is the answer of my turn
 		r.h.apisix.llm.script = model;
 	}, 240_000);
 
-	// Her three reads allowed, her brief neither stopped nor paused, her inbox empty
+	// Her three reads allowed and her mail listened to, her brief neither stopped nor paused, her
+	// inbox empty
 	beforeEach(async () => {
 		inbox = [];
-		for (const domain of DOMAINS) await grantConsent(r.h.db, ALICE, domain, 'read');
+		await allowBriefReads(r.h.db, ALICE);
 		await hold(false, null);
 	});
 
