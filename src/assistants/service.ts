@@ -14,11 +14,13 @@ import {
 	defaultNameFor,
 	formerDefaultNames,
 	isValidAssistantName,
+	namesAfterLocalpart,
 	requestNaming,
 	type Namesake
 } from './naming.js';
 import {
 	findAssistant,
+	flagToRenameIfNamed,
 	isFlaggedToRenameIfFormerDefault,
 	listAssistantRoomIds,
 	listAssistantRooms,
@@ -70,6 +72,10 @@ export interface AssistantService {
 	// A name its owner gives it meanwhile stays. Failed when the owner's name could not be read,
 	// which leaves it flagged for the next start.
 	renameIfFormerDefault(owner: string): Promise<'renamed' | 'kept' | 'failed'>;
+	// The owner's Matrix name is now the one given, as when the homeserver that named them after
+	// their identifier gives them their own: their assistant, while it goes by a name after their
+	// localpart, is flagged to take their first name, and its naming job asked for
+	followOwnerName(owner: string, ownerName: string): Promise<void>;
 	// The owner's assistant goes by its name in its profile, where the homeserver lets it change,
 	// and in each of its rooms with its owner, where a refusal is thrown, to be tried again
 	showName(owner: string): Promise<void>;
@@ -279,6 +285,20 @@ export function makeAssistantService(deps: AssistantServiceDeps): AssistantServi
 			if (!renamed) return 'kept';
 			log.info({ owner }, 'assistant named after its owner');
 			return 'renamed';
+		},
+		async followOwnerName(owner, ownerName) {
+			const ownerLocalpart = matrixLocalpartOfPrincipal(config, owner);
+			const name = ownerName.trim();
+			// Their identifier still, or no name: their assistant has nothing else to take
+			if (ownerLocalpart === null || name === '' || name === ownerLocalpart) return;
+			const flagged = await withPrincipal(db, { id: owner }, async (tx) => {
+				if (!(await flagToRenameIfNamed(tx, owner, namesAfterLocalpart(ownerLocalpart)))) {
+					return false;
+				}
+				await requestNaming(tx, owner, { renameIfFormerDefault: true });
+				return true;
+			});
+			if (flagged) log.info({ owner }, 'assistant to take the name its owner now has');
 		},
 		async showName(owner) {
 			const record = await current(owner);

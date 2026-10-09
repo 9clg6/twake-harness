@@ -1115,7 +1115,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// Who comes into an assistant's room: anyone but its owner makes it leave, as it answers its owner
 	// in a direct room only for now. The owner has joined: their devices are in the room, the greeting
-	// can be encrypted for them.
+	// can be encrypted for them. Each change of the owner's name comes as a member event of theirs
+	// too: an assistant still named after their identifier then takes their first name.
 	appservice.on(
 		'room.event',
 		guard(
@@ -1137,6 +1138,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				) {
 					await leaveNoLongerDirect(roomId, room.owner, room.userId);
 					return;
+				}
+				const ownerName = event.content?.['displayname'];
+				if (
+					membership === 'join' &&
+					ownerUserId !== null &&
+					event.state_key === ownerUserId &&
+					typeof ownerName === 'string'
+				) {
+					// A failure leaves the greeting to go out all the same
+					try {
+						await assistants.followOwnerName(room.owner, ownerName);
+					} catch (err: unknown) {
+						log.warn({ roomId, owner: room.owner, err }, 'owner name not followed');
+					}
 				}
 				if (membership !== 'join' || room.welcome === null) return;
 				if (event.state_key !== ownerUserId) return;
@@ -1856,10 +1871,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			)
 		);
 	}
-	// An assistant flagged when the harness started naming assistants after their owner's first name
-	// takes it, if it still goes by a default name it had before, and goes by its name in its rooms.
-	// Once: its naming job clears the flag once the name is settled, and keeps it for the next start
-	// when the owner's name cannot be read.
+	// An assistant flagged when the harness started naming assistants after their owner's first name,
+	// or when its owner got a name while it went by their identifier, takes it, if it still goes by a
+	// default name it had before, and goes by its name in its rooms. Once: its naming job clears the
+	// flag once the name is settled, and keeps it for the next start when the owner's name cannot be
+	// read.
 	const owners = new Set(assistantsAtStart.map(({ owner }) => owner));
 	owners.delete(ORGANIZATION_PRINCIPAL);
 	try {
