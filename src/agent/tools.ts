@@ -147,6 +147,8 @@ export interface Tool {
 	// application they have not let their assistant read: what its frozen calls name in place of a
 	// contract, by which the call their yes allowed finds the tool again
 	readonly frozenAs?: string;
+	// A tool the model is never offered, which only a frozen call runs
+	readonly hidden?: true;
 	run(args: unknown, context: ToolContext): Promise<ToolOutcome>;
 }
 
@@ -163,7 +165,9 @@ export function makeToolRegistry(
 	const byName = new Map(tools.map((tool) => [tool.definition.function.name, tool]));
 	return {
 		get definitions() {
-			return [...tools, ...extra()].map((tool) => tool.definition);
+			return [...tools, ...extra()]
+				.filter((tool) => tool.hidden !== true)
+				.map((tool) => tool.definition);
 		},
 		find: (name) =>
 			byName.get(name) ?? extra().find((tool) => tool.definition.function.name === name) ?? null

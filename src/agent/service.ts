@@ -75,6 +75,7 @@ import {
 
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
+import { SUGGEST_CALL, makeSuggestionResumeTool } from '../suggestions/consent.js';
 import { makeSuggestionRunner, type SuggestionInput, type SuggestionResult } from './suggestion.js';
 
 export type SessionTarget =
@@ -332,6 +333,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				consentMetrics
 			}),
 			makeListeningJournalTool({ clock, timeZone: config.timeZone }),
+			makeSuggestionResumeTool({ config }),
 			...makeListeningTools({
 				config,
 				consentMetrics,
@@ -458,7 +460,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						{
 							id: callId,
 							type: 'function',
-							function: { name: approved.tool, arguments: JSON.stringify(approved.arguments) }
+							function: {
+								name: approved.tool,
+								// The quotes of a suggestion that waited for its owner never reach the conversation
+								arguments:
+									approved.contract === SUGGEST_CALL ? '{}' : JSON.stringify(approved.arguments)
+							}
 						}
 					]
 				},
@@ -787,7 +794,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	const suggestions = makeSuggestionRunner({ config, db, llm, contracts, admission, gate, clock });
+	const suggestions = makeSuggestionRunner({
+		config,
+		db,
+		llm,
+		contracts,
+		admission,
+		gate,
+		clock,
+		consentMetrics
+	});
 
 	// The brief of the owner's working day, which the worker role's scheduler asks for: the
 	// assistant speaks as in its owner's turns, given no tool

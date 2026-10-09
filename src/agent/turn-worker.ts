@@ -17,7 +17,7 @@ import {
 	toYesNoQuestion,
 	type RequestState
 } from '../consents/repository.js';
-import { requestHtml } from '../consents/request.js';
+import { requestHtml, type OwnerRequest } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
 import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
 import type { BriefMarker } from '../matrix/brief.js';
@@ -449,6 +449,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return;
 		}
 		const result = await agent.runSuggestion({ payload, attempt, log: jobLog });
+		if (result.kind === 'asked') {
+			jobLog.info({ owner, pendingCallId: result.pendingCallId }, 'suggestion asks for consent');
+			await sendSuggestionQuestion(owner, result);
+			return;
+		}
 		if (result.kind !== 'proposed') {
 			jobLog.info(
 				{
@@ -482,6 +487,15 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			});
 			jobLog.info({ owner, pendingCallId, outcome }, 'suggestion sent to Space');
 		}
+		await sendSuggestionQuestion(owner, result);
+	}
+
+	// The harness's request about the call a suggestion froze, in the owner's assistant room
+	async function sendSuggestionQuestion(
+		owner: string,
+		result: { pendingCallId: string; answer: string; request: OwnerRequest | null }
+	): Promise<void> {
+		const { pendingCallId } = result;
 		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 		if (assistant?.roomId === null || assistant === null) return;
 		const call = await withPrincipal(db, { id: owner }, (tx) =>

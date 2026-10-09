@@ -221,6 +221,13 @@ export interface Messages {
 	};
 	// What the harness says once the owner chose whether their assistant listens to an application,
 	// named as the catalog names it, on which their turn ends
+	readonly suggestions: {
+		// Why the assistant asks to read in an application, said under its question: it wants to
+		// propose a slot for a message of this author, whose address the harness computed
+		consentContext(author: string): string;
+		// What ends the turn of the owner's yes to that question
+		consentGranted: string;
+	};
 	readonly sources: {
 		// What reaches them there wakes their assistant from now on
 		listening(application: string): string;
@@ -629,6 +636,12 @@ const ENGLISH: Messages = {
 			notRead: 'I could not read your calendar today.'
 		}
 	},
+	suggestions: {
+		consentContext: (author) =>
+			`I would like to propose a time slot for a message of ${author} in a conversation.`,
+		consentGranted:
+			'Thank you. I will propose time slots for the messages that arrange a meeting with you.'
+	},
 	sources: {
 		listening: (application) =>
 			`I am listening to ${application}: I will let you know what arrives for you there.`,
@@ -915,6 +928,12 @@ const FRENCH: Messages = {
 			truncated: "Il y en a d'autres dans ton agenda.",
 			notRead: "Je n'ai pas pu lire ton agenda aujourd'hui."
 		}
+	},
+	suggestions: {
+		consentContext: (author) =>
+			`Je voudrais te proposer un créneau pour un message de ${author} dans une conversation.`,
+		consentGranted:
+			'Merci. Je te proposerai des créneaux pour les messages qui fixent un rendez-vous avec toi.'
 	},
 	sources: {
 		listening: (application) => `J'écoute ${application} : je te préviens de ce qui t'y arrive.`,
