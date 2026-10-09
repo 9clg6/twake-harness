@@ -35,7 +35,7 @@ import {
 } from './helpers/brief.js';
 import { makeSettableClock, type SettableClock } from './helpers/clock.js';
 import { call, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { allowBriefReads } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import { toolsOf, type ChatRequest, type ScriptedReply } from './helpers/fake-apisix.js';
 import type { TestBroker } from './helpers/rabbitmq.js';
@@ -309,9 +309,7 @@ describe('my quiet hours, from 20:00 to 08:00 and all weekend unless I choose ot
 			if (call.path !== LIST_EVENTS) return { status: 404, body: {} };
 			return { status: 200, body: { time_zone: 'Europe/Paris', events: [], truncated: false } };
 		};
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(q.r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(q.r.h.db, ALICE);
 	}, 240_000);
 
 	afterAll(async () => {

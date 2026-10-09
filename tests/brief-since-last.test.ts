@@ -30,7 +30,7 @@ import {
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { allowBriefReads } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest } from './helpers/fake-apisix.js';
 
@@ -192,9 +192,7 @@ describe('my brief names what reached me since my last brief that my assistant t
 	}, 240_000);
 
 	beforeEach(async () => {
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(r.h.db, ALICE);
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')
 				? { content: WRITTEN }

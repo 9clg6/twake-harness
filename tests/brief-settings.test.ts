@@ -6,7 +6,7 @@ import { wake } from '../src/wakeups/wake.js';
 import { ASSIGNED, lastUser, turnCalls, until } from './helpers/activity.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { call, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { allowBriefReads } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import { toolsOf, type ChatRequest, type ScriptedReply } from './helpers/fake-apisix.js';
 
@@ -123,9 +123,7 @@ describe('I set my brief in our conversation, and it goes out as I set it', () =
 		);
 		r.h.apisix.llm.script = model;
 		// She allowed every read of her brief: its first one asks her nothing of them
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(r.h.db, ALICE);
 	}, 240_000);
 
 	afterAll(async () => {

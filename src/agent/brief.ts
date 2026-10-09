@@ -68,6 +68,8 @@ import {
 	type SessionRecord
 } from '../sessions/repository.js';
 import { findBriefMailsReadAt, saveBriefMailsReadAt } from '../settings/repository.js';
+import { listenUnlessChosen, listListened } from '../sources/repository.js';
+import { publishedUnder } from '../sources/sources.js';
 import { eraseHeldActivities } from '../wakeups/held.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
@@ -467,10 +469,20 @@ function meetingLines(
 	});
 }
 
+// What a section of the brief reads of an application the owner's assistant does not listen to:
+// nothing, which the brief says nothing of
+const NOT_LISTENED = { ok: false, reason: 'not_listened' } as const;
+
+// Whether the brief says nothing of a read it went without: one the owner took back, which it says
+// once in a line of its own, or one of an application their assistant does not listen to
+function unsaid(read: Read<unknown>): boolean {
+	return unallowed(read) || (!read.ok && read.reason === NOT_LISTENED.reason);
+}
+
 // The brief as the harness lays it out itself, for the owner, when the model wrote nothing: the
 // sections the model is asked for, five items at most each, an empty one left out but for the day,
-// which says in one line that it has no meeting, an application not read said once, and two
-// examples at most of what to answer that fit what the brief shows
+// which says in one line that it has no meeting, an application not read said once, but those it
+// says nothing of, and two examples at most of what to answer that fit what the brief shows
 function template(
 	sections: Sections,
 	untold: Untold,
@@ -483,7 +495,7 @@ function template(
 	const examples: string[] = [];
 	const unread = new Set<string>();
 	const notRead = (name: keyof Sections): void => {
-		if (unallowed(sections[name]) || unread.has(DOMAINS[name])) return;
+		if (unsaid(sections[name]) || unread.has(DOMAINS[name])) return;
 		unread.add(DOMAINS[name]);
 		laid.push(line(words.notRead[name]));
 	};
@@ -706,13 +718,14 @@ function withdrawnOf(sections: Sections): BriefDomain[] {
 
 // What the model is handed of the brief's reads: each section read, what arrived since the owner's
 // last brief that their assistant told them nothing of, when anything did, and why each other one
-// was not, but those the owner took back, which the harness tells them of itself
+// was not, but those the owner took back, which the harness tells them of itself, and those of an
+// application their assistant does not listen to
 function dataOf(date: string, { sections, untold, timeZone }: Reads): Record<string, unknown> {
 	const data: Record<string, unknown> = { date };
 	const notRead: Record<string, string> = {};
 	for (const [name, read] of readsOf(sections)) {
 		if (read.ok) data[name] = read.value;
-		else if (!unallowed(read)) notRead[name] = read.reason;
+		else if (!unsaid(read)) notRead[name] = read.reason;
 	}
 	if (untold.activities.length > 0) data['since_last_brief'] = untoldData(untold, timeZone);
 	return Object.keys(notRead).length === 0 ? data : { ...data, not_read: notRead };
@@ -736,7 +749,8 @@ function logSkipped(name: keyof Sections, read: Read<unknown>, log: FastifyBaseL
 // Admitted as a turn is, it reads the day's meetings of their calendar, the invitations that wait
 // for their answer, their unread mail since their last brief and their late tasks and those of the
 // day itself, through the same tools and checks as the model's calls, with nobody to ask: an
-// application they did not allow is left out. Then one model call, with no tool and no history,
+// application they did not allow is left out, and one their assistant does not listen to is not
+// read. Then one model call, with no tool and no history,
 // writes the brief from those reads, given as data, which the conversation keeps as the assistant's
 // answer, with what its numbers, keys and emails name.
 // Should the model fail or write nothing, the harness lays out the same sections itself. The day's
@@ -871,15 +885,20 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		};
 	}
 
-	// The brief's reads after the day's, the zone it is written in, the instant it read the owner's
-	// mail at, when it did, and the activities of their journal no brief named yet
+	// The brief's reads after the day's, of the applications given, which the owner's assistant
+	// listens to, alone, the zone it is written in, the instant it read the owner's mail at, when it
+	// did, and the activities of their journal from those applications that no brief named yet
 	async function readSections(
 		context: ToolContext,
 		date: string,
-		calendar: Read<Day>
+		calendar: Read<Day>,
+		listened: readonly BriefDomain[]
 	): Promise<Reads> {
 		const owner = context.principalId;
-		const invitations = await readInvitations(context, date);
+		const listens = (name: keyof Sections): boolean => listened.includes(DOMAINS[name]);
+		const invitations: Read<Invitations> = listens('invitations')
+			? await readInvitations(context, date)
+			: NOT_LISTENED;
 		// Read once the calendar's reads may have named it, as a turn reads it: the zone of the
 		// owner's calendar, which the time their mail is read from is told in, the days of their tasks
 		// counted in, and the brief written in, and the days their brief goes out on
@@ -887,21 +906,18 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		// One activity more than the model is handed, which tells there are more
 		const { readAt, activities } = await withPrincipal(db, { id: owner }, async (tx) => ({
 			readAt: await findBriefMailsReadAt(tx, owner),
-			activities: await listUntoldActivities(tx, owner, MAX_UNTOLD + 1)
+			activities: await listUntoldActivities(tx, owner, publishedUnder(listened), MAX_UNTOLD + 1)
 		}));
 		const now = clock.now();
-		const mails = await readMails(
-			context,
-			mailsSince(readAt, now, settings),
-			settings.timeZone,
-			calendar
-		);
+		const mails: Read<Mails> = listens('mails')
+			? await readMails(context, mailsSince(readAt, now, settings), settings.timeZone, calendar)
+			: NOT_LISTENED;
 		return {
 			sections: {
 				calendar,
 				invitations,
 				mails,
-				tasks: await readTasks(context, settings.timeZone)
+				tasks: listens('tasks') ? await readTasks(context, settings.timeZone) : NOT_LISTENED
 			},
 			timeZone: settings.timeZone,
 			mailsReadAt: mails.ok ? now : null,
@@ -1145,11 +1161,18 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return { kind: 'notice', text };
 	}
 
+	// The applications of the brief the owner's assistant listens to, which alone it reads
+	async function listenedBy(owner: string): Promise<BriefDomain[]> {
+		const listened = await withPrincipal(db, { id: owner }, (tx) => listListened(tx, owner));
+		return BRIEF_DOMAINS.filter((domain) => listened.includes(domain));
+	}
+
 	// The brief once the owner's reads are settled. The day's read asks them nothing, but for the
 	// question about their permission while no brief waits for their answer to it, which the brief
 	// gives way to, in the same transaction as what goes with it; the brief that waits says nothing
 	// until the day's read works again, whatever keeps it from working. Then the brief's other reads,
-	// and the brief written from them.
+	// and the brief written from them. Without the owner's calendar, which their assistant does not
+	// listen to, the brief reads no day, and waits for none.
 	async function goOut(
 		writing: Writing,
 		context: ToolContext,
@@ -1158,6 +1181,10 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		alongside?: (tx: Tx) => Promise<unknown>
 	): Promise<BriefResult> {
 		const { date, log } = writing;
+		const listened = await listenedBy(context.principalId);
+		if (!listened.includes('calendar')) {
+			return writeBrief(writing, await readSections(context, date, NOT_LISTENED, listened), ending);
+		}
 		const calendar = await readDay(context, date, waiting === null);
 		if (!calendar.ok && calendar.question !== undefined) {
 			logSkipped('calendar', calendar, log);
@@ -1168,7 +1195,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			log.info({ pendingCallId: waiting.pendingCallId, since: waiting.date }, 'brief withheld');
 			return { kind: 'withheld' };
 		}
-		const reads = await readSections(context, date, calendar);
+		const reads = await readSections(context, date, calendar, listened);
 		return writeBrief(writing, reads, ending);
 	}
 
@@ -1224,8 +1251,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	}
 
 	// The owner's yes to the question of their first brief allows each read it asked for, on its own,
-	// as a yes to a first read allows its application, and that day's brief goes out then, however
-	// late, its question answered with it. Their yes to the question about their permission runs the
+	// as a yes to a first read allows its application, has their assistant listen to their mail,
+	// unless they chose otherwise, and that day's brief goes out then, however late, its question
+	// answered with it. Their yes to the question about their permission runs the
 	// read the brief gave way for, as it was frozen, under the brief's own id, then the brief's other
 	// reads: that day's brief, written from them, goes out then, and no brief waits any more. While
 	// the broker still refuses the read, the brief waits for their answer to the harness's new
@@ -1251,6 +1279,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			for (const domain of allowed) {
 				await grantConsent(tx, principal.id, domain, 'read', input.through);
 			}
+			// It also has their assistant listen to their mail, which the brief reads only then, unless
+			// they chose otherwise
+			if (asked !== null) await listenUnlessChosen(tx, principal.id, 'mail');
 			const locale = localeOf(await findAssistant(tx, principal.id), config.locale);
 			const session = await ensureRoomSession(tx, principal.id, roomId);
 			const { actions } = record;
@@ -1306,24 +1337,29 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				answered
 			);
 		}
-		const calendar = dayOf(
-			readOf(
-				await deps.runFrozenCall(
-					approved,
-					pendingCallId,
-					{ ...context, origin: approved.origin, unattended: true, asksDelegation: true },
-					log
-				),
-				listSchema
-			)
-		);
+		// Without the owner's calendar, which their assistant no longer listens to, the read is not
+		// run, and the brief goes out all the same
+		const listened = await listenedBy(principal.id);
+		const calendar: Read<Day> = listened.includes('calendar')
+			? dayOf(
+					readOf(
+						await deps.runFrozenCall(
+							approved,
+							pendingCallId,
+							{ ...context, origin: approved.origin, unattended: true, asksDelegation: true },
+							log
+						),
+						listSchema
+					)
+				)
+			: NOT_LISTENED;
 		if (!calendar.ok && calendar.question !== undefined) {
 			logSkipped('calendar', calendar, log);
 			return giveWay(writing, calendar.question, (tx) =>
 				supersedeApprovedCall(tx, principal.id, pendingCallId)
 			);
 		}
-		const reads = await readSections(context, date, calendar);
+		const reads = await readSections(context, date, calendar, listened);
 		return writeBrief(writing, reads, async (tx) => {
 			await markReplayed(tx, pendingCallId);
 			return endBriefWait(tx, principal.id);
