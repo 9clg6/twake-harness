@@ -161,8 +161,7 @@ describe('a deployment that speaks French', () => {
 		);
 		expect(request).toBe(
 			[
-				"C'est la première fois que j'ai besoin de lire tes données dans mail. Tu m'autorises ? Je commencerais par ceci :",
-				JSON.stringify({ from: 'paul@test.local' }, null, 2),
+				"C'est la première fois que j'ai besoin de lire tes données dans mail. Tu m'autorises ?",
 				'Réponds par oui ou non dans ton prochain message.'
 			].join('\n\n')
 		);

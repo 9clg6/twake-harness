@@ -117,11 +117,10 @@ describe('my assistant asks before it first uses an application', () => {
 		const request = await client.waitForMessage(room, assistantId, (t) =>
 			t.startsWith('This is the first time')
 		);
-		// The question, the call as it would run, and how to answer
+		// The question, about reading in the application whatever the call, and how to answer
 		expect(request).toBe(
 			[
-				'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
-				JSON.stringify({ from: 'paul@test.local' }, null, 2),
+				'This is the first time I need to read your data in mail. Do you allow it?',
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
@@ -259,8 +258,7 @@ describe('my assistant asks before it first uses an application', () => {
 		});
 		expect(res.body.answer).toBe(
 			[
-				'This is the first time I need to read your data in calendar. Do you allow it? I would start with this:',
-				JSON.stringify(slot, null, 2),
+				'This is the first time I need to read your data in calendar. Do you allow it?',
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
@@ -431,8 +429,7 @@ describe('my assistant asks before it first uses an application', () => {
 		});
 		expect(res.body.answer).toBe(
 			[
-				'This is the first time I need to read your data in tasks. Do you allow it? I would start with this:',
-				JSON.stringify({ zone: 'Europe/Paris', limit: 5 }, null, 2),
+				'This is the first time I need to read your data in tasks. Do you allow it?',
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);

@@ -23,17 +23,13 @@ const DOMAINS = ['mail', 'drive', 'notes', 'tasks', 'wiki', 'boards', 'contacts'
 
 // The harness's question about a first read, all the API shows of its request
 function question(domain: string): string {
-	return `This is the first time I need to read your data in ${domain}. Do you allow it? I would start with this:`;
+	return `This is the first time I need to read your data in ${domain}. Do you allow it?`;
 }
 
-// The whole request, as the room and the chat through the API show it: the question, the call as
-// frozen, and how to answer
-function requestFor(domain: string, args: unknown): string {
-	return [
-		question(domain),
-		JSON.stringify(args, null, 2),
-		'Answer yes or no in your next message.'
-	].join('\n\n');
+// The whole request, as the room and the chat through the API show it: the question, under which
+// a first read shows no call, and how to answer
+function requestFor(domain: string): string {
+	return [question(domain), 'Answer yes or no in your next message.'].join('\n\n');
 }
 
 function call(name: string, args: unknown): ToolCall[] {
@@ -202,7 +198,7 @@ describe('my consents through the API', () => {
 		const asked = await c.post<{ answer: string }>('alice', '/v1/chat', {
 			message: 'Find the budget in my mail'
 		});
-		expect(asked.body.answer).toBe(requestFor('mail', { q: 'budget' }));
+		expect(asked.body.answer).toBe(requestFor('mail'));
 		expect(h.apisix.contracts.calls).toHaveLength(1);
 	});
 	it("keeps my consents out of everyone else's reach", async () => {
@@ -278,7 +274,7 @@ describe('my consents through the API', () => {
 		}>();
 		expect(body).toEqual({
 			session_id: expect.any(String),
-			answer: requestFor('tasks', { q: 'budget' }),
+			answer: requestFor('tasks'),
 			model: 'qwen3.8',
 			pending_call: pendingInTurn('tasks', body.session_id)
 		});
@@ -432,9 +428,11 @@ describe('my consents through the API', () => {
 			const turn = await c.post<{ answer: string; pending_call: unknown }>('alice', '/v1/chat', {
 				message: 'Search my notes for the reorganisation'
 			});
-			// I read the whole request, as my room would show it
-			expect(turn.body.answer).toContain('"q": "Q3 reorganisation memo"');
+			// I read the whole request, as my room would show it: what the model wrote, then the
+			// question, under which a first read shows no call
 			expect(turn.body.answer).toContain('Searching your notes for the Q3 reorganisation memo');
+			expect(turn.body.answer).toContain(requestFor('notes'));
+			expect(turn.body.answer).not.toContain('"q": "Q3 reorganisation memo"');
 			// What waits for my answer shows the question alone
 			const waiting = await c.get('alice', '/v1/pending-calls');
 			for (const shown of [JSON.stringify(turn.body.pending_call), JSON.stringify(waiting.body)]) {

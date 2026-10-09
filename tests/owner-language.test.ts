@@ -38,17 +38,17 @@ function model(request: ChatRequest): ScriptedReply {
 	return { content: `Heard: ${content}` };
 }
 
-// The question about the first read of an application, the call it shows, and how to answer
+// The question about the first read of an application, which shows no call, and how to answer
 function question(asked: string, howToAnswer: string): string {
-	return [asked, JSON.stringify({ q: 'budget' }, null, 2), howToAnswer].join('\n\n');
+	return [asked, howToAnswer].join('\n\n');
 }
 
 const FRENCH_QUESTION = question(
-	"C'est la première fois que j'ai besoin de lire tes données dans notes. Tu m'autorises ? Je commencerais par ceci :",
+	"C'est la première fois que j'ai besoin de lire tes données dans notes. Tu m'autorises ?",
 	'Réponds par oui ou non dans ton prochain message.'
 );
 const ENGLISH_QUESTION = question(
-	'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
+	'This is the first time I need to read your data in mail. Do you allow it?',
 	'Answer yes or no in your next message.'
 );
 
