@@ -33,10 +33,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        # Every suite runs with one api replica and with two sharing the database, on the
-        # Synapse of the platform; the latest release, there to see an upgrade coming, runs on
-        # main only, so a pull request costs half the runner time
-        replicas: [1, 2]
+        # On main, every suite runs with one api replica and with two sharing the database, on the
+        # Synapse of the platform and on its latest release, there to see an upgrade coming. A pull
+        # request runs one replica on the Synapse of the platform alone, a quarter of main's jobs
+        replicas: ${{ github.event_name == 'push' && fromJSON('[1, 2]') || fromJSON('[1]') }}
         synapse: ${{ github.event_name == 'push' && fromJSON('["ghcr.io/element-hq/synapse:v1.160.0", "ghcr.io/element-hq/synapse:latest"]') || fromJSON('["ghcr.io/element-hq/synapse:v1.160.0"]') }}
         # Each configuration runs as three jobs side by side, each with a third of the test files
         shard: [1, 2, 3]
