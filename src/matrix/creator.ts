@@ -4,6 +4,7 @@ import type { AssistantService } from '../assistants/service.js';
 import type { DialogState } from '../assistants/repository.js';
 import { wordAnswer } from '../consents/answers.js';
 import type { Messages } from '../i18n/messages.js';
+import { CREATOR_COMMANDS, isCreatorCommand } from './commands.js';
 import type { YesNoQuestion } from './questions.js';
 
 // How long the owner has to confirm the deletion of their assistant once the creator asked
@@ -13,9 +14,20 @@ type ConfirmingDeletion = Extract<DialogState, { step: 'confirming_deletion' }>;
 
 export function helpText(messages: Messages): string {
 	const { helpHeader, commands, commandSeparator } = messages.creator;
-	return [helpHeader, ...commands.map((c) => `${c.command}${commandSeparator}${c.help}`)].join(
-		'\n'
-	);
+	return [
+		helpHeader,
+		...CREATOR_COMMANDS.map(
+			(name) => `${commands[name].command}${commandSeparator}${commands[name].help}`
+		)
+	].join('\n');
+}
+
+// The command a message's first word names: typed after « / », or after « ! » as Twake Chat sends
+// a command the creator announced
+function commandOf(word: string): string {
+	const lowered = word.toLowerCase();
+	const sent = lowered.startsWith('!') ? lowered.slice(1) : null;
+	return sent !== null && isCreatorCommand(sent) ? `/${sent}` : lowered;
 }
 
 // What the owner's message was to the creator, as the matrix role logs it: a command, the name it
@@ -80,7 +92,7 @@ export async function runCreatorTurn(
 	if (input.text === null) return null;
 	const text = input.text.trim();
 	const [word = '', ...rest] = text.split(/\s+/);
-	const command = word.toLowerCase();
+	const command = commandOf(word);
 	const argument = rest.join(' ').trim();
 	// A question that no longer stands leaves nothing to wait for
 	const awaitingName = input.state?.step === 'awaiting_name';

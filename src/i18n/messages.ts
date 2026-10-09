@@ -4,6 +4,7 @@
 import type { RefusalReason } from '../agent/admission.js';
 import type { ConsentLevel } from '../consents/consent.js';
 import type { DelegationRefusal, SpaceScope } from '../consents/delegation.js';
+import type { CreatorCommandName } from '../matrix/commands.js';
 
 export const LOCALES = ['en', 'fr'] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -29,7 +30,9 @@ export interface Messages {
 	formerDefaultAssistantName(ownerName: string): string;
 	readonly creator: {
 		readonly helpHeader: string;
-		readonly commands: readonly CreatorCommand[];
+		// How its help writes each command the creator answers, and what the command does, which the
+		// client also shows of it after « / »
+		readonly commands: Readonly<Record<CreatorCommandName, CreatorCommand>>;
 		// Between a command and its help, with the spacing of the language
 		readonly commandSeparator: string;
 		readonly askName: string;
@@ -376,14 +379,14 @@ const ENGLISH: Messages = {
 	formerDefaultAssistantName: (ownerName) => `${ownerName}'s assistant`,
 	creator: {
 		helpHeader: 'I create and manage your Twake Space assistant. Commands:',
-		commands: [
-			{ command: '/newbot', help: 'create your assistant' },
-			{ command: '/mybot', help: 'show your assistant' },
-			{ command: '/rename <name>', help: 'rename your assistant' },
-			{ command: '/delete', help: 'delete your assistant' },
-			{ command: '/recover', help: 'recover the encryption keys of your assistant' },
-			{ command: '/help', help: 'this list' }
-		],
+		commands: {
+			newbot: { command: '/newbot', help: 'create your assistant' },
+			mybot: { command: '/mybot', help: 'show your assistant' },
+			rename: { command: '/rename <name>', help: 'rename your assistant' },
+			delete: { command: '/delete', help: 'delete your assistant' },
+			recover: { command: '/recover', help: 'recover the encryption keys of your assistant' },
+			help: { command: '/help', help: 'this list' }
+		},
 		commandSeparator: ': ',
 		askName: 'Which name do you want for your assistant?',
 		created: (name, userId, link) =>
@@ -636,14 +639,14 @@ const FRENCH: Messages = {
 	formerDefaultAssistantName: (ownerName) => `Assistant de ${ownerName}`,
 	creator: {
 		helpHeader: 'Je crée et je gère ton assistant Twake Space :',
-		commands: [
-			{ command: '/newbot', help: 'créer ton assistant' },
-			{ command: '/mybot', help: 'voir ton assistant' },
-			{ command: '/rename <nom>', help: 'renommer ton assistant' },
-			{ command: '/delete', help: 'supprimer ton assistant' },
-			{ command: '/recover', help: 'récupérer les clés de chiffrement de ton assistant' },
-			{ command: '/help', help: 'cette liste' }
-		],
+		commands: {
+			newbot: { command: '/newbot', help: 'créer ton assistant' },
+			mybot: { command: '/mybot', help: 'voir ton assistant' },
+			rename: { command: '/rename <nom>', help: 'renommer ton assistant' },
+			delete: { command: '/delete', help: 'supprimer ton assistant' },
+			recover: { command: '/recover', help: 'récupérer les clés de chiffrement de ton assistant' },
+			help: { command: '/help', help: 'cette liste' }
+		},
 		commandSeparator: ' : ',
 		askName: 'Quel nom veux-tu lui donner ?',
 		created: (name, userId, link) =>

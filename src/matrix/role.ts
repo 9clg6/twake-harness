@@ -44,7 +44,7 @@ import { getMessages, type Messages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
-import { announceCommands, commandOf } from './commands.js';
+import { announceCommands, announceCreatorCommands, commandOf } from './commands.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { makeEnsureEncryption, routeEncryptionSetups } from './encryption.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
@@ -488,6 +488,30 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return isIn;
 	}
 
+	// Announces the creator's commands in each room it is in with someone, in the language of the
+	// one member it talks to there, else the deployment's, one room at a time and until the role
+	// stops; the number of rooms it wrote them in. A room whose members cannot be read is skipped.
+	async function announceCreatorCommandsAtStart(): Promise<number> {
+		let announced = 0;
+		for (const roomId of await admin.joinedRooms(creator)) {
+			if (closing) break;
+			try {
+				const members = (await admin.joinedMembers(creator, roomId)) ?? [];
+				const [member, ...more] = members.filter((userId) => userId !== creator);
+				if (member === undefined) continue;
+				const owner = more.length === 0 ? principalOfMatrixUser(config, member) : null;
+				const toOwner = owner === null ? messages : await fetchMessages(owner);
+				const room = { roomId, creatorUserId: creator };
+				if ((await announceCreatorCommands({ admin, log }, room, toOwner)) === 'announced') {
+					announced += 1;
+				}
+			} catch (err: unknown) {
+				log.warn({ roomId, err }, 'creator commands not announced at start');
+			}
+		}
+		return announced;
+	}
+
 	// Suggestions from the messages of the channels the listener is in
 	const suggestions = makeSuggestionIntake({ config, db, log });
 
@@ -767,10 +791,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					return;
 				}
 				// Synapse delivers nothing sent before the join, so the creator opens the conversation
-				// itself rather than let a first message go unanswered.
+				// itself rather than let a first message go unanswered. Its commands are announced
+				// first, so that the client offers them after « / » once the help shows.
 				if (invited === creator) {
 					const owner = principalOfMatrixUser(config, event.sender ?? '');
 					const toOwner = owner === null ? messages : await fetchMessages(owner);
+					await announceCreatorCommands(
+						{ admin, log },
+						{ roomId, creatorUserId: creator },
+						toOwner
+					);
 					await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(toOwner)));
 				}
 			},
@@ -1839,6 +1869,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	} catch (err: unknown) {
 		log.warn({ err }, 'assistant names not requested at start');
 	}
+	// The rooms the creator is in with someone get its commands as a room it joins does, in the
+	// background: those it joined before it announced any, or that refused them then. A room that
+	// holds them already is left as it is.
+	inFlight.track(
+		announceCreatorCommandsAtStart().then(
+			(announced) => {
+				if (announced > 0) log.info({ announced }, 'creator commands announced at start');
+			},
+			(err: unknown) => {
+				log.warn({ err }, 'creator commands not announced at start');
+			}
+		)
+	);
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
 	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts
 	// and that fails leaves the push unanswered in the SDK.
