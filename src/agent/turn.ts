@@ -17,6 +17,7 @@ import {
 	type ToolContext,
 	type ToolRegistry
 } from './tools.js';
+import { withTrueWeekdays } from './weekdays.js';
 
 export interface TurnInput {
 	readonly systemPrompt: string;
@@ -36,6 +37,8 @@ export interface TurnInput {
 	readonly actionsDone?: (actions: number) => void;
 	// Whether the model may end the turn on no words at all, as a turn an activity woke may
 	readonly mayStaySilent?: boolean;
+	// The owner's day, as ISO 8601 writes it, in which the model's words read a date without its year
+	readonly today: string;
 }
 
 export interface TurnOutput {
@@ -225,7 +228,8 @@ async function askModel(
 	iteration: number,
 	prompt: readonly LlmMessage[],
 	tools: readonly LlmToolDefinition[],
-	spent: Spent
+	spent: Spent,
+	today: string
 ): Promise<Asked> {
 	deps.log.info(
 		{ iteration, messageCount: prompt.length, characters: countCharacters(prompt) },
@@ -248,6 +252,12 @@ async function askModel(
 			spend(deps.log, iteration, completion, spent);
 			logAnswer(deps.log, iteration, completion);
 		}
+	}
+	// Whatever the turn does with the model's words, the owner reads, the conversation keeps and a
+	// request quotes them with the day of each date named from the date; the debug line of
+	// logAnswer keeps them as the model wrote them
+	if (completion.content !== null) {
+		completion = { ...completion, content: withTrueWeekdays(completion.content, today) };
 	}
 	return { completion, cut: cutShort(deps, tools, completion, spent) };
 }
@@ -294,7 +304,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			iteration,
 			[system, ...past, ...messages],
 			deps.tools.definitions,
-			spent
+			spent,
+			input.today
 		);
 		iteration += 1;
 		// The model ran out while thinking past the tokens of the turn: its last call, without tools,
@@ -407,7 +418,14 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		role: 'system',
 		content: `${input.systemPrompt}\n\n${wrapUpInstruction(deps, reached)}`
 	};
-	const asked = await askModel(deps, iteration, [instructed, ...past, ...messages], [], spent);
+	const asked = await askModel(
+		deps,
+		iteration,
+		[instructed, ...past, ...messages],
+		[],
+		spent,
+		input.today
+	);
 	// A model with no tools may still call one, through the API or in its text: those calls are
 	// not for the owner, its words beside them are
 	const written = asked.completion.content ?? '';

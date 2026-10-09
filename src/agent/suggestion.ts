@@ -16,7 +16,7 @@ import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import type { SuggestPayload } from '../suggestions/job.js';
 import type { Proposal } from '../suggestions/text.js';
 import type { Admission } from './admission.js';
-import { describeMoment, findTimeZone, type Clock } from './clock.js';
+import { dateIn, describeMoment, findTimeZone, type Clock } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
 import { makeToolRegistry, type Tool, type ToolRegistry } from './tools.js';
@@ -258,7 +258,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		if (others.length === 0) return { kind: 'none', reason: 'nobody_else' };
 		const registry = makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
 		const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
-		const moment = describeMoment(clock.now(), timeZone, locale);
+		const now = clock.now();
+		const moment = describeMoment(now, timeZone, locale);
 		const messages = getMessages(locale);
 		const decision = await admission.admit(owner);
 		if (!decision.ok) return { kind: 'busy' };
@@ -302,7 +303,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 								log: turnLog
 							},
 							actionsBefore: 0,
-							limitNotice: () => ''
+							limitNotice: () => '',
+							today: dateIn(now, timeZone)
 						}
 					);
 				} catch (err: unknown) {
