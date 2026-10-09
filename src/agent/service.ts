@@ -31,7 +31,12 @@ import {
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
-import { MOVED_EVENT_TYPE, type MeetingScope } from '../wakeups/event-types.js';
+import {
+	CANCELLED_EVENT_TYPE,
+	COUNTERED_EVENT_TYPE,
+	MOVED_EVENT_TYPE,
+	type MeetingScope
+} from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
@@ -76,7 +81,14 @@ import {
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 import { SUGGEST_CALL, makeSuggestionResumeTool } from '../suggestions/consent.js';
-import { makeSuggestionRunner, type SuggestionInput, type SuggestionResult } from './suggestion.js';
+import {
+	makeSuggestionRunner,
+	makeSuggestionTools,
+	readMeeting,
+	suggestionMaxToolCalls,
+	type SuggestionInput,
+	type SuggestionResult
+} from './suggestion.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -95,11 +107,11 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WITHDRAW_OWN_CONSENTS
 ];
 
-// The tools a turn that comes from others, an event's or a suggestion's, is never offered, even
-// once its owner's yes resumed it, whatever their rights: the owner's listening journal, which
-// tells them in their own turns what their assistant saw, and would show such a turn the text third
-// parties wrote in every other activity; and the tools by which they choose what their assistant
-// listens to, which a third party's text never changes
+// The tools a turn an event started is never offered, even once its owner's yes resumed it,
+// whatever their rights: the owner's listening journal, which tells them in their own turns what
+// their assistant saw, and would show such a turn the text third parties wrote in every other
+// activity; and the tools by which they choose what their assistant listens to, which a third
+// party's text never changes. A suggestion's turn is offered its own two tools alone.
 const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 	LISTENING_JOURNAL_TOOL,
 	...LISTENING_TOOLS
@@ -108,15 +120,34 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // The tools alone that a turn a meeting's change woke is given, by the type of that change and
 // what it is about, among those its owner's rights and the rule above leave it: for a move of a
 // meeting or of a whole series, the check of its new slot and the answers to it; for a move of one
-// occurrence of a series, which the answers cannot reach apart from the rest of it, none. The turn
+// occurrence of a series, which the answers cannot reach apart from the rest of it, none; for a
+// cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
+// check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
 // their yes resumes is told of no event, and is not held to them.
 const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
+const CHECK_ALONE = ['read_freebusy'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
 	string,
 	Readonly<Record<MeetingScope, readonly string[]>>
 > = new Map([
-	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }]
+	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }],
+	[CANCELLED_EVENT_TYPE, { event: [], series: [], occurrence: [] }],
+	[COUNTERED_EVENT_TYPE, { event: CHECK_ALONE, series: CHECK_ALONE, occurrence: CHECK_ALONE }]
 ]);
+
+// What follows what a meeting's wake-up told once the harness checked it, by its type, which only
+// the calendar listener gives: a move's new slot, a counter-proposal's time, or else a new
+// invitation's slot
+function availabilityOf(
+	type: string,
+	calendarData: string,
+	scope: MeetingScope,
+	messages: Messages
+): string {
+	if (type === MOVED_EVENT_TYPE) return messages.events.movedAvailability(calendarData, scope);
+	if (type === COUNTERED_EVENT_TYPE) return messages.events.counteredAvailability(calendarData);
+	return messages.events.availability(calendarData);
+}
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -207,8 +238,9 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
-	// The event of a turn of origin event: its id and CloudEvent type, and for an invitation, what
-	// the harness checks before the model speaks
+	// The event of a turn of origin event: its id and CloudEvent type, and for a new invitation, a
+	// move, a cancellation or a counter-proposal, the meeting, whose slot, or the time proposed, the
+	// harness checks before the model speaks unless it is cancelled
 	readonly event?: {
 		readonly id: string;
 		readonly type: string;
@@ -345,11 +377,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const gate = makeTurnGate();
 	const admission = makeAdmission({ config, db, log: deps.log, clock });
 
-	// What the model is told. An invitation an event brings has its slot checked by the harness
-	// before the model speaks, from the UID and the times its wake-up carries, through the same
-	// tools and context as the model's calls: what the calendar answered follows what the wake-up
-	// told, as data. Any other message is told as it is. A read of that check that waits for its
-	// owner, such as the first read of their calendar, ends the turn on the harness's question.
+	// What the model is told. An invitation an event brings, a move or a counter-proposal has its
+	// slot, or the time proposed, checked by the harness before the model speaks, from the UID and
+	// the times its wake-up carries, through the same tools and context as the model's calls: what
+	// the calendar answered follows what the wake-up told, as data. A cancellation leaves nothing to
+	// check, and any other message is told as it is. A read of that check that waits for its owner,
+	// such as the first read of their calendar, ends the turn on the harness's question.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
@@ -357,7 +390,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		messages: Messages
 	): Promise<Told> {
 		const event = input.origin === 'event' ? input.event : undefined;
-		if (!carriesInvitation(event)) return { message: input.message, question: null };
+		if (!carriesInvitation(event) || event.type === CANCELLED_EVENT_TYPE) {
+			return { message: input.message, question: null };
+		}
 		const { invitation } = event;
 		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
@@ -372,11 +407,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
 		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
-		// Only the calendar listener gives an event that carries an invitation, and so a move's type
-		const availability =
-			event.type === MOVED_EVENT_TYPE
-				? messages.events.movedAvailability(check.data, invitation.scope ?? 'event')
-				: messages.events.availability(check.data);
+		const availability = availabilityOf(
+			event.type,
+			check.data,
+			invitation.scope ?? 'event',
+			messages
+		);
 		return {
 			message: input.message === null ? availability : `${input.message}\n${availability}`,
 			question
@@ -606,12 +642,30 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
 				: [];
 			const actions = opened.actions.filter((action) => !withheld.includes(action));
-			const memory = actions.includes('memory.read_own')
-				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
-				: { memory: [], user: [] };
-			const skills = actions.includes('skills.read_own')
-				? await withPrincipal(db, principal, (tx) => listSkills(tx))
-				: [];
+			// A turn resumed from a suggestion's call is still that suggestion's, whatever its owner may
+			// do in their own turns: it reads none of their memory or skills, may look for slots with the
+			// people of the meeting their yes allowed and prepare that meeting again, which waits for
+			// them once more, and makes no more calls than the suggestion could
+			const suggestion =
+				origin === 'suggestion'
+					? {
+							tools: makeSuggestionTools(
+								contracts,
+								principal.id,
+								readMeeting(approved?.arguments)?.attendees ?? [],
+								null
+							),
+							maxToolCalls: suggestionMaxToolCalls(config)
+						}
+					: null;
+			const memory =
+				suggestion === null && actions.includes('memory.read_own')
+					? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
+					: { memory: [], user: [] };
+			const skills =
+				suggestion === null && actions.includes('skills.read_own')
+					? await withPrincipal(db, principal, (tx) => listSkills(tx))
+					: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
 			// A resumed turn keeps the correlation id of the turn that froze its call, so that the
 			// gateway's audit links both
@@ -722,7 +776,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							input.event.invitation.scope ?? 'event'
 						] ?? null)
 					: null;
-			const turnTools = meetingTools === null ? offered : onlyTools(offered, meetingTools);
+			const turnTools =
+				suggestion?.tools ?? (meetingTools === null ? offered : onlyTools(offered, meetingTools));
 			// The turn an activity woke, rather than the one its owner's yes resumed from it, may say
 			// nothing
 			const woken = origin === 'event' && approved === null;
@@ -734,7 +789,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						llm,
 						tools: turnTools,
 						log,
-						maxToolCalls: config.turn.maxToolCalls,
+						maxToolCalls: suggestion?.maxToolCalls ?? config.turn.maxToolCalls,
 						maxTurnTokens: config.turn.maxTokens,
 						historyMaxChars: config.turn.historyMaxChars
 					},
@@ -757,7 +812,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							memory,
 							skills,
 							history,
-							nudgeInterval: config.turn.memoryNudgeInterval
+							nudgeInterval: suggestion === null ? config.turn.memoryNudgeInterval : 0
 						}),
 						history,
 						message: told.message,
