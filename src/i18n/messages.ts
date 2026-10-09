@@ -103,11 +103,12 @@ export interface Messages {
 	// of the model, so that nothing a third party wrote can phrase or answer it
 	readonly consent: {
 		// Every question shows the call below it, or what stands in its place, then how to answer; a
-		// first use's about a call the model wrote without arguments shows none, since reading or
-		// writing in the application is all there is to know of it.
+		// first read's shows none, its yes letting the assistant read in the application, whatever it
+		// reads there, and nor does a first write's about a call the model wrote without arguments
+		// that no preview describes, since writing in the application is all there is to know of it.
 		// The application as the catalog names it, or else by its id, and what reading covers there
-		// when the catalog says, both from labelOf; and whether the request shows the call below
-		firstRead(application: string, covers: string | null, shown: boolean): string;
+		// when the catalog says, both from labelOf
+		firstRead(application: string, covers: string | null): string;
 		// Asked before the assistant first writes in an application, even one its owner lets it read:
 		// the application as for reading, what writing covers there when the catalog says, and
 		// whether the request shows the call below
@@ -363,12 +364,12 @@ const ENGLISH: Messages = {
 		late: 'This is taking longer than expected. If no answer follows, ask me again.'
 	},
 	consent: {
-		firstRead: (application, covers, shown) =>
+		firstRead: (application, covers) =>
 			firstUse(
 				`This is the first time I need to read your data in ${application}.`,
 				'Reading:',
 				covers,
-				shown ? 'Do you allow it? I would start with this:' : 'Do you allow it?'
+				'Do you allow it?'
 			),
 		firstWrite: (application, covers, shown) =>
 			firstUse(
@@ -630,12 +631,12 @@ const FRENCH: Messages = {
 		late: 'Ça prend plus de temps que prévu. Si aucune réponse ne suit, redemande-moi.'
 	},
 	consent: {
-		firstRead: (application, covers, shown) =>
+		firstRead: (application, covers) =>
 			firstUse(
 				`C'est la première fois que j'ai besoin de lire tes données dans ${application}.`,
 				'Lecture :',
 				covers,
-				shown ? "Tu m'autorises ? Je commencerais par ceci :" : "Tu m'autorises ?"
+				"Tu m'autorises ?"
 			),
 		firstWrite: (application, covers, shown) =>
 			firstUse(

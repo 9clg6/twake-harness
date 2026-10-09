@@ -807,16 +807,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			const request = await nextRequest(seen);
 			expect(request.body).toBe(
 				[
-					'This is the first time I need to read your data in calendar. Do you allow it? I would start with this:',
-					JSON.stringify(
-						{
-							start: '2026-10-09T09:00:00+02:00',
-							end: '2026-10-09T10:00:00+02:00',
-							exclude: ['uid-pre']
-						},
-						null,
-						2
-					),
+					'This is the first time I need to read your data in calendar. Do you allow it?',
 					HOW_TO_ANSWER
 				].join('\n\n')
 			);
@@ -834,6 +825,13 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			expect(
 				resumed.some((m) => m.role === 'user' && (m.content ?? '').includes('"uid":"uid-pre"'))
 			).toBe(true);
+			// The conversation keeps her request as she read it, without a call: what the model was
+			// told just before it holds the read that waited for her
+			const asked = resumed.findIndex((m) => m.role === 'assistant' && m.content === request.body);
+			expect(asked).toBeGreaterThan(0);
+			expect(resumed[asked - 1]?.role).toBe('user');
+			expect(resumed[asked - 1]?.content).toContain('"tool":"read_freebusy","arguments":{');
+			expect(resumed[asked - 1]?.content).toContain('"exclude":["uid-pre"]');
 		} finally {
 			r.h.apisix.llm.script = invitationModel;
 		}

@@ -612,22 +612,30 @@ describe('my assistant shows me what the application says an action would do bef
 	});
 
 	it('never asks an application for a preview it did not declare as the harness reads one', async () => {
-		// Sharing declares a preview the harness does not know, and listing tasks is a read: both
-		// show the call as the model wrote it, and nothing reaches the gateway before my answer
-		for (const [message, question] of [
+		// Sharing declares a preview the harness does not know: it shows the call as the model wrote
+		// it. Listing tasks is a read, whose question shows no call. Nothing reaches the gateway
+		// before my answer.
+		const share = 'Share the plan with Bob';
+		for (const [message, expected] of [
 			[
-				'Share the plan with Bob',
-				'This is the first time I need to change your data in drive, and actions like this one need your yes each time. Do you allow it, starting with this one, exactly as below?'
+				share,
+				asked(
+					'This is the first time I need to change your data in drive, and actions like this one need your yes each time. Do you allow it, starting with this one, exactly as below?',
+					frozen(REQUESTS[share]?.args)
+				)
 			],
 			[
 				'What do I have to do today?',
-				'This is the first time I need to read your data in tasks. Do you allow it? I would start with this:'
+				[
+					'This is the first time I need to read your data in tasks. Do you allow it?',
+					HOW_TO_ANSWER
+				].join('\n\n')
 			]
 		] as const) {
 			const seen = requests().length;
 			await r.client.sendText(r.room, message);
 			const request = await nextFrom(isRequest, seen);
-			expect(request.body).toBe(asked(question, frozen(REQUESTS[message]?.args)));
+			expect(request.body).toBe(expected);
 			const acknowledged = r.saying('All right').length;
 			await r.client.react(r.room, request.eventId, '❌');
 			await r.nextSaying('All right', acknowledged);

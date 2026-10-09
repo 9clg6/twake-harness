@@ -87,8 +87,7 @@ describe('I answer the question in words', () => {
 		const question = await r.nextQuestion(seen);
 		expect(r.questions().at(-1)?.body).toBe(
 			[
-				'This is the first time I need to read your data in notes. Do you allow it? I would start with this:',
-				JSON.stringify({ q: 'budget' }, null, 2),
+				'This is the first time I need to read your data in notes. Do you allow it?',
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
@@ -108,8 +107,7 @@ describe('I answer the question in words', () => {
 		const question = r.questions().find((m) => m.eventId === asked);
 		expect(question?.body).toBe(
 			[
-				'This is the first time I need to read your data in sheets. Do you allow it? I would start with this:',
-				JSON.stringify({ q: 'budget' }, null, 2),
+				'This is the first time I need to read your data in sheets. Do you allow it?',
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);

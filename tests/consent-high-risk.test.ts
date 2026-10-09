@@ -598,20 +598,20 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 		expect(unknownRisks()).toHaveLength(warned.length);
 	});
 
-	it('shows what the model wrote and the call in a first read too, around the question that names the application', async () => {
+	it('shows what the model wrote in a first read too, above the question that names the application, under which no call shows', async () => {
 		const seen = requests().length;
 		await r.client.sendText(r.room, 'What do I have to do today?');
 		const request = await nextRequest(seen);
 		expect(request.body).toBe(
-			asked(
+			[
+				'Your assistant wrote:\n> Let me look at your tasks.',
 				[
 					'This is the first time I need to read your data in Twake Tasks.',
 					'Reading: list and read your tasks',
-					'Do you allow it? I would start with this:'
+					'Do you allow it?'
 				].join('\n'),
-				{ due: 'today' },
-				'Let me look at your tasks.'
-			)
+				HOW_TO_ANSWER
+			].join('\n\n')
 		);
 		expect(waits().at(-1)).toMatchObject({ reasons: ['consent'], level: 'read' });
 		expect(waits().at(-1)).not.toHaveProperty('risk');

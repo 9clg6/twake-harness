@@ -77,12 +77,13 @@ function asked(question: string, args: unknown, said: string): string {
 	return askedAbout(question, JSON.stringify(args, null, 2), said);
 }
 
-// The same with what stands in the call's place, such as the tool of a call without arguments
-function askedAbout(question: string, shown: string, said: string): string {
+// The same with what stands in the call's place, such as the tool of a call without arguments, or
+// with nothing there under a question that shows no call, a first read's
+function askedAbout(question: string, shown: string | null, said: string): string {
 	return [
 		['Your assistant wrote:', ...said.split('\n').map((line) => `> ${line}`)].join('\n'),
 		question,
-		shown,
+		...(shown === null ? [] : [shown]),
 		HOW_TO_ANSWER
 	].join('\n\n');
 }
@@ -163,9 +164,9 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		// Its first read of my mail asks as it would in our conversation, and reads nothing yet
 		const read = await nextRequest(seen);
 		expect(read.body).toBe(
-			asked(
-				'This is the first time I need to read your data in mail. Do you allow it? I would start with this:',
-				{ q: 'mail-1' },
+			askedAbout(
+				'This is the first time I need to read your data in mail. Do you allow it?',
+				null,
 				'A mail arrived. Let me read it.'
 			)
 		);
