@@ -2,6 +2,7 @@ import type { RabbitMQMessage, RabbitMQMessageProperties } from '@linagora/rabbi
 import { z } from 'zod';
 
 import type { ActivitySource } from '../config.js';
+import type { Noted } from '../journal/repository.js';
 import { cut } from '../llm/data.js';
 import {
 	listenOnOwnQueue,
@@ -18,6 +19,10 @@ const ACTIVITY_EXCHANGE = 'activity';
 
 // The most recipients of one event the listener reads, in their order: the others are left out
 const MAX_RECIPIENTS = 100;
+
+// The objects whose title the listening journal keeps: a task's or a meeting's, never what a
+// message or a file is called
+const TITLED_OBJECTS: readonly string[] = ['task', 'event'];
 
 // Text people wrote, cut rather than refused
 function untrustedText(max: number) {
@@ -145,10 +150,14 @@ function wakeupsOf(event: ActivityEvent): {
 	readonly ignored: number;
 } {
 	const { object, preview } = event.data;
-	const computedObject = {
+	// What identifies the object to act on it
+	const objectIds = {
 		type: object.type,
 		id: object.id,
-		...(object.key === undefined ? {} : { key: object.key }),
+		...(object.key === undefined ? {} : { key: object.key })
+	};
+	const computedObject = {
+		...objectIds,
 		...(object.board === undefined ? {} : { board_id: object.board.id }),
 		...(object.container === undefined ? {} : { container: object.container }),
 		...(object.url === undefined ? {} : { url: object.url })
@@ -157,6 +166,18 @@ function wakeupsOf(event: ActivityEvent): {
 		...(object.title === undefined ? {} : { title: object.title }),
 		...(object.board === undefined ? {} : { board_name: object.board.name }),
 		...(preview === undefined ? {} : { preview })
+	};
+	// What the owner's listening journal keeps of it: the object, by what identifies it to act on
+	// it, and the title of a task or a meeting alone
+	const noted: Noted = {
+		ids: { computed: { object: objectIds }, untrusted: {} },
+		names: {
+			computed: {},
+			untrusted:
+				object.title !== undefined && TITLED_OBJECTS.includes(object.type)
+					? { title: object.title }
+					: {}
+		}
 	};
 	const wakeups: Wakeup[] = [];
 	const skipped: SkippedRecipient[] = [];
@@ -190,7 +211,8 @@ function wakeupsOf(event: ActivityEvent): {
 					object: computedObject
 				},
 				untrusted
-			}
+			},
+			noted
 		});
 	});
 	return {

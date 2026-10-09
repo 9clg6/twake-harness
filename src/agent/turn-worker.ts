@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import type { Config } from '../config.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
@@ -19,6 +19,7 @@ import {
 } from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
+import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
 import type { BriefMarker } from '../matrix/brief.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
 import type { Refusal, RefusalReason } from './admission.js';
@@ -43,12 +44,15 @@ const turnPayload = z.object({
 	// worker role's scheduler, for the brief of the owner's working day
 	origin: z.enum(['owner', 'event', 'brief']).optional(),
 	// The event, when the turn is an event's: its id and CloudEvent type, as its source published
-	// them, and for an invitation, what the harness checks before the model speaks. A brief is
-	// keyed as an event is, by the id the scheduler gave it.
+	// them, that source, by which its owner's listening journal keeps it, and for an invitation, what
+	// the harness checks before the model speaks. A brief is keyed as an event is, by the id the
+	// scheduler gave it.
 	event: z
 		.object({
 			id: z.string().min(1),
 			type: z.string().min(1),
+			// Not in a turn queued before the journal was
+			source: z.string().min(1).optional(),
 			invitation: invitationSchema.optional()
 		})
 		.optional(),
@@ -79,6 +83,11 @@ function correlationIdOf(payload: TurnPayload, origin: PayloadOrigin): string {
 	return payload.eventId.startsWith(EVENT_KEY_PREFIX)
 		? payload.eventId.slice(EVENT_KEY_PREFIX.length)
 		: payload.eventId;
+}
+
+// A turn queued before the origin was recorded is an event's when its id says so
+function originOf(payload: TurnPayload): PayloadOrigin {
+	return payload.origin ?? (payload.eventId.startsWith(EVENT_KEY_PREFIX) ? 'event' : 'owner');
 }
 
 const resumePayload = z.object({
@@ -181,6 +190,41 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		};
 		turnLog.info({ owner, reason, ...deferral }, `${kind} turn deferred`);
 		return deferral;
+	}
+
+	// Sets what came of the activity a turn was woken for in its owner's listening journal, once the
+	// turn ended, in the transaction given under their principal, then says so once committed: once
+	// for each activity, with what identifies it and none of its content
+	async function settleWith(
+		owner: string,
+		event: TurnPayload['event'],
+		outcome: WokenTurnOutcome,
+		turnLog: FastifyBaseLogger,
+		alongside: (tx: Tx) => Promise<unknown>
+	): Promise<void> {
+		const source = event?.source;
+		const settled = await withPrincipal(db, { id: owner }, async (tx) => {
+			await alongside(tx);
+			return event === undefined || source === undefined
+				? false
+				: settleActivity(tx, owner, source, event.id, outcome);
+		});
+		if (settled && event !== undefined) {
+			turnLog.info(
+				{ source, eventId: event.id, type: event.type, owner, outcome },
+				'activity noted'
+			);
+		}
+	}
+
+	// What came of the activity a turn was woken for, on its own
+	function settle(
+		owner: string,
+		event: TurnPayload['event'],
+		outcome: WokenTurnOutcome,
+		turnLog: FastifyBaseLogger
+	): Promise<void> {
+		return settleWith(owner, event, outcome, turnLog, () => Promise.resolve());
 	}
 
 	// The owner's assistant, when this room is still its room
@@ -531,12 +575,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			const parsed = turnPayload.safeParse(job.payload);
 			if (!parsed.success) throw new Error('turn payload is malformed');
 			const { owner, roomId, eventId, text } = parsed.data;
-			// A turn queued before the origin was recorded is an event's when its id says so
-			const origin =
-				parsed.data.origin ?? (eventId.startsWith(EVENT_KEY_PREFIX) ? 'event' : 'owner');
+			const origin = originOf(parsed.data);
 			const assistant = await roomAssistant(owner, roomId);
 			if (assistant === null) {
 				log.info({ owner, roomId }, 'turn dropped: no assistant for this room');
+				// Nobody was told of the activity it was woken for
+				if (origin === 'event') await settle(owner, parsed.data.event, 'failed', log);
 				return null;
 			}
 			const correlationId = correlationIdOf(parsed.data, origin);
@@ -560,13 +604,15 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				...(actionsDone === null ? {} : { actionsDone })
 			});
 			if (result.kind === 'busy' && origin === 'event') {
-				return deferOrAbandon(job, result.reason, turnLog, owner, 'event');
+				const deferral = deferOrAbandon(job, result.reason, turnLog, owner, 'event');
+				if (deferral === null) await settle(owner, parsed.data.event, 'abandoned', turnLog);
+				return deferral;
 			}
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
 			// Read once the turn is over: the owner may have changed their language in it
 			const { notices } = await fetchOwnerMessages(db, owner, locale);
-			await enqueueJob(db, {
-				kind: 'send',
+			const send = {
+				kind: 'send' as const,
 				payload: {
 					...(await replyTo(result, assistant, roomId, notices)),
 					// A turn woken by an event posted to the API answers no message of the room
@@ -574,8 +620,26 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				},
 				dedupKey: `send:${eventId}`,
 				groupKey: `send:${roomId}`
-			});
+			};
+			if (origin !== 'event') {
+				await enqueueJob(db, send);
+				return null;
+			}
+			// What came of the activity is settled with what tells its owner of it, or not at all
+			await settleWith(
+				owner,
+				parsed.data.event,
+				result.kind === 'ok' ? 'suggested' : 'failed',
+				turnLog,
+				(tx) => enqueueJob(tx, send)
+			);
 			return null;
+		},
+		// A turn an activity woke that failed for good told its owner nothing of it
+		failedForGood: async (job) => {
+			const parsed = turnPayload.safeParse(job.payload);
+			if (job.kind !== 'turn' || !parsed.success || originOf(parsed.data) !== 'event') return;
+			await settle(parsed.data.owner, parsed.data.event, 'failed', log);
 		}
 	});
 }

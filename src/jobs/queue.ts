@@ -194,21 +194,22 @@ export function retryDelaysOf(kind: JobKind): RetryDelays {
 }
 
 // A job that failed is queued again after the wait of the try it failed, or fails for good when that
-// try has none
+// try has none. Resolves to whether the job failed for good, rather than being tried again later
 export async function failJob(
 	db: Db,
 	id: number,
 	attempts: number,
 	error: string,
 	delaysMs: RetryDelays
-): Promise<void> {
+): Promise<boolean> {
 	const delayMs = delaysMs[attempts - 1];
 	if (delayMs === undefined) {
 		await db.sql`update jobs set status = 'failed', last_error = ${error}, finished_at = now() where id = ${id}`;
-		return;
+		return true;
 	}
 	await db.sql`
 		update jobs set status = 'queued', locked_by = null, locked_at = null, last_error = ${error},
 			run_after = now() + make_interval(secs => ${delayMs / 1000})
 		where id = ${id}`;
+	return false;
 }

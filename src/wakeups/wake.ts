@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Clock } from '../agent/clock.js';
 import { carriesInvitation, type Invitation } from '../agent/invitation.js';
 import type { TurnPayload } from '../agent/turn-worker.js';
 import { localeOf } from '../assistants/locale.js';
@@ -8,6 +9,14 @@ import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
+import {
+	noteActivity,
+	NOTHING_SHOWN,
+	wasNoted,
+	type ActivityOutcome,
+	type Noted,
+	type Shown
+} from '../journal/repository.js';
 import { fenced } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
@@ -27,10 +36,10 @@ export interface Wakeup {
 	readonly type: string;
 	readonly recipient: Person & { readonly reason: string };
 	readonly actor: Person;
-	readonly shown: {
-		readonly computed: Readonly<Record<string, unknown>>;
-		readonly untrusted: Readonly<Record<string, unknown>>;
-	};
+	readonly shown: Shown;
+	// What its owner's listening journal keeps of it beyond its source, type and id, nothing unless
+	// its source says
+	readonly noted?: Noted;
 	// For an invitation, what its turn checks before the model speaks
 	readonly invitation?: Invitation;
 	// For the brief of its owner's working day, the date in their zone it is the brief of: only the
@@ -48,6 +57,8 @@ export interface WakeDeps {
 	readonly config: Config;
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
+	// The present the daily reminders, the briefs and the listening journal read
+	readonly clock: Clock;
 }
 
 export interface WakeOptions {
@@ -85,7 +96,9 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 // brief for the brief the scheduler asks for. The owner is
 // the recipient by their email, which is their principal: only a person of the instance's mail
 // domain has one, nobody is woken for their own action, and nobody more often in an hour than the
-// deployment allows.
+// deployment allows. Their listening journal notes each event they are woken for or their cap
+// holds back, which neither wakes them twice; a brief, which the scheduler tries again, it never
+// notes.
 export async function wake(
 	deps: WakeDeps,
 	wakeup: Wakeup,
@@ -98,6 +111,8 @@ export async function wake(
 	// A brief comes from the scheduler's source, and that source brings nothing else: an event
 	// published under it is nobody's brief, and takes none of their wake-ups
 	if ((wakeup.source === BRIEF_SOURCE) !== (wakeup.brief !== undefined)) return 'ignored';
+	// A brief is no activity: the journal notes the others alone
+	const isActivity = wakeup.brief === undefined;
 	const outcome = await withPrincipal(db, { id: owner }, async (tx) => {
 		const assistant = await findAssistant(tx, owner);
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId === null) {
@@ -116,14 +131,29 @@ export async function wake(
 					select count(*)::int from wakeups
 					where owner = ${owner} and woken_at > now() - interval '1 hour'
 				) as woken`;
-		// An owner the event already woke is not woken again
-		if (prior?.seen === true) return 'duplicate' as const;
+		// An owner the event already woke, or whose journal noted it, is not woken again
+		if (prior?.seen === true || (await wasNoted(tx, owner, wakeup.source, wakeup.id))) {
+			return 'duplicate' as const;
+		}
+		const noteAs = (journaled: ActivityOutcome): Promise<void> =>
+			noteActivity(tx, owner, {
+				source: wakeup.source,
+				eventId: wakeup.id,
+				type: wakeup.type,
+				receivedAt: deps.clock.now(),
+				outcome: journaled,
+				noted: wakeup.noted ?? { ids: NOTHING_SHOWN, names: NOTHING_SHOWN }
+			});
 		// Nor past their hourly cap: a burst of events, a mass assignment or what piled up during an
 		// outage, drowns neither their room nor their quota
-		if ((prior?.woken ?? 0) >= config.wakeups.perHour) return 'capped' as const;
+		if ((prior?.woken ?? 0) >= config.wakeups.perHour) {
+			if (isActivity) await noteAs('capped');
+			return 'capped' as const;
+		}
 		// Kept with the turn it queues, or not at all
 		await tx.sql`
 			insert into wakeups (source, event_id, owner) values (${wakeup.source}, ${wakeup.id}, ${owner})`;
+		if (isActivity) await noteAs('woken');
 		const key = `event:${JSON.stringify([wakeup.source, wakeup.id, owner])}`;
 		const payload: TurnPayload = {
 			owner,
@@ -134,6 +164,7 @@ export async function wake(
 			event: {
 				id: wakeup.id,
 				type: wakeup.type,
+				source: wakeup.source,
 				...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
 			},
 			...(wakeup.brief === undefined ? {} : { brief: wakeup.brief })
@@ -145,5 +176,7 @@ export async function wake(
 	if (outcome === 'woken') deps.log.info(logged, 'event queued');
 	// Taken all the same, for no turn: nothing tells the owner of an event past their cap
 	if (outcome === 'capped' && options.logCapped !== false) deps.log.info(logged, 'event capped');
+	// What came of an activity, once settled: one capped is, one woken once its turn ends
+	if (outcome === 'capped' && isActivity) deps.log.info({ ...logged, outcome }, 'activity noted');
 	return outcome;
 }

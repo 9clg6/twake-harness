@@ -459,7 +459,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		const said = r.saying('echo: ').length;
 		const app = r.h.apps[0];
 		if (app === undefined) throw new Error('no api role');
-		const deps = { config: r.h.config, db: r.h.db, log: app.log };
+		const deps = { config: r.h.config, db: r.h.db, log: app.log, clock };
 		// An event that names the brief of Wednesday, its type and its id, as a listener hands it on
 		const posing: Omit<Wakeup, 'source'> = {
 			id: briefId(ALICE, '2026-10-28'),

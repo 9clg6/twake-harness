@@ -251,6 +251,9 @@ function invitationOf(message: Record<string, unknown>, recipient: string): Read
 	// The occurrence an invitation is about, in its zone as its times are
 	const occurrence = whenOf(vevent.parsed, 'recurrence-id', leftOut).at;
 	const title = vevent.parsed.getFirstPropertyValue('summary');
+	// What the organizer wrote, as the model is shown it and the journal keeps it
+	const shownTitle = typeof title === 'string' ? { title: cut(title, TITLE_MAX) } : {};
+	const shownUid = cut(uid, UID_MAX);
 	const wakeup: Wakeup = {
 		source: SOURCE,
 		id,
@@ -274,10 +277,19 @@ function invitationOf(message: Record<string, unknown>, recipient: string): Read
 			},
 			// The organizer writes the UID and the zone as much as the title
 			untrusted: {
-				...(typeof title === 'string' ? { title: cut(title, TITLE_MAX) } : {}),
-				uid: cut(uid, UID_MAX),
+				...shownTitle,
+				uid: shownUid,
 				...(start.timezone === null ? {} : { timezone: cut(start.timezone, ZONE_MAX) })
 			}
+		},
+		// What the owner's listening journal keeps of it: the meeting, by its UID and its occurrence,
+		// and its title and times
+		noted: {
+			ids: {
+				computed: occurrence === null ? {} : { recurrence_id: occurrence },
+				untrusted: { uid: shownUid }
+			},
+			names: { computed: { start: start.at, end: end.at }, untrusted: shownTitle }
 		},
 		invitation: { uid, start: start.at, end: end.at, timezone: start.timezone }
 	};
