@@ -184,6 +184,15 @@ describe('my consents through the API', () => {
 		expect((await c.get('alice', '/v1/consents')).body).toEqual({
 			consents: [granted.body]
 		});
+		// The grant is logged once, at info, with the level it grants
+		const grants = h.logLines().filter((line) => line['msg'] === 'consent granted');
+		expect(grants).toHaveLength(1);
+		expect(grants[0]).toMatchObject({
+			level: 30,
+			principal: 'alice',
+			domain: 'mail',
+			consentLevel: 'read'
+		});
 		// My assistant reads my mail without asking me first
 		const read = await c.post<{ answer: string }>('alice', '/v1/chat', {
 			message: 'Find the budget in my mail'

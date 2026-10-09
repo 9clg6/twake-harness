@@ -209,7 +209,8 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				contract: contract.id,
 				tool: contract.toolName,
 				domain: contract.domain,
-				level: contract.level,
+				// pino writes the line's own level under `level`
+				consentLevel: contract.level,
 				...(contract.risk === null ? {} : { risk: contract.risk }),
 				...(previewDigest === null ? {} : { preview: true }),
 				principal: owner

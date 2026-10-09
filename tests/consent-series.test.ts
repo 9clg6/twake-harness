@@ -206,7 +206,7 @@ describe('my assistant asks me whether to answer for a whole series before it an
 		expect(waits.at(-1)).toMatchObject({
 			tool: 'accept_invitation',
 			domain: 'calendar',
-			level: 'write',
+			consentLevel: 'write',
 			reasons: ['series'],
 			preview: true,
 			principal: 'alice@test.local'

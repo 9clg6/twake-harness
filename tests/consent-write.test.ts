@@ -124,7 +124,7 @@ describe('my assistant asks again before it first writes in an application', () 
 			contract: 'calendar.invitation.accept.v1',
 			tool: 'accept_invitation',
 			domain: 'calendar',
-			level: 'write',
+			consentLevel: 'write',
 			principal: 'alice@test.local'
 		});
 		expect(r.h.logLines().some((l) => JSON.stringify(l).includes('evt-budget'))).toBe(false);

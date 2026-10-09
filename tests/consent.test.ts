@@ -125,16 +125,17 @@ describe('my assistant asks before it first uses an application', () => {
 			].join('\n\n')
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
-		// The wait is logged with what it is about, never with what the call would have sent
+		// The wait is logged at info with what it is about, never with what the call would have sent
 		const waits = h
 			.logLines()
 			.filter((line) => line['msg'] === 'contract call waits for its owner');
 		expect(waits).toHaveLength(1);
 		expect(waits[0]).toMatchObject({
+			level: 30,
 			contract: 'mail.emails.read.v1',
 			tool: 'search_emails',
 			domain: 'mail',
-			level: 'read',
+			consentLevel: 'read',
 			principal: 'alice@test.local'
 		});
 		expect(typeof waits[0]?.['pendingCallId']).toBe('string');
