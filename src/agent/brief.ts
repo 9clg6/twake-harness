@@ -50,6 +50,7 @@ import {
 	type SessionRecord
 } from '../sessions/repository.js';
 import { findBriefMailsReadAt, saveBriefMailsReadAt } from '../settings/repository.js';
+import { eraseHeldActivities } from '../wakeups/held.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
 import { describeMoment, isoIn, type Clock } from './clock.js';
@@ -967,11 +968,10 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			if (!stored) return null;
 			// The owner's next brief reads their mail from the instant this one read it
 			if (mailsReadAt !== null) await saveBriefMailsReadAt(tx, principal.id, mailsReadAt);
-			await eraseActivityNames(
-				tx,
-				principal.id,
-				untold.activities.map(({ activity }) => activity)
-			);
+			const named = untold.activities.map(({ activity }) => activity);
+			await eraseActivityNames(tx, principal.id, named);
+			// What the owner's quiet hours held, the brief named: no release wakes them for it
+			await eraseHeldActivities(tx, principal.id, named);
 			return { closed: await ending(tx) };
 		});
 		if (saved === null) return { kind: 'missing' };

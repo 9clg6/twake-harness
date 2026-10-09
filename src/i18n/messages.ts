@@ -2,6 +2,7 @@
 // the deployment's. The model is told to speak it; these are the fixed texts around it.
 
 import type { RefusalReason } from '../agent/admission.js';
+import type { Weekday } from '../agent/clock.js';
 import type { UntoldKind } from '../briefs/untold.js';
 import type { ConsentLevel } from '../consents/consent.js';
 import type { DelegationRefusal, SpaceScope } from '../consents/delegation.js';
@@ -298,6 +299,17 @@ export interface Messages {
 		// It no longer does, and their assistant still reads there when they ask
 		notListening(application: string): string;
 	};
+	// What the harness says once the owner set their quiet hours, on which their turn ends
+	readonly quietHours: {
+		// They have none: their assistant tells them what reaches them at any hour
+		readonly none: string;
+		// Their daily range, its bounds as a wall clock shows them, and their whole quiet days, one of
+		// them at least, and that what reaches them then waits, unless a meeting starts before
+		set(
+			range: { readonly start: string; readonly end: string } | null,
+			days: readonly Weekday[]
+		): string;
+	};
 	// What the model is told of the present at the start of every turn, so that it can place
 	// "today" or "this afternoon" and give contracts times with the right offset
 	now(words: string, iso: string, timeZone: string): string;
@@ -471,6 +483,31 @@ const FR_MEETING: Readonly<Record<MeetingScope, string>> = {
 	occurrence: "une occurrence d'une série de réunions",
 	series: 'une série de réunions'
 };
+
+// The days of the week, as each language names them in a sentence
+const EN_WEEKDAYS: Readonly<Record<Weekday, string>> = {
+	monday: 'Monday',
+	tuesday: 'Tuesday',
+	wednesday: 'Wednesday',
+	thursday: 'Thursday',
+	friday: 'Friday',
+	saturday: 'Saturday',
+	sunday: 'Sunday'
+};
+const FR_WEEKDAYS: Readonly<Record<Weekday, string>> = {
+	monday: 'lundi',
+	tuesday: 'mardi',
+	wednesday: 'mercredi',
+	thursday: 'jeudi',
+	friday: 'vendredi',
+	saturday: 'samedi',
+	sunday: 'dimanche'
+};
+
+// Words listed as the language joins them: "a, b and c"
+function listed(locale: Locale, words: readonly string[]): string {
+	return new Intl.ListFormat(locale, { type: 'conjunction' }).format(words);
+}
 
 // Words that start a sentence, with a capital
 function capitalized(words: string): string {
@@ -779,6 +816,23 @@ const ENGLISH: Messages = {
 			`I am listening to ${application}: I will let you know what arrives for you there.`,
 		notListening: (application) =>
 			`I am no longer listening to ${application}: I will no longer let you know what arrives for you there, but I can still look at it when you ask me.`
+	},
+	quietHours: {
+		none: 'You have no quiet hours: I will let you know what arrives for you at any hour.',
+		set: (range, days) => {
+			const parts = [
+				...(range === null ? [] : [`every day from ${range.start} to ${range.end}`]),
+				...(days.length === 0
+					? []
+					: [
+							`all of ${listed(
+								'en',
+								days.map((day) => EN_WEEKDAYS[day])
+							)}`
+						])
+			];
+			return `Your quiet hours: ${parts.join(', and ')}. What arrives for you meanwhile waits for your brief or their end, unless it is a meeting that starts before.`;
+		}
 	},
 	now: (words, iso, timeZone) =>
 		[
@@ -1138,6 +1192,23 @@ const FRENCH: Messages = {
 		listening: (application) => `J'écoute ${application} : je te préviens de ce qui t'y arrive.`,
 		notListening: (application) =>
 			`Je n'écoute plus ${application} : je ne te préviens plus de ce qui t'y arrive, mais je peux toujours le consulter quand tu me le demandes.`
+	},
+	quietHours: {
+		none: "Tu n'as pas d'heures calmes : je te préviens à toute heure de ce qui t'arrive.",
+		set: (range, days) => {
+			const parts = [
+				...(range === null ? [] : [`chaque jour de ${range.start} à ${range.end}`]),
+				...(days.length === 0
+					? []
+					: [
+							`tout ${listed(
+								'fr',
+								days.map((day) => `le ${FR_WEEKDAYS[day]}`)
+							)}`
+						])
+			];
+			return `Tes heures calmes : ${parts.join(', et ')}. Ce qui t'arrive pendant ce temps attend ton brief ou leur fin, sauf une réunion qui commence avant.`;
+		}
 	},
 	now: (words, iso, timeZone) =>
 		[

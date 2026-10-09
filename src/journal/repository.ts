@@ -6,7 +6,8 @@ import { isRecord } from '../matrix/json.js';
 // it waited too long for admission, share_spent once admission refused it as the owner's day, or
 // the share of it their assistant spends on its own, was spent, failed otherwise; capped when the
 // owner's hourly cap held it back, and for_brief when it called for no word at once, such as a task
-// they assigned themselves, both with no turn
+// they assigned themselves, both with no turn; quiet_hours when it reached them during their quiet
+// hours, until it wakes them as they end, woken then, unless their brief names it first
 export type ActivityOutcome =
 	| 'woken'
 	| 'suggested'
@@ -15,10 +16,14 @@ export type ActivityOutcome =
 	| 'share_spent'
 	| 'failed'
 	| 'capped'
-	| 'for_brief';
+	| 'for_brief'
+	| 'quiet_hours';
 
 // The outcomes the turn an activity woke ends on
-export type WokenTurnOutcome = Exclude<ActivityOutcome, 'woken' | 'capped' | 'for_brief'>;
+export type WokenTurnOutcome = Exclude<
+	ActivityOutcome,
+	'woken' | 'capped' | 'for_brief' | 'quiet_hours'
+>;
 
 // Something as the model is shown it: what its source computed, apart from what people wrote,
 // which is data, never instructions
@@ -129,6 +134,20 @@ export async function settleActivity(
 	return rows.length > 0;
 }
 
+// Sets an activity the owner's quiet hours held as woken, once it wakes them as they end: the turn
+// it wakes settles what came of it
+export async function noteReleased(
+	tx: Tx,
+	owner: string,
+	source: string,
+	eventId: string
+): Promise<void> {
+	await tx.sql`
+		update listening_journal set outcome = 'woken'
+		where owner = ${owner} and source = ${source} and event_id = ${eventId}
+			and outcome = 'quiet_hours'`;
+}
+
 // The owner's activities received from a given instant on, in the order they arrived
 export async function listActivitiesSince(tx: Tx, owner: string, since: Date): Promise<Activity[]> {
 	const rows = await tx.sql<ActivityRow[]>`
@@ -140,12 +159,14 @@ export async function listActivitiesSince(tx: Tx, owner: string, since: Date): P
 
 // What came of the activities that had no turn, which the owner's next brief names: those their
 // hourly cap held back, those that waited too long for admission or that admission refused once
-// their assistant's share of the day was spent, and those kept for their brief
+// their assistant's share of the day was spent, those kept for their brief, and those their quiet
+// hours hold
 const UNTOLD_OUTCOMES: readonly ActivityOutcome[] = [
 	'capped',
 	'abandoned',
 	'share_spent',
-	'for_brief'
+	'for_brief',
+	'quiet_hours'
 ];
 
 // The owner's activities that had no turn and that no brief named yet, nor the purge erased the
