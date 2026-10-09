@@ -12,6 +12,8 @@ import {
 	INVITED,
 	lastUser,
 	logSink,
+	MAIL_RECEIVED,
+	mailEvent,
 	PREFIX,
 	startActivityBroker,
 	startCalendarFanout,
@@ -214,10 +216,14 @@ async function startListening(
 describe('what my assistant saw today', () => {
 	let l: Listening;
 	let worker: WorkerRole;
-	// Both roles read the same present
+	// Both roles read the same present, and the worker listens to the mails that arrive too
 	const clock = makeSettableClock(THURSDAY_LATE);
 	beforeAll(async () => {
-		l = await startListening('today', { api: clock, worker: clock });
+		l = await startListening(
+			'today',
+			{ api: clock, worker: clock },
+			{ ACTIVITY_TYPES: [ASSIGNED, MAIL_RECEIVED].join(',') }
+		);
 		worker = await l.listen();
 	}, 240_000);
 	afterAll(async () => {
@@ -364,6 +370,48 @@ describe('what my assistant saw today', () => {
 			expect.objectContaining({ level: 30, source: 'twake://tasks', outcome: 'failed' })
 		]);
 		expect(await l.r.nextSaying(FAILED, notices)).toBe(`${FAILED}. Please try again in a moment.`);
+	});
+
+	it('keeps a task I assign myself for my brief, which my journal tells me, and nothing of my other actions', async () => {
+		const said = l.r.saying('').length;
+		const handled = (id: string): Record<string, unknown>[] =>
+			l.logs.lines().filter((line) => line['msg'] === 'event handled' && line['eventId'] === id);
+		// I assign myself ROAD-16, which comes twice, then send myself a mail
+		const mine = {
+			...assignment({ type: 'task', id: 'task-16', key: 'ROAD-16', title: 'Renew my badge' }),
+			twakeactor: ALICE
+		};
+		const myMail = { ...mailEvent(`mail-${mine.id}`, ALICE), twakeactor: ALICE };
+		await l.publish(mine);
+		await l.publish(mine);
+		await l.publish(myMail);
+		await until('my mail was handled', () => handled(myMail.id).length > 0);
+		expect(handled(mine.id).map((line) => line['outcome'])).toEqual(['for_brief', 'duplicate']);
+		expect(handled(myMail.id).map((line) => line['outcome'])).toEqual(['ignored']);
+		expect(l.noted(mine.id)).toEqual([
+			expect.objectContaining({
+				level: 30,
+				source: 'twake://tasks',
+				type: ASSIGNED,
+				owner: ALICE,
+				outcome: 'for_brief'
+			})
+		]);
+		expect(l.noted(myMail.id)).toEqual([]);
+		expect(turnCalls(l.r.h.apisix.llm.calls, mine.id)).toHaveLength(0);
+		const { activities } = await l.ask();
+		expect(activities).toContainEqual(
+			expect.objectContaining({
+				object: { type: 'task', id: 'task-16', key: 'ROAD-16' },
+				outcome: 'for_brief',
+				untrusted: { title: 'Renew my badge' }
+			})
+		);
+		expect(activities.filter((activity) => activity['source'] === 'twake://mail')).toEqual([]);
+		// Nothing reached my room but the answer to my question
+		expect(l.r.saying('').slice(said)).toEqual([
+			expect.objectContaining({ body: expect.stringMatching(/^Saw: /) })
+		]);
 	});
 });
 
