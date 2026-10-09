@@ -286,9 +286,12 @@ describe('my brief names what reached me since my last brief that my assistant t
 					source: CALENDAR_SOURCE,
 					type: INVITED_EVENT_TYPE,
 					received_at: '2026-10-11T18:00:00+02:00',
+					received_at_in_words: 'dimanche 11 octobre 2026, 18:00',
 					outcome: 'capped',
 					start: '2026-10-12T10:00:00+02:00',
+					start_in_words: 'lundi 12 octobre 2026, 10:00',
 					end: '2026-10-12T11:00:00+02:00',
+					end_in_words: 'lundi 12 octobre 2026, 11:00',
 					untrusted: { uid: 'budget', title: 'Revue du budget' }
 				},
 				{
@@ -296,10 +299,14 @@ describe('my brief names what reached me since my last brief that my assistant t
 					source: CALENDAR_SOURCE,
 					type: RENAMED_EVENT_TYPE,
 					received_at: '2026-10-11T19:00:00+02:00',
+					received_at_in_words: 'dimanche 11 octobre 2026, 19:00',
 					outcome: 'for_brief',
 					recurrence_id: '2026-10-13T09:00:00+02:00',
+					recurrence_id_in_words: 'mardi 13 octobre 2026, 09:00',
 					start: '2026-10-13T09:00:00+02:00',
+					start_in_words: 'mardi 13 octobre 2026, 09:00',
 					end: '2026-10-13T09:15:00+02:00',
+					end_in_words: 'mardi 13 octobre 2026, 09:15',
 					untrusted: { uid: 'standup', title: 'Point équipe' }
 				},
 				{
@@ -307,10 +314,14 @@ describe('my brief names what reached me since my last brief that my assistant t
 					source: CALENDAR_SOURCE,
 					type: MOVED_EVENT_TYPE,
 					received_at: '2026-10-11T20:00:00+02:00',
+					received_at_in_words: 'dimanche 11 octobre 2026, 20:00',
 					outcome: 'abandoned',
 					recurrence_id: '2026-10-13T09:00:00+02:00',
+					recurrence_id_in_words: 'mardi 13 octobre 2026, 09:00',
 					start: '2026-10-13T09:30:00+02:00',
+					start_in_words: 'mardi 13 octobre 2026, 09:30',
 					end: '2026-10-13T09:45:00+02:00',
+					end_in_words: 'mardi 13 octobre 2026, 09:45',
 					untrusted: { uid: 'standup', title: 'Point équipe' }
 				},
 				{
@@ -318,6 +329,7 @@ describe('my brief names what reached me since my last brief that my assistant t
 					source: TASKS_SOURCE,
 					type: TASK_ASSIGNED_EVENT_TYPE,
 					received_at: '2026-10-12T07:00:00+02:00',
+					received_at_in_words: 'lundi 12 octobre 2026, 07:00',
 					outcome: 'share_spent',
 					object: { type: 'task', id: 'task-demo', key: 'WEB-12' },
 					untrusted: { title: 'Préparer la démo' }
@@ -339,7 +351,12 @@ describe('my brief names what reached me since my last brief that my assistant t
 				invitations: [{ number: 1, uid: 'budget', recurrence_id: null }],
 				since_last_brief: [
 					{ number: 1, uid: 'budget', recurrence_id: null },
-					{ number: 2, uid: 'standup', recurrence_id: '2026-10-13T09:00:00+02:00' },
+					{
+						number: 2,
+						uid: 'standup',
+						recurrence_id: '2026-10-13T09:00:00+02:00',
+						recurrence_id_in_words: 'mardi 13 octobre 2026, 09:00'
+					},
 					{ key: 'WEB-12', task_id: 'task-demo' }
 				]
 			}
