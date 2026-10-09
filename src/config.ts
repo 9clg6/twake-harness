@@ -79,6 +79,9 @@ export interface Config {
 		readonly userDailyTokens: number;
 		// The AI Gateway's own rate, respected before it refuses us
 		readonly globalPerMinute: number;
+		// The share of each user's daily tokens kept for their own words, from 0 to 1: the turns
+		// activities wake and the briefs may spend the rest
+		readonly chatReserve: number;
 	};
 	readonly contracts: {
 		// Under the APISIX address: where the curated OpenAPI is served, and an optional prefix for
@@ -218,6 +221,9 @@ const envSchema = z.object({
 	ADMISSION_USER_PER_MINUTE: z.coerce.number().int().min(1).default(10),
 	ADMISSION_USER_DAILY_TOKENS: z.coerce.number().int().min(1).default(200_000),
 	ADMISSION_GLOBAL_PER_MINUTE: z.coerce.number().int().min(1).default(400),
+	// The share of each owner's day kept for their own words: the turns activities wake and the
+	// briefs may spend the rest
+	CHAT_RESERVE: z.coerce.number().min(0).max(1).default(0.5),
 	CONTRACTS_OPENAPI_PATH: z.string().min(1).default('contracts/openapi.json'),
 	CONTRACTS_BASE_PATH: z.string().default(''),
 	CONTRACTS_REFRESH_MS: z.coerce.number().int().min(0).default(300_000),
@@ -459,7 +465,8 @@ export function loadConfig(env: Env): Config {
 			userQueue: values.ADMISSION_USER_QUEUE,
 			userPerMinute: values.ADMISSION_USER_PER_MINUTE,
 			userDailyTokens: values.ADMISSION_USER_DAILY_TOKENS,
-			globalPerMinute: values.ADMISSION_GLOBAL_PER_MINUTE
+			globalPerMinute: values.ADMISSION_GLOBAL_PER_MINUTE,
+			chatReserve: values.CHAT_RESERVE
 		},
 		contracts: {
 			openapiPath: values.CONTRACTS_OPENAPI_PATH,

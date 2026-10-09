@@ -13,7 +13,7 @@ import type { Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import { ensureRoomSession, saveSessionMessages } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
-import type { Admission, Refusal } from './admission.js';
+import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
 import { describeMoment, type Clock } from './clock.js';
 import type { TurnGate } from './gate.js';
@@ -86,11 +86,18 @@ export interface BriefInput {
 
 export type BriefResult =
 	// The brief, as the model wrote it, or as the harness lays it out when the model wrote nothing,
-	// and its HTML, which the harness lays out either way
-	| { readonly kind: 'ok'; readonly text: string; readonly html: string }
+	// and its HTML, which the harness lays out either way. Refused by admission once the owner's day,
+	// or the share of it their assistant spends on its own, was spent, the harness lays it out with
+	// no model call, and says why.
+	| {
+			readonly kind: 'ok';
+			readonly text: string;
+			readonly html: string;
+			readonly refusedFor?: SpentReason;
+	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
-	// Admission refused it, as it would a turn
+	// Admission refused it for another reason, as it would a turn
 	| ({ readonly kind: 'busy' } & Refusal);
 
 export interface BriefRunnerDeps {
@@ -236,7 +243,11 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		}
 	}
 
-	async function runAdmitted(input: BriefInput): Promise<BriefResult> {
+	// The brief, written by the model unless admission refused it for a spent day
+	async function writeBrief(
+		input: BriefInput,
+		refusedFor: SpentReason | null
+	): Promise<BriefResult> {
 		const { principal, roomId, date } = input;
 		const opened = await withPrincipal(db, principal, async (tx) => {
 			const record = await ensurePrincipal(tx, principal);
@@ -287,7 +298,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			history: [],
 			nudgeInterval: 0
 		});
-		const model = await written(system, told, log);
+		const model =
+			refusedFor === null ? await written(system, told, log) : { text: null, tokens: 0 };
 		// Its date in words, as the owner reads it: the brief's own, whatever day it goes out on. The
 		// model's brief repeats titles people wrote, unasked, every morning: its Markdown renders with
 		// nothing that acts, as the harness quotes the model in its requests, never their HTML or links
@@ -307,27 +319,37 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			])
 		);
 		if (!saved) return { kind: 'missing' };
-		if (model.tokens > 0) await admission.recordUsage(principal.id, model.tokens);
+		if (model.tokens > 0) await admission.recordUsage(principal.id, model.tokens, 'brief');
 		log.info(
 			{
 				by: model.text === null ? 'template' : 'model',
 				meetings: read.ok ? read.day.meetings.length : null,
-				tokens: model.tokens
+				tokens: model.tokens,
+				...(refusedFor === null ? {} : { refused: refusedFor })
 			},
 			'brief written'
 		);
-		return { kind: 'ok', text: brief.text, html: brief.html };
+		return {
+			kind: 'ok',
+			text: brief.text,
+			html: brief.html,
+			...(refusedFor === null ? {} : { refusedFor })
+		};
 	}
 
 	return {
 		async run(input) {
 			const { principal } = input;
 			// Admitted before anything else runs, as a turn is; the slot is held until the brief is
-			// written
-			const decision = await admission.admit(principal.id);
-			if (!decision.ok) return { kind: 'busy', ...decision.refusal };
+			// written. Refused for a spent day, it goes out all the same, laid out by the harness.
+			const decision = await admission.admit(principal.id, 'brief');
+			if (!decision.ok) {
+				const { reason } = decision.refusal;
+				if (!spentForTheDay(reason)) return { kind: 'busy', ...decision.refusal };
+				return gate.run(principal.id, () => writeBrief(input, reason));
+			}
 			try {
-				return await gate.run(principal.id, () => runAdmitted(input));
+				return await gate.run(principal.id, () => writeBrief(input, null));
 			} finally {
 				decision.release();
 			}

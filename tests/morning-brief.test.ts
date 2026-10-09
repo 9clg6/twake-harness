@@ -23,6 +23,9 @@ const MONDAY_AT_EIGHT = '2026-10-12T06:00:00Z';
 const LIST_EVENTS = '/contracts/v1/calendar/events';
 // What the model writes as the brief
 const WRITTEN = 'Ce matin : le stand-up à 9 h, que chevauche la revue de design.';
+// What Alice reads once her assistant spent the share of her day kept for what it does on its own
+const SHARE_SPENT =
+	"J'ai utilisé la part de mon quota du jour réservée à ce que je fais de moi-même : je ne réagirai plus de moi-même à tes activités jusqu'à minuit. Mon prochain brief nommera ce qui arrive d'ici là, et je te réponds toujours quand tu m'écris.";
 
 // What her calendar's contract lists for a day: a stand-up and a design review that overlap, as the
 // contract computes it, and lunch after them
@@ -165,16 +168,31 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		return (notifications ?? []).map((n) => n.event?.event_id ?? '');
 	}
 
-	// The tokens Alice spent on a day, as admission counts them: past her daily budget, her turns
-	// are refused
-	async function spend(day: string, tokens: number): Promise<void> {
+	// The tokens Alice spent on a day, as admission counts them, all of them by turns activities
+	// woke: past the share of her day her assistant may spend on its own, half of it by default, what
+	// it does on its own is refused
+	async function spendOnItsOwn(day: string, tokens: number): Promise<void> {
 		await withPrincipal(
 			r.h.db,
 			{ id: ALICE },
 			(tx) => tx.sql`
-				insert into usage_daily (owner, day, tokens) values (${ALICE}, ${day}, ${tokens})
-				on conflict (owner, day) do update set tokens = excluded.tokens`
+				insert into usage_daily (owner, day, tokens, event_tokens)
+				values (${ALICE}, ${day}, ${tokens}, ${tokens})
+				on conflict (owner, day) do update
+				set tokens = excluded.tokens, event_tokens = excluded.event_tokens`
 		);
+	}
+
+	// The turns Alice started this minute, as admission counts them: past her turns per minute, her
+	// turns are refused until the minute passes, or until she started none
+	async function rush(turns: number): Promise<void> {
+		await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
+			await tx.sql`delete from usage_window where owner = ${ALICE}`;
+			if (turns === 0) return;
+			await tx.sql`
+				insert into usage_window (owner, at, turns)
+				values (${ALICE}, date_trunc('second', now()), ${turns})`;
+		});
 	}
 
 	beforeAll(async () => {
@@ -435,23 +453,54 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(onLogs.lines().some((line) => line['msg'] === 'morning briefs off')).toBe(false);
 	});
 
-	it('waits as an event’s turn does when admission refuses the brief, saying why', async () => {
+	it('lays out my brief itself, with no model call, once my assistant spent its share of my day, and tells me it stays quiet until midnight', async () => {
 		const seen = briefs().length;
-		await spend('2026-10-27', 200_000);
+		const calls = briefCalls().length;
+		const notices = r.saying(SHARE_SPENT).length;
+		await spendOnItsOwn('2026-10-27', 100_000);
 		try {
 			await pass('2026-10-27T07:00:00Z');
+			const brief = await nextBrief(seen);
+			expect(brief.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-10-27' });
+			expect(brief.body).toBe(
+				[
+					'Tes réunions du jour, mardi 27 octobre 2026 :',
+					'- 09:00–09:30 Stand-up (chevauche Revue de design)',
+					'- 09:15–10:00 Revue de design (chevauche Stand-up)',
+					'- 12:30–13:30 Déjeuner'
+				].join('\n')
+			);
+			expect(briefCalls().slice(calls)).toEqual([]);
+			expect(await r.nextSaying(SHARE_SPENT, notices)).toBe(SHARE_SPENT);
+			expect(logged('brief written').at(-1)).toMatchObject({
+				by: 'template',
+				refused: 'event_share',
+				tokens: 0
+			});
+			expect(logged('brief turn deferred')).toEqual([]);
+		} finally {
+			await spendOnItsOwn('2026-10-27', 0);
+		}
+	});
+
+	it('waits as an event’s turn does when admission refuses the brief for another reason, saying why', async () => {
+		const seen = briefs().length;
+		await rush(120);
+		try {
+			await pass('2026-11-04T07:00:00Z');
 			await until('the brief deferred', () =>
 				logged('brief turn deferred').some(
 					(line) =>
-						line['reason'] === 'user_budget' &&
-						String(line['reqId']).startsWith('brief-2026-10-27-')
+						line['reason'] === 'user_rate' && String(line['reqId']).startsWith('brief-2026-11-04-')
 				)
 			);
 			expect(briefs()).toHaveLength(seen);
 		} finally {
-			await spend('2026-10-27', 0);
+			await rush(0);
 		}
-		expect(dateOf(await nextBrief(seen))).toBe('2026-10-27');
+		const brief = await nextBrief(seen);
+		expect(dateOf(brief)).toBe('2026-11-04');
+		expect(brief.body).toBe(WRITTEN);
 	});
 
 	it('takes no event a source published for a brief, whatever its source or type says', async () => {
