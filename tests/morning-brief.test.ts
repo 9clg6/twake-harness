@@ -18,7 +18,8 @@ import {
 	LIST_MAILBOXES,
 	LIST_TASKS,
 	MAILBOXES,
-	referencesIn
+	referencesIn,
+	seenEveryDay
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -396,6 +397,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 	}, 240_000);
 
 	beforeEach(async () => {
+		await seenEveryDay(r.h.db, ALICE);
 		await allowBriefReads(r.h.db, ALICE);
 		r.h.apisix.contracts.handler = answering(clock);
 		r.h.apisix.llm.script = (request) =>

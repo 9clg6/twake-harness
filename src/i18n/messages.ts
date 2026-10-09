@@ -313,6 +313,9 @@ export interface Messages {
 		// unanswered twice, with how to resume the brief
 		readonly refused: string;
 		readonly paused: string;
+		// What the assistant says once the owner went ten working days without a word or a read in
+		// their room, with how to resume the brief
+		readonly idle: string;
 		// The first brief after the owner took back the read of an application says so in one line,
 		// with what to tell the assistant to give it back
 		withdrawn(domain: BriefDomain): string;
@@ -922,6 +925,7 @@ const ENGLISH: Messages = {
 		refused: 'All right, I will not send you a brief. To get it back, tell me "resume my brief".',
 		paused:
 			'You did not answer, so I am pausing your brief. To get it back, tell me "resume my brief".',
+		idle: 'You have not read or written anything here for 10 working days, so I am pausing your brief. To get it back, tell me "resume my brief".',
 		withdrawn: (domain) => ENGLISH_BRIEF_WITHDRAWN[domain]
 	},
 	suggestions: {
@@ -1340,6 +1344,7 @@ const FRENCH: Messages = {
 			"D'accord, je n'enverrai pas de brief. Pour le reprendre, dis-moi « reprends le brief ».",
 		paused:
 			"Tu n'as pas répondu : je mets ton brief en pause. Pour le reprendre, dis-moi « reprends le brief ».",
+		idle: "Tu n'as rien lu ni écrit ici depuis 10 jours ouvrés : je mets ton brief en pause. Pour le reprendre, dis-moi « reprends le brief ».",
 		withdrawn: (domain) => FRENCH_BRIEF_WITHDRAWN[domain]
 	},
 	suggestions: {
