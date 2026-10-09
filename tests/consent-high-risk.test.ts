@@ -369,7 +369,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 			contract: 'mail.email.send.v1',
 			tool: 'send_email',
 			domain: 'mail',
-			level: 'write',
+			consentLevel: 'write',
 			principal: 'alice@test.local'
 		});
 		expect(r.h.logLines().some((l) => JSON.stringify(l).includes('paul@test.local'))).toBe(false);
@@ -613,7 +613,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 				HOW_TO_ANSWER
 			].join('\n\n')
 		);
-		expect(waits().at(-1)).toMatchObject({ reasons: ['consent'], level: 'read' });
+		expect(waits().at(-1)).toMatchObject({ reasons: ['consent'], consentLevel: 'read' });
 		expect(waits().at(-1)).not.toHaveProperty('risk');
 		const done = r.saying('Done:').length;
 		await r.client.react(r.room, request.eventId, '✅');
@@ -640,7 +640,7 @@ describe('my assistant shows me every high-risk action and runs it only on my ye
 			reasons: ['consent', 'high_risk'],
 			risk: 'high',
 			domain: 'drive',
-			level: 'write'
+			consentLevel: 'write'
 		});
 		// One request covers both: my one ✅ shares the plan
 		let done = r.saying('Done:').length;

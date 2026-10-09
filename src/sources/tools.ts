@@ -139,7 +139,14 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 		if (isConversationGone(pendingCallId)) return { result: pendingCallId };
 		deps.consentMetrics.requested(call);
 		context.log.info(
-			{ pendingCallId, reasons: call.reasons, tool: LISTEN_TOOL, domain: source, level: 'read' },
+			{
+				pendingCallId,
+				reasons: call.reasons,
+				tool: LISTEN_TOOL,
+				domain: source,
+				// pino writes the line's own level under `level`
+				consentLevel: 'read'
+			},
 			'listening waits for its owner'
 		);
 		return {

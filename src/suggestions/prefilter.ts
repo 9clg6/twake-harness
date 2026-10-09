@@ -29,6 +29,8 @@ const INTENT_PATTERNS: readonly RegExp[] = [
 	/\bon (en )?parle\b/,
 	/\bon se (voit|vois|call|appelle|parle|retrouve|capte|joint)\b/,
 	/\bon (s'appelle|s’appelle|se fait)\b/,
+	// peut-on se voir, pour te voir, on pourrait se parler
+	/\b(se|te|vous|nous) (voir|retrouver|parler|capter|caler|rejoindre)\b/,
 	/\b(r[ée]union|rdv|rendez-vous|visio|appel|stand-?up|point (rapide|[ée]quipe)|caler|planifier|programmer)\b/,
 	/\b(meeting|call|meet|catch[- ]?up|sync|schedule|book)\b/,
 	/\b(let's|lets|we can|shall we|can we|could we|how about we) (talk|meet|chat|sync|catch up|call|discuss)\b/,
