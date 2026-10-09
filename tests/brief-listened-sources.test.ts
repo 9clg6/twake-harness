@@ -219,8 +219,8 @@ describe('my brief tells only of the applications my assistant listens to', () =
 		// Until then her assistant listens to her calendar and her tasks, not to her mail
 		expect(await told("Qu'écoutes-tu ?")).toEqual({
 			listened: ['calendar', 'tasks'],
-			not_listened: ['mail'],
-			not_yet_possible: ['drive', 'chat']
+			not_listened: ['mail', 'drive'],
+			not_yet_possible: ['chat']
 		});
 		const seen = said().length;
 		const sent = briefs().length;
@@ -235,8 +235,8 @@ describe('my brief tells only of the applications my assistant listens to', () =
 		expect(handedSince(calls)).toMatchObject({ date: '2026-10-12', mails: { unread: [] } });
 		expect(await told("Qu'écoutes-tu ?")).toEqual({
 			listened: ['calendar', 'tasks', 'mail'],
-			not_listened: [],
-			not_yet_possible: ['drive', 'chat']
+			not_listened: ['drive'],
+			not_yet_possible: ['chat']
 		});
 	});
 
@@ -286,6 +286,7 @@ describe('my brief tells only of the applications my assistant listens to', () =
 			NOT_LISTENING_TO_CALENDAR
 		);
 		// Since Wednesday's brief, kept for her next one: an invitation, and a task assigned to her
+		// that her hourly cap held back
 		await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
 			await noteActivity(tx, ALICE, {
 				source: CALENDAR_SOURCE,
@@ -300,7 +301,7 @@ describe('my brief tells only of the applications my assistant listens to', () =
 				eventId: 'assigned-demo',
 				type: TASK_ASSIGNED_EVENT_TYPE,
 				receivedAt: new Date('2026-10-14T16:00:00Z'),
-				outcome: 'for_brief',
+				outcome: 'capped',
 				noted: ASSIGNED
 			});
 		});

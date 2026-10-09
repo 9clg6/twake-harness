@@ -118,3 +118,18 @@ export async function saveBriefMailsReadAt(tx: Tx, owner: string, at: Date): Pro
 		insert into owner_settings (owner, brief_mails_read_at) values (${owner}, ${at})
 		on conflict (owner) do update set brief_mails_read_at = excluded.brief_mails_read_at`;
 }
+
+// The instant an owner's last brief read the shares made to them; null until a brief did
+export async function findBriefSharesReadAt(tx: Tx, owner: string): Promise<Date | null> {
+	const rows = await tx.sql<{ brief_shares_read_at: Date | null }[]>`
+		select brief_shares_read_at from owner_settings where owner = ${owner}`;
+	return rows[0]?.brief_shares_read_at ?? null;
+}
+
+// Keeps the instant a brief read the shares made to an owner, in place of the one before, the rest
+// kept
+export async function saveBriefSharesReadAt(tx: Tx, owner: string, at: Date): Promise<void> {
+	await tx.sql`
+		insert into owner_settings (owner, brief_shares_read_at) values (${owner}, ${at})
+		on conflict (owner) do update set brief_shares_read_at = excluded.brief_shares_read_at`;
+}
