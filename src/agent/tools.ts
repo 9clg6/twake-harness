@@ -166,6 +166,17 @@ export function makeToolRegistry(
 	};
 }
 
+// The tools of a registry but those named, which are neither offered to the model nor run, should
+// it name one all the same
+export function withoutTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+	return {
+		get definitions() {
+			return registry.definitions.filter((tool) => !names.includes(tool.function.name));
+		},
+		find: (name) => (names.includes(name) ? null : registry.find(name))
+	};
+}
+
 function hasOnlyKeys(args: unknown, keys: readonly string[]): args is Record<string, unknown> {
 	return (
 		typeof args === 'object' &&

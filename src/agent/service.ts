@@ -17,6 +17,7 @@ import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
+import { LISTENING_JOURNAL_TOOL, makeListeningJournalTool } from '../journal/tool.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
@@ -64,6 +65,7 @@ import {
 	type ToolRegistry,
 	type TurnOrigin,
 	WITHDRAW_OWN_CONSENTS,
+	withoutTools,
 	WRITE_OWN_MEMORY,
 	WRITE_OWN_SETTINGS
 } from './tools.js';
@@ -88,6 +90,12 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WRITE_OWN_MEMORY,
 	WITHDRAW_OWN_CONSENTS
 ];
+
+// The tools a turn that comes from others, an event's or a suggestion's, is never offered, even
+// once its owner's yes resumed it, whatever their rights: the owner's listening journal, which
+// tells them in their own turns what their assistant saw, and would show such a turn the text third
+// parties wrote in every other activity
+const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [LISTENING_JOURNAL_TOOL];
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -293,7 +301,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				// Each application once, as consents_list names it
 				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort(),
 				consentMetrics
-			})
+			}),
+			makeListeningJournalTool({ clock, timeZone: config.timeZone })
 		],
 		() => contracts.tools
 	);
@@ -654,13 +663,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const moment = describeMoment(clock.now(), timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
+			const turnTools = comesFromOthers(origin)
+				? withoutTools(tools, TOOLS_HIDDEN_FROM_EVENT_TURNS)
+				: tools;
 			// The names of the tools the model is given, which its rules are built on
-			const toolNames = tools.definitions.map((tool) => tool.function.name);
+			const toolNames = turnTools.definitions.map((tool) => tool.function.name);
 			try {
 				const turn = await runTurn(
 					{
 						llm,
-						tools,
+						tools: turnTools,
 						log,
 						maxToolCalls: config.turn.maxToolCalls,
 						maxTurnTokens: config.turn.maxTokens,

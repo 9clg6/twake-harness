@@ -172,6 +172,13 @@ export function lastUserContent(request: ChatRequest): string {
 	return '';
 }
 
+// The tools a request to the model offers, by their names
+export function toolsOf(request: ChatRequest | undefined): string[] {
+	return (request?.tools ?? []).map(
+		(tool) => (tool as { function: { name: string } }).function.name
+	);
+}
+
 // The default script answers like a very literal model: it echoes the last user message.
 export const echoScript: LlmScript = (request) => ({
 	content: `echo: ${lastUserContent(request)}`

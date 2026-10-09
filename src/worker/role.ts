@@ -10,6 +10,7 @@ import { makeConsentMetrics } from '../consents/metrics.js';
 import { startReminderScheduler } from '../consents/reminder.js';
 import { startCurationScheduler } from '../curation/curation.js';
 import type { Db } from '../db/client.js';
+import { startListeningJournalPurgeScheduler } from '../journal/purge.js';
 import { startSuggestionPurgeScheduler } from '../suggestions/retention.js';
 import { startActivityListener } from '../wakeups/activity.js';
 import { startCalendarListener } from '../wakeups/calendar.js';
@@ -27,7 +28,8 @@ export interface WorkerRoleOptions {
 	readonly logStream?: Writable;
 	// The first wait before the listener tries again, a message or to listen, a second unless set
 	readonly retryDelayMs?: number;
-	// The present the daily reminders and the briefs read, the system clock unless set
+	// The present the daily reminders, the briefs and the listening journals read, the system clock
+	// unless set
 	readonly clock?: Clock;
 	// How often the role looks whether their hour has come, a minute unless set
 	readonly reminderCheckMs?: number;
@@ -43,11 +45,12 @@ export interface WorkerRole {
 }
 
 // The daily curation, the hourly expiry of the requests nobody answered, the hourly purges of the
-// wake-ups past their retention and of the suggestions nothing reads any more, each starting with
-// a pass at once, the daily reminders of the permissions about to expire, at their hour, and the
-// briefs of the owners' working days, from eight in their zones; the expiries are counted on the
-// metrics the role serves. With the activity exchange or Calendar's fanout configured, the role
-// also listens to it, and connects to the broker for that alone, once for each.
+// wake-ups and of the listening journals past their retention and of the suggestions nothing reads
+// any more, each starting with a pass at once, the daily reminders of the permissions about to
+// expire, at their hour, and the briefs of the owners' working days, from eight in their zones; the
+// expiries are counted on the metrics the role serves. With the activity exchange or Calendar's
+// fanout configured, the role also listens to it, and connects to the broker for that alone, once
+// for each.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
 	const clock = options.clock ?? SYSTEM_CLOCK;
@@ -69,7 +72,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			),
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
-	const deps = { config, db, log: app.log };
+	const deps = { config, db, log: app.log, clock };
 	const listening =
 		options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs };
 	if (config.activity !== null) {
@@ -86,16 +89,19 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		consentMetrics
 	);
 	const purge = startWakeupPurgeScheduler(db, app.log, config.wakeups.retentionMs);
+	const journalPurge = startListeningJournalPurgeScheduler(
+		db,
+		app.log,
+		config.wakeups.retentionMs,
+		clock
+	);
 	const suggestionPurge = startSuggestionPurgeScheduler(
 		db,
 		app.log,
 		config.consent.requestLifetimeMs
 	);
-	const reminders = startReminderScheduler(
-		{ ...deps, clock },
-		options.reminderCheckMs ?? REMINDER_CHECK_MS
-	);
-	const briefs = startBriefScheduler({ ...deps, clock }, options.briefCheckMs ?? BRIEF_CHECK_MS);
+	const reminders = startReminderScheduler(deps, options.reminderCheckMs ?? REMINDER_CHECK_MS);
+	const briefs = startBriefScheduler(deps, options.briefCheckMs ?? BRIEF_CHECK_MS);
 	return {
 		app,
 		stop: async () => {
@@ -103,6 +109,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			curation.stop();
 			expiry.stop();
 			purge.stop();
+			journalPurge.stop();
 			suggestionPurge.stop();
 			await reminders.stop();
 			await briefs.stop();

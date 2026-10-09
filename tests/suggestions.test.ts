@@ -8,6 +8,7 @@ import { eventually } from './helpers/feedback.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	MEETING_CATALOG,
+	toolsOf,
 	type ChatRequest,
 	type ContractCall,
 	type ScriptedReply
@@ -290,6 +291,16 @@ describe('the assistant proposes from the messages of channels', () => {
 		expect(posted[0]?.path).toBe('/contracts/v1/calendar/meetings');
 		expect(posted[0]?.headers['x-twake-on-behalf-of']).toBe(ALICE);
 		expect(posted[0]?.body).toMatchObject({ title: 'Point lundi', attendees: [BOB] });
+	});
+
+	it("offers the turn the owner's yes resumed none of the tools of their own turns", async () => {
+		// That turn is still the channel's: after the meeting, the model is not offered the owner's
+		// listening journal
+		const resumed = await eventually(() =>
+			h.apisix.llm.calls.find((c) => (c.request.messages.at(-1)?.content ?? '').includes('m-1'))
+		);
+		expect(toolsOf(resumed?.request)).toContain('create_meeting');
+		expect(toolsOf(resumed?.request)).not.toContain('listening_journal');
 	});
 
 	it('proposes once a day at most three times, and once per room per twelve hours', async () => {
