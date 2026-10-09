@@ -305,7 +305,10 @@ describe('the assistant proposes from the messages of channels', () => {
 	});
 
 	it("reaches nothing else of the owner's in that turn, and those two tools for the people of the meeting alone", async () => {
-		type Waiting = { id: string; channel: string };
+		interface Waiting {
+			id: string;
+			channel: string;
+		}
 		const waiting = await eventually(async () => {
 			const { body } = await h.api.get<{ pending_calls: Waiting[] }>(BOB, '/v1/pending-calls');
 			return body.pending_calls[0]?.channel === 'room' ? body.pending_calls[0] : undefined;
@@ -392,7 +395,10 @@ describe('the assistant proposes from the messages of channels', () => {
 		const room = await openChannel(user, [other]);
 		await say(other, room, 'On se voit quand ?');
 		await say(user, room, 'on se voit lundi à 10h ?');
-		type Waiting = { id: string; channel: string };
+		interface Waiting {
+			id: string;
+			channel: string;
+		}
 		const waiting = await until(async () => {
 			const { body } = await h.api.get<{ pending_calls: Waiting[] }>(owner, '/v1/pending-calls');
 			return body.pending_calls[0]?.channel === 'room' ? body.pending_calls[0] : null;
