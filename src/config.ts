@@ -149,7 +149,7 @@ export interface Config {
 		readonly retentionMs: number;
 	};
 	// The brief of each owner's working day, which the worker role asks their assistant for in their
-	// room, from eight on weekdays in their zone
+	// room, on the days and from the time they chose in their zone, from eight on weekdays by default
 	readonly brief: {
 		readonly enabled: boolean;
 	};

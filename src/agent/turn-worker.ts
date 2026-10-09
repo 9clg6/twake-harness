@@ -7,6 +7,7 @@ import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
+import { findBriefWait } from '../briefs/waits.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
 import {
 	closeHeldRequest,
@@ -281,9 +282,25 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		};
 	}
 
+	// What a message that asks the owner about a call the harness froze carries: the request, whose
+	// event the matrix role remembers for their answer, and its marker for their client while the
+	// call still waits for that answer
+	async function asking(
+		owner: string,
+		pendingCallId: string
+	): Promise<Pick<SendPayload, 'request' | 'questionMarker'>> {
+		const call = await withPrincipal(db, { id: owner }, (tx) =>
+			findPendingCall(tx, owner, pendingCallId)
+		);
+		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+		return {
+			request: { pendingCallId, owner },
+			...(questionMarker === null ? {} : { questionMarker })
+		};
+	}
+
 	// What the assistant sends back for a turn: its answer, or the fixed notice of a refused or
-	// failed turn, and the question it asks when the turn froze a call, marked for the owner's
-	// client while the call still waits for their answer
+	// failed turn, and the question it asks when the turn froze a call
 	async function replyTo(
 		result: OwnerTurnResult,
 		assistant: AssistantRecord,
@@ -292,11 +309,6 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	): Promise<SendPayload> {
 		const { owner } = assistant;
 		const pendingCallId = result.kind === 'ok' ? result.pendingCallId : undefined;
-		const call =
-			pendingCallId === undefined
-				? null
-				: await withPrincipal(db, { id: owner }, (tx) => findPendingCall(tx, owner, pendingCallId));
-		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
 		return {
 			asUserId: assistant.userId,
 			roomId,
@@ -307,8 +319,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 						? notices.busy(result.reason)
 						: notices.turnFailed,
 			outcome: result.kind === 'ok' ? 'answered' : 'failed',
-			...(pendingCallId === undefined ? {} : { request: { pendingCallId, owner } }),
-			...(questionMarker === null ? {} : { questionMarker }),
+			...(pendingCallId === undefined ? {} : await asking(owner, pendingCallId)),
 			// The harness's own request, laid out by the harness as HTML too
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
@@ -396,7 +407,89 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return null;
 	}
 
-	// Runs the call its owner allowed, then the rest of the turn, and sends the answer
+	// The owner allowed the call already, and sending their yes again would change nothing: a turn
+	// refused for room waits for it, and one refused for their day, or kept waiting too long,
+	// settles the call their yes allowed
+	async function waitOrSettle(
+		job: Job,
+		request: ResumeRequest,
+		assistant: AssistantRecord,
+		refusal: Refusal,
+		turnLog: FastifyBaseLogger
+	): Promise<Deferral | null> {
+		if (refusal.reason !== 'user_budget') {
+			const deferral = deferOrAbandon(job, refusal.reason, turnLog, request.owner, 'resumed');
+			if (deferral !== null) return deferral;
+		}
+		return settleRefusedYes(job, request, assistant, refusal, turnLog);
+	}
+
+	// The brief that gave way to the question about the owner's permission, which their yes
+	// resumes: that day's brief goes out, marked as the brief of its date, or, while the broker
+	// still refuses, the question again, marked as a question, either one answering their yes. A
+	// brief refused for the share of the day the assistant spends on its own goes out laid out by
+	// the harness, and the assistant tells its owner so, once a day, as for the brief of the morning.
+	async function resumeBrief(
+		job: Job,
+		request: ResumeRequest,
+		assistant: AssistantRecord,
+		turnLog: FastifyBaseLogger
+	): Promise<Deferral | null> {
+		const { owner, roomId, pendingCallId } = request;
+		const result = await agent.resumeBrief({
+			principal: { id: owner },
+			roomId,
+			pendingCallId,
+			log: turnLog,
+			assistantName: assistant.name
+		});
+		if (result.kind === 'missing') {
+			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
+			return null;
+		}
+		if (result.kind === 'busy') return waitOrSettle(job, request, assistant, result, turnLog);
+		let reply: Pick<
+			SendPayload,
+			'text' | 'outcome' | 'html' | 'brief' | 'request' | 'questionMarker'
+		>;
+		if (result.kind === 'ok') {
+			reply = {
+				text: result.text,
+				html: result.html,
+				brief: { date: result.date },
+				outcome: 'answered'
+			};
+		} else if (result.kind === 'question') {
+			reply = {
+				text: result.text,
+				outcome: 'answered',
+				...(await asking(owner, result.pendingCallId))
+			};
+		} else {
+			turnLog.warn({ result: result.kind }, 'resumed brief did not succeed');
+			const { notices } = await fetchOwnerMessages(db, owner, locale);
+			reply = { text: notices.turnFailed, outcome: 'failed' };
+		}
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId,
+				...reply,
+				// The owner's yes, which the matrix role marks as answered
+				...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
+			} satisfies SendPayload,
+			dedupKey: `send:resume:${pendingCallId}`,
+			groupKey: `send:${roomId}`
+		});
+		if (result.kind === 'ok' && result.refusedFor === 'event_share') {
+			await noticeShareSpent(assistant, roomId, turnLog);
+		}
+		return null;
+	}
+
+	// Runs the call its owner allowed, then the rest of the turn, and sends the answer. The call a
+	// brief's read froze, which the brief waits for, resumes that brief.
 	async function resume(job: Job, request: ResumeRequest): Promise<Deferral | null> {
 		const { owner, roomId, pendingCallId, through } = request;
 		const assistant = await roomAssistant(owner, roomId);
@@ -405,6 +498,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return null;
 		}
 		const turnLog = log.child({ reqId: `resume:${pendingCallId}`, roomId });
+		const waiting = await withPrincipal(db, { id: owner }, (tx) => findBriefWait(tx, owner));
+		if (waiting?.pendingCallId === pendingCallId) {
+			return resumeBrief(job, request, assistant, turnLog);
+		}
 		const actionsDone =
 			request.replyTo === undefined
 				? null
@@ -423,16 +520,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
 			return null;
 		}
-		// The owner allowed the call already, and sending their yes again would change nothing: a turn
-		// refused for room waits for it, and one refused for their day, or kept waiting too long,
-		// settles the call their yes allowed
-		if (result.kind === 'busy') {
-			if (result.reason !== 'user_budget') {
-				const deferral = deferOrAbandon(job, result.reason, turnLog, owner, 'resumed');
-				if (deferral !== null) return deferral;
-			}
-			return settleRefusedYes(job, request, assistant, result, turnLog);
-		}
+		if (result.kind === 'busy') return waitOrSettle(job, request, assistant, result, turnLog);
 		if (result.kind !== 'ok') turnLog.warn({ result }, 'resumed turn did not succeed');
 		// Read once the turn is over: the owner may have changed their language in it
 		const { notices } = await fetchOwnerMessages(db, owner, locale);
@@ -550,10 +638,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
-	// a message of its own, marked as the brief of its date. Refused by admission for rate or room,
-	// it waits as a turn an event woke does, and the line that says so says why. Refused for a spent
-	// day, it goes out laid out by the harness, and once the share of the day the assistant spends on
-	// its own was spent, the assistant tells its owner so, once a day.
+	// a message of its own, marked as the brief of its date, or the question about their permission
+	// it gave way to, marked as a question. Refused by admission for rate or room, it waits as a turn
+	// an event woke does, and the line that says so says why. Refused for a spent day, it goes out
+	// laid out by the harness, and once the share of the day the assistant spends on its own was
+	// spent, the assistant tells its owner so, once a day.
 	async function sendBrief(
 		job: Job,
 		payload: TurnPayload,
@@ -573,7 +662,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			assistantName: assistant.name
 		});
 		if (result.kind === 'busy') return deferOrAbandon(job, result.reason, turnLog, owner, 'brief');
-		if (result.kind !== 'ok') {
+		// A brief that waits for its owner's answer says nothing while the broker still refuses
+		if (result.kind === 'withheld') return null;
+		if (result.kind !== 'ok' && result.kind !== 'question') {
 			turnLog.warn({ result: result.kind }, 'brief dropped');
 			return null;
 		}
@@ -583,13 +674,16 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				asUserId: assistant.userId,
 				roomId,
 				text: result.text,
-				html: result.html,
-				brief: { date: brief.date }
+				...(result.kind === 'ok'
+					? { html: result.html, brief: { date: brief.date } }
+					: await asking(owner, result.pendingCallId))
 			} satisfies SendPayload,
 			dedupKey: `send:${eventId}`,
 			groupKey: `send:${roomId}`
 		});
-		if (result.refusedFor === 'event_share') await noticeShareSpent(assistant, roomId, turnLog);
+		if (result.kind === 'ok' && result.refusedFor === 'event_share') {
+			await noticeShareSpent(assistant, roomId, turnLog);
+		}
 		return null;
 	}
 
