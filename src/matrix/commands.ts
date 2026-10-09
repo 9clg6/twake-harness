@@ -1,3 +1,5 @@
+import { isDeepStrictEqual } from 'node:util';
+
 import type { FastifyBaseLogger } from 'fastify';
 
 import type { Messages } from '../i18n/messages.js';
@@ -87,7 +89,8 @@ export interface AnnounceDeps {
 type Announcement = 'announced' | 'unchanged' | 'refused';
 
 // Announces a bot's commands in one of its rooms, as that bot. Written only when the room holds
-// none or other ones, so announcing a room again changes nothing. A room that refuses it (its
+// none or other ones, so announcing a room again changes nothing: compared as values, since the
+// homeserver gives a state event back with its keys in another order. A room that refuses it (its
 // power levels) is logged.
 async function announce(
 	deps: AnnounceDeps,
@@ -97,7 +100,7 @@ async function announce(
 ): Promise<Announcement> {
 	try {
 		const current = await deps.admin.readState(userId, roomId, COMMANDS_EVENT_TYPE, userId);
-		if (JSON.stringify(current) === JSON.stringify(content)) return 'unchanged';
+		if (isDeepStrictEqual(current, content)) return 'unchanged';
 		await deps.admin.writeState(userId, roomId, COMMANDS_EVENT_TYPE, userId, content);
 		deps.log.info({ roomId, userId }, 'commands announced');
 		return 'announced';

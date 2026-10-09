@@ -62,6 +62,36 @@ describe('Twake Chat offers the creator’s commands, which the creator takes as
 		return null;
 	}
 
+	// The event that holds a bot's commands in a room, as a member reads it; null when there is none
+	async function commandsEventId(
+		viewer: MatrixUser,
+		roomId: string,
+		botUserId: string
+	): Promise<string | null> {
+		const path = `/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/state`;
+		const state = (await h.synapse.request(viewer, 'GET', path)).body as unknown as readonly {
+			readonly event_id: string;
+			readonly type: string;
+			readonly state_key: string;
+		}[];
+		const event = state.find((e) => e.type === COMMANDS_TYPE && e.state_key === botUserId);
+		return event?.event_id ?? null;
+	}
+
+	// What the creator's pass over its rooms came to, once the role started after the log line
+	// `after`
+	async function passAtStart(after: number): Promise<Record<string, unknown>> {
+		for (let i = 0; i < 240; i += 1) {
+			const pass = h
+				.logLines()
+				.slice(after)
+				.find((line) => line['msg'] === 'creator commands checked at start');
+			if (pass !== undefined) return pass;
+			await sleep(250);
+		}
+		throw new Error('the creator did not go over its rooms at start');
+	}
+
 	function fromCreator(): DecryptedMessage[] {
 		return client.messages.filter((m) => m.roomId === room && m.sender === creatorId);
 	}
@@ -109,6 +139,7 @@ describe('Twake Chat offers the creator’s commands, which the creator takes as
 		expect(await answerToCommand('!help', 'help')).toContain(
 			'/rename <name>: rename your assistant'
 		);
+		expect(await answerToCommand('!recover', 'recover')).toBe('Key recovery is not available yet.');
 		expect(await answerToCommand('!delete', 'delete')).toBe(
 			'Delete Friday? I will erase its conversations, its memory, its skills and your permissions. Answer yes to confirm.'
 		);
@@ -136,8 +167,17 @@ describe('Twake Chat offers the creator’s commands, which the creator takes as
 		const events = { ...(levels['events'] as Record<string, number>), [COMMANDS_TYPE]: 0 };
 		await h.synapse.request(dan, 'PUT', levelsPath, { ...levels, events });
 
+		let before = h.logLines().length;
 		await h.restartRole();
 
+		// My room with it held them already
+		expect(await passAtStart(before)).toMatchObject({ rooms: 2, announced: 1 });
 		expect(await announcedCommands(dan, older, creatorId)).toEqual(CREATOR_COMMANDS);
+		// At the next start, every room holds them already: none is written again
+		const announcement = await commandsEventId(dan, older, creatorId);
+		before = h.logLines().length;
+		await h.restartRole();
+		expect(await passAtStart(before)).toMatchObject({ rooms: 2, announced: 0 });
+		expect(await commandsEventId(dan, older, creatorId)).toBe(announcement);
 	});
 });

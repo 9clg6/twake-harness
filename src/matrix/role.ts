@@ -490,8 +490,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// Announces the creator's commands in each room it is in with someone, in the language of the
 	// one member it talks to there, else the deployment's, one room at a time and until the role
-	// stops; the number of rooms it wrote them in. A room whose members cannot be read is skipped.
-	async function announceCreatorCommandsAtStart(): Promise<number> {
+	// stops: the number of rooms it went over, and of those it wrote them in. A room whose members
+	// cannot be read is skipped.
+	async function announceCreatorCommandsAtStart(): Promise<{ rooms: number; announced: number }> {
+		let rooms = 0;
 		let announced = 0;
 		for (const roomId of await admin.joinedRooms(creator)) {
 			if (closing) break;
@@ -502,6 +504,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const owner = more.length === 0 ? principalOfMatrixUser(config, member) : null;
 				const toOwner = owner === null ? messages : await fetchMessages(owner);
 				const room = { roomId, creatorUserId: creator };
+				rooms += 1;
 				if ((await announceCreatorCommands({ admin, log }, room, toOwner)) === 'announced') {
 					announced += 1;
 				}
@@ -509,7 +512,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				log.warn({ roomId, err }, 'creator commands not announced at start');
 			}
 		}
-		return announced;
+		return { rooms, announced };
 	}
 
 	// Suggestions from the messages of the channels the listener is in
@@ -1874,8 +1877,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// holds them already is left as it is.
 	inFlight.track(
 		announceCreatorCommandsAtStart().then(
-			(announced) => {
-				if (announced > 0) log.info({ announced }, 'creator commands announced at start');
+			(pass) => {
+				log.info(pass, 'creator commands checked at start');
 			},
 			(err: unknown) => {
 				log.warn({ err }, 'creator commands not announced at start');

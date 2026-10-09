@@ -24,7 +24,7 @@ export function helpText(messages: Messages): string {
 
 // The command a message's first word names: typed after « / », or after « ! » as Twake Chat sends
 // a command the creator announced
-function commandOf(word: string): string {
+function creatorCommandOf(word: string): string {
 	const lowered = word.toLowerCase();
 	const sent = lowered.startsWith('!') ? lowered.slice(1) : null;
 	return sent !== null && isCreatorCommand(sent) ? `/${sent}` : lowered;
@@ -92,7 +92,7 @@ export async function runCreatorTurn(
 	if (input.text === null) return null;
 	const text = input.text.trim();
 	const [word = '', ...rest] = text.split(/\s+/);
-	const command = commandOf(word);
+	const command = creatorCommandOf(word);
 	const argument = rest.join(' ').trim();
 	// A question that no longer stands leaves nothing to wait for
 	const awaitingName = input.state?.step === 'awaiting_name';
