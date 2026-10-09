@@ -7,9 +7,10 @@ import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 // assistant and of what they told it: their conversations, its memory, their skills, the
 // permissions they gave it, the calls that wait for their answer, the suggestions it made them, the
 // brief that waits for their answer, the question of their first brief and where their brief stands
-// with its reads, the reminders of their delegation, what it told them of their
-// sessions, the question it asked them about their identity with their answer, and the jobs that
-// would still run for it. Its record stays, marked deleted, with the language its owner chose, and
+// with its reads, the activities their quiet hours hold, the reminders of their delegation, what it
+// told them of their sessions, the question it asked them about their identity with their answer,
+// and the jobs that would still run for it. Its record stays, marked deleted, with the language its
+// owner chose, and
 // its rooms leave the index, the encrypted conversations it read for its owner with them. What a
 // new assistant needs or must not lose stays: the Matrix account, its device and keys, as a Matrix
 // identifier is never reused, the owner's quota counters, the zone of their calendar, a setting of
@@ -49,6 +50,8 @@ export async function eraseAssistant(
 	await tx.sql`delete from suggestions where owner = ${owner}`;
 	await tx.sql`delete from brief_delegation_waits where owner = ${owner}`;
 	await tx.sql`delete from brief_questions where owner = ${owner}`;
+	// What the owner's quiet hours hold would wake it as they end, as a job would
+	await tx.sql`delete from held_activities where owner = ${owner}`;
 	await tx.sql`delete from consents where owner = ${owner}`;
 	// The reads their brief had go with the permissions: the next assistant's first brief asks for
 	// them again
