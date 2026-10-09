@@ -24,7 +24,7 @@ import type { Locale, Messages } from '../i18n/messages.js';
 import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
 import type { BriefMarker } from '../matrix/brief.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
-import type { Refusal, RefusalReason } from './admission.js';
+import { spentForTheDay, type Refusal, type RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
 import { matrixUserIdOfPrincipal } from '../principals/identity.js';
 import {
@@ -231,6 +231,31 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return settleWith(owner, event, outcome, turnLog, () => Promise.resolve());
 	}
 
+	// Tells the owner once a day, in their assistant's room, that their assistant spent the share of
+	// their day it may spend on its own: it stays quiet until midnight, and still answers them
+	async function noticeShareSpent(
+		assistant: AssistantRecord,
+		roomId: string,
+		turnLog: FastifyBaseLogger
+	): Promise<void> {
+		const { owner } = assistant;
+		const { notices } = await fetchOwnerMessages(db, owner, locale);
+		const queued = await withPrincipal(db, { id: owner }, async (tx) => {
+			if (!(await agent.admission.shareNoticeDue(tx, owner))) return false;
+			await enqueueJob(tx, {
+				kind: 'send',
+				payload: {
+					asUserId: assistant.userId,
+					roomId,
+					text: notices.shareSpent
+				} satisfies SendPayload,
+				groupKey: `send:${roomId}`
+			});
+			return true;
+		});
+		if (queued) turnLog.info({ owner }, 'share spent notice queued');
+	}
+
 	// The owner's assistant, when this room is still its room
 	async function roomAssistant(owner: string, roomId: string): Promise<AssistantRecord | null> {
 		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
@@ -403,7 +428,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	// The brief that gave way to the question about the owner's permission, or to the question of
 	// their first brief, which their yes resumes: that day's brief goes out, marked as the brief of
 	// its date, or, while the broker refuses, its question, marked as a question, either one
-	// answering their yes
+	// answering their yes. A brief refused for the share of the day the assistant spends on its own
+	// goes out laid out by the harness, and the assistant tells its owner so, once a day, as for the
+	// brief of the morning.
 	async function resumeBrief(
 		job: Job,
 		request: ResumeRequest,
@@ -458,6 +485,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			dedupKey: `send:resume:${pendingCallId}`,
 			groupKey: `send:${roomId}`
 		});
+		if (result.kind === 'ok' && result.refusedFor === 'event_share') {
+			await noticeShareSpent(assistant, roomId, turnLog);
+		}
 		return null;
 	}
 
@@ -619,8 +649,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
 	// a message of its own, marked as the brief of its date, or the question it gave way to, about
 	// their permission or the reads of their first brief, marked as a question, or what it says once
-	// it stops for want of their answer. Refused by admission, it waits as a turn an event woke does,
-	// and the line that says so says why.
+	// it stops for want of their answer. Refused by admission for rate or room, it waits as a turn an
+	// event woke does, and the line that says so says why. Refused for a spent day, it goes out laid
+	// out by the harness, and once the share of the day the assistant spends on its own was spent,
+	// the assistant tells its owner so, once a day.
 	async function sendBrief(
 		job: Job,
 		payload: TurnPayload,
@@ -661,6 +693,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			dedupKey: `send:${eventId}`,
 			groupKey: `send:${roomId}`
 		});
+		if (result.kind === 'ok' && result.refusedFor === 'event_share') {
+			await noticeShareSpent(assistant, roomId, turnLog);
+		}
 		return null;
 	}
 
@@ -724,6 +759,16 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				...(actionsDone === null ? {} : { actionsDone })
 			});
 			if (result.kind === 'busy' && origin === 'event') {
+				// Refused for a spent day, the activity waits for its owner's brief rather than for room,
+				// and once the share of the day their assistant spends on its own was spent, the assistant
+				// tells them so, once a day
+				if (spentForTheDay(result.reason)) {
+					await settle(owner, parsed.data.event, 'share_spent', turnLog);
+					if (result.reason === 'event_share') {
+						await noticeShareSpent(assistant, roomId, turnLog);
+					}
+					return null;
+				}
 				const deferral = deferOrAbandon(job, result.reason, turnLog, owner, 'event');
 				if (deferral === null) await settle(owner, parsed.data.event, 'abandoned', turnLog);
 				return deferral;

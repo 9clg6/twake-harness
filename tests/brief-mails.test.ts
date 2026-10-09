@@ -297,11 +297,15 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		}
 		// The model is handed her unread mail as Mail listed it, the newsletter left out, in the order
 		// the harness lays it out, the flagged photos first, with the people of her day's meetings,
-		// and told which five to keep
+		// and told which five to keep; each time written in words beside it, in her language and zone
 		const told = lastUser(briefCalls().slice(calls).at(0));
 		expect(dataOf(told)).toHaveProperty('mails', {
 			since: '2026-10-09T08:00:00+02:00',
-			unread: [emailOf(PHOTOS), emailOf(CLAIRE_ASKS)],
+			since_in_words: 'vendredi 9 octobre 2026, 08:00',
+			unread: [
+				{ ...emailOf(PHOTOS), received_at_in_words: 'samedi 10 octobre 2026, 11:00' },
+				{ ...emailOf(CLAIRE_ASKS), received_at_in_words: 'lundi 12 octobre 2026, 07:40' }
+			],
 			truncated: false,
 			participants: PARTICIPANTS
 		});

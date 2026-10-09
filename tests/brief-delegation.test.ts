@@ -242,11 +242,19 @@ describe('my brief gives way to the question about my permission when the platfo
 		expect(again?.headers['x-correlation-id']).toMatch(/^brief-2026-10-12-[0-9a-f]{16}$/);
 		expect(again?.headers['x-correlation-id']).toBe(first?.headers['x-correlation-id']);
 		expect(week?.headers['x-correlation-id']).toBe(first?.headers['x-correlation-id']);
+		const [standup] = dayOf('2026-10-12')['events'] as Record<string, unknown>[];
 		expect(dataOf(lastUser(briefCalls().slice(calls).at(0)))).toEqual({
 			date: '2026-10-12',
+			date_in_words: 'lundi 12 octobre 2026',
 			calendar: {
 				time_zone: 'Europe/Paris',
-				meetings: dayOf('2026-10-12')['events'],
+				meetings: [
+					{
+						...standup,
+						start_in_words: 'lundi 12 octobre 2026, 09:00',
+						end_in_words: 'lundi 12 octobre 2026, 09:30'
+					}
+				],
 				truncated: false
 			},
 			invitations: { pending: [], truncated: false },

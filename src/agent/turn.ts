@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Locale } from '../i18n/messages.js';
 import type {
 	LlmClient,
 	LlmCompletion,
@@ -9,6 +10,7 @@ import type {
 } from '../llm/client.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withoutCallMarkup } from './call-markup.js';
+import type { TimeZone } from './clock.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	runTool,
@@ -17,7 +19,7 @@ import {
 	type ToolContext,
 	type ToolRegistry
 } from './tools.js';
-import { withTrueWeekdays } from './weekdays.js';
+import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
 export interface TurnInput {
 	readonly systemPrompt: string;
@@ -39,6 +41,9 @@ export interface TurnInput {
 	readonly mayStaySilent?: boolean;
 	// The owner's day, as ISO 8601 writes it, in which the model's words read a date without its year
 	readonly today: string;
+	// The owner's zone and language, in which each date the model reads is written in words
+	readonly timeZone: TimeZone;
+	readonly locale: Locale;
 }
 
 export interface TurnOutput {
@@ -222,15 +227,17 @@ function cutShort(
 
 // One model call, with the tools it may call, whose tokens its turn adds to those it spent: a call
 // that ran out of budget while thinking is made once more with twice the budget, up to the ceiling,
-// unless it has tools and the turn spent all its tokens
+// unless it has tools and the turn spent all its tokens. The model reads each date it is handed
+// written in words beside it, in its owner's zone and language.
 async function askModel(
 	deps: TurnDeps,
 	iteration: number,
-	prompt: readonly LlmMessage[],
+	messages: readonly LlmMessage[],
 	tools: readonly LlmToolDefinition[],
 	spent: Spent,
-	today: string
+	owner: Pick<TurnInput, 'today' | 'timeZone' | 'locale'>
 ): Promise<Asked> {
+	const prompt = withDatesInWords(messages, owner.timeZone, owner.locale);
 	deps.log.info(
 		{ iteration, messageCount: prompt.length, characters: countCharacters(prompt) },
 		'model asked'
@@ -257,7 +264,7 @@ async function askModel(
 	// request quotes them with the day of each date named from the date; the debug line of
 	// logAnswer keeps them as the model wrote them
 	if (completion.content !== null) {
-		completion = { ...completion, content: withTrueWeekdays(completion.content, today) };
+		completion = { ...completion, content: withTrueWeekdays(completion.content, owner.today) };
 	}
 	return { completion, cut: cutShort(deps, tools, completion, spent) };
 }
@@ -281,7 +288,11 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// What this turn adds to the conversation, which the model always reads whole
 	const messages: LlmMessage[] =
 		input.message === null ? [] : [{ role: 'user', content: input.message }];
-	const past = computeVisibleHistory(input.history, deps.historyMaxChars);
+	// The past conversation as the model reads it, each date in words, cut to what it may read
+	const past = computeVisibleHistory(
+		withDatesInWords(input.history, input.timeZone, input.locale),
+		deps.historyMaxChars
+	);
 	if (past.length < input.history.length) {
 		deps.log.info(
 			{ historyMessages: input.history.length, shownMessages: past.length },
@@ -305,7 +316,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			[system, ...past, ...messages],
 			deps.tools.definitions,
 			spent,
-			input.today
+			input
 		);
 		iteration += 1;
 		// The model ran out while thinking past the tokens of the turn: its last call, without tools,
@@ -424,7 +435,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		[instructed, ...past, ...messages],
 		[],
 		spent,
-		input.today
+		input
 	);
 	// A model with no tools may still call one, through the API or in its text: those calls are
 	// not for the owner, its words beside them are
