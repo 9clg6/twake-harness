@@ -438,4 +438,114 @@ describe('my assistant asks before it first uses an application', () => {
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 	});
+
+	it('asks every owner again before it reads or writes in their calendar, now that both cover meetings', async () => {
+		// Reading Calendar now finds when the owner and others are free, and writing there calls
+		// meetings, which email everyone invited. Alice let her assistant read her calendar through the
+		// API; Frank kept his writing there, allowed in the chat above; Erin kept hers reading it, and
+		// lets it write there through the API.
+		await withPrincipal(
+			h.db,
+			{ id: 'alice@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('alice@test.local', 'calendar', 'read', 'api')`
+		);
+		await withPrincipal(
+			h.db,
+			{ id: 'erin@test.local' },
+			(tx) => tx.sql`insert into consents (owner, domain, level, granted_by)
+				values ('erin@test.local', 'calendar', 'write', 'api')`
+		);
+		const seen = async (owner: string): Promise<{ consents: string[]; waiting: string[] }> =>
+			withPrincipal(h.db, { id: owner }, async (tx) => {
+				const named = (rows: { domain: string; level: string }[]): string[] =>
+					rows.map((row) => `${row.domain} ${row.level}`);
+				return {
+					consents: named(
+						await tx.sql<{ domain: string; level: string }[]>`
+							select domain, level from consents order by domain, level`
+					),
+					waiting: named(
+						await tx.sql<{ domain: string; level: string }[]>`
+							select domain, level from pending_calls where status = 'open' order by domain, level`
+					)
+				};
+			});
+		// Frank was asked whether his assistant may read his calendar, and Dave, whose request to read
+		// his still waits from above, whether his may accept an invitation there, in the words of
+		// before, and neither has answered yet
+		const slot = { start: '2026-10-07T17:00:00+02:00', end: '2026-10-07T18:00:00+02:00' };
+		h.apisix.llm.script = () => ({ toolCalls: call('read_freebusy', slot) });
+		const reading = await h.api.post<{ pending_call: { id: string } }>(
+			'frank@test.local',
+			'/v1/chat',
+			{ message: 'Am I free tomorrow at 5?' }
+		);
+		h.apisix.llm.script = () => ({
+			toolCalls: call('accept_invitation', { event_id: 'uid-friday' })
+		});
+		const writing = await h.api.post<{ pending_call: { id: string } }>(
+			'dave@test.local',
+			'/v1/chat',
+			{ message: 'Accept the meeting on Friday' }
+		);
+		expect(await seen('frank@test.local')).toEqual({
+			consents: ['calendar write'],
+			waiting: ['calendar read']
+		});
+		expect(await seen('dave@test.local')).toEqual({
+			consents: [],
+			waiting: ['calendar read', 'calendar write']
+		});
+		const migration = '0076_consents_calendar_meetings_reask.sql';
+		await h.db.sql`delete from schema_migrations where name = ${migration}`;
+		expect((await runMigrations(h.db)).applied).toEqual([migration]);
+		// Calendar read and write went, whoever gave them, and so did the requests to read or write
+		// there; Tasks, Mail and every other application stay as their owners left them
+		expect(await seen('alice@test.local')).toEqual({ consents: [], waiting: ['mail read'] });
+		expect(await seen('frank@test.local')).toEqual({ consents: [], waiting: [] });
+		expect(await seen('dave@test.local')).toEqual({ consents: [], waiting: [] });
+		expect(await seen('erin@test.local')).toEqual({
+			consents: ['mail read'],
+			waiting: ['tasks read']
+		});
+		// A yes to either comes too late, and allows nothing
+		for (const [owner, asked] of [
+			['frank@test.local', reading],
+			['dave@test.local', writing]
+		] as const) {
+			expect(
+				await h.api.post(owner, `/v1/pending-calls/${asked.body.pending_call.id}/approve`, {})
+			).toEqual({ status: 409, body: { error: 'pending call closed', state: 'expired' } });
+		}
+		expect(await seen('frank@test.local')).toEqual({ consents: [], waiting: [] });
+		expect(await seen('dave@test.local')).toEqual({ consents: [], waiting: [] });
+		// Erin's next read of her calendar, and Frank's next write there, wait for their answers, as a
+		// first read and a first write do
+		h.apisix.llm.script = () => ({ toolCalls: call('read_freebusy', slot) });
+		const read = await h.api.post<{ answer: string }>('erin@test.local', '/v1/chat', {
+			message: 'Am I free tomorrow at 5?'
+		});
+		expect(read.body.answer).toBe(
+			[
+				'This is the first time I need to read your data in calendar. Do you allow it? I would start with this:',
+				JSON.stringify(slot, null, 2),
+				'Answer yes or no in your next message.'
+			].join('\n\n')
+		);
+		h.apisix.llm.script = () => ({
+			toolCalls: call('accept_invitation', { event_id: 'uid-friday' })
+		});
+		const write = await h.api.post<{ answer: string }>('frank@test.local', '/v1/chat', {
+			message: 'Accept the meeting on Friday'
+		});
+		expect(write.body.answer).toBe(
+			[
+				'This is the first time I need to change your data in calendar. Do you allow it? I would start with this:',
+				JSON.stringify({ event_id: 'uid-friday' }, null, 2),
+				'Answer yes or no in your next message.'
+			].join('\n\n')
+		);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+	});
 });
