@@ -17,7 +17,8 @@ import {
 	toolCallStatus,
 	type ToolCallStatus,
 	type ToolContext,
-	type ToolRegistry
+	type ToolRegistry,
+	type TurnBrief
 } from './tools.js';
 import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
@@ -57,6 +58,8 @@ export interface TurnOutput {
 	readonly pendingCallId?: string;
 	// That question in its parts, when the harness laid it out as a request about the call
 	readonly request?: OwnerRequest;
+	// The brief the owner asked for, when the turn ended on it
+	readonly brief?: TurnBrief;
 	// The turn reached one of its limits before it answered: there is more to do
 	readonly atLimit?: true;
 }
@@ -405,7 +408,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					messages: [...input.history, ...messages],
 					tokens: spent.tokens,
 					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId }),
-					...(outcome.request === undefined ? {} : { request: outcome.request })
+					...(outcome.request === undefined ? {} : { request: outcome.request }),
+					...(outcome.brief === undefined ? {} : { brief: outcome.brief })
 				};
 			}
 			if (tool !== null && args !== null) input.actionsDone?.(actions);

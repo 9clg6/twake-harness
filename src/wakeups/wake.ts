@@ -308,6 +308,16 @@ export async function wake(
 	return outcome;
 }
 
+// The brief its owner asks for in their turn takes the wake-up of its date, as a pass's would, so
+// that no pass wakes them for that date after it: under the lock of their wake-ups, as any of
+// theirs is taken, and counted among those of their hour. One a pass took first stays as it is.
+export async function takeBriefWakeup(tx: Tx, owner: string, id: string): Promise<void> {
+	await tx.sql`select pg_advisory_xact_lock(hashtext(${`wakeups:${owner}`}))`;
+	await tx.sql`
+		insert into wakeups (source, event_id, owner) values (${BRIEF_SOURCE}, ${id}, ${owner})
+		on conflict do nothing`;
+}
+
 // Wakes an owner's assistant for the activities their quiet hours held whose release came, the
 // first due first, within their hourly cap, the rest left for a later pass. Each comes out of the
 // hold, and wakes nobody whose assistant left its room or who no longer listens to its
