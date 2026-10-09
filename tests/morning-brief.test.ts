@@ -455,31 +455,80 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(told).toMatch(
 			/^\[brief\] Ma journée de travail commence : c'est l'heure de mon brief du matin \(id brief-2026-10-12-[0-9a-f]{16}\)\.\n/
 		);
-		const [review, sync, , , seminar] = eventsOf(pendingOf('2026-10-12'));
+		// Each date and time written in words beside it, in her language and zone
+		const [standup, review, lunch] = eventsOf(dayOf('2026-10-12'));
+		const [invited, sync, , , seminar] = eventsOf(pendingOf('2026-10-12'));
+		const [late] = tasksIn(tasksOf('overdue', '2026-10-12'));
+		const [due] = tasksIn(tasksOf('today', '2026-10-12'));
+		const monday = (time: string): string => `lundi 12 octobre 2026, ${time}`;
+		const tuesday = (time: string): string => `mardi 13 octobre 2026, ${time}`;
 		expect(dataOf(told)).toEqual({
 			date: '2026-10-12',
+			date_in_words: 'lundi 12 octobre 2026',
 			calendar: {
 				time_zone: 'Europe/Paris',
-				meetings: dayOf('2026-10-12')['events'],
+				meetings: [
+					{
+						...standup,
+						recurrence_id_in_words: monday('09:00'),
+						start_in_words: monday('09:00'),
+						end_in_words: monday('09:30')
+					},
+					{
+						...review,
+						start_in_words: monday('09:15'),
+						end_in_words: monday('10:00'),
+						conflicts: [
+							{
+								uid: 'standup',
+								recurrence_id: '2026-10-12T09:00:00+02:00',
+								recurrence_id_in_words: monday('09:00')
+							}
+						]
+					},
+					{ ...lunch, start_in_words: monday('12:30'), end_in_words: monday('13:30') }
+				],
 				truncated: false
 			},
 			invitations: {
 				pending: [
-					{ number: 1, series: false, ...review },
-					{ number: 2, series: true, ...sync },
-					{ number: 3, series: false, ...seminar }
+					{
+						number: 1,
+						series: false,
+						...invited,
+						start_in_words: monday('09:15'),
+						end_in_words: monday('10:00'),
+						conflicts: [
+							{
+								uid: 'standup',
+								recurrence_id: '2026-10-12T09:00:00+02:00',
+								recurrence_id_in_words: monday('09:00')
+							}
+						]
+					},
+					{
+						number: 2,
+						series: true,
+						...sync,
+						recurrence_id_in_words: tuesday('08:30'),
+						start_in_words: tuesday('08:30'),
+						end_in_words: tuesday('08:45')
+					},
+					// A whole day's event: the day it starts, and no words for the day it ends on
+					{ number: 3, series: false, ...seminar, start_in_words: 'vendredi 16 octobre 2026' }
 				],
 				truncated: false
 			},
 			mails: {
 				since: '2026-10-09T08:00:00+02:00',
-				unread: [BOB_ASKS],
+				since_in_words: 'vendredi 9 octobre 2026, 08:00',
+				unread: [{ ...BOB_ASKS, received_at_in_words: monday('07:30') }],
 				truncated: false,
 				participants: ['bob@test.local', 'carol@test.local']
 			},
 			tasks: {
-				overdue: tasksIn(tasksOf('overdue', '2026-10-12')),
-				today: tasksIn(tasksOf('today', '2026-10-12')),
+				overdue: [{ ...late, due_date_in_words: 'vendredi 9 octobre 2026' }],
+				today: [{ ...due, due_date_in_words: 'lundi 12 octobre 2026' }],
 				truncated: false
 			}
 		});
@@ -764,7 +813,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(brief.content['m.mentions']).toEqual({});
 	});
 
-	it('leaves out my calendar when I have not allowed it, asks me nothing, and logs it', async () => {
+	it('leaves out my calendar once I took it back, asks me nothing, says so once, and logs it', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const reads = dayReads().length;
@@ -776,17 +825,28 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(dateOf(brief)).toBe('2026-10-22');
 		expect(dayReads().slice(reads)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
+		const [late] = tasksIn(tasksOf('overdue', '2026-10-22'));
+		const [due] = tasksIn(tasksOf('today', '2026-10-22'));
 		// Her mail is read all the same, with nobody known of her day's meetings
 		expect(dataOf(told)).toEqual({
 			date: '2026-10-22',
-			mails: { since: expect.any(String), unread: [], truncated: false, participants: [] },
-			tasks: {
-				overdue: tasksIn(tasksOf('overdue', '2026-10-22')),
-				today: tasksIn(tasksOf('today', '2026-10-22')),
-				truncated: false
+			date_in_words: 'jeudi 22 octobre 2026',
+			mails: {
+				since: expect.any(String),
+				since_in_words: expect.any(String),
+				unread: [],
+				truncated: false,
+				participants: []
 			},
-			not_read: { calendar: 'consent', invitations: 'consent' }
+			tasks: {
+				overdue: [{ ...late, due_date_in_words: 'lundi 19 octobre 2026' }],
+				today: [{ ...due, due_date_in_words: 'jeudi 22 octobre 2026' }],
+				truncated: false
+			}
 		});
+		expect(brief.body).toBe(
+			`${WRITTEN}\n\nJe ne lis plus ton agenda : pour que je le lise de nouveau, dis-moi « lis mon agenda ».`
+		);
 		// The brief is all her assistant said, and no call waits for her
 		expect(r.client.messages.filter((m) => m.sender === r.assistantId).slice(said)).toEqual([
 			brief
@@ -805,7 +865,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		}
 	});
 
-	it('leaves out my tasks when I have not allowed them, which the harness’s own brief says in one line', async () => {
+	it('leaves out my tasks once I took them back, which the harness’s own brief says after it, in one line', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const tasks = taskReads().length;
@@ -820,8 +880,9 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		const brief = await nextBrief(seen);
 		expect(taskReads().slice(tasks)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
-		expect(dataOf(told)).toMatchObject({ date: '2026-11-06', not_read: { tasks: 'consent' } });
+		expect(dataOf(told)).toMatchObject({ date: '2026-11-06' });
 		expect(dataOf(told)).not.toHaveProperty('tasks');
+		expect(dataOf(told)).not.toHaveProperty('not_read');
 		expect(brief.body).toBe(
 			[
 				'Tes réunions du jour, vendredi 6 novembre 2026 :',
@@ -834,9 +895,9 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				'2. Point quotidien : série à partir du samedi 7 novembre, 08:30–08:45, de bob@test.local',
 				'3. Séminaire : mardi 10 novembre, toute la journée, de carol@test.local',
 				'',
-				"Je n'ai pas pu lire tes tâches aujourd'hui.",
+				'Pour enchaîner, dis-moi par exemple « décline la 1 ».',
 				'',
-				'Pour enchaîner, dis-moi par exemple « décline la 1 ».'
+				'Je ne lis plus tes tâches : pour que je les lise de nouveau, dis-moi « lis mes tâches ».'
 			].join('\n')
 		);
 		// No call waits for her
@@ -1001,12 +1062,18 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		await r.client.sendText(r.room, 'Décline la 2');
 		await r.nextSaying('echo: Décline la 2', 0);
 		// Her next turn reads, in the conversation, the uid and occurrence of each numbered invitation
-		// and the ids of each task by its key
+		// and the ids of each task by its key; the occurrence in words in her zone, where summer time,
+		// whose offset the calendar wrote, is over
 		expect(referencesIn(r.h.apisix.llm.calls.slice(turns).at(0)?.request)).toEqual([
 			{
 				invitations: [
 					{ number: 1, uid: 'review', recurrence_id: null },
-					{ number: 2, uid: 'daily-sync', recurrence_id: '2026-11-05T08:30:00+02:00' },
+					{
+						number: 2,
+						uid: 'daily-sync',
+						recurrence_id: '2026-11-05T08:30:00+02:00',
+						recurrence_id_in_words: 'jeudi 5 novembre 2026, 07:30'
+					},
 					{ number: 3, uid: 'seminar', recurrence_id: null }
 				],
 				tasks: [
@@ -1027,7 +1094,12 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 			{
 				invitations: [
 					{ number: 1, uid: 'review', recurrence_id: null },
-					{ number: 2, uid: 'daily-sync', recurrence_id: '2026-11-06T08:30:00+02:00' },
+					{
+						number: 2,
+						uid: 'daily-sync',
+						recurrence_id: '2026-11-06T08:30:00+02:00',
+						recurrence_id_in_words: 'vendredi 6 novembre 2026, 07:30'
+					},
 					{ number: 3, uid: 'seminar', recurrence_id: null }
 				],
 				tasks: [

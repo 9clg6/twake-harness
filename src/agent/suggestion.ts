@@ -349,7 +349,9 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							},
 							actionsBefore: 0,
 							limitNotice: () => '',
-							today: dateIn(now, timeZone)
+							today: dateIn(now, timeZone),
+							timeZone,
+							locale
 						}
 					);
 				} catch (err: unknown) {

@@ -832,7 +832,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
 						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
 						mayStaySilent: woken,
-						today: dateIn(now, timeZone)
+						today: dateIn(now, timeZone),
+						timeZone,
+						locale
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>
