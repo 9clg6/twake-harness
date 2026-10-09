@@ -448,6 +448,54 @@ export function brokerRefusal(
 	};
 }
 
+// What the gateway relays from the token broker for a Twake Space route when it holds no Space API
+// token of the owner's: an RFC 9457 problem that says so, with a consent link that anyone answering
+// the call, a contract included, could have written
+export function brokerSpaceTokenRefusal(consentUrl: string = BROKER_CONSENT_URL): ContractReply {
+	return {
+		status: 401,
+		body: {
+			type: 'urn:twake:problem:space_token_missing',
+			title: 'Space token missing',
+			status: 401,
+			detail:
+				'The user has not given their agent a Twake Space API token yet: they must open the consent link.',
+			code: 'space_token_missing',
+			consent_url: consentUrl
+		}
+	};
+}
+
+// What a Twake Space contract answers when Space refuses the owner's API token: it expired, was
+// revoked, or its account left the organization
+export function spaceTokenRejection(): ContractReply {
+	return {
+		status: 401,
+		body: {
+			type: 'urn:twake:problem:space_token_rejected',
+			title: 'Space token rejected',
+			status: 401,
+			detail: 'Twake Space no longer accepts the API token the user gave their agent.',
+			code: 'space_token_rejected'
+		}
+	};
+}
+
+// What it answers when the owner's API token lacks the scope the call needs, as Space names it
+export function spaceScopeRefusal(scope: string): ContractReply {
+	return {
+		status: 403,
+		body: {
+			type: 'urn:twake:problem:space_scope_missing',
+			title: 'Space scope missing',
+			status: 403,
+			detail: `The user's Twake Space API token lacks the ${scope} scope this call needs.`,
+			code: 'space_scope_missing',
+			scope
+		}
+	};
+}
+
 // What the token broker answers on its delegation route about an owner whose permission it holds,
 // whether it expired or not: when they gave it and when it expires, to the second, and its consent
 // link
