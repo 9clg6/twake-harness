@@ -169,16 +169,19 @@ const UNTOLD_OUTCOMES: readonly ActivityOutcome[] = [
 	'quiet_hours'
 ];
 
-// The owner's activities that had no turn and that no brief named yet, nor the purge erased the
-// names of, in the order they arrived, the first ones given
+// The owner's activities published under the sources given that had no turn and that no brief named
+// yet, nor the purge erased the names of, in the order they arrived, the first ones given
 export async function listUntoldActivities(
 	tx: Tx,
 	owner: string,
+	sources: readonly string[],
 	limit: number
 ): Promise<Activity[]> {
+	if (sources.length === 0) return [];
 	const rows = await tx.sql<ActivityRow[]>`
 		select source, event_id, type, received_at, outcome, ids, names from listening_journal
-		where owner = ${owner} and outcome in ${tx.sql([...UNTOLD_OUTCOMES])} and names is not null
+		where owner = ${owner} and source in ${tx.sql([...sources])}
+			and outcome in ${tx.sql([...UNTOLD_OUTCOMES])} and names is not null
 		order by received_at, source, event_id
 		limit ${limit}`;
 	return rows.map(activityOf);

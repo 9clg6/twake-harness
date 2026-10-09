@@ -23,7 +23,7 @@ import {
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent, withdrawConsent } from './helpers/consents.js';
+import { allowBriefReads, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest, ContractCall, ContractReply } from './helpers/fake-apisix.js';
 
@@ -398,9 +398,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 
 	beforeEach(async () => {
 		await seenEveryDay(r.h.db, ALICE);
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(r.h.db, ALICE);
 		r.h.apisix.contracts.handler = answering(clock);
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')

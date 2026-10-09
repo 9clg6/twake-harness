@@ -18,7 +18,7 @@ import {
 	startConsentRoom,
 	type ConsentRoom
 } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { allowBriefReads } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 import type { MatrixUser } from './helpers/synapse.js';
@@ -146,9 +146,7 @@ describe('my brief pauses once I have neither written nor read in my room for te
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBeGreaterThan(0);
 		// Her brief reads her calendar, her mail and her tasks: a free day, no invitation, an empty
 		// inbox and no task
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(r.h.db, ALICE);
 		r.h.apisix.contracts.handler = (call) => {
 			if (call.path === LIST_MAILBOXES) return { status: 200, body: MAILBOXES };
 			if (call.path === LIST_EMAILS)

@@ -16,15 +16,13 @@ import {
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { allowBriefReads } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest, ScriptedReply } from './helpers/fake-apisix.js';
 
 const ALICE = 'alice@test.local';
 // Where the content of a brief tells Alice's client that it is one, and of which day
 const BRIEF_CONTENT_KEY = 'app.twake.assistant.brief';
-// The applications her brief reads
-const DOMAINS = ['calendar', 'mail', 'tasks'];
 // The zone a read of her calendar returned, which the assistant she creates next does not follow
 const ZONE = 'Asia/Tokyo';
 // How the question of a first brief tells its days and its time when she kept the defaults
@@ -124,7 +122,7 @@ describe('deleting my assistant erases what I chose of my brief and the zone of 
 
 	it('sends no second brief the day I create my assistant again after its brief', async () => {
 		await seenEveryDay(r.h.db, ALICE);
-		for (const domain of DOMAINS) await grantConsent(r.h.db, ALICE, domain, 'read');
+		await allowBriefReads(r.h.db, ALICE);
 		// Monday at eight, the brief of Jarvis goes out
 		await pass('2026-11-02T07:00:00Z');
 		await until('the brief of Monday', () =>
