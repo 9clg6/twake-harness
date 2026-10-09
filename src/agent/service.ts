@@ -24,6 +24,7 @@ import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
+import { makeQuietHoursTool, QUIET_HOURS_TOOL } from '../quiet/tool.js';
 import {
 	createSession,
 	ensureRoomSession,
@@ -121,13 +122,14 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 // their assistant saw, and would show such a turn the text third parties wrote in every other
 // activity; the tools by which they choose what their assistant listens to, which a third party's
 // text never changes; the settings of their morning brief, which only they move, pause or stop;
-// and their brief at once, which only they ask for. A suggestion's turn is offered its own two
-// tools alone.
+// their brief at once, which only they ask for; and their quiet hours, which only they set. A
+// suggestion's turn is offered its own two tools alone.
 const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 	LISTENING_JOURNAL_TOOL,
 	...LISTENING_TOOLS,
 	BRIEF_SETTINGS_TOOL,
-	BRIEF_NOW_TOOL
+	BRIEF_NOW_TOOL,
+	QUIET_HOURS_TOOL
 ];
 
 // The tools alone that a turn a meeting's change woke is given, by the type of that change and
@@ -388,6 +390,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				domains: () => contracts.domainDescriptions
 			}),
 			makeBriefSettingsTool({ clock, timeZone: config.timeZone }),
+			makeQuietHoursTool({
+				timeZone: config.timeZone,
+				locale: config.locale,
+				defaults: config.quietHours
+			}),
 			// The brief its owner asks for exists while the briefs are on alone, written as the
 			// scheduler's are, once the service is made
 			...(config.brief.enabled

@@ -2,6 +2,8 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import type { Config } from '../config.js';
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
+import { isQuietAt, quietHoursOf } from '../quiet/hours.js';
+import { findOwnerSettings } from '../settings/repository.js';
 import { dateIn, nextMidnightIn, type Clock } from './clock.js';
 import type { TurnOrigin } from './tools.js';
 
@@ -44,8 +46,9 @@ export interface AdmissionSnapshot {
 export interface Admission {
 	admit(principalId: string, origin: SpendingOrigin): Promise<AdmissionDecision>;
 	recordUsage(principalId: string, tokens: number, origin: SpendingOrigin): Promise<void>;
-	// True the first time it is asked on the owner's day, in the transaction given under their
-	// principal: their assistant tells them once a day that it spent its share
+	// True the first time it is asked on the owner's day out of their quiet hours, in the
+	// transaction given under their principal: their assistant tells them once a day that it spent
+	// its share
 	shareNoticeDue(tx: Tx, principalId: string): Promise<boolean>;
 	snapshot(): AdmissionSnapshot;
 }
@@ -222,6 +225,10 @@ export function makeAdmission(deps: AdmissionDeps): Admission {
 			);
 		},
 		async shareNoticeDue(tx, principalId) {
+			// Never during the owner's quiet hours: the first refusal past them tells them
+			const { timeZone, quiet } = await findOwnerSettings(tx, principalId);
+			const hours = quietHoursOf(quiet, config.quietHours);
+			if (isQuietAt(hours, timeZone ?? config.timeZone, clock.now())) return false;
 			const rows = await tx.sql`
 				insert into usage_daily (owner, day, share_noticed) values (${principalId}, ${today()}, true)
 				on conflict (owner, day) do update set share_noticed = true
