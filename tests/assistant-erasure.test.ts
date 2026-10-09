@@ -44,7 +44,7 @@ const PROPOSAL = {
 	content: '# Monday plan\nTasks first.'
 };
 
-// The zone a read of my calendar returned, which the harness keeps for me rather than for my
+// The zone a read of my calendar returned, which the harness keeps for me until I delete my
 // assistant
 const ZONE = 'Asia/Tokyo';
 
@@ -388,11 +388,18 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		await r.client.waitForMessage(irisRoom, r.assistantId, (t) => t === UNVERIFIED_REPORT);
 	});
 
-	it('keeps the identity it holds of me, and the zone of my calendar', async () => {
+	it("keeps the identity it holds of me, and erases the zone of my calendar: the turns of my new assistant state the present in the deployment's", async () => {
 		expect((await r.h.api.get(ALICE, '/v1/assistants/me/owner-identity')).body['pinned']).toEqual(
 			pinned
 		);
-		expect(await myZone()).toBe(ZONE);
+		expect(await myZone()).toBeNull();
+		const turns = r.h.apisix.llm.calls.length;
+		await ask(irisRoom, 'What time is it?', (t) => t === 'Heard: What time is it?');
+		const prompt =
+			r.h.apisix.llm.calls.slice(turns).find((c) => lastUser(c.request) === 'What time is it?')
+				?.request.messages[0]?.content ?? '';
+		expect(prompt).toContain(`time zone ${r.h.config.timeZone}.`);
+		expect(prompt).not.toContain(ZONE);
 	});
 
 	it('wakes my new assistant for no event it already told me of, however often the event comes again', async () => {
