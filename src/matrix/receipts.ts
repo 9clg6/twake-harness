@@ -1,10 +1,12 @@
 import { isRecord } from './json.js';
 
-// The read receipts that tell a user read a room, public and private
-const READ_RECEIPTS = ['m.read', 'm.read.private'];
+// The read receipt that tells a user read a room. A private one (`m.read.private`) is theirs alone:
+// the Matrix specification keeps it from an application service, as Synapse does from 1.162 on, so
+// it counts nowhere, even where an older Synapse still pushes it.
+const READ_RECEIPT = 'm.read';
 
-// The room of a read receipt Synapse pushes, and the users it says read there, public or private,
-// whatever event each one read: null for any other ephemeral event
+// The room of a read receipt Synapse pushes, and the users it says read there publicly, whatever
+// event each one read: null for any other ephemeral event
 export function readersOf(
 	event: Record<string, unknown>
 ): { readonly roomId: string; readonly userIds: ReadonlySet<string> } | null {
@@ -16,10 +18,8 @@ export function readersOf(
 	const userIds = new Set<string>();
 	for (const receipts of Object.values(content)) {
 		if (!isRecord(receipts)) continue;
-		for (const type of READ_RECEIPTS) {
-			const users = receipts[type];
-			if (isRecord(users)) for (const userId of Object.keys(users)) userIds.add(userId);
-		}
+		const users = receipts[READ_RECEIPT];
+		if (isRecord(users)) for (const userId of Object.keys(users)) userIds.add(userId);
 	}
 	return { roomId, userIds };
 }
