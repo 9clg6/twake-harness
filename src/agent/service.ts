@@ -31,6 +31,7 @@ import {
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
+import { MOVED_EVENT_TYPE, type MeetingScope } from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
@@ -52,6 +53,7 @@ import {
 	makeConsentsWithdrawTool,
 	makeToolRegistry,
 	memoryTool,
+	onlyTools,
 	runTool,
 	toolCallStatus,
 	sessionSearchTool,
@@ -101,6 +103,19 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 	LISTENING_JOURNAL_TOOL,
 	...LISTENING_TOOLS
 ];
+
+// The tools alone that a turn a meeting's change woke is given, by the type of that change and
+// what it is about, among those its owner's rights and the rule above leave it: for a move of a
+// meeting or of a whole series, the check of its new slot and the answers to it; for a move of one
+// occurrence of a series, which the answers cannot reach apart from the rest of it, none. The turn
+// their yes resumes is told of no event, and is not held to them.
+const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
+const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
+	string,
+	Readonly<Record<MeetingScope, readonly string[]>>
+> = new Map([
+	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }]
+]);
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -355,7 +370,11 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
 		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
-		const availability = messages.events.availability(check.data);
+		// Only the calendar listener gives an event that carries an invitation, and so a move's type
+		const availability =
+			event.type === MOVED_EVENT_TYPE
+				? messages.events.movedAvailability(check.data, invitation.scope ?? 'event')
+				: messages.events.availability(check.data);
 		return {
 			message: input.message === null ? availability : `${input.message}\n${availability}`,
 			question
@@ -687,9 +706,16 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const moment = describeMoment(clock.now(), timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
-			const turnTools = comesFromOthers(origin)
+			const offered = comesFromOthers(origin)
 				? withoutTools(tools, TOOLS_HIDDEN_FROM_EVENT_TURNS)
 				: tools;
+			const meetingTools =
+				origin === 'event' && carriesInvitation(input.event)
+					? (TOOLS_OF_MEETING_CHANGES.get(input.event.type)?.[
+							input.event.invitation.scope ?? 'event'
+						] ?? null)
+					: null;
+			const turnTools = meetingTools === null ? offered : onlyTools(offered, meetingTools);
 			// The turn an activity woke, rather than the one its owner's yes resumed from it, may say
 			// nothing
 			const woken = origin === 'event' && approved === null;
