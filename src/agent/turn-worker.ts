@@ -325,6 +325,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			...(result.kind === 'ok' && result.request !== undefined
 				? { html: requestHtml(result.request) }
 				: {}),
+			// The brief the owner asked for, as the harness laid it out, marked as the brief of its date
+			...(result.kind === 'ok' && result.brief !== undefined
+				? { html: result.brief.html, brief: { date: result.brief.date } }
+				: {}),
 			...(result.kind === 'ok' && result.atLimit === true ? { atLimit: true } : {})
 		};
 	}

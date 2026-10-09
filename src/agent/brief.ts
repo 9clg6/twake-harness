@@ -28,6 +28,7 @@ import {
 	takeBriefQuestion,
 	type BriefDomain
 } from '../briefs/questions.js';
+import { BRIEF_NOW_TOOL } from '../briefs/now.js';
 import { briefId } from '../briefs/schedule.js';
 import { fetchBriefSettings } from '../briefs/settings.js';
 import {
@@ -64,16 +65,23 @@ import type { Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import {
 	ensureRoomSession,
+	findSession,
+	holdSession,
 	saveSessionMessages,
 	type SessionRecord
 } from '../sessions/repository.js';
-import { findBriefMailsReadAt, saveBriefMailsReadAt } from '../settings/repository.js';
+import {
+	findBriefMailsReadAt,
+	findOwnerSettings,
+	saveBriefMailsReadAt
+} from '../settings/repository.js';
 import { listenUnlessChosen, listListened } from '../sources/repository.js';
 import { publishedUnder } from '../sources/sources.js';
 import { eraseHeldActivities } from '../wakeups/held.js';
+import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
-import { describeMoment, isoIn, timeOfDay, type Clock, type TimeZone } from './clock.js';
+import { dateIn, describeMoment, isoIn, timeOfDay, type Clock, type TimeZone } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runTool, type ToolContext, type ToolOutcome, type ToolRegistry } from './tools.js';
@@ -302,14 +310,16 @@ export interface BriefResumeInput {
 
 export type BriefResult =
 	// The brief of its date, as the model wrote it, or as the harness lays it out when the model
-	// wrote nothing, and its HTML, which the harness lays out either way. Refused by admission once
-	// the owner's day, or the share of it their assistant spends on its own, was spent, the harness
-	// lays it out with no model call, and says why.
+	// wrote nothing, its HTML, which the harness lays out either way, and what its numbers, its
+	// tasks' keys and its emails name, when it shows any. Refused by admission once the owner's day,
+	// or the share of it their assistant spends on its own, was spent, the harness lays it out with
+	// no model call, and says why.
 	| {
 			readonly kind: 'ok';
 			readonly text: string;
 			readonly html: string;
 			readonly date: string;
+			readonly references: References | null;
 			readonly refusedFor?: SpentReason;
 	  }
 	// The broker refused the day's read for want of the owner's permission, or the owner's first
@@ -353,11 +363,14 @@ export interface BriefRunner {
 	// The brief that gave way to the question about the owner's permission, which their yes resumes:
 	// that day's brief, whenever they said it
 	resume(input: BriefResumeInput): Promise<BriefResult>;
+	// The brief the owner asks for in their turn, which ends on it: their turn holds its admission
+	// and their gate already
+	inTurn(context: ToolContext): Promise<BriefResult>;
 }
 
-// A brief being written: its owner, their conversation in the room and their language, what their
-// assistant is told their day starts with, the date it is of, and the spent day admission refused
-// it for, when it did: the harness lays it out then, with no model call
+// A brief being written: its owner, their conversation and their language, what their assistant is
+// told their day starts with, or that they ask for their brief, the date it is of, and the spent day
+// admission refused it for, when it did: the harness lays it out then, with no model call
 interface Writing {
 	readonly principal: Principal;
 	readonly session: SessionRecord;
@@ -367,6 +380,12 @@ interface Writing {
 	readonly assistantName: string | undefined;
 	readonly log: FastifyBaseLogger;
 	readonly refusedFor: SpentReason | null;
+	// Whether the owner asked for it in their turn, which keeps it in their conversation as its
+	// call and its answer, in place of the brief itself
+	readonly inTurn: boolean;
+	// Whether it tells the rest of their day, as the brief they asked for does, whether in their turn
+	// or on their yes to the question it gave way to: their meetings not over yet
+	readonly restOfDay: boolean;
 }
 
 // The wall time of a time the calendar gave in its day's zone, with that zone's offset: 09:00
@@ -644,6 +663,16 @@ function dayOf(list: Read<z.infer<typeof listSchema>>): Read<Day> {
 	};
 }
 
+// The rest of the owner's day at that instant, which the brief they ask for tells: its meetings not
+// over yet, the one under way included
+function restOf(day: Read<Day>, now: Date): Read<Day> {
+	if (!day.ok) return day;
+	const meetings = day.value.meetings.filter(
+		(meeting) => meeting.all_day || Date.parse(meeting.end) > now.getTime()
+	);
+	return { ok: true, value: { ...day.value, meetings } };
+}
+
 // The invitations that wait for the owner's answer, from the occurrences the calendar listed in the
 // order they start: each series once, by its first occurrence over the days read, numbered from 1
 function invitationsOf(events: readonly Meeting[], truncated: boolean): Invitations {
@@ -692,11 +721,25 @@ function referencesOf(sections: Sections, untold: Untold): References | null {
 	};
 }
 
-// A message of the conversation without the references an earlier brief left in it
+// A message of the conversation without the references an earlier brief left in it: after the line
+// that told it, or in the result of the call that posted the one its owner asked for
 function withoutReferences(message: LlmMessage): LlmMessage {
+	if (message.role === 'tool' && message.name === BRIEF_NOW_TOOL && message.content !== null) {
+		const result: unknown = JSON.parse(message.content);
+		return typeof result === 'object' && result !== null && 'references' in result
+			? { ...message, content: JSON.stringify({ ...result, references: undefined }) }
+			: message;
+	}
 	return message.role === 'user' && message.content !== null
 		? { ...message, content: message.content.replace(KEPT_REFERENCES, '') }
 		: message;
+}
+
+// The conversation of the turn that ended on the brief its owner asked for: what came before the
+// turn, its first messages, without the references of the earlier briefs, which that brief replaces
+// as a newer brief does
+export function withBriefAskedFor(messages: readonly LlmMessage[], earlier: number): LlmMessage[] {
+	return messages.map((message, index) => (index < earlier ? withoutReferences(message) : message));
 }
 
 // Each section of the brief with its read, in the order the brief tells them
@@ -970,6 +1013,30 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		consentMetrics.expired(closed);
 	}
 
+	// The conversation keeps what the assistant was told and its answer after the messages given, as
+	// it keeps a turn's, in the transaction of what goes with them; the turn the owner asked for the
+	// brief in keeps them itself, as its call and its answer, which the brief only holds the
+	// conversation for. False once the conversation is gone.
+	async function keep(
+		tx: Tx,
+		writing: Writing,
+		told: string,
+		answer: string,
+		earlier: readonly LlmMessage[] = writing.session.messages
+	): Promise<boolean> {
+		if (writing.inTurn) return holdSession(tx, writing.session.id);
+		return saveSessionMessages(tx, writing.session.id, [
+			...earlier,
+			{ role: 'user', content: told },
+			{ role: 'assistant', content: answer }
+		]);
+	}
+
+	// The day as the brief tells it: the rest of it, for the brief the owner asked for
+	function toldDay(writing: Writing, day: Read<Day>): Read<Day> {
+		return writing.restOfDay ? restOf(day, clock.now()) : day;
+	}
+
 	// The brief gives way to the harness's question about the owner's permission, which the
 	// conversation keeps as the assistant's answer, as it keeps a turn's, and waits for their answer
 	// to it from then on, in the same transaction as what else ends with it
@@ -978,13 +1045,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		question: DelegationQuestion,
 		alongside?: (tx: Tx) => Promise<unknown>
 	): Promise<BriefResult> {
-		const { principal, session, date } = writing;
+		const { principal, date } = writing;
 		const saved = await withPrincipal(db, principal, async (tx) => {
-			const kept = await saveSessionMessages(tx, session.id, [
-				...session.messages,
-				{ role: 'user', content: writing.told },
-				{ role: 'assistant', content: question.text }
-			]);
+			const kept = await keep(tx, writing, writing.told, question.text);
 			if (kept) {
 				await alongside?.(tx);
 				await keepBriefWait(tx, principal.id, { date, pendingCallId: question.pendingCallId });
@@ -1050,11 +1113,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				.map((domain) => line(messages.brief.withdrawn(domain)));
 			const brief = [laid, ...lines];
 			const text = brief.map((part) => part.text).join('\n\n');
-			const stored = await saveSessionMessages(tx, session.id, [
-				...session.messages.map(withoutReferences),
-				{ role: 'user', content: kept },
-				{ role: 'assistant', content: text }
-			]);
+			const stored = await keep(tx, writing, kept, text, session.messages.map(withoutReferences));
 			if (!stored) return null;
 			// The owner's next brief reads their mail from the instant this one read it
 			if (mailsReadAt !== null) await saveBriefMailsReadAt(tx, principal.id, mailsReadAt);
@@ -1071,7 +1130,11 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		});
 		if (saved === null) return { kind: 'missing' };
 		for (const closed of saved.closed) closedUnanswered(principal.id, closed, log);
-		if (model.tokens > 0) await admission.recordUsage(principal.id, model.tokens, 'brief');
+		// The brief the owner asked for in their turn spends their day as their words do, any other the
+		// share of it their assistant spends on its own
+		if (model.tokens > 0) {
+			await admission.recordUsage(principal.id, model.tokens, writing.inTurn ? 'owner' : 'brief');
+		}
 		log.info(
 			{
 				by: model.text === null ? 'template' : 'model',
@@ -1092,6 +1155,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			text: saved.text,
 			html: saved.html,
 			date,
+			references,
 			...(refusedFor === null ? {} : { refusedFor })
 		};
 	}
@@ -1120,16 +1184,12 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			arguments: { domains: missing },
 			previewDigest: null,
 			correlationId,
-			origin: 'event',
+			origin: writing.inTurn ? 'owner' : 'event',
 			sessionId: session.id,
 			request: text
 		};
 		const pendingCallId = await withPrincipal(db, principal, async (tx) => {
-			const kept = await saveSessionMessages(tx, session.id, [
-				...session.messages,
-				{ role: 'user', content: writing.told },
-				{ role: 'assistant', content: text }
-			]);
+			const kept = await keep(tx, writing, writing.told, text);
 			if (!kept) return null;
 			const id = await insertPendingCall(tx, call);
 			await keepBriefQuestion(tx, principal.id, { date, pendingCallId: id, asked: asked + 1 });
@@ -1145,14 +1205,10 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	// brief stops until they resume it, and says so, which the conversation keeps as the assistant's
 	// answer. The question closes as expired.
 	async function pause(writing: Writing): Promise<BriefResult> {
-		const { principal, session, locale, log } = writing;
+		const { principal, locale, log } = writing;
 		const text = getMessages(locale).brief.paused;
 		const saved = await withPrincipal(db, principal, async (tx) => {
-			const kept = await saveSessionMessages(tx, session.id, [
-				...session.messages,
-				{ role: 'user', content: writing.told },
-				{ role: 'assistant', content: text }
-			]);
+			const kept = await keep(tx, writing, writing.told, text);
 			return kept ? { closed: await stopBrief(tx, principal.id) } : null;
 		});
 		if (saved === null) return { kind: 'missing' };
@@ -1171,8 +1227,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	// question about their permission while no brief waits for their answer to it, which the brief
 	// gives way to, in the same transaction as what goes with it; the brief that waits says nothing
 	// until the day's read works again, whatever keeps it from working. Then the brief's other reads,
-	// and the brief written from them. Without the owner's calendar, which their assistant does not
-	// listen to, the brief reads no day, and waits for none.
+	// and the brief written from them: the brief the owner asks for tells the rest of their day.
+	// Without the owner's calendar, which their assistant does not listen to, the brief reads no day,
+	// and waits for none.
 	async function goOut(
 		writing: Writing,
 		context: ToolContext,
@@ -1185,7 +1242,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		if (!listened.includes('calendar')) {
 			return writeBrief(writing, await readSections(context, date, NOT_LISTENED, listened), ending);
 		}
-		const calendar = await readDay(context, date, waiting === null);
+		const calendar = toldDay(writing, await readDay(context, date, waiting === null));
 		if (!calendar.ok && calendar.question !== undefined) {
 			logSkipped('calendar', calendar, log);
 			return giveWay(writing, calendar.question, alongside);
@@ -1228,7 +1285,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			date,
 			assistantName: input.assistantName,
 			log,
-			refusedFor
+			refusedFor,
+			inTurn: false,
+			restOfDay: false
 		};
 		if (missing.length > 0) {
 			if (question?.date === date) {
@@ -1300,15 +1359,19 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		const { actions, locale, session, approved, date } = opened;
 		const log = input.log.child({ session: session.id, principal: principal.id });
 		const id = briefId(principal.id, date);
+		// A question the owner's turn asked was the brief they asked for
+		const restOfDay = approved.origin === 'owner';
 		const writing: Writing = {
 			principal,
 			session,
 			locale,
-			told: getMessages(locale).brief.intro(id),
+			told: restOfDay ? getMessages(locale).brief.asked(id) : getMessages(locale).brief.intro(id),
 			date,
 			assistantName: input.assistantName,
 			log,
-			refusedFor
+			refusedFor,
+			inTurn: false,
+			restOfDay
 		};
 		const context: ToolContext = {
 			principalId: principal.id,
@@ -1341,15 +1404,18 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		// run, and the brief goes out all the same
 		const listened = await listenedBy(principal.id);
 		const calendar: Read<Day> = listened.includes('calendar')
-			? dayOf(
-					readOf(
-						await deps.runFrozenCall(
-							approved,
-							pendingCallId,
-							{ ...context, origin: approved.origin, unattended: true, asksDelegation: true },
-							log
-						),
-						listSchema
+			? toldDay(
+					writing,
+					dayOf(
+						readOf(
+							await deps.runFrozenCall(
+								approved,
+								pendingCallId,
+								{ ...context, origin: approved.origin, unattended: true, asksDelegation: true },
+								log
+							),
+							listSchema
+						)
 					)
 				)
 			: NOT_LISTENED;
@@ -1364,6 +1430,55 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			await markReplayed(tx, pendingCallId);
 			return endBriefWait(tx, principal.id);
 		});
+	}
+
+	// The brief the owner asks for in their turn, which holds its admission and their gate already:
+	// the brief of the date it is on their wall clock, whether their brief is due that day, stopped or
+	// paused, which takes the wake-up of that date, so that no pass sends another that day. What their
+	// brief waits for an answer to closes as expired, to be asked again: the question of their first
+	// brief, while their reads are not settled, or the question about their permission. Then it goes
+	// out as any brief, telling the rest of their day, and their turn keeps it as its call and its
+	// answer.
+	async function runInTurn(context: ToolContext): Promise<BriefResult> {
+		const principal: Principal = { id: context.principalId };
+		const { sessionId, log } = context;
+		if (sessionId === undefined) return { kind: 'missing' };
+		const opened = await withPrincipal(db, principal, async (tx) => {
+			const session = await findSession(tx, sessionId);
+			if (session === null) return null;
+			const assistant = await findAssistant(tx, principal.id);
+			const { timeZone } = await findOwnerSettings(tx, principal.id);
+			const date = dateIn(clock.now(), timeZone ?? config.timeZone);
+			await takeBriefWakeup(tx, principal.id, briefId(principal.id, date));
+			const { settled } = await findBriefReads(tx, principal.id);
+			const missing = settled ? [] : await missingReads(tx, principal.id);
+			const asked = (await findBriefQuestion(tx, principal.id))?.asked ?? 0;
+			const closed = [
+				await endBriefQuestion(tx, principal.id),
+				await endBriefWait(tx, principal.id)
+			];
+			return { session, assistant, date, missing, asked, closed };
+		});
+		if (opened === null) return { kind: 'missing' };
+		const { session, assistant, date, missing, asked, closed } = opened;
+		for (const request of closed) closedUnanswered(principal.id, request, log);
+		const locale = localeOf(assistant, config.locale);
+		const id = briefId(principal.id, date);
+		log.info({ date }, 'brief asked for');
+		const writing: Writing = {
+			principal,
+			session,
+			locale,
+			told: getMessages(locale).brief.asked(id),
+			date,
+			assistantName: assistant?.name,
+			log,
+			refusedFor: null,
+			inTurn: true,
+			restOfDay: true
+		};
+		if (missing.length > 0) return ask(writing, context.correlationId ?? id, missing, asked);
+		return goOut(writing, context, null, () => Promise.resolve(null));
 	}
 
 	// Admitted before anything else runs, as a turn is; the slot is held until the brief is written.
@@ -1388,6 +1503,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	return {
 		run: (input) => admitted(input.principal.id, (refusedFor) => runAdmitted(input, refusedFor)),
 		resume: (input) =>
-			admitted(input.principal.id, (refusedFor) => resumeAdmitted(input, refusedFor))
+			admitted(input.principal.id, (refusedFor) => resumeAdmitted(input, refusedFor)),
+		inTurn: runInTurn
 	};
 }
