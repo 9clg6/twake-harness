@@ -8,16 +8,23 @@ import { BRIEF_EVENT_TYPE } from '../src/wakeups/event-types.js';
 import { wake, type Wakeup } from '../src/wakeups/wake.js';
 import { startWorkerRole } from '../src/worker/role.js';
 import { lastUser, logSink, until } from './helpers/activity.js';
+import {
+	BRIEF_CATALOG,
+	dataOf,
+	emailOf,
+	INBOX,
+	LIST_EMAILS,
+	LIST_EVENTS,
+	LIST_MAILBOXES,
+	LIST_TASKS,
+	MAILBOXES,
+	referencesIn
+} from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
-import {
-	CALENDAR_CATALOG,
-	type ChatRequest,
-	type ContractCall,
-	type ContractReply
-} from './helpers/fake-apisix.js';
+import type { ChatRequest, ContractCall, ContractReply } from './helpers/fake-apisix.js';
 
 const ALICE = 'alice@test.local';
 // Where the content of a brief tells Alice's client that it is one, and of which day
@@ -26,8 +33,6 @@ const BRIEF_CONTENT_KEY = 'app.twake.assistant.brief';
 const QUESTION_CONTENT_KEY = 'app.twake.assistant.question';
 // Monday 12 October 2026 at eight in Paris
 const MONDAY_AT_EIGHT = '2026-10-12T06:00:00Z';
-const LIST_EVENTS = '/contracts/v1/calendar/events';
-const LIST_TASKS = '/contracts/v1/tasks/mine';
 // What the model writes as the brief
 const WRITTEN = 'Ce matin : le stand-up à 9 h, que chevauche la revue de design.';
 // The wake-ups Alice may have in an hour, as the harness counts them, on its database's clock: the
@@ -96,42 +101,6 @@ function dayOf(date: string, lunch = 'Déjeuner'): Record<string, unknown> {
 		truncated: false
 	};
 }
-
-// Her calendar's contracts with the list of the invitations that wait for her answer alone, and the
-// list of her open tasks by when they are due, as the contracts service publishes them
-const BRIEF_CATALOG = {
-	...CALENDAR_CATALOG,
-	paths: {
-		...CALENDAR_CATALOG.paths,
-		[LIST_EVENTS]: {
-			get: {
-				...CALENDAR_CATALOG.paths[LIST_EVENTS].get,
-				parameters: [
-					...CALENDAR_CATALOG.paths[LIST_EVENTS].get.parameters,
-					{ name: 'needs_action', in: 'query', required: false, schema: { type: 'boolean' } }
-				]
-			}
-		},
-		[LIST_TASKS]: {
-			get: {
-				operationId: 'list_my_tasks',
-				summary: "List the user's open tasks in Twake Tasks",
-				tags: ['tasks.task.read.v1'],
-				parameters: [
-					{ name: 'zone', in: 'query', required: true, schema: { type: 'string' } },
-					{
-						name: 'due',
-						in: 'query',
-						required: false,
-						schema: { type: 'string', enum: ['overdue', 'today', 'upcoming', 'all'] }
-					},
-					{ name: 'days', in: 'query', required: false, schema: { type: 'integer' } },
-					{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }
-				]
-			}
-		}
-	}
-};
 
 // The day that comes some days after a date, both written YYYY-MM-DD
 function plusDays(date: string, days: number): string {
@@ -259,50 +228,52 @@ function tasksIn(list: Record<string, unknown>): Record<string, unknown>[] {
 	return list['tasks'] as Record<string, unknown>[];
 }
 
+// What her inbox holds unread: a mail from Bob, who organizes her stand-up, that asks her for the
+// quarter's figures, and a newsletter, sent in bulk
+const BOB_ASKS = emailOf({
+	id: 'mail-bob',
+	at: '2026-10-12T05:30:00Z',
+	from: 'bob@test.local',
+	name: 'Bob',
+	subject: 'Chiffres du trimestre',
+	preview: 'Peux-tu m’envoyer les chiffres avant le stand-up ?',
+	toMe: true
+});
+const NEWSLETTER = emailOf({
+	id: 'mail-newsletter',
+	at: '2026-10-12T05:00:00Z',
+	from: 'news@twake.example',
+	name: 'Twake',
+	subject: 'Les nouveautés du mois',
+	bulk: true
+});
+
 // What her applications' contracts answer the brief: her day, from the date it is asked for, the
-// invitations that wait for her answer, and her tasks by when they are due, today being the date the
-// clock says in the zone of the call, unless a test gives others
+// invitations that wait for her answer, her tasks by when they are due, today being the date the
+// clock says in the zone of the call, and the unread mail of her inbox, none unless a test gives
+// others
 function answering(
 	clock: Clock,
 	answers: {
 		readonly day?: (date: string) => Record<string, unknown>;
 		readonly pending?: (date: string) => Record<string, unknown>;
 		readonly tasks?: (due: string, today: string) => Record<string, unknown>;
+		readonly mails?: readonly Record<string, unknown>[];
 	} = {}
 ): (call: ContractCall) => ContractReply {
-	const { day = (date) => dayOf(date), pending = pendingOf, tasks = tasksOf } = answers;
+	const { day = (date) => dayOf(date), pending = pendingOf, tasks = tasksOf, mails = [] } = answers;
 	return (call) => {
 		if (call.path === LIST_TASKS) {
 			const today = dateIn(clock.now(), String(call.query['zone']));
 			return { status: 200, body: tasks(String(call.query['due']), today) };
 		}
+		if (call.path === LIST_MAILBOXES) return { status: 200, body: MAILBOXES };
+		if (call.path === LIST_EMAILS)
+			return { status: 200, body: { emails: mails, next_cursor: null } };
 		if (call.path !== LIST_EVENTS) return { status: 404, body: {} };
 		const from = String(call.query['from']);
 		return { status: 200, body: call.query['needs_action'] === 'true' ? pending(from) : day(from) };
 	};
-}
-
-// What the model is handed: one line of JSON between the fences of a nonce
-const FENCED = /<<<brief-data ([0-9a-f]{12})\n(.+)\nbrief-data \1>>>/;
-
-// What the conversation keeps of a brief for the next turns, as data, the same way
-const REFERENCES = /<<<brief-references ([0-9a-f]{12})\n(.+)\nbrief-references \1>>>/g;
-
-// The references of briefs a model call reads in the conversation
-function referencesIn(request: ChatRequest | undefined): unknown[] {
-	return (request?.messages ?? []).flatMap((message) =>
-		message.role === 'user'
-			? [...String(message.content).matchAll(REFERENCES)].map(
-					(match) => JSON.parse(match[2] ?? '') as unknown
-				)
-			: []
-	);
-}
-
-function dataOf(told: string): unknown {
-	const line = FENCED.exec(told)?.[2];
-	if (line === undefined) throw new Error(`no brief data in ${told}`);
-	return JSON.parse(line) as unknown;
 }
 
 // The date a brief says it is of, as Alice's client reads it
@@ -407,8 +378,9 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 	}, 240_000);
 
 	beforeEach(async () => {
-		await grantConsent(r.h.db, ALICE, 'calendar', 'read');
-		await grantConsent(r.h.db, ALICE, 'tasks', 'read');
+		for (const domain of ['calendar', 'mail', 'tasks']) {
+			await grantConsent(r.h.db, ALICE, domain, 'read');
+		}
 		r.h.apisix.contracts.handler = answering(clock);
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')
@@ -420,22 +392,30 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		if (r !== undefined) await r.close();
 	});
 
-	it('on a Monday at eight in my zone, I get one message marked as the brief, written by the model from the day’s read of my calendar, which notifies me and stays in our conversation', async () => {
+	it('on a Monday at eight in my zone, I get one message marked as the brief, written by the model from the day’s read of my applications, which notifies me and stays in our conversation', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const reads = r.h.apisix.contracts.calls.length;
+		r.h.apisix.contracts.handler = answering(clock, { mails: [BOB_ASKS, NEWSLETTER] });
 		await pass(MONDAY_AT_EIGHT);
 		const brief = await nextBrief(seen);
 		expect(brief.body).toBe(WRITTEN);
 		expect(brief.content['msgtype']).toBe('m.text');
 		expect(brief.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-10-12' });
-		// The day's read, the read of the invitations that wait for her answer over seven days, then
-		// the reads of her tasks due before today and today, in the zone kept for her, for Alice, under
-		// the brief's own correlation id
+		// The day's read, the read of the invitations that wait for her answer over seven days, the
+		// read of her mailboxes and of her inbox's unread mail since the same time on Friday, her first
+		// brief's, then the reads of her tasks due before today and today, in the zone kept for her,
+		// for Alice, under the brief's own correlation id
 		const read = r.h.apisix.contracts.calls.slice(reads);
 		expect(read.map((call) => [call.method, call.path, call.query])).toEqual([
 			['GET', LIST_EVENTS, { from: '2026-10-12', days: '1', limit: '20' }],
 			['GET', LIST_EVENTS, { from: '2026-10-12', days: '7', limit: '100', needs_action: 'true' }],
+			['GET', LIST_MAILBOXES, {}],
+			[
+				'GET',
+				LIST_EMAILS,
+				{ mailbox: INBOX, unread: 'true', after: '2026-10-09T08:00:00+02:00', limit: '50' }
+			],
 			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'overdue', limit: '30' }],
 			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'today', limit: '30' }]
 		]);
@@ -446,7 +426,8 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		// One model call, with no tools and no history: what the model is told, in her language, then
 		// the day's meetings as data, their conflicts included, and what people wrote under untrusted;
 		// then the invitations that wait for her answer, numbered in the order they start, a series
-		// once, from its first occurrence; then her tasks, late ones first
+		// once, from its first occurrence; then her unread mail but the newsletter, with the people of
+		// her day's meetings; then her tasks, late ones first
 		const asked = briefCalls().slice(calls);
 		expect(asked).toHaveLength(1);
 		const request = asked[0];
@@ -519,6 +500,13 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 					{ number: 3, series: false, ...seminar, start_in_words: 'vendredi 16 octobre 2026' }
 				],
 				truncated: false
+			},
+			mails: {
+				since: '2026-10-09T08:00:00+02:00',
+				since_in_words: 'vendredi 9 octobre 2026, 08:00',
+				unread: [{ ...BOB_ASKS, received_at_in_words: monday('07:30') }],
+				truncated: false,
+				participants: ['bob@test.local', 'carol@test.local']
 			},
 			tasks: {
 				overdue: [{ ...late, due_date_in_words: 'vendredi 9 octobre 2026' }],
@@ -821,9 +809,17 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		const told = lastUser(briefCalls().slice(calls).at(0));
 		const [late] = tasksIn(tasksOf('overdue', '2026-10-22'));
 		const [due] = tasksIn(tasksOf('today', '2026-10-22'));
+		// Her mail is read all the same, with nobody known of her day's meetings
 		expect(dataOf(told)).toEqual({
 			date: '2026-10-22',
 			date_in_words: 'jeudi 22 octobre 2026',
+			mails: {
+				since: expect.any(String),
+				since_in_words: expect.any(String),
+				unread: [],
+				truncated: false,
+				participants: []
+			},
 			tasks: {
 				overdue: [{ ...late, due_date_in_words: 'lundi 19 octobre 2026' }],
 				today: [{ ...due, due_date_in_words: 'jeudi 22 octobre 2026' }],

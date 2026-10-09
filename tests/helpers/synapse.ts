@@ -126,12 +126,14 @@ async function generateConfig(dir: string): Promise<string> {
 		() => false
 	);
 	if (!generated) {
-		await new GenericContainer(IMAGE)
+		const generator: StartedTestContainer = await new GenericContainer(IMAGE)
 			.withEnvironment({ SYNAPSE_SERVER_NAME, SYNAPSE_REPORT_STATS: 'no', ...hostIdentity() })
 			.withBindMounts([{ source: dir, target: '/data' }])
 			.withCommand(['generate'])
 			.withWaitStrategy(Wait.forOneShotStartup())
 			.start();
+		// The container exits once it has written them, and stopping it is what removes it
+		await generator.stop();
 	}
 	return dir;
 }

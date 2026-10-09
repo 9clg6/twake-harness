@@ -3,7 +3,19 @@ import { z } from 'zod';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
+import {
+	byImportance,
+	emailListSchema,
+	mailboxListSchema,
+	mailsSince,
+	MAX_MAILS,
+	participantsOf,
+	type Email,
+	type Mails,
+	type Sender
+} from '../briefs/mails.js';
 import { briefId } from '../briefs/schedule.js';
+import { fetchBriefSettings } from '../briefs/settings.js';
 import { endBriefWait, findBriefWait, keepBriefWait } from '../briefs/waits.js';
 import type { Config } from '../config.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
@@ -26,10 +38,10 @@ import {
 	saveSessionMessages,
 	type SessionRecord
 } from '../sessions/repository.js';
-import { fetchOwnerTimeZone } from '../settings/time-zone.js';
+import { findBriefMailsReadAt, saveBriefMailsReadAt } from '../settings/repository.js';
 import type { Admission, Refusal } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
-import { describeMoment, type Clock, type TimeZone } from './clock.js';
+import { describeMoment, isoIn, type Clock, type TimeZone } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runTool, type ToolContext, type ToolOutcome, type ToolRegistry } from './tools.js';
@@ -47,6 +59,10 @@ const INVITATION_DAYS = 7;
 const MAX_PENDING_OCCURRENCES = 100;
 const MAX_INVITATIONS = 20;
 
+// Mail's operations the brief finds the owner's inbox with, then reads their unread emails of
+const LIST_MAILBOXES = 'list_mailboxes';
+const LIST_EMAILS = 'list_emails';
+
 // The tasks' operation the brief reads the owner's late tasks and those of the day with, and the
 // most tasks the model is handed, late ones first
 const LIST_TASKS = 'list_my_tasks';
@@ -55,8 +71,9 @@ const MAX_TASKS = 30;
 // What the brief's reads hand the model, as the invitation check's reads do
 const BRIEF_DATA = 'brief-data';
 
-// What the conversation keeps of a brief for the owner's next turns, as data: what its numbers and
-// its tasks' keys name, until a newer brief replaces it. The line that introduces it goes with it.
+// What the conversation keeps of a brief for the owner's next turns, as data: what its numbers, its
+// tasks' keys and its emails name, until a newer brief replaces it. The line that introduces it goes
+// with it.
 const BRIEF_REFERENCES = 'brief-references';
 const KEPT_REFERENCES = new RegExp(
 	`\\n[^\\n]*\\n<<<${BRIEF_REFERENCES} ([0-9a-f]{12})\\n[^\\n]*\\n${BRIEF_REFERENCES} \\1>>>`,
@@ -115,13 +132,18 @@ interface Invitations {
 	readonly truncated: boolean;
 }
 
-// What a brief's numbers and its tasks' keys name, for the owner's next turns: the uid and
-// occurrence of each invitation, the ids of each task
+// What a brief's numbers, its tasks' keys and its emails name, for the owner's next turns: the uid
+// and occurrence of each invitation, the id and sender of each email the brief was handed, in the
+// order the harness lays them out, the ids of each task
 interface References {
 	readonly invitations?: readonly {
 		readonly number: number;
 		readonly uid: string;
 		readonly recurrence_id: string | null;
+	}[];
+	readonly mails?: readonly {
+		readonly id: string;
+		readonly from: Sender | null;
 	}[];
 	readonly tasks?: readonly {
 		readonly key: string;
@@ -190,6 +212,7 @@ type Read<T> =
 interface Sections {
 	readonly calendar: Read<Day>;
 	readonly invitations: Read<Invitations>;
+	readonly mails: Read<Mails>;
 	readonly tasks: Read<Tasks>;
 }
 
@@ -197,8 +220,17 @@ interface Sections {
 const DOMAINS: Readonly<Record<keyof Sections, string>> = {
 	calendar: 'calendar',
 	invitations: 'calendar',
+	mails: 'mail',
 	tasks: 'tasks'
 };
+
+// The brief's reads: what it tells, the zone it is written in, and the instant it read the owner's
+// mail at, which their next brief reads it from, when it read it
+interface Reads {
+	readonly sections: Sections;
+	readonly timeZone: TimeZone;
+	readonly mailsReadAt: Date | null;
+}
 
 export interface BriefInput {
 	readonly principal: Principal;
@@ -311,7 +343,8 @@ function line(text: string): Laid {
 }
 
 // A section of the brief as the harness lays it out: its heading over its first items, numbered
-// from 1 or not, then how many more there are, if any. People's text is text, never markup.
+// from 1 or not, if it has any, then how many more there are, if any. People's text is text, never
+// markup.
 function section(
 	heading: string,
 	items: readonly string[],
@@ -329,20 +362,32 @@ function section(
 		].join('\n'),
 		html: [
 			`<p>${escapeHtml(heading)}</p>`,
-			`<${list}>${shown.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${list}>`,
+			...(shown.length === 0
+				? []
+				: [`<${list}>${shown.map((item) => `<li>${escapeHtml(item)}</li>`).join('')}</${list}>`]),
 			...after.map((text) => `<p>${escapeHtml(text)}</p>`)
 		].join('\n')
 	};
 }
 
-// What a section says of the items it does not show, of those its application gave, or nothing
+// What a section says, in the words given, of the items it does not show, of those its application
+// gave, or nothing
 function moreOf(
 	count: number,
 	truncated: boolean,
-	words: Messages['brief']['template']
+	more: (count: number, atLeast: boolean) => string
 ): string | null {
 	const hidden = Math.max(count - SHOWN, 0);
-	return hidden > 0 || truncated ? words.more(hidden, truncated) : null;
+	return hidden > 0 || truncated ? more(hidden, truncated) : null;
+}
+
+// Who sent an email, as the owner reads it: the name its sender gave, or else their address
+function senderOf(email: Email, words: Messages['brief']['template']): string {
+	const sender = email.untrusted.from[0];
+	const name = sender?.name?.trim() ?? '';
+	if (name.length > 0) return name;
+	const address = sender?.email ?? '';
+	return address.length > 0 ? address : words.unknownSender;
 }
 
 // The day's meetings, each one with its times and title, and the titles of those it overlaps that
@@ -369,15 +414,15 @@ function meetingLines(
 
 // The brief as the harness lays it out itself, for the owner, when the model wrote nothing: the
 // sections the model is asked for, five items at most each, an empty one left out but for the day,
-// which says in one line that it has no meeting, an application not read said once, and examples of
-// what to answer that fit what the brief shows
+// which says in one line that it has no meeting, an application not read said once, and two
+// examples at most of what to answer that fit what the brief shows
 function template(
 	sections: Sections,
 	date: string,
 	locale: Locale,
 	words: Messages['brief']['template']
 ): Laid {
-	const { calendar, invitations, tasks } = sections;
+	const { calendar, invitations, mails, tasks } = sections;
 	const laid: Laid[] = [];
 	const examples: string[] = [];
 	const unread = new Set<string>();
@@ -396,7 +441,7 @@ function template(
 			section(
 				words.heading(dateWords),
 				meetingLines(meetings, words),
-				moreOf(meetings.length, truncated, words),
+				moreOf(meetings.length, truncated, words.more),
 				false
 			)
 		);
@@ -420,12 +465,33 @@ function template(
 				section(
 					words.invitations(INVITATION_DAYS),
 					lines,
-					moreOf(pending.length, truncated, words),
+					moreOf(pending.length, truncated, words.more),
 					true
 				)
 			);
 			examples.push(words.decline(first.number));
 		}
+	}
+	if (!mails.ok) notRead('mails');
+	else if (mails.value.unread.length > 0 || mails.value.truncated) {
+		// Mail may have more unread mail than the brief read, even when all it read was sent in bulk
+		const { since, unread, truncated } = mails.value;
+		const lines = unread.map((email) =>
+			words.mail(
+				senderOf(email, words),
+				email.untrusted.subject.trim().length > 0 ? email.untrusted.subject : words.noSubject,
+				email.flagged
+			)
+		);
+		laid.push(
+			section(
+				words.mails(dayWords(since, locale), wallTimeOf(since)),
+				lines,
+				moreOf(lines.length, truncated, words.unreadMore),
+				false
+			)
+		);
+		if (lines.length > 0) examples.push(words.summarize);
 	}
 	if (!tasks.ok) notRead('tasks');
 	else {
@@ -442,11 +508,11 @@ function template(
 				),
 				...today.map((task) => words.dueToday(task.key, task.untrusted.title, task.due_time))
 			];
-			laid.push(section(words.tasks, lines, moreOf(lines.length, truncated, words), false));
+			laid.push(section(words.tasks, lines, moreOf(lines.length, truncated, words.more), false));
 			examples.push(words.postpone(first.key));
 		}
 	}
-	if (examples.length > 0) laid.push(line(words.footer(examples)));
+	if (examples.length > 0) laid.push(line(words.footer(examples.slice(0, 2))));
 	return {
 		text: laid.map((part) => part.text).join('\n\n'),
 		html: laid.map((part) => part.html).join('\n')
@@ -517,12 +583,14 @@ function invitationsOf(events: readonly Meeting[], truncated: boolean): Invitati
 	};
 }
 
-// What the brief's numbers and its tasks' keys name, or null when it names nothing
+// What the brief's numbers, its tasks' keys and its emails name, or null when it names nothing:
+// each email the model was handed, whichever it shows
 function referencesOf(sections: Sections): References | null {
-	const { invitations, tasks } = sections;
+	const { invitations, mails, tasks } = sections;
 	const numbered = invitations.ok ? invitations.value.pending : [];
+	const handed = mails.ok ? mails.value.unread : [];
 	const keyed = tasks.ok ? [...tasks.value.overdue, ...tasks.value.today] : [];
-	if (numbered.length + keyed.length === 0) return null;
+	if (numbered.length + handed.length + keyed.length === 0) return null;
 	return {
 		...(numbered.length === 0
 			? {}
@@ -533,6 +601,9 @@ function referencesOf(sections: Sections): References | null {
 						recurrence_id
 					}))
 				}),
+		...(handed.length === 0
+			? {}
+			: { mails: handed.map(({ id, untrusted }) => ({ id, from: untrusted.from[0] ?? null })) }),
 		...(keyed.length === 0
 			? {}
 			: { tasks: keyed.map(({ key, board_id, task_id }) => ({ key, board_id, task_id })) })
@@ -578,10 +649,11 @@ function logSkipped(name: keyof Sections, read: Read<unknown>, log: FastifyBaseL
 
 // The brief of an owner's working day, which the worker role's scheduler asks their assistant for.
 // Admitted as a turn is, it reads the day's meetings of their calendar, the invitations that wait
-// for their answer and their late tasks and those of the day itself, through the same tools and
-// checks as the model's calls, with nobody to ask: an application they did not allow is left out.
-// Then one model call, with no tool and no history, writes the brief from those reads, given as
-// data, which the conversation keeps as the assistant's answer, with what its numbers and keys name.
+// for their answer, their unread mail since their last brief and their late tasks and those of the
+// day itself, through the same tools and checks as the model's calls, with nobody to ask: an
+// application they did not allow is left out. Then one model call, with no tool and no history,
+// writes the brief from those reads, given as data, which the conversation keeps as the assistant's
+// answer, with what its numbers, keys and emails name.
 // Should the model fail or write nothing, the harness lays out the same sections itself. The day's
 // read the platform's broker refuses for want of the owner's permission for their assistant to act
 // for them is the exception: the brief reads nothing else and gives way to the harness's question
@@ -674,19 +746,76 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		};
 	}
 
-	// The brief's reads after the day's, and the zone it is written in
+	// The unread emails of the owner's inbox since the instant given, told in the zone given, and the
+	// people of the day's meetings, whose emails count: their inbox found among their mailboxes by its
+	// role, fifty emails at most, those sent in bulk left out, in the order the harness lays them out
+	async function readMails(
+		context: ToolContext,
+		since: Date,
+		zone: string,
+		calendar: Read<Day>
+	): Promise<Read<Mails>> {
+		const mailboxes = await read(context, LIST_MAILBOXES, {}, mailboxListSchema);
+		if (!mailboxes.ok) return mailboxes;
+		const inbox = mailboxes.value.mailboxes.find((mailbox) => mailbox.role === 'inbox');
+		if (inbox === undefined) return { ok: false, reason: 'no_inbox' };
+		const after = isoIn(since, zone);
+		const list = await read(
+			context,
+			LIST_EMAILS,
+			{ mailbox: inbox.id, unread: true, after, limit: MAX_MAILS },
+			emailListSchema
+		);
+		if (!list.ok) return list;
+		const { emails, next_cursor } = list.value;
+		const meetings = calendar.ok ? calendar.value.meetings : [];
+		return {
+			ok: true,
+			value: {
+				since: after,
+				unread: emails
+					.slice(0, MAX_MAILS)
+					.filter((email) => !email.bulk)
+					.sort(byImportance),
+				truncated: next_cursor !== null || emails.length > MAX_MAILS,
+				participants: participantsOf(
+					meetings.map((meeting) => meeting.untrusted.organizer),
+					context.principalId
+				)
+			}
+		};
+	}
+
+	// The brief's reads after the day's, the zone it is written in, and the instant it read the
+	// owner's mail at, when it did
 	async function readSections(
 		context: ToolContext,
 		date: string,
 		calendar: Read<Day>
-	): Promise<{ readonly sections: Sections; readonly timeZone: TimeZone }> {
+	): Promise<Reads> {
+		const owner = context.principalId;
 		const invitations = await readInvitations(context, date);
 		// Read once the calendar's reads may have named it, as a turn reads it: the zone of the
-		// owner's calendar, which the days of their tasks are counted in, and the brief written in
-		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
+		// owner's calendar, which the time their mail is read from is told in, the days of their tasks
+		// counted in, and the brief written in, and the days their brief goes out on
+		const settings = await fetchBriefSettings(db, owner, config.timeZone);
+		const readAt = await withPrincipal(db, { id: owner }, (tx) => findBriefMailsReadAt(tx, owner));
+		const now = clock.now();
+		const mails = await readMails(
+			context,
+			mailsSince(readAt, now, settings),
+			settings.timeZone,
+			calendar
+		);
 		return {
-			sections: { calendar, invitations, tasks: await readTasks(context, timeZone) },
-			timeZone
+			sections: {
+				calendar,
+				invitations,
+				mails,
+				tasks: await readTasks(context, settings.timeZone)
+			},
+			timeZone: settings.timeZone,
+			mailsReadAt: mails.ok ? now : null
 		};
 	}
 
@@ -749,13 +878,13 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return { kind: 'question', ...question };
 	}
 
-	// The brief of its date, written from its reads in the zone given, which the conversation keeps
-	// as the assistant's answer, in the same transaction as what else ends with it. A request that
-	// closed unanswered with it expired, as one past its lifetime does, and counts the same.
+	// The brief of its date, written from its reads in their zone, which the conversation keeps as
+	// the assistant's answer, in the same transaction as the instant it read the owner's mail at, when
+	// it did, and what else ends with it. A request that closed unanswered with it expired, as one past
+	// its lifetime does, and counts the same.
 	async function writeBrief(
 		writing: Writing,
-		sections: Sections,
-		timeZone: TimeZone,
+		{ sections, timeZone, mailsReadAt }: Reads,
 		ending: (tx: Tx) => Promise<ClosedRequest | null>
 	): Promise<BriefResult> {
 		const { principal, session, locale, date, log } = writing;
@@ -778,8 +907,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			model.text === null
 				? template(sections, date, locale, messages.brief.template)
 				: { text: model.text, html: renderQuotedMarkdown(model.text) };
-		// The conversation keeps the brief as the owner reads it, and what its numbers and keys name,
-		// as data, in place of what any earlier brief's named: not the data it was written from,
+		// The conversation keeps the brief as the owner reads it, and what its numbers, keys and emails
+		// name, as data, in place of what any earlier brief's named: not the data it was written from,
 		// which every later turn would carry
 		const references = referencesOf(sections);
 		const kept =
@@ -792,7 +921,10 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				{ role: 'user', content: kept },
 				{ role: 'assistant', content: brief.text }
 			]);
-			return stored ? { closed: await ending(tx) } : null;
+			if (!stored) return null;
+			// The owner's next brief reads their mail from the instant this one read it
+			if (mailsReadAt !== null) await saveBriefMailsReadAt(tx, principal.id, mailsReadAt);
+			return { closed: await ending(tx) };
 		});
 		if (saved === null) return { kind: 'missing' };
 		const { closed } = saved;
@@ -806,6 +938,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				by: model.text === null ? 'template' : 'model',
 				meetings: sections.calendar.ok ? sections.calendar.value.meetings.length : null,
 				invitations: sections.invitations.ok ? sections.invitations.value.pending.length : null,
+				mails: sections.mails.ok ? sections.mails.value.unread.length : null,
 				tasks: sections.tasks.ok
 					? sections.tasks.value.overdue.length + sections.tasks.value.today.length
 					: null,
@@ -859,8 +992,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			log.info({ pendingCallId: waiting.pendingCallId, since: waiting.date }, 'brief withheld');
 			return { kind: 'withheld' };
 		}
-		const { sections, timeZone } = await readSections(context, date, calendar);
-		return writeBrief(writing, sections, timeZone, (tx) => endBriefWait(tx, principal.id));
+		const reads = await readSections(context, date, calendar);
+		return writeBrief(writing, reads, (tx) => endBriefWait(tx, principal.id));
 	}
 
 	// The owner's yes runs the read the brief gave way for, as it was frozen, under the brief's own
@@ -922,8 +1055,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				supersedeApprovedCall(tx, principal.id, pendingCallId)
 			);
 		}
-		const { sections, timeZone } = await readSections(context, date, calendar);
-		return writeBrief(writing, sections, timeZone, async (tx) => {
+		const reads = await readSections(context, date, calendar);
+		return writeBrief(writing, reads, async (tx) => {
 			await markReplayed(tx, pendingCallId);
 			return endBriefWait(tx, principal.id);
 		});

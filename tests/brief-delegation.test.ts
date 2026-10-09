@@ -233,7 +233,7 @@ describe('my brief gives way to the question about my permission when the platfo
 		expect(brief.body).toBe(WRITTEN);
 		expect(brief.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-10-12' });
 		// Written by the model from that day's read, made again under the brief's own id, then from
-		// the brief's other reads, under the same id: the catalog has no list of her tasks
+		// the brief's other reads, under the same id: the catalog has no list of her mail or her tasks
 		expect(queriesSince(reads)).toEqual([MONDAY, MONDAY, weekOf('2026-10-12')]);
 		const [first, again, week] = calendarReads().slice(reads);
 		expect(again?.headers['x-correlation-id']).toMatch(/^brief-2026-10-12-[0-9a-f]{16}$/);
@@ -255,7 +255,7 @@ describe('my brief gives way to the question about my permission when the platfo
 				truncated: false
 			},
 			invitations: { pending: [], truncated: false },
-			not_read: { tasks: 'unavailable' }
+			not_read: { mails: 'unavailable', tasks: 'unavailable' }
 		});
 		// Her yes started no turn of its own: the brief is all her assistant said
 		await sleep(1000);
