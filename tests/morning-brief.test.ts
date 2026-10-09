@@ -1,5 +1,6 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
+import { dateIn, type Clock } from '../src/agent/clock.js';
 import { briefId, runBriefPass, type SettledBriefs } from '../src/briefs/schedule.js';
 import { loadConfig } from '../src/config.js';
 import { withPrincipal } from '../src/db/client.js';
@@ -11,7 +12,12 @@ import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
 import { grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
-import { CALENDAR_CATALOG, type ChatRequest, type ContractCall } from './helpers/fake-apisix.js';
+import {
+	CALENDAR_CATALOG,
+	type ChatRequest,
+	type ContractCall,
+	type ContractReply
+} from './helpers/fake-apisix.js';
 
 const ALICE = 'alice@test.local';
 // Where the content of a brief tells Alice's client that it is one, and of which day
@@ -21,8 +27,12 @@ const QUESTION_CONTENT_KEY = 'app.twake.assistant.question';
 // Monday 12 October 2026 at eight in Paris
 const MONDAY_AT_EIGHT = '2026-10-12T06:00:00Z';
 const LIST_EVENTS = '/contracts/v1/calendar/events';
+const LIST_TASKS = '/contracts/v1/tasks/mine';
 // What the model writes as the brief
 const WRITTEN = 'Ce matin : le stand-up à 9 h, que chevauche la revue de design.';
+// The wake-ups Alice may have in an hour, as the harness counts them, on its database's clock: the
+// suite wakes her more often in an hour than an owner may be by default
+const WAKEUPS_PER_HOUR = 40;
 
 // What her calendar's contract lists for a day: a stand-up and a design review that overlap, as the
 // contract computes it, and lunch after them
@@ -87,12 +97,211 @@ function dayOf(date: string, lunch = 'Déjeuner'): Record<string, unknown> {
 	};
 }
 
+// Her calendar's contracts with the list of the invitations that wait for her answer alone, and the
+// list of her open tasks by when they are due, as the contracts service publishes them
+const BRIEF_CATALOG = {
+	...CALENDAR_CATALOG,
+	paths: {
+		...CALENDAR_CATALOG.paths,
+		[LIST_EVENTS]: {
+			get: {
+				...CALENDAR_CATALOG.paths[LIST_EVENTS].get,
+				parameters: [
+					...CALENDAR_CATALOG.paths[LIST_EVENTS].get.parameters,
+					{ name: 'needs_action', in: 'query', required: false, schema: { type: 'boolean' } }
+				]
+			}
+		},
+		[LIST_TASKS]: {
+			get: {
+				operationId: 'list_my_tasks',
+				summary: "List the user's open tasks in Twake Tasks",
+				tags: ['tasks.task.read.v1'],
+				parameters: [
+					{ name: 'zone', in: 'query', required: true, schema: { type: 'string' } },
+					{
+						name: 'due',
+						in: 'query',
+						required: false,
+						schema: { type: 'string', enum: ['overdue', 'today', 'upcoming', 'all'] }
+					},
+					{ name: 'days', in: 'query', required: false, schema: { type: 'integer' } },
+					{ name: 'limit', in: 'query', required: false, schema: { type: 'integer' } }
+				]
+			}
+		}
+	}
+};
+
+// The day that comes some days after a date, both written YYYY-MM-DD
+function plusDays(date: string, days: number): string {
+	return new Date(Date.parse(`${date}T12:00:00Z`) + days * 86_400_000).toISOString().slice(0, 10);
+}
+
+// What her calendar's contract lists of the invitations that wait for her answer, over the seven
+// days from a date: the design review of that day, three occurrences of a daily sync she was
+// invited to, from the next day on, and a seminar of a whole day on the fifth
+function pendingOf(date: string): Record<string, unknown> {
+	const at = (days: number, time: string): string => `${plusDays(date, days)}T${time}:00+02:00`;
+	const sync = (days: number): Record<string, unknown> => ({
+		uid: 'daily-sync',
+		recurrence_id: at(days, '08:30'),
+		start: at(days, '08:30'),
+		end: at(days, '08:45'),
+		all_day: false,
+		status: 'CONFIRMED',
+		private: false,
+		my_partstat: 'NEEDS-ACTION',
+		needs_action: true,
+		conflicts: [],
+		untrusted: {
+			title: 'Point quotidien',
+			location: null,
+			description: null,
+			organizer: 'bob@test.local'
+		}
+	});
+	return {
+		time_zone: 'Europe/Paris',
+		start: at(0, '00:00'),
+		end: at(7, '00:00'),
+		events: [
+			{
+				uid: 'review',
+				recurrence_id: null,
+				start: at(0, '09:15'),
+				end: at(0, '10:00'),
+				all_day: false,
+				status: 'CONFIRMED',
+				private: false,
+				my_partstat: 'NEEDS-ACTION',
+				needs_action: true,
+				conflicts: [{ uid: 'standup', recurrence_id: at(0, '09:00') }],
+				untrusted: {
+					title: 'Revue de design',
+					location: 'Salle 4',
+					description: 'Apporter les maquettes',
+					organizer: 'carol@test.local'
+				}
+			},
+			sync(1),
+			sync(2),
+			sync(3),
+			{
+				uid: 'seminar',
+				recurrence_id: null,
+				start: plusDays(date, 4),
+				end: plusDays(date, 4),
+				all_day: true,
+				status: 'CONFIRMED',
+				private: false,
+				my_partstat: 'NEEDS-ACTION',
+				needs_action: true,
+				conflicts: [],
+				untrusted: {
+					title: 'Séminaire',
+					location: 'Lyon',
+					description: null,
+					organizer: 'carol@test.local'
+				}
+			}
+		],
+		truncated: false
+	};
+}
+
+// The events of a list her calendar's contract answered
+function eventsOf(list: Record<string, unknown>): Record<string, unknown>[] {
+	return list['events'] as Record<string, unknown>[];
+}
+
+// What her tasks' contract lists of her open tasks due before today, or today, today being the
+// date it is in the zone of the call: a demo to prepare, three days late, then a report to send by
+// five today
+function tasksOf(due: string, today: string, title = 'Préparer la démo'): Record<string, unknown> {
+	const demo = {
+		board_id: 'board-web',
+		task_id: 'task-demo',
+		key: 'WEB-12',
+		parent_id: null,
+		section_id: null,
+		state: 'open',
+		priority: 1,
+		due_date: plusDays(today, -3),
+		due_time: null,
+		due_zone: null,
+		deadline: null,
+		assignees: [ALICE],
+		assigned_to_me: true,
+		untrusted: { title, board_name: 'Site web', labels: ['démo'] }
+	};
+	const report = {
+		board_id: 'board-ops',
+		task_id: 'task-report',
+		key: 'OPS-3',
+		parent_id: null,
+		section_id: null,
+		state: 'open',
+		priority: null,
+		due_date: today,
+		due_time: '17:00',
+		due_zone: 'Europe/Paris',
+		deadline: null,
+		assignees: [ALICE],
+		assigned_to_me: true,
+		untrusted: { title: 'Envoyer le compte rendu', board_name: 'Opérations', labels: [] }
+	};
+	return { tasks: due === 'overdue' ? [demo] : due === 'today' ? [report] : [], truncated: false };
+}
+
+// The tasks of a list her tasks' contract answered
+function tasksIn(list: Record<string, unknown>): Record<string, unknown>[] {
+	return list['tasks'] as Record<string, unknown>[];
+}
+
+// What her applications' contracts answer the brief: her day, from the date it is asked for, the
+// invitations that wait for her answer, and her tasks by when they are due, today being the date the
+// clock says in the zone of the call, unless a test gives others
+function answering(
+	clock: Clock,
+	answers: {
+		readonly day?: (date: string) => Record<string, unknown>;
+		readonly pending?: (date: string) => Record<string, unknown>;
+		readonly tasks?: (due: string, today: string) => Record<string, unknown>;
+	} = {}
+): (call: ContractCall) => ContractReply {
+	const { day = (date) => dayOf(date), pending = pendingOf, tasks = tasksOf } = answers;
+	return (call) => {
+		if (call.path === LIST_TASKS) {
+			const today = dateIn(clock.now(), String(call.query['zone']));
+			return { status: 200, body: tasks(String(call.query['due']), today) };
+		}
+		if (call.path !== LIST_EVENTS) return { status: 404, body: {} };
+		const from = String(call.query['from']);
+		return { status: 200, body: call.query['needs_action'] === 'true' ? pending(from) : day(from) };
+	};
+}
+
 // What the model is handed: one line of JSON between the fences of a nonce
-const FENCED = /<<<calendar-data ([0-9a-f]{12})\n(.+)\ncalendar-data \1>>>/;
+const FENCED = /<<<brief-data ([0-9a-f]{12})\n(.+)\nbrief-data \1>>>/;
+
+// What the conversation keeps of a brief for the next turns, as data, the same way
+const REFERENCES = /<<<brief-references ([0-9a-f]{12})\n(.+)\nbrief-references \1>>>/g;
+
+// The references of briefs a model call reads in the conversation
+function referencesIn(request: ChatRequest | undefined): unknown[] {
+	return (request?.messages ?? []).flatMap((message) =>
+		message.role === 'user'
+			? [...String(message.content).matchAll(REFERENCES)].map(
+					(match) => JSON.parse(match[2] ?? '') as unknown
+				)
+			: []
+	);
+}
 
 function dataOf(told: string): unknown {
 	const line = FENCED.exec(told)?.[2];
-	if (line === undefined) throw new Error(`no calendar data in ${told}`);
+	if (line === undefined) throw new Error(`no brief data in ${told}`);
 	return JSON.parse(line) as unknown;
 }
 
@@ -130,6 +339,10 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 	// The reads of her calendar's days that reached the gateway
 	const dayReads = (): ContractCall[] =>
 		r.h.apisix.contracts.calls.filter((call) => call.path === LIST_EVENTS);
+
+	// The reads of her tasks that reached the gateway
+	const taskReads = (): ContractCall[] =>
+		r.h.apisix.contracts.calls.filter((call) => call.path === LIST_TASKS);
 
 	// The lines the api role logged with that message
 	const logged = (msg: string): Record<string, unknown>[] =>
@@ -184,20 +397,19 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				ASSISTANT_TIMEZONE: 'Europe/Paris',
 				BRIEF_ENABLED: 'true',
 				// The suite starts more of Alice's turns in a minute than an owner may by default
-				ADMISSION_USER_PER_MINUTE: '120'
+				ADMISSION_USER_PER_MINUTE: '120',
+				WAKEUPS_PER_HOUR: String(WAKEUPS_PER_HOUR)
 			},
 			{ clock }
 		);
-		r.h.apisix.contracts.spec = CALENDAR_CATALOG;
+		r.h.apisix.contracts.spec = BRIEF_CATALOG;
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBeGreaterThan(0);
 	}, 240_000);
 
 	beforeEach(async () => {
 		await grantConsent(r.h.db, ALICE, 'calendar', 'read');
-		r.h.apisix.contracts.handler = (call) =>
-			call.path === LIST_EVENTS
-				? { status: 200, body: dayOf(String(call.query['from'])) }
-				: { status: 404, body: {} };
+		await grantConsent(r.h.db, ALICE, 'tasks', 'read');
+		r.h.apisix.contracts.handler = answering(clock);
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')
 				? { content: WRITTEN }
@@ -211,21 +423,30 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 	it('on a Monday at eight in my zone, I get one message marked as the brief, written by the model from the day’s read of my calendar, which notifies me and stays in our conversation', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
-		const reads = dayReads().length;
+		const reads = r.h.apisix.contracts.calls.length;
 		await pass(MONDAY_AT_EIGHT);
 		const brief = await nextBrief(seen);
 		expect(brief.body).toBe(WRITTEN);
 		expect(brief.content['msgtype']).toBe('m.text');
 		expect(brief.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-10-12' });
-		// The day's read, for Alice, under the brief's own correlation id
-		const read = dayReads().slice(reads);
-		expect(read).toHaveLength(1);
-		expect(read[0]?.method).toBe('GET');
-		expect(read[0]?.query).toEqual({ from: '2026-10-12', days: '1', limit: '20' });
-		expect(read[0]?.headers['x-twake-on-behalf-of']).toBe(ALICE);
-		expect(read[0]?.headers['x-correlation-id']).toMatch(/^brief-2026-10-12-[0-9a-f]{16}$/);
+		// The day's read, the read of the invitations that wait for her answer over seven days, then
+		// the reads of her tasks due before today and today, in the zone kept for her, for Alice, under
+		// the brief's own correlation id
+		const read = r.h.apisix.contracts.calls.slice(reads);
+		expect(read.map((call) => [call.method, call.path, call.query])).toEqual([
+			['GET', LIST_EVENTS, { from: '2026-10-12', days: '1', limit: '20' }],
+			['GET', LIST_EVENTS, { from: '2026-10-12', days: '7', limit: '100', needs_action: 'true' }],
+			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'overdue', limit: '30' }],
+			['GET', LIST_TASKS, { zone: 'Europe/Paris', due: 'today', limit: '30' }]
+		]);
+		for (const call of read) {
+			expect(call.headers['x-twake-on-behalf-of']).toBe(ALICE);
+			expect(call.headers['x-correlation-id']).toMatch(/^brief-2026-10-12-[0-9a-f]{16}$/);
+		}
 		// One model call, with no tools and no history: what the model is told, in her language, then
-		// the day's meetings as data, their conflicts included, and what people wrote under untrusted
+		// the day's meetings as data, their conflicts included, and what people wrote under untrusted;
+		// then the invitations that wait for her answer, numbered in the order they start, a series
+		// once, from its first occurrence; then her tasks, late ones first
 		const asked = briefCalls().slice(calls);
 		expect(asked).toHaveLength(1);
 		const request = asked[0];
@@ -235,11 +456,25 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(told).toMatch(
 			/^\[brief\] Ma journée de travail commence : c'est l'heure de mon brief du matin \(id brief-2026-10-12-[0-9a-f]{16}\)\.\n/
 		);
+		const [review, sync, , , seminar] = eventsOf(pendingOf('2026-10-12'));
 		expect(dataOf(told)).toEqual({
 			date: '2026-10-12',
 			calendar: {
 				time_zone: 'Europe/Paris',
 				meetings: dayOf('2026-10-12')['events'],
+				truncated: false
+			},
+			invitations: {
+				pending: [
+					{ number: 1, series: false, ...review },
+					{ number: 2, series: true, ...sync },
+					{ number: 3, series: false, ...seminar }
+				],
+				truncated: false
+			},
+			tasks: {
+				overdue: tasksIn(tasksOf('overdue', '2026-10-12')),
+				today: tasksIn(tasksOf('today', '2026-10-12')),
 				truncated: false
 			}
 		});
@@ -298,7 +533,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		// Her hour's wake-ups are spent
 		await r.h.db.sql`
 			insert into wakeups (source, event_id, owner)
-			select 'filler', 'filler-' || n, ${ALICE} from generate_series(1, 20) as n`;
+			select 'filler', 'filler-' || n, ${ALICE} from generate_series(1, ${WAKEUPS_PER_HOUR}) as n`;
 		try {
 			await pass('2026-10-20T06:00:00Z', settled);
 			// Still held back a minute later: the replica tries it again, and says so only once
@@ -314,14 +549,15 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(wakeUpLines('event queued', '2026-10-20')).toHaveLength(1);
 	});
 
-	it('lays out the same meetings itself, marked too, when the model fails, people’s titles as text', async () => {
+	it('lays out the same sections itself, marked too, when the model fails, people’s titles as text', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const hostile = '<b>Déjeuner</b> [lien](https://evil.example)';
-		r.h.apisix.contracts.handler = (call) =>
-			call.path === LIST_EVENTS
-				? { status: 200, body: dayOf(String(call.query['from']), hostile) }
-				: { status: 404, body: {} };
+		const hostileTask = '<i>Préparer</i> [la démo](https://evil.example)';
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: (date) => dayOf(date, hostile),
+			tasks: (due, today) => tasksOf(due, today, hostileTask)
+		});
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')
 				? { failWith: 502 }
@@ -330,12 +566,25 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		const brief = await nextBrief(seen);
 		expect(briefCalls().slice(calls)).toHaveLength(1);
 		expect(brief.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-10-21' });
+		// Her meetings, her invitations by their numbers, a series once, then her tasks, late ones
+		// first, and what she may answer
 		expect(brief.body).toBe(
 			[
 				'Tes réunions du jour, mercredi 21 octobre 2026 :',
 				'- 09:00–09:30 Stand-up (chevauche Revue de design)',
 				'- 09:15–10:00 Revue de design (chevauche Stand-up)',
-				`- 12:30–13:30 ${hostile}`
+				`- 12:30–13:30 ${hostile}`,
+				'',
+				'Tes invitations en attente sur 7 jours :',
+				'1. Revue de design : mercredi 21 octobre, 09:15–10:00, de carol@test.local',
+				'2. Point quotidien : série à partir du jeudi 22 octobre, 08:30–08:45, de bob@test.local',
+				'3. Séminaire : dimanche 25 octobre, toute la journée, de carol@test.local',
+				'',
+				'Tes tâches en retard et du jour :',
+				`- WEB-12 ${hostileTask} : en retard, prévue le dimanche 18 octobre`,
+				"- OPS-3 Envoyer le compte rendu : pour aujourd'hui, 17:00",
+				'',
+				'Pour enchaîner, dis-moi par exemple « décline la 1 » ou « reporte WEB-12 à demain ».'
 			].join('\n')
 		);
 		const html = String(brief.content['formatted_body']);
@@ -343,8 +592,145 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(html).toContain(
 			'<li>12:30–13:30 &lt;b&gt;Déjeuner&lt;/b&gt; [lien](https://evil.example)</li>'
 		);
-		expect(html).not.toContain('<a');
-		expect(html).not.toContain('<b>');
+		expect(html).toContain(
+			'<ol><li>Revue de design : mercredi 21 octobre, 09:15–10:00, de carol@test.local</li>'
+		);
+		expect(html).toContain(
+			'<li>WEB-12 &lt;i&gt;Préparer&lt;/i&gt; [la démo](https://evil.example) : en retard, prévue le dimanche 18 octobre</li>'
+		);
+		for (const acting of ['<a', '<b>', '<i>']) expect(html).not.toContain(acting);
+	});
+
+	it('lays out five items at most a section, then says how many more there are', async () => {
+		const seen = briefs().length;
+		// Monday 9 November: seven meetings, seven invitations of their own, four late tasks and
+		// three of the day, of which Tasks gave its first ones only
+		const at = (date: string, time: string): string => `${date}T${time}:00+01:00`;
+		const event = (
+			uid: string,
+			date: string,
+			hour: number,
+			title: string,
+			pending: boolean
+		): Record<string, unknown> => ({
+			uid,
+			recurrence_id: null,
+			start: at(date, `${String(hour).padStart(2, '0')}:00`),
+			end: at(date, `${String(hour).padStart(2, '0')}:30`),
+			all_day: false,
+			status: 'CONFIRMED',
+			private: false,
+			my_partstat: pending ? 'NEEDS-ACTION' : 'ACCEPTED',
+			needs_action: pending,
+			conflicts: [],
+			untrusted: { title, location: null, description: null, organizer: 'bob@test.local' }
+		});
+		const seven = [1, 2, 3, 4, 5, 6, 7];
+		const task = (n: number, due: string): Record<string, unknown> => ({
+			...tasksIn(tasksOf('overdue', due))[0],
+			task_id: `task-${n}`,
+			key: `WEB-${n}`,
+			due_date: due,
+			untrusted: { title: `Tâche ${n}`, board_name: 'Site web', labels: [] }
+		});
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: (date) => ({
+				time_zone: 'Europe/Paris',
+				events: seven.map((n) => event(`meeting-${n}`, date, 7 + n, `Réunion ${n}`, false)),
+				truncated: false
+			}),
+			pending: (date) => ({
+				time_zone: 'Europe/Paris',
+				events: seven.map((n) =>
+					event(`invitation-${n}`, plusDays(date, n - 1), 15, `Invitation ${n}`, true)
+				),
+				truncated: false
+			}),
+			tasks: (due, today) => ({
+				tasks:
+					due === 'overdue'
+						? [1, 2, 3, 4].map((n) => task(n, plusDays(today, -n)))
+						: [5, 6, 7].map((n) => task(n, today)),
+				truncated: due === 'today'
+			})
+		});
+		r.h.apisix.llm.script = (request) =>
+			lastUser(request).startsWith('[brief]')
+				? { failWith: 502 }
+				: { content: `echo: ${lastUser(request)}` };
+		await pass('2026-11-09T07:00:00Z');
+		const brief = await nextBrief(seen);
+		expect(dateOf(brief)).toBe('2026-11-09');
+		expect(brief.body).toBe(
+			[
+				'Tes réunions du jour, lundi 9 novembre 2026 :',
+				'- 08:00–08:30 Réunion 1',
+				'- 09:00–09:30 Réunion 2',
+				'- 10:00–10:30 Réunion 3',
+				'- 11:00–11:30 Réunion 4',
+				'- 12:00–12:30 Réunion 5',
+				'+ 2 autres',
+				'',
+				'Tes invitations en attente sur 7 jours :',
+				'1. Invitation 1 : lundi 9 novembre, 15:00–15:30, de bob@test.local',
+				'2. Invitation 2 : mardi 10 novembre, 15:00–15:30, de bob@test.local',
+				'3. Invitation 3 : mercredi 11 novembre, 15:00–15:30, de bob@test.local',
+				'4. Invitation 4 : jeudi 12 novembre, 15:00–15:30, de bob@test.local',
+				'5. Invitation 5 : vendredi 13 novembre, 15:00–15:30, de bob@test.local',
+				'+ 2 autres',
+				'',
+				'Tes tâches en retard et du jour :',
+				'- WEB-1 Tâche 1 : en retard, prévue le dimanche 8 novembre',
+				'- WEB-2 Tâche 2 : en retard, prévue le samedi 7 novembre',
+				'- WEB-3 Tâche 3 : en retard, prévue le vendredi 6 novembre',
+				'- WEB-4 Tâche 4 : en retard, prévue le jeudi 5 novembre',
+				"- WEB-5 Tâche 5 : pour aujourd'hui",
+				'+ au moins 2 autres',
+				'',
+				'Pour enchaîner, dis-moi par exemple « décline la 1 » ou « reporte WEB-1 à demain ».'
+			].join('\n')
+		);
+	});
+
+	it('leaves out an empty section, and says an empty day in one line', async () => {
+		const seen = briefs().length;
+		const nothing = (): Record<string, unknown> => ({
+			time_zone: 'Europe/Paris',
+			events: [],
+			truncated: false
+		});
+		r.h.apisix.llm.script = (request) =>
+			lastUser(request).startsWith('[brief]')
+				? { failWith: 502 }
+				: { content: `echo: ${lastUser(request)}` };
+		// Tuesday 10 November: no meeting and no invitation, a task of the day
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: nothing,
+			pending: nothing,
+			tasks: (due, today) =>
+				due === 'today' ? tasksOf(due, today) : { tasks: [], truncated: false }
+		});
+		await pass('2026-11-10T07:00:00Z');
+		const tuesday = await nextBrief(seen);
+		expect(tuesday.body).toBe(
+			[
+				"Tu n'as aucune réunion aujourd'hui, mardi 10 novembre 2026.",
+				'',
+				'Tes tâches en retard et du jour :',
+				"- OPS-3 Envoyer le compte rendu : pour aujourd'hui, 17:00",
+				'',
+				'Pour enchaîner, dis-moi par exemple « reporte OPS-3 à demain ».'
+			].join('\n')
+		);
+		// Wednesday 11 November: nothing at all
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: nothing,
+			pending: nothing,
+			tasks: () => ({ tasks: [], truncated: false })
+		});
+		await pass('2026-11-11T07:00:00Z');
+		const wednesday = await nextBrief(seen + 1);
+		expect(wednesday.body).toBe("Tu n'as aucune réunion aujourd'hui, mercredi 11 novembre 2026.");
 	});
 
 	it('shows the brief the model wrote with nothing in it that acts or mentions, should it repeat a title someone wrote', async () => {
@@ -385,15 +771,77 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(dateOf(brief)).toBe('2026-10-22');
 		expect(dayReads().slice(reads)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
-		expect(dataOf(told)).toEqual({ date: '2026-10-22', not_read: { calendar: 'consent' } });
+		expect(dataOf(told)).toEqual({
+			date: '2026-10-22',
+			tasks: {
+				overdue: tasksIn(tasksOf('overdue', '2026-10-22')),
+				today: tasksIn(tasksOf('today', '2026-10-22')),
+				truncated: false
+			},
+			not_read: { calendar: 'consent', invitations: 'consent' }
+		});
 		// The brief is all her assistant said, and no call waits for her
 		expect(r.client.messages.filter((m) => m.sender === r.assistantId).slice(said)).toEqual([
 			brief
 		]);
 		expect(brief.content[QUESTION_CONTENT_KEY]).toBeUndefined();
 		expect(await r.callsTo('calendar')).toHaveLength(pending);
+		for (const section of ['calendar', 'invitations']) {
+			expect(logged('brief application skipped')).toContainEqual(
+				expect.objectContaining({
+					domain: 'calendar',
+					section,
+					reason: 'consent',
+					principal: ALICE
+				})
+			);
+		}
+	});
+
+	it('leaves out my tasks when I have not allowed them, which the harness’s own brief says in one line', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		const tasks = taskReads().length;
+		const pending = (await r.callsTo('tasks')).length;
+		await withdrawConsent(r.h.db, ALICE, 'tasks', 'read');
+		r.h.apisix.llm.script = (request) =>
+			lastUser(request).startsWith('[brief]')
+				? { failWith: 502 }
+				: { content: `echo: ${lastUser(request)}` };
+		// Friday 6 November
+		await pass('2026-11-06T07:00:00Z');
+		const brief = await nextBrief(seen);
+		expect(taskReads().slice(tasks)).toHaveLength(0);
+		const told = lastUser(briefCalls().slice(calls).at(0));
+		expect(dataOf(told)).toMatchObject({ date: '2026-11-06', not_read: { tasks: 'consent' } });
+		expect(dataOf(told)).not.toHaveProperty('tasks');
+		expect(brief.body).toBe(
+			[
+				'Tes réunions du jour, vendredi 6 novembre 2026 :',
+				'- 09:00–09:30 Stand-up (chevauche Revue de design)',
+				'- 09:15–10:00 Revue de design (chevauche Stand-up)',
+				'- 12:30–13:30 Déjeuner',
+				'',
+				'Tes invitations en attente sur 7 jours :',
+				'1. Revue de design : vendredi 6 novembre, 09:15–10:00, de carol@test.local',
+				'2. Point quotidien : série à partir du samedi 7 novembre, 08:30–08:45, de bob@test.local',
+				'3. Séminaire : mardi 10 novembre, toute la journée, de carol@test.local',
+				'',
+				"Je n'ai pas pu lire tes tâches aujourd'hui.",
+				'',
+				'Pour enchaîner, dis-moi par exemple « décline la 1 ».'
+			].join('\n')
+		);
+		// No call waits for her
+		expect(brief.content[QUESTION_CONTENT_KEY]).toBeUndefined();
+		expect(await r.callsTo('tasks')).toHaveLength(pending);
 		expect(logged('brief application skipped')).toContainEqual(
-			expect.objectContaining({ domain: 'calendar', reason: 'consent', principal: ALICE })
+			expect.objectContaining({
+				domain: 'tasks',
+				section: 'tasks',
+				reason: 'consent',
+				principal: ALICE
+			})
 		);
 	});
 
@@ -498,15 +946,68 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		);
 	});
 
-	it('follows the zone of my calendar once a read of it named one', async () => {
+	it('gives my next turns what the numbers and keys of my brief name, as data, until a newer brief replaces it', async () => {
 		const seen = briefs().length;
-		r.h.apisix.contracts.handler = (call) =>
-			call.path === LIST_EVENTS
-				? {
-						status: 200,
-						body: { ...dayOf(String(call.query['from'])), time_zone: 'America/New_York' }
-					}
-				: { status: 404, body: {} };
+		// Wednesday 4 November: her words still come from a session the harness saw open less than a
+		// month earlier, on the clock of these tests
+		await pass('2026-11-04T07:00:00Z');
+		const wednesday = await nextBrief(seen);
+		// Kept from her: the brief she reads is the model's
+		expect(wednesday.body).toBe(WRITTEN);
+		let turns = r.h.apisix.llm.calls.length;
+		await r.client.sendText(r.room, 'Décline la 2');
+		await r.nextSaying('echo: Décline la 2', 0);
+		// Her next turn reads, in the conversation, the uid and occurrence of each numbered invitation
+		// and the ids of each task by its key
+		expect(referencesIn(r.h.apisix.llm.calls.slice(turns).at(0)?.request)).toEqual([
+			{
+				invitations: [
+					{ number: 1, uid: 'review', recurrence_id: null },
+					{ number: 2, uid: 'daily-sync', recurrence_id: '2026-11-05T08:30:00+02:00' },
+					{ number: 3, uid: 'seminar', recurrence_id: null }
+				],
+				tasks: [
+					{ key: 'WEB-12', board_id: 'board-web', task_id: 'task-demo' },
+					{ key: 'OPS-3', board_id: 'board-ops', task_id: 'task-report' }
+				]
+			}
+		]);
+		// Thursday's brief replaces them: her next turn reads Thursday's alone, though Wednesday's
+		// brief is still in the conversation
+		await pass('2026-11-05T07:00:00Z');
+		await nextBrief(seen + 1);
+		turns = r.h.apisix.llm.calls.length;
+		await r.client.sendText(r.room, 'Accepte la 1');
+		await r.nextSaying('echo: Accepte la 1', 0);
+		const next = r.h.apisix.llm.calls.slice(turns).at(0)?.request;
+		expect(referencesIn(next)).toEqual([
+			{
+				invitations: [
+					{ number: 1, uid: 'review', recurrence_id: null },
+					{ number: 2, uid: 'daily-sync', recurrence_id: '2026-11-06T08:30:00+02:00' },
+					{ number: 3, uid: 'seminar', recurrence_id: null }
+				],
+				tasks: [
+					{ key: 'WEB-12', board_id: 'board-web', task_id: 'task-demo' },
+					{ key: 'OPS-3', board_id: 'board-ops', task_id: 'task-report' }
+				]
+			}
+		]);
+		expect(
+			next?.messages.some(
+				(message) =>
+					message.role === 'user' && String(message.content).includes('(id brief-2026-11-04-')
+			)
+		).toBe(true);
+	});
+
+	it('follows the zone of my calendar once a read of it named one, my tasks’ days included', async () => {
+		const seen = briefs().length;
+		const tasks = taskReads().length;
+		r.h.apisix.contracts.handler = answering(clock, {
+			day: (date) => ({ ...dayOf(date), time_zone: 'America/New_York' }),
+			pending: (date) => ({ ...pendingOf(date), time_zone: 'America/New_York' })
+		});
 		// Friday at eight in Paris: the read of that day names New York
 		await pass('2026-10-30T07:00:00Z');
 		await nextBrief(seen);
@@ -516,6 +1017,12 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		await pass('2026-11-02T13:00:00Z');
 		await nextBrief(seen + 1);
 		expect(briefs().slice(seen).map(dateOf)).toEqual(['2026-10-30', '2026-11-02']);
+		// Her tasks are read in the zone her calendar named, from the brief whose read named it on
+		expect(
+			taskReads()
+				.slice(tasks)
+				.map((call) => call.query['zone'])
+		).toEqual(['America/New_York', 'America/New_York', 'America/New_York', 'America/New_York']);
 	});
 });
 
