@@ -746,7 +746,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(brief.content['m.mentions']).toEqual({});
 	});
 
-	it('leaves out my calendar when I have not allowed it, asks me nothing, and logs it', async () => {
+	it('leaves out my calendar once I took it back, asks me nothing, says so once, and logs it', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const reads = dayReads().length;
@@ -766,9 +766,11 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				overdue: tasksIn(tasksOf('overdue', '2026-10-22')),
 				today: tasksIn(tasksOf('today', '2026-10-22')),
 				truncated: false
-			},
-			not_read: { calendar: 'consent', invitations: 'consent' }
+			}
 		});
+		expect(brief.body).toBe(
+			`${WRITTEN}\n\nJe ne lis plus ton agenda : pour que je le lise de nouveau, dis-moi « lis mon agenda ».`
+		);
 		// The brief is all her assistant said, and no call waits for her
 		expect(r.client.messages.filter((m) => m.sender === r.assistantId).slice(said)).toEqual([
 			brief
@@ -787,7 +789,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		}
 	});
 
-	it('leaves out my tasks when I have not allowed them, which the harness’s own brief says in one line', async () => {
+	it('leaves out my tasks once I took them back, which the harness’s own brief says after it, in one line', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const tasks = taskReads().length;
@@ -802,8 +804,9 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		const brief = await nextBrief(seen);
 		expect(taskReads().slice(tasks)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
-		expect(dataOf(told)).toMatchObject({ date: '2026-11-06', not_read: { tasks: 'consent' } });
+		expect(dataOf(told)).toMatchObject({ date: '2026-11-06' });
 		expect(dataOf(told)).not.toHaveProperty('tasks');
+		expect(dataOf(told)).not.toHaveProperty('not_read');
 		expect(brief.body).toBe(
 			[
 				'Tes réunions du jour, vendredi 6 novembre 2026 :',
@@ -816,9 +819,9 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 				'2. Point quotidien : série à partir du samedi 7 novembre, 08:30–08:45, de bob@test.local',
 				'3. Séminaire : mardi 10 novembre, toute la journée, de carol@test.local',
 				'',
-				"Je n'ai pas pu lire tes tâches aujourd'hui.",
+				'Pour enchaîner, dis-moi par exemple « décline la 1 ».',
 				'',
-				'Pour enchaîner, dis-moi par exemple « décline la 1 ».'
+				'Je ne lis plus tes tâches : pour que je les lise de nouveau, dis-moi « lis mes tâches ».'
 			].join('\n')
 		);
 		// No call waits for her
