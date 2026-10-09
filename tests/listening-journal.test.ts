@@ -40,7 +40,6 @@ const THURSDAY_LATE = '2026-10-08T21:50:00Z';
 const FRIDAY_EARLY = '2026-10-08T22:10:00Z';
 const FRIDAY_LATER = '2026-10-08T22:15:00Z';
 const FRIDAY_MORNING = '2026-10-09T07:30:00Z';
-const FRIDAY = '2026-10-09';
 
 // What the organizer of the budget review wrote of its place and agenda, which the journal never
 // keeps
@@ -423,16 +422,16 @@ describe('the outcome of each activity, and what is kept of it', () => {
 	const clock = makeSettableClock(FRIDAY_MORNING);
 	const workerClock = makeSettableClock(FRIDAY_EARLY);
 
-	// The tokens Alice spent on a day, as admission counts them: past her daily budget, her turns
-	// are refused
-	async function spend(day: string, tokens: number): Promise<void> {
-		await withPrincipal(
-			l.r.h.db,
-			{ id: ALICE },
-			(tx) => tx.sql`
-				insert into usage_daily (owner, day, tokens) values (${ALICE}, ${day}, ${tokens})
-				on conflict (owner, day) do update set tokens = excluded.tokens`
-		);
+	// The turns Alice started this minute, as admission counts them: past her turns per minute, her
+	// turns are refused until the minute passes, or until she started none
+	async function rush(turns: number): Promise<void> {
+		await withPrincipal(l.r.h.db, { id: ALICE }, async (tx) => {
+			await tx.sql`delete from usage_window where owner = ${ALICE}`;
+			if (turns === 0) return;
+			await tx.sql`
+				insert into usage_window (owner, at, turns)
+				values (${ALICE}, date_trunc('second', now()), ${turns})`;
+		});
 	}
 
 	// Starts the worker role again, which purges what it keeps at once, at the present of its clock
@@ -471,8 +470,8 @@ describe('the outcome of each activity, and what is kept of it', () => {
 		const told = assignment({ type: 'task', id: 'task-1', key: 'ROAD-1', title: 'Told' });
 		await l.publish(told);
 		await l.answerTo(told.id);
-		// My day is spent: the turn of the next one waits, then is given up
-		await spend(FRIDAY, 200_000);
+		// My minute is spent: the turn of the next one waits, then is given up
+		await rush(100);
 		workerClock.set('2026-10-09T06:05:00Z');
 		const given = assignment({ type: 'task', id: 'task-2', key: 'ROAD-2', title: 'Given up' });
 		await l.publish(given);
@@ -481,7 +480,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				.logLines()
 				.some((line) => line['msg'] === 'event turn abandoned' && line['reqId'] === given.id)
 		);
-		await spend(FRIDAY, 0);
+		await rush(0);
 		// Past my two wake-ups of the hour, and delivered twice
 		workerClock.set('2026-10-09T06:10:00Z');
 		const held = assignment({ type: 'task', id: 'task-3', key: 'ROAD-3', title: 'Held back' });
