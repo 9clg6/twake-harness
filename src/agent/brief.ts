@@ -16,6 +16,16 @@ import {
 } from '../briefs/mails.js';
 import { briefId } from '../briefs/schedule.js';
 import { fetchBriefSettings } from '../briefs/settings.js';
+import {
+	kindOf,
+	MAX_UNTOLD,
+	titleOf,
+	untoldData,
+	untoldOf,
+	untoldReferences,
+	type Untold,
+	type UntoldReference
+} from '../briefs/untold.js';
 import { endBriefWait, findBriefWait, keepBriefWait } from '../briefs/waits.js';
 import type { Config } from '../config.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
@@ -28,6 +38,7 @@ import {
 } from '../consents/repository.js';
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
+import { eraseActivityNames, listUntoldActivities } from '../journal/repository.js';
 import { LlmError, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { fenced } from '../llm/data.js';
 import { escapeHtml, renderQuotedMarkdown } from '../matrix/format.js';
@@ -133,7 +144,8 @@ interface Invitations {
 
 // What a brief's numbers, its tasks' keys and its emails name, for the owner's next turns: the uid
 // and occurrence of each invitation, the id and sender of each email the brief was handed, in the
-// order the harness lays them out, the ids of each task
+// order the harness lays them out, the ids of each task, and what the numbers and keys of what
+// arrived since their last brief name
 interface References {
 	readonly invitations?: readonly {
 		readonly number: number;
@@ -149,6 +161,7 @@ interface References {
 		readonly board_id: string;
 		readonly task_id: string;
 	}[];
+	readonly since_last_brief?: readonly UntoldReference[];
 }
 
 // One open task as the tasks' contract lists it: what Tasks computed, then, under untrusted, what
@@ -223,12 +236,14 @@ const DOMAINS: Readonly<Record<keyof Sections, string>> = {
 	tasks: 'tasks'
 };
 
-// The brief's reads: what it tells, the zone it is written in, and the instant it read the owner's
-// mail at, which their next brief reads it from, when it read it
+// The brief's reads: what it tells, the zone it is written in, the instant it read the owner's mail
+// at, which their next brief reads it from, when it read it, and what arrived since their last
+// brief that their assistant told them nothing of, which their listening journal kept
 interface Reads {
 	readonly sections: Sections;
 	readonly timeZone: string;
 	readonly mailsReadAt: Date | null;
+	readonly untold: Untold;
 }
 
 export interface BriefInput {
@@ -427,6 +442,7 @@ function meetingLines(
 // examples at most of what to answer that fit what the brief shows
 function template(
 	sections: Sections,
+	untold: Untold,
 	date: string,
 	locale: Locale,
 	words: Messages['brief']['template']
@@ -521,6 +537,18 @@ function template(
 			examples.push(words.postpone(first.key));
 		}
 	}
+	if (untold.activities.length > 0) {
+		const lines = untold.activities.map(({ activity, meeting, task }) =>
+			words.untold(
+				meeting === null ? (task?.key ?? null) : `${meeting.number}.`,
+				titleOf(activity) ?? words.untitled,
+				words.kinds[kindOf(activity)]
+			)
+		);
+		laid.push(
+			section(words.since, lines, moreOf(lines.length, untold.truncated, words.more), false)
+		);
+	}
 	if (examples.length > 0) laid.push(line(words.footer(examples.slice(0, 2))));
 	return {
 		text: laid.map((part) => part.text).join('\n\n'),
@@ -593,13 +621,14 @@ function invitationsOf(events: readonly Meeting[], truncated: boolean): Invitati
 }
 
 // What the brief's numbers, its tasks' keys and its emails name, or null when it names nothing:
-// each email the model was handed, whichever it shows
-function referencesOf(sections: Sections): References | null {
+// each email the model was handed, whichever it shows, and each activity no brief named before
+function referencesOf(sections: Sections, untold: Untold): References | null {
 	const { invitations, mails, tasks } = sections;
 	const numbered = invitations.ok ? invitations.value.pending : [];
 	const handed = mails.ok ? mails.value.unread : [];
 	const keyed = tasks.ok ? [...tasks.value.overdue, ...tasks.value.today] : [];
-	if (numbered.length + handed.length + keyed.length === 0) return null;
+	const since = untoldReferences(untold);
+	if (numbered.length + handed.length + keyed.length + since.length === 0) return null;
 	return {
 		...(numbered.length === 0
 			? {}
@@ -615,7 +644,8 @@ function referencesOf(sections: Sections): References | null {
 			: { mails: handed.map(({ id, untrusted }) => ({ id, from: untrusted.from[0] ?? null })) }),
 		...(keyed.length === 0
 			? {}
-			: { tasks: keyed.map(({ key, board_id, task_id }) => ({ key, board_id, task_id })) })
+			: { tasks: keyed.map(({ key, board_id, task_id }) => ({ key, board_id, task_id })) }),
+		...(since.length === 0 ? {} : { since_last_brief: since })
 	};
 }
 
@@ -631,14 +661,17 @@ function readsOf(sections: Sections): readonly (readonly [keyof Sections, Read<u
 	return Object.entries(sections) as [keyof Sections, Read<unknown>][];
 }
 
-// What the model is handed of the brief's reads: each section read, and why each other one was not
-function dataOf(date: string, sections: Sections): Record<string, unknown> {
+// What the model is handed of the brief's reads: each section read, what arrived since the owner's
+// last brief that their assistant told them nothing of, when anything did, and why each section not
+// read was not
+function dataOf(date: string, { sections, untold, timeZone }: Reads): Record<string, unknown> {
 	const data: Record<string, unknown> = { date };
 	const notRead: Record<string, string> = {};
 	for (const [name, read] of readsOf(sections)) {
 		if (read.ok) data[name] = read.value;
 		else notRead[name] = read.reason;
 	}
+	if (untold.activities.length > 0) data['since_last_brief'] = untoldData(untold, timeZone);
 	return Object.keys(notRead).length === 0 ? data : { ...data, not_read: notRead };
 }
 
@@ -795,8 +828,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		};
 	}
 
-	// The brief's reads after the day's, the zone it is written in, and the instant it read the
-	// owner's mail at, when it did
+	// The brief's reads after the day's, the zone it is written in, the instant it read the owner's
+	// mail at, when it did, and the activities of their journal no brief named yet
 	async function readSections(
 		context: ToolContext,
 		date: string,
@@ -808,7 +841,11 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		// owner's calendar, which the time their mail is read from is told in, the days of their tasks
 		// counted in, and the brief written in, and the days their brief goes out on
 		const settings = await fetchBriefSettings(db, owner, config.timeZone);
-		const readAt = await withPrincipal(db, { id: owner }, (tx) => findBriefMailsReadAt(tx, owner));
+		// One activity more than the model is handed, which tells there are more
+		const { readAt, activities } = await withPrincipal(db, { id: owner }, async (tx) => ({
+			readAt: await findBriefMailsReadAt(tx, owner),
+			activities: await listUntoldActivities(tx, owner, MAX_UNTOLD + 1)
+		}));
 		const now = clock.now();
 		const mails = await readMails(
 			context,
@@ -824,7 +861,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				tasks: await readTasks(context, settings.timeZone)
 			},
 			timeZone: settings.timeZone,
-			mailsReadAt: mails.ok ? now : null
+			mailsReadAt: mails.ok ? now : null,
+			untold: untoldOf(activities, invitations.ok ? invitations.value.pending : [])
 		};
 	}
 
@@ -882,18 +920,19 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 
 	// The brief of its date, written from its reads in their zone, by the model unless admission
 	// refused it for a spent day, which the conversation keeps as the assistant's answer, in the same
-	// transaction as the instant it read the owner's mail at, when it did, and what else ends with it.
-	// A request that closed unanswered with it expired, as one past its lifetime does, and counts the
-	// same.
+	// transaction as the instant it read the owner's mail at, when it did, the erasure of what showed
+	// the activities it named, and what else ends with it. A request that closed unanswered with it
+	// expired, as one past its lifetime does, and counts the same.
 	async function writeBrief(
 		writing: Writing,
-		{ sections, timeZone, mailsReadAt }: Reads,
+		reads: Reads,
 		ending: (tx: Tx) => Promise<ClosedRequest | null>
 	): Promise<BriefResult> {
 		const { principal, session, locale, date, log, refusedFor } = writing;
+		const { sections, timeZone, mailsReadAt, untold } = reads;
 		const messages = getMessages(locale);
 		for (const [name, skipped] of readsOf(sections)) logSkipped(name, skipped, log);
-		const told = `${writing.told}\n${messages.brief.day(fenced(BRIEF_DATA, dataOf(date, sections)))}`;
+		const told = `${writing.told}\n${messages.brief.day(fenced(BRIEF_DATA, dataOf(date, reads)))}`;
 		const moment = describeMoment(clock.now(), timeZone, locale);
 		const system = buildSystemPrompt({
 			persona: deps.persona(writing.assistantName, messages),
@@ -909,12 +948,12 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		// links
 		const brief: Laid =
 			model.text === null
-				? template(sections, date, locale, messages.brief.template)
+				? template(sections, untold, date, locale, messages.brief.template)
 				: { text: model.text, html: renderQuotedMarkdown(model.text) };
 		// The conversation keeps the brief as the owner reads it, and what its numbers, keys and emails
 		// name, as data, in place of what any earlier brief's named: not the data it was written from,
 		// which every later turn would carry
-		const references = referencesOf(sections);
+		const references = referencesOf(sections, untold);
 		const kept =
 			references === null
 				? writing.told
@@ -928,6 +967,11 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			if (!stored) return null;
 			// The owner's next brief reads their mail from the instant this one read it
 			if (mailsReadAt !== null) await saveBriefMailsReadAt(tx, principal.id, mailsReadAt);
+			await eraseActivityNames(
+				tx,
+				principal.id,
+				untold.activities.map(({ activity }) => activity)
+			);
 			return { closed: await ending(tx) };
 		});
 		if (saved === null) return { kind: 'missing' };
@@ -946,6 +990,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 				tasks: sections.tasks.ok
 					? sections.tasks.value.overdue.length + sections.tasks.value.today.length
 					: null,
+				activities: untold.activities.length,
 				tokens: model.tokens,
 				...(refusedFor === null ? {} : { refused: refusedFor })
 			},

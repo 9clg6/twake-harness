@@ -70,6 +70,18 @@ function shownOf(value: unknown): Shown {
 	};
 }
 
+function activityOf(row: ActivityRow): Activity {
+	return {
+		source: row.source,
+		eventId: row.event_id,
+		type: row.type,
+		receivedAt: row.received_at,
+		outcome: row.outcome,
+		ids: shownOf(row.ids),
+		names: row.names === null ? null : shownOf(row.names)
+	};
+}
+
 // Notes an activity in its owner's journal, in the transaction given under their principal. The
 // owner joins the index of the principals, whose journal the worker role's purge walks.
 export async function noteActivity(
@@ -123,15 +135,45 @@ export async function listActivitiesSince(tx: Tx, owner: string, since: Date): P
 		select source, event_id, type, received_at, outcome, ids, names from listening_journal
 		where owner = ${owner} and received_at >= ${since}
 		order by received_at, source, event_id`;
-	return rows.map((row) => ({
-		source: row.source,
-		eventId: row.event_id,
-		type: row.type,
-		receivedAt: row.received_at,
-		outcome: row.outcome,
-		ids: shownOf(row.ids),
-		names: row.names === null ? null : shownOf(row.names)
-	}));
+	return rows.map(activityOf);
+}
+
+// What came of the activities that had no turn, which the owner's next brief names: those their
+// hourly cap held back, those that waited too long for admission or that admission refused once
+// their assistant's share of the day was spent, and those kept for their brief
+const UNTOLD_OUTCOMES: readonly ActivityOutcome[] = [
+	'capped',
+	'abandoned',
+	'share_spent',
+	'for_brief'
+];
+
+// The owner's activities that had no turn and that no brief named yet, nor the purge erased the
+// names of, in the order they arrived, the first ones given
+export async function listUntoldActivities(
+	tx: Tx,
+	owner: string,
+	limit: number
+): Promise<Activity[]> {
+	const rows = await tx.sql<ActivityRow[]>`
+		select source, event_id, type, received_at, outcome, ids, names from listening_journal
+		where owner = ${owner} and outcome in ${tx.sql([...UNTOLD_OUTCOMES])} and names is not null
+		order by received_at, source, event_id
+		limit ${limit}`;
+	return rows.map(activityOf);
+}
+
+// Erases the names of the owner's activities a brief named, once it went out
+export async function eraseActivityNames(
+	tx: Tx,
+	owner: string,
+	activities: readonly Pick<Activity, 'source' | 'eventId'>[]
+): Promise<void> {
+	for (const { source, eventId } of activities) {
+		await tx.sql`
+			update listening_journal set names = null
+			where owner = ${owner} and source = ${source} and event_id = ${eventId}`;
+	}
 }
 
 // How many activities a purge erased the names of, and how many it deleted

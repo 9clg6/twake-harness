@@ -18,8 +18,8 @@ export interface ListeningJournalDeps {
 
 // An activity as the model reads it: what it was, when it arrived in the owner's zone and what came
 // of it, then what identifies and shows it, people's words under untrusted. Once its names are
-// erased, what it was and what came of it alone.
-function viewOf(activity: Activity, timeZone: TimeZone): Record<string, unknown> {
+// erased, what it was and what came of it alone. The brief hands its model the same.
+export function activityView(activity: Activity, timeZone: string): Record<string, unknown> {
 	const { source, type, outcome, ids, names } = activity;
 	if (names === null) return { source, type, outcome };
 	const untrusted = { ...ids.untrusted, ...names.untrusted };
@@ -62,7 +62,7 @@ export function makeListeningJournalTool(deps: ListeningJournalDeps): Tool {
 				result: {
 					time_zone: timeZone,
 					since: isoIn(since, timeZone),
-					activities: activities.map((activity) => viewOf(activity, timeZone))
+					activities: activities.map((activity) => activityView(activity, timeZone))
 				}
 			};
 		}
