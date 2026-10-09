@@ -653,10 +653,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
 	// a message of its own, marked as the brief of its date, or the question it gave way to, about
 	// their permission or the reads of their first brief, marked as a question, or what it says once
-	// it stops for want of their answer. Refused by admission for rate or room, it waits as a turn an
-	// event woke does, and the line that says so says why. Refused for a spent day, it goes out laid
-	// out by the harness, and once the share of the day the assistant spends on its own was spent,
-	// the assistant tells its owner so, once a day.
+	// it stops by itself, its question unanswered or its owner not seen. Refused by admission for
+	// rate or room, it waits as a turn an event woke does, and the line that says so says why.
+	// Refused for a spent day, it goes out laid out by the harness, and once the share of the day the
+	// assistant spends on its own was spent, the assistant tells its owner so, once a day.
 	async function sendBrief(
 		job: Job,
 		payload: TurnPayload,

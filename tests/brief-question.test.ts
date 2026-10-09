@@ -10,7 +10,8 @@ import {
 	LIST_EVENTS,
 	LIST_MAILBOXES,
 	LIST_TASKS,
-	MAILBOXES
+	MAILBOXES,
+	seenEveryDay
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import {
@@ -131,6 +132,7 @@ describe('my first brief asks me, in one question, to read my calendar, my mail 
 	// Each case is a first brief again: none of her reads allowed, her brief neither stopped nor
 	// paused, no question of it waiting, and nothing said yet of a read taken back
 	beforeEach(async () => {
+		await seenEveryDay(r.h.db, ALICE);
 		for (const domain of DOMAINS) await withdrawConsent(r.h.db, ALICE, domain, 'read');
 		await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
 			await tx.sql`delete from brief_questions where owner = ${ALICE}`;
