@@ -286,6 +286,7 @@ describe('my brief tells only of the applications my assistant listens to', () =
 			NOT_LISTENING_TO_CALENDAR
 		);
 		// Since Wednesday's brief, kept for her next one: an invitation, and a task assigned to her
+		// that her hourly cap held back
 		await withPrincipal(r.h.db, { id: ALICE }, async (tx) => {
 			await noteActivity(tx, ALICE, {
 				source: CALENDAR_SOURCE,
@@ -300,7 +301,7 @@ describe('my brief tells only of the applications my assistant listens to', () =
 				eventId: 'assigned-demo',
 				type: TASK_ASSIGNED_EVENT_TYPE,
 				receivedAt: new Date('2026-10-14T16:00:00Z'),
-				outcome: 'for_brief',
+				outcome: 'capped',
 				noted: ASSIGNED
 			});
 		});

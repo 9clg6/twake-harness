@@ -404,19 +404,18 @@ describe('my brief names what reached me since my last brief that my assistant t
 				'2026-10-15T17:00:00+02:00'
 			)
 		);
-		await note(
-			'replied-seminar',
-			REPLIED_EVENT_TYPE,
-			'2026-10-13T16:00:00Z',
-			'for_brief',
-			aboutMeeting(
-				'seminar',
-				null,
-				'Séminaire',
-				'2026-10-16T09:00:00+02:00',
-				'2026-10-16T18:00:00+02:00'
-			)
-		);
+		await note('replied-seminar', REPLIED_EVENT_TYPE, '2026-10-13T16:00:00Z', 'for_brief', {
+			ids: { computed: {}, untrusted: { uid: 'seminar' } },
+			names: {
+				computed: {
+					start: '2026-10-16T09:00:00+02:00',
+					end: '2026-10-16T18:00:00+02:00',
+					attendee: '[REDACTED-EMAIL-c19b85e2]',
+					answer: 'DECLINED'
+				},
+				untrusted: { title: 'Séminaire' }
+			}
+		});
 		await note(
 			'assigned-spec',
 			TASK_ASSIGNED_EVENT_TYPE,
@@ -431,8 +430,10 @@ describe('my brief names what reached me since my last brief that my assistant t
 			[
 				'Depuis ton dernier brief :',
 				'- 2. Revue de sprint : annulée',
-				'- 3. Séminaire : réponse à ton invitation',
 				"- WEB-14 Relire la spec : tâche qui t'est assignée",
+				'',
+				'Réponses à tes invitations :',
+				'- 3. Séminaire : [REDACTED-EMAIL-c19b85e2] décline',
 				'',
 				'Pour enchaîner, dis-moi par exemple « décline la 1 ».'
 			].join('\n')

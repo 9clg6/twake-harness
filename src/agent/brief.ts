@@ -44,12 +44,21 @@ import {
 	type ToldShare
 } from '../briefs/shares.js';
 import {
+	answerGiven,
+	assignedAfter,
+	assignedData,
+	assignedReferences,
+	attendeeOf,
 	kindOf,
 	MAX_UNTOLD,
+	repliesData,
+	replyReferences,
 	titleOf,
 	untoldData,
 	untoldOf,
 	untoldReferences,
+	type AssignedReference,
+	type NumberedMeeting,
 	type Untold,
 	type UntoldReference
 } from '../briefs/untold.js';
@@ -217,7 +226,9 @@ interface References {
 		readonly task_id: string;
 	}[];
 	readonly since_last_brief?: readonly UntoldReference[];
+	readonly replies?: readonly NumberedMeeting[];
 	readonly shares?: readonly ShareReference[];
+	readonly self_assigned?: readonly AssignedReference[];
 }
 
 // One open task as the tasks' contract lists it: what Tasks computed, then, under untrusted, what
@@ -445,17 +456,18 @@ function line(text: string): Laid {
 }
 
 // A section of the brief as the harness lays it out: its heading over its first items, numbered
-// from 1 or not, if it has any, then how many more there are, if any. People's text is text, never
-// markup.
+// from 1 or not, if it has any, then how many more there are, if any, and what it counts without
+// naming, if anything. People's text is text, never markup.
 function section(
 	heading: string,
 	items: readonly string[],
 	more: string | null,
-	numbered: boolean
+	numbered: boolean,
+	counted: string | null = null
 ): Laid {
 	const list = numbered ? 'ol' : 'ul';
 	const shown = items.slice(0, SHOWN);
-	const after = more === null ? [] : [more];
+	const after = [more, counted].filter((text): text is string => text !== null);
 	return {
 		text: [
 			heading,
@@ -656,6 +668,28 @@ function template(
 			section(words.since, lines, moreOf(lines.length, untold.truncated, words.more), false)
 		);
 	}
+	if (untold.replies.length > 0) {
+		// The declines and the maybes named, then the acceptances counted
+		const named = untold.replies.filter(({ activity }) => answerGiven(activity) !== 'ACCEPTED');
+		const accepted = untold.replies.length - named.length;
+		const lines = named.map(({ activity, meeting }) =>
+			words.reply(
+				meeting === null ? null : `${meeting.number}.`,
+				titleOf(activity) ?? words.untitled,
+				attendeeOf(activity) ?? words.someone,
+				words.answers[answerGiven(activity) ?? 'NEEDS-ACTION']
+			)
+		);
+		laid.push(
+			section(
+				words.replies,
+				lines,
+				moreOf(lines.length, false, words.more),
+				false,
+				accepted === 0 ? null : words.accepted(accepted)
+			)
+		);
+	}
 	if (!shares.ok) notRead('shares');
 	else {
 		const told = shares.value.shares.flatMap((share) =>
@@ -684,6 +718,12 @@ function template(
 			const number = file === undefined ? null : numberOf(file.item);
 			if (number !== null) examples.push(words.read(number));
 		}
+	}
+	if (untold.assigned.length > 0) {
+		const lines = untold.assigned.map(({ activity, number, task }) =>
+			words.assignedTask(`${number}.`, titleOf(activity) ?? words.untitled, task.key)
+		);
+		laid.push(section(words.assigned, lines, moreOf(lines.length, false, words.more), false));
 	}
 	if (examples.length > 0) laid.push(line(words.footer(examples.slice(0, 2))));
 	return {
@@ -774,8 +814,17 @@ function referencesOf(sections: Sections, untold: Untold): References | null {
 	const handed = mails.ok ? mails.value.unread : [];
 	const keyed = tasks.ok ? [...tasks.value.overdue, ...tasks.value.today] : [];
 	const since = untoldReferences(untold);
+	const replies = replyReferences(untold);
 	const shared = shares.ok ? shareReferences(shares.value) : [];
-	const count = numbered.length + handed.length + keyed.length + since.length + shared.length;
+	const assigned = assignedReferences(untold);
+	const count =
+		numbered.length +
+		handed.length +
+		keyed.length +
+		since.length +
+		replies.length +
+		shared.length +
+		assigned.length;
 	if (count === 0) return null;
 	return {
 		...(numbered.length === 0
@@ -794,19 +843,30 @@ function referencesOf(sections: Sections, untold: Untold): References | null {
 			? {}
 			: { tasks: keyed.map(({ key, board_id, task_id }) => ({ key, board_id, task_id })) }),
 		...(since.length === 0 ? {} : { since_last_brief: since }),
-		...(shared.length === 0 ? {} : { shares: shared })
+		...(replies.length === 0 ? {} : { replies }),
+		...(shared.length === 0 ? {} : { shares: shared }),
+		...(assigned.length === 0 ? {} : { self_assigned: assigned })
 	};
 }
 
 // The last number the brief gives before the shares': that of its last invitation, or of the last
-// meeting that arrived since the owner's last brief, or none
+// meeting that arrived since the owner's last brief, an answer's included, or none
 function lastNumber(invitations: Read<Invitations>, untold: Untold): number {
 	const pending = invitations.ok ? invitations.value.pending : [];
 	return Math.max(
 		0,
 		...pending.map(({ number }) => number),
-		...untold.activities.flatMap(({ meeting }) => (meeting === null ? [] : [meeting.number]))
+		...[...untold.activities, ...untold.replies].flatMap(({ meeting }) =>
+			meeting === null ? [] : [meeting.number]
+		)
 	);
+}
+
+// The last number the brief gives before the tasks the owner assigned themselves: that of the last
+// file or folder shared with them it numbers, or else the last before the shares
+function lastSharedNumber(before: number, shares: Read<Shares>): number {
+	const numbers = shares.ok ? shareReferences(shares.value).map(({ number }) => number) : [];
+	return Math.max(before, ...numbers);
 }
 
 // A message of the conversation without the references an earlier brief left in it: after the line
@@ -859,6 +919,8 @@ function dataOf(date: string, { sections, untold, timeZone }: Reads): Record<str
 		else if (!unsaid(read)) notRead[name] = read.reason;
 	}
 	if (untold.activities.length > 0) data['since_last_brief'] = untoldData(untold, timeZone);
+	if (untold.replies.length > 0) data['replies'] = repliesData(untold, timeZone);
+	if (untold.assigned.length > 0) data['self_assigned'] = assignedData(untold, timeZone);
 	return Object.keys(notRead).length === 0 ? data : { ...data, not_read: notRead };
 }
 
@@ -1071,14 +1133,16 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		const tasks: Read<Tasks> = listens('tasks')
 			? await readTasks(context, settings.timeZone)
 			: NOT_LISTENED;
-		const untold = untoldOf(activities, invitations.ok ? invitations.value.pending : []);
-		// The shares are numbered after the invitations and the meetings the brief numbers
+		const met = untoldOf(activities, invitations.ok ? invitations.value.pending : []);
+		// The shares are numbered after the invitations and the meetings the brief numbers, and the
+		// tasks the owner assigned themselves after the shares
+		const before = lastNumber(invitations, met);
 		const shares: Read<Shares> = listens('shares')
 			? await readShares(
 					context,
 					sharesSince(sharesReadAt, now, settings),
 					settings.timeZone,
-					lastNumber(invitations, untold)
+					before
 				)
 			: NOT_LISTENED;
 		return {
@@ -1086,7 +1150,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			timeZone: settings.timeZone,
 			mailsReadAt: mails.ok ? now : null,
 			sharesReadAt: shares.ok ? now : null,
-			untold
+			untold: assignedAfter(met, lastSharedNumber(before, shares))
 		};
 	}
 
@@ -1241,7 +1305,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			if (mailsReadAt !== null) await saveBriefMailsReadAt(tx, principal.id, mailsReadAt);
 			// and the shares made to them from the instant this one read them
 			if (sharesReadAt !== null) await saveBriefSharesReadAt(tx, principal.id, sharesReadAt);
-			const named = untold.activities.map(({ activity }) => activity);
+			const named = [...untold.activities, ...untold.replies, ...untold.assigned].map(
+				({ activity }) => activity
+			);
 			await eraseActivityNames(tx, principal.id, named);
 			// What the owner's quiet hours held, the brief named: no release wakes them for it
 			await eraseHeldActivities(tx, principal.id, named);
@@ -1269,6 +1335,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 					? sections.tasks.value.overdue.length + sections.tasks.value.today.length
 					: null,
 				activities: untold.activities.length,
+				replies: untold.replies.length,
+				self_assigned: untold.assigned.length,
 				shares: sections.shares.ok ? sections.shares.value.shares.length : null,
 				tokens: model.tokens,
 				...(refusedFor === null ? {} : { refused: refusedFor })
