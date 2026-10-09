@@ -142,9 +142,10 @@ config:
   # owners whose permission for their assistant to act for them expires within five days; empty
   # means the harness default, 9
   delegationReminderHour: ''
-  # The brief of each owner's working day, which the worker role wakes their assistant for, Monday
-  # to Friday, from eight on the wall clock of their calendar's zone, assistantTimezone until a read
-  # named one, and within three hours; it needs wakeupsRetentionMs of two days at least
+  # The brief of each owner's working day, which the worker role wakes their assistant for, on the
+  # days and from the time they chose, Monday to Friday from eight by default, on the wall clock of
+  # their calendar's zone, assistantTimezone until a read named one, and within three hours; it needs
+  # wakeupsRetentionMs of two days at least
   briefEnabled: false
   # Calendar's fanout of the notifications it sends each invitee, which the worker role listens
   # to, and it alone, on a connection of its own to Calendar's vhost: each invitee of a new

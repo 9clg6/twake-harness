@@ -165,18 +165,58 @@ export function isoIn(instant: Date, timeZone: string): string {
 	return `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
 }
 
-// The day and the hour of a zone's wall clock at an instant: 2026-10-08 and 9 at nine in the
-// morning there
+// The day, the hour and the minute of a zone's wall clock at an instant: 2026-10-08, 9 and 30 at
+// half past nine in the morning there
 export interface WallDay {
 	readonly date: string;
 	readonly hour: number;
+	readonly minute: number;
 }
 
 export function wallDayAt(instant: Date, timeZone: string): WallDay {
-	return { date: dateIn(instant, timeZone), hour: Number(wallClock(instant, timeZone)('hour')) };
+	const field = wallClock(instant, timeZone);
+	return {
+		date: dateIn(instant, timeZone),
+		hour: Number(field('hour')),
+		minute: Number(field('minute'))
+	};
 }
 
 // How many days of the calendar go from one day to another, both as dateIn gives them
 export function daysFrom(from: string, to: string): number {
 	return Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+}
+
+// The days of the week, Monday first
+export const WEEKDAYS = [
+	'monday',
+	'tuesday',
+	'wednesday',
+	'thursday',
+	'friday',
+	'saturday',
+	'sunday'
+] as const;
+export type Weekday = (typeof WEEKDAYS)[number];
+
+// The day of the week of a day as dateIn gives it
+export function weekdayOf(date: string): Weekday {
+	const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+	return WEEKDAYS[(day + 6) % 7] ?? 'monday';
+}
+
+// A day written as dateIn writes it
+const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// Whether a text is a day of the calendar as dateIn writes it: 2026-10-20, never 2026-02-30
+export function isCalendarDay(text: string): boolean {
+	const match = DAY.exec(text);
+	if (match === null) return false;
+	const [, year = '', month = '', day = ''] = match;
+	return isCalendarDate(year, month, day);
+}
+
+// A time of day in minutes after midnight, as a wall clock shows it: 07:30 for 450
+export function timeOfDay(minutes: number): string {
+	return `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
 }
