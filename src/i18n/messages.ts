@@ -3,7 +3,7 @@
 
 import type { RefusalReason } from '../agent/admission.js';
 import type { ConsentLevel } from '../consents/consent.js';
-import type { DelegationCode } from '../consents/delegation.js';
+import type { DelegationRefusal, SpaceScope } from '../consents/delegation.js';
 
 export const LOCALES = ['en', 'fr'] as const;
 export type Locale = (typeof LOCALES)[number];
@@ -132,14 +132,15 @@ export interface Messages {
 		// Above what an application said a call would do, which its owner reads in the call's place,
 		// quoted apart from the harness's own words: the application as the question names it
 		described(application: string): string;
-		// The platform's broker lacks the owner's permission for their assistant to act for them:
-		// what the call was about to do, in the application named as for a first use, why it waits,
-		// and whether to try again; with the deployment's consent link, where to give it first, and
-		// without one, no step the owner could not take
+		// The platform lacks what it needs from the owner to act for them: their permission for their
+		// assistant to act for them, or their API token for Twake Space. What the call was about to
+		// do, in the application named as for a first use, why it waits, and whether to try again;
+		// with the deployment's consent link, where to give it first, and without one, no step the
+		// owner could not take
 		delegation(
 			application: string,
 			level: ConsentLevel,
-			code: DelegationCode,
+			refusal: DelegationRefusal,
 			link: string | null
 		): string;
 		// The contract answers a recurring invitation only for the whole series: whether to answer
@@ -268,6 +269,98 @@ function withDeOrDApostrophe(name: string): string {
 // words, as a request carries no buttons, and in their next message, the only one that answers it
 const ENGLISH_HOW_TO_ANSWER = 'Answer yes or no in your next message.';
 const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non dans ton prochain message.';
+
+// The scopes of a Twake Space API token as Space's own pages name them, in each language, so that
+// an owner finds on its « API tokens » page the one their token lacks
+const ENGLISH_SPACE_SCOPES: Record<SpaceScope, string> = {
+	'space:read': 'Read spaces',
+	'space:write': 'Change spaces',
+	'members:write': 'Manage members',
+	'feed:read': 'Read feeds'
+};
+const FRENCH_SPACE_SCOPES: Record<SpaceScope, string> = {
+	'space:read': 'Lire les espaces',
+	'space:write': 'Modifier les espaces',
+	'members:write': 'Gérer les membres',
+	'feed:read': 'Lire les fils'
+};
+
+// Why a call waits for what its owner must give the platform, after what it was about to do, and
+// where they give it, before the link, in each language
+interface DelegationWords {
+	readonly why: string;
+	readonly give: string;
+}
+
+function englishDelegation(application: string, refusal: DelegationRefusal): DelegationWords {
+	switch (refusal.code) {
+		case 'delegation_missing':
+			return {
+				why: 'I need your permission to act on your behalf, and you have not given it yet',
+				give: 'Give it here'
+			};
+		case 'delegation_expired':
+			return {
+				why: 'I need your permission to act on your behalf, and the one you gave me has expired',
+				give: 'Give it again here'
+			};
+		case 'space_token_missing':
+			return {
+				why: `I need one of your ${application} API tokens, and you have not given me one yet`,
+				give: 'Give me one here'
+			};
+		case 'space_token_rejected':
+			return {
+				why: `I need one of your ${application} API tokens, and ${application} no longer accepts the one you gave me: it has expired or been revoked, or your account has left the organization`,
+				give: 'Give me a new one here'
+			};
+		case 'space_scope_missing':
+			return refusal.scope === null
+				? {
+						why: `I need your ${application} API token to have a permission that the one you gave me does not have`,
+						give: 'Give me one with the recommended permissions here'
+					}
+				: {
+						why: `I need your ${application} API token to have the “${ENGLISH_SPACE_SCOPES[refusal.scope]}” permission, and the one you gave me does not`,
+						give: 'Give me one that has it here'
+					};
+	}
+}
+
+function frenchDelegation(application: string, refusal: DelegationRefusal): DelegationWords {
+	switch (refusal.code) {
+		case 'delegation_missing':
+			return {
+				why: "j'ai besoin de ton autorisation d'agir en ton nom, et tu ne l'as pas encore donnée",
+				give: 'Donne-la ici'
+			};
+		case 'delegation_expired':
+			return {
+				why: "j'ai besoin de ton autorisation d'agir en ton nom, et celle que tu m'as donnée a expiré",
+				give: 'Donne-la à nouveau ici'
+			};
+		case 'space_token_missing':
+			return {
+				why: `j'ai besoin d'un de tes jetons d'API ${application}, et tu ne m'en as pas encore donné`,
+				give: "Donne-m'en un ici"
+			};
+		case 'space_token_rejected':
+			return {
+				why: `j'ai besoin d'un de tes jetons d'API ${application}, et ${application} n'accepte plus celui que tu m'as donné : il a expiré ou a été révoqué, ou ton compte a quitté l'organisation`,
+				give: "Donne-m'en un nouveau ici"
+			};
+		case 'space_scope_missing':
+			return refusal.scope === null
+				? {
+						why: `j'ai besoin que ton jeton d'API ${application} ait un droit que celui que tu m'as donné n'a pas`,
+						give: "Donne-m'en un avec les droits recommandés ici"
+					}
+				: {
+						why: `j'ai besoin que ton jeton d'API ${application} ait le droit « ${FRENCH_SPACE_SCOPES[refusal.scope]} », et celui que tu m'as donné ne l'a pas`,
+						give: "Donne-m'en un qui l'a ici"
+					};
+	}
+}
 
 // What an event from the activity exchange is, as the model is handed it
 const EN_EVENT_DATA =
@@ -399,13 +492,13 @@ const ENGLISH: Messages = {
 		howToAnswer: ENGLISH_HOW_TO_ANSWER,
 		said: 'Your assistant wrote:',
 		described: (application) => `${application} describes it as:`,
-		delegation: (application, level, code, link) => {
-			const expired = code === 'delegation_expired';
-			const why = `To ${level === 'read' ? 'read' : 'change'} your data in ${application}, I need your permission to act on your behalf, and ${expired ? 'the one you gave me has expired' : 'you have not given it yet'}.`;
+		delegation: (application, level, refusal, link) => {
+			const { why, give } = englishDelegation(application, refusal);
+			const asked = `To ${level === 'read' ? 'read' : 'change'} your data in ${application}, ${why}.`;
 			const answer = ENGLISH_HOW_TO_ANSWER;
 			return link === null
-				? `${why}\nShall I try again? ${answer}`
-				: `${why} Give it ${expired ? 'again ' : ''}here: ${link}\nOnce that is done, shall I try again? ${answer}`;
+				? `${asked}\nShall I try again? ${answer}`
+				: `${asked} ${give}: ${link}\nOnce that is done, shall I try again? ${answer}`;
 		},
 		series: (application) =>
 			`This is a series in ${application}: shall I answer for the whole series?`,
@@ -666,13 +759,13 @@ const FRENCH: Messages = {
 		howToAnswer: FRENCH_HOW_TO_ANSWER,
 		said: 'Ton assistant a écrit :',
 		described: (application) => `Description donnée par ${application} :`,
-		delegation: (application, level, code, link) => {
-			const expired = code === 'delegation_expired';
-			const why = `Pour ${level === 'read' ? 'lire' : 'modifier'} tes données dans ${application}, j'ai besoin de ton autorisation d'agir en ton nom, et ${expired ? "celle que tu m'as donnée a expiré" : "tu ne l'as pas encore donnée"}.`;
+		delegation: (application, level, refusal, link) => {
+			const { why, give } = frenchDelegation(application, refusal);
+			const asked = `Pour ${level === 'read' ? 'lire' : 'modifier'} tes données dans ${application}, ${why}.`;
 			const answer = FRENCH_HOW_TO_ANSWER;
 			return link === null
-				? `${why}\nJe réessaie ? ${answer}`
-				: `${why} Donne-la ${expired ? 'à nouveau ' : ''}ici : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;
+				? `${asked}\nJe réessaie ? ${answer}`
+				: `${asked} ${give} : ${link}\nUne fois que c'est fait, je réessaie ? ${answer}`;
 		},
 		series: (application) =>
 			`C'est une série dans ${application} : je réponds pour toute la série ?`,
