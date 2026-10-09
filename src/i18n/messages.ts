@@ -210,6 +210,14 @@ export interface Messages {
 			readonly notRead: string;
 		};
 	};
+	// What the harness says once the owner chose whether their assistant listens to an application,
+	// named as the catalog names it, on which their turn ends
+	readonly sources: {
+		// What reaches them there wakes their assistant from now on
+		listening(application: string): string;
+		// It no longer does, and their assistant still reads there when they ask
+		notListening(application: string): string;
+	};
 	// What the model is told of the present at the start of every turn, so that it can place
 	// "today" or "this afternoon" and give contracts times with the right offset
 	now(words: string, iso: string, timeZone: string): string;
@@ -567,6 +575,12 @@ const ENGLISH: Messages = {
 			notRead: 'I could not read your calendar today.'
 		}
 	},
+	sources: {
+		listening: (application) =>
+			`I am listening to ${application}: I will let you know what arrives for you there.`,
+		notListening: (application) =>
+			`I am no longer listening to ${application}: I will no longer let you know what arrives for you there, but I can still look at it when you ask me.`
+	},
 	now: (words, iso, timeZone) =>
 		[
 			'## Now',
@@ -835,6 +849,11 @@ const FRENCH: Messages = {
 			truncated: "Il y en a d'autres dans ton agenda.",
 			notRead: "Je n'ai pas pu lire ton agenda aujourd'hui."
 		}
+	},
+	sources: {
+		listening: (application) => `J'écoute ${application} : je te préviens de ce qui t'y arrive.`,
+		notListening: (application) =>
+			`Je n'écoute plus ${application} : je ne te préviens plus de ce qui t'y arrive, mais je peux toujours le consulter quand tu me le demandes.`
 	},
 	now: (words, iso, timeZone) =>
 		[

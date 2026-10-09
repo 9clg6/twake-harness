@@ -95,6 +95,8 @@ describe('contracts as tools', () => {
 				'clarify',
 				'consents_list',
 				'consents_withdraw',
+				'listen_to_source',
+				'listened_sources',
 				'listening_journal',
 				'memory',
 				'set_language',
@@ -104,7 +106,8 @@ describe('contracts as tools', () => {
 				'scoped_skills_list',
 				'scoped_skills_read',
 				'skills_propose',
-				'skills_search'
+				'skills_search',
+				'stop_listening_to_source'
 			].sort()
 		);
 	});

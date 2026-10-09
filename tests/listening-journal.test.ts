@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { withPrincipal } from '../src/db/client.js';
@@ -10,6 +9,7 @@ import {
 	HARNESS_PASSWORD,
 	HARNESS_USER,
 	INVITED,
+	invitationId,
 	lastUser,
 	logSink,
 	MAIL_RECEIVED,
@@ -72,12 +72,6 @@ function budgetReview(uid: string): Record<string, unknown> {
 		eventPath: `/calendars/a/b/${uid}.ics`,
 		isNewEvent: true
 	};
-}
-
-// The id Calendar's notification of a new invitation gets for its invitee, Alice, which her
-// assistant's turn is told of
-function invitationId(uid: string): string {
-	return createHash('sha256').update(`${uid}|${ALICE}|0`).digest('hex');
 }
 
 let serial = 0;
@@ -245,7 +239,7 @@ describe('what my assistant saw today', () => {
 		// Just after midnight, he invites me to the budget review, then assigns me ROAD-12
 		clock.set(FRIDAY_EARLY);
 		await calendar.publish(budgetReview('budget-review'));
-		await l.answerTo(invitationId('budget-review'));
+		await l.answerTo(invitationId('budget-review', ALICE));
 		clock.set(FRIDAY_LATER);
 		const road12 = assignment();
 		await l.publish(road12);
@@ -279,7 +273,7 @@ describe('what my assistant saw today', () => {
 		// anyone wrote
 		for (const [id, source, type] of [
 			[thursday.id, 'twake://tasks', ASSIGNED],
-			[invitationId('budget-review'), 'twake://calendar', INVITED],
+			[invitationId('budget-review', ALICE), 'twake://calendar', INVITED],
 			[road12.id, 'twake://tasks', ASSIGNED]
 		] as const) {
 			const lines = l.noted(id);

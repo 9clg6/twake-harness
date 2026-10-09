@@ -4,7 +4,7 @@ import { localeOf } from '../assistants/locale.js';
 import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
-import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
+import { replayOutcome, type ConsentMetrics, type ReplayOutcome } from '../consents/metrics.js';
 import {
 	approvePendingCall,
 	grantConsent,
@@ -30,6 +30,7 @@ import {
 	type SessionRecord
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
+import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
@@ -94,8 +95,12 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 // The tools a turn that comes from others, an event's or a suggestion's, is never offered, even
 // once its owner's yes resumed it, whatever their rights: the owner's listening journal, which
 // tells them in their own turns what their assistant saw, and would show such a turn the text third
-// parties wrote in every other activity
-const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [LISTENING_JOURNAL_TOOL];
+// parties wrote in every other activity; and the tools by which they choose what their assistant
+// listens to, which a third party's text never changes
+const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
+	LISTENING_JOURNAL_TOOL,
+	...LISTENING_TOOLS
+];
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -137,7 +142,7 @@ const CONTRACT_CHANGED = {
 // the harness's new question, when the call waits for its owner again; and the harness's own
 // notice, when the call did not run as its owner allowed it: its contract refused it, as what it
 // acts on changed since the preview its owner was shown, or, asked anew what the call would do,
-// did it
+// did it; or when a call of the harness's own confirms what it did
 interface Replayed {
 	readonly messages: LlmMessage[];
 	readonly question: Question | null;
@@ -165,6 +170,13 @@ function statusOf(result: unknown): number | null {
 	if (typeof result !== 'object' || result === null) return null;
 	const status = (result as Record<string, unknown>)['status'];
 	return typeof status === 'number' ? status : null;
+}
+
+// What came of a call of the harness's own its owner allowed, which answers no HTTP status: whether
+// it did what it was asked
+function ownReplayOutcome(result: unknown): ReplayOutcome {
+	if (typeof result !== 'object' || result === null) return 'failed';
+	return (result as Record<string, unknown>)['success'] === true ? 'ok' : 'failed';
 }
 
 export interface OwnerTurnInput {
@@ -304,7 +316,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort(),
 				consentMetrics
 			}),
-			makeListeningJournalTool({ clock, timeZone: config.timeZone })
+			makeListeningJournalTool({ clock, timeZone: config.timeZone }),
+			...makeListeningTools({
+				config,
+				consentMetrics,
+				domains: () => contracts.domainDescriptions
+			})
 		],
 		() => contracts.tools
 	);
@@ -346,11 +363,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	}
 
 	// Runs the call its owner allowed, exactly as it was frozen. A tool that no longer stands for
-	// the contract the owner allowed, at the same level, runs nothing. The call waits for nothing the
-	// owner's yes answered; one that waits for its owner again, such as one the platform's broker
-	// still refuses or one in an application whose writing they took back since, comes back with
-	// the harness's new question. A call whose contract showed its owner what it would do carries
-	// the digest of that preview, which the contract checks.
+	// the contract the owner allowed, at the same level, runs nothing; a call of the harness's own,
+	// such as listening to an application, finds its tool by the name it was frozen under. The call
+	// waits for nothing the owner's yes answered; one that waits for its owner again, such as one
+	// the platform's broker still refuses or one in an application whose writing they took back
+	// since, comes back with the harness's new question. A call whose contract showed its owner what
+	// it would do carries the digest of that preview, which the contract checks.
 	async function runFrozenCall(
 		approved: ApprovedCall,
 		pendingCallId: string,
@@ -360,10 +378,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
 		const tool = tools.find(approved.tool);
 		const unchanged =
-			definition !== undefined &&
 			tool !== null &&
-			definition.id === approved.contract &&
-			definition.level === approved.level;
+			(definition === undefined
+				? tool.frozenAs === approved.contract
+				: definition.id === approved.contract && definition.level === approved.level);
 		const outcome: ToolOutcome = unchanged
 			? await runTool(tool, approved.arguments, {
 					...context,
@@ -375,7 +393,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const httpStatus = statusOf(outcome.result);
 		const changed = changedSincePreview(approved, outcome);
 		if (question === null) {
-			consentMetrics.replayed(approved, replayOutcome(httpStatus));
+			consentMetrics.replayed(
+				approved,
+				definition === undefined ? ownReplayOutcome(outcome.result) : replayOutcome(httpStatus)
+			);
 			log.info(
 				{
 					pendingCallId,
@@ -432,7 +453,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question,
 			// A call that did not run as its owner allowed it ends the turn on the harness's notice:
 			// one its contract refused, as what it acts on changed since the preview they were shown,
-			// or one a preview asked for anew did, which the tool's outcome carries without a question
+			// or one a preview asked for anew did, which the tool's outcome carries without a question.
+			// So does a call of the harness's own, on its words that confirm what it did.
 			notice: changedSincePreview(approved, outcome)
 				? consent.changed
 				: question === null
