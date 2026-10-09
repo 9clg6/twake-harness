@@ -35,6 +35,10 @@ export type SuggestPayload = z.infer<typeof suggestPayloadSchema>;
 // A suggestion is stale after this long
 export const SUGGEST_MAX_AGE_MS = 10 * 60 * 1000;
 
+// How often a suggestion that waits for its owner to let their assistant read what it needs looks
+// for their answer, until it is stale
+export const SUGGEST_RECHECK_MS = 5_000;
+
 // The group of an owner's suggestions, apart from their turns
 export function suggestGroup(owner: string): string {
 	return `suggest:${owner}`;

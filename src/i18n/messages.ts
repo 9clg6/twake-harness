@@ -230,15 +230,16 @@ export interface Messages {
 			readonly notRead: string;
 		};
 	};
-	// What the harness says once the owner chose whether their assistant listens to an application,
-	// named as the catalog names it, on which their turn ends
+	// What a suggestion says when it asks its owner to let their assistant read an application
 	readonly suggestions: {
-		// Why the assistant asks to read in an application, said under its question: it wants to
-		// propose a slot for a message of this author, whose address the harness computed
+		// Why the assistant asks, said under its question: it wants to propose a slot for a message
+		// of this other person, whose address the harness computed
 		consentContext(author: string): string;
 		// What ends the turn of the owner's yes to that question
-		consentGranted: string;
+		readonly consentGranted: string;
 	};
+	// What the harness says once the owner chose whether their assistant listens to an application,
+	// named as the catalog names it, on which their turn ends
 	readonly sources: {
 		// What reaches them there wakes their assistant from now on
 		listening(application: string): string;

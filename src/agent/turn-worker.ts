@@ -28,6 +28,7 @@ import { matrixUserIdOfPrincipal } from '../principals/identity.js';
 import {
 	suggestPayloadSchema,
 	SUGGEST_MAX_AGE_MS,
+	SUGGEST_RECHECK_MS,
 	type SuggestPayload
 } from '../suggestions/job.js';
 import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
@@ -426,34 +427,38 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 
 	// What an owner's assistant proposes from the quotes of a job: the quotes are used here, sent
 	// to the model, and gone with the job. Its handler catches what this throws, so that a failed
-	// job never keeps them.
-	async function suggest(payload: SuggestPayload): Promise<void> {
+	// job never keeps them. A job that asked its owner for a permission waits for their answer, as
+	// long as its quotes may be kept; it waited already once deferred.
+	async function suggest(payload: SuggestPayload, waited: boolean): Promise<Deferral | null> {
 		const settings = options.suggestions;
-		if (settings === undefined) return;
+		if (settings === undefined) return null;
 		const { owner, roomId } = payload;
 		const attempt = payload.retry === undefined ? 0 : 1;
 		const jobLog = log.child({ reqId: `suggest:${payload.eventId}`, roomId });
 		// Turned off since the job was queued, as a second try at another time can be
 		if (!settings.config.suggestions.enabled) {
 			jobLog.info({ owner }, 'suggestion dropped: off');
-			return;
+			return null;
 		}
-		if (Date.now() - payload.at > SUGGEST_MAX_AGE_MS) {
+		const leftMs = payload.at + SUGGEST_MAX_AGE_MS - Date.now();
+		if (leftMs < 0) {
 			jobLog.info({ owner }, 'suggestion dropped: too old');
-			return;
+			return null;
 		}
 		const skip = await withPrincipal(db, { id: owner }, (tx) =>
 			mayReceive(tx, owner, roomId, attempt)
 		);
 		if (skip !== null) {
 			jobLog.info({ owner, reason: skip }, 'suggestion skipped');
-			return;
+			return null;
 		}
-		const result = await agent.runSuggestion({ payload, attempt, log: jobLog });
+		const result = await agent.runSuggestion({ payload, attempt, waited, log: jobLog });
 		if (result.kind === 'asked') {
 			jobLog.info({ owner, pendingCallId: result.pendingCallId }, 'suggestion asks for consent');
 			await sendSuggestionQuestion(owner, result);
-			return;
+		}
+		if (result.kind === 'asked' || result.kind === 'waiting') {
+			return { retryInMs: Math.min(SUGGEST_RECHECK_MS, leftMs) };
 		}
 		if (result.kind !== 'proposed') {
 			jobLog.info(
@@ -464,7 +469,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				},
 				'suggestion decided'
 			);
-			return;
+			return null;
 		}
 		const { pendingCallId, proposal } = result;
 		await withPrincipal(db, { id: owner }, (tx) =>
@@ -489,6 +494,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			jobLog.info({ owner, pendingCallId, outcome }, 'suggestion sent to Space');
 		}
 		await sendSuggestionQuestion(owner, result);
+		return null;
 	}
 
 	// The harness's request about the call a suggestion froze, in the owner's assistant room
@@ -573,7 +579,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 					return null;
 				}
 				try {
-					await suggest(quoted.data);
+					return await suggest(quoted.data, job.deferrals > 0);
 				} catch (err: unknown) {
 					log.warn(
 						{ job: job.id, reason: err instanceof Error ? err.name : 'error' },

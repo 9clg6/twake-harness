@@ -46,6 +46,8 @@ export interface SuggestionInput {
 	readonly payload: SuggestPayload;
 	// 0 for a first suggestion, 1 for the try at another time
 	readonly attempt: number;
+	// Whether it already waited for its owner to let their assistant read what it needs
+	readonly waited: boolean;
 	readonly log: FastifyBaseLogger;
 }
 
@@ -60,6 +62,8 @@ export type SuggestionResult =
 			readonly answer: string;
 			readonly request: OwnerRequest;
 	  }
+	// That question still waits for the owner
+	| { readonly kind: 'waiting' }
 	| {
 			readonly kind: 'proposed';
 			readonly pendingCallId: string;
@@ -248,6 +252,11 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		const meeting = contracts.contracts.find((c) => c.toolName === CREATE_MEETING);
 		if (slots === undefined || meeting === undefined)
 			return { kind: 'none', reason: 'no_contracts' };
+		const others = (payload.retry?.attendees ?? payload.quoted.map((q) => q.email))
+			.map((e) => e.toLowerCase())
+			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
+		const other = others[0];
+		if (other === undefined) return { kind: 'none', reason: 'nobody_else' };
 		const prepared = await withPrincipal(db, principal, async (tx) => {
 			const record = await ensurePrincipal(tx, principal);
 			const assistant = await findAssistant(tx, owner);
@@ -274,12 +283,13 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		}
 		const locale = localeOf(prepared.assistant, config.locale);
 		if (prepared.lacking !== null) {
+			const { domain, level } = prepared.lacking;
 			const question = await askSuggestionConsent(
 				{ config, db, domains: contracts.domainDescriptions, consentMetrics },
-				payload,
-				locale,
-				prepared.lacking
+				{ owner, other, domain, level, eventId: payload.eventId, waited: input.waited },
+				locale
 			);
+			if (question === 'waiting') return { kind: 'waiting' };
 			return question === null
 				? { kind: 'none', reason: 'no_calendar_consent' }
 				: {
@@ -289,10 +299,6 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						answer: requestText(question.request)
 					};
 		}
-		const others = (payload.retry?.attendees ?? payload.quoted.map((q) => q.email))
-			.map((e) => e.toLowerCase())
-			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
-		if (others.length === 0) return { kind: 'none', reason: 'nobody_else' };
 		const registry = makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
 		const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 		const moment = describeMoment(clock.now(), timeZone, locale);
