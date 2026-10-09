@@ -973,8 +973,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return row === undefined ? null : { owner: row.owner, userId: row.user_id };
 	}
 
-	// Whether a room the owner invited their assistant into is an encrypted conversation of the owner
-	// and one other person: there it reads, for its owner alone, and never writes
+	// Whether a room the owner invited their assistant into is an encrypted conversation of the owner,
+	// still in it, and one other person: there it reads, for its owner alone, and never writes
 	async function isOwnersEncryptedPair(
 		intent: Intent,
 		roomId: string,
@@ -986,6 +986,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			'join',
 			'invite'
 		]);
+		const owner = members.find((member) => member.membershipFor === ownerUserId);
+		if (owner?.membership !== 'join') return false;
 		const others = members.filter(
 			(member) => member.membershipFor !== ownerUserId && member.membershipFor !== assistantUserId
 		);
@@ -1362,7 +1364,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	);
 
 	// A conversation the assistant reads for its owner: it is forgotten once the assistant leaves or
-	// is removed, and left, without a word, once a third person comes in
+	// is removed, and left, without a word, once a third person comes in or either member goes
 	appservice.on(
 		'room.event',
 		guard(
@@ -1383,10 +1385,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					if (membership === 'leave' || membership === 'ban') await forget('removed');
 					return;
 				}
-				if (!consent && membership !== 'join' && membership !== 'invite') return;
 				const intent = appservice.getIntentForUserId(listened.userId);
 				const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
-				// A third person, a withdrawn request or a no: it leaves without a word
+				// A third person, a member gone, a withdrawn request or a no: it leaves without a word
 				if (
 					(await isOwnersEncryptedPair(intent, roomId, ownerUserId, listened.userId)) &&
 					(await otherMemberAccepted(intent, roomId, ownerUserId, listened.userId))
