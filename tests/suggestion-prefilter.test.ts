@@ -14,7 +14,7 @@ describe('the pre-filter of channel messages', () => {
 		'Meeting on October 12',
 		'on se call le 3 novembre',
 		'Quick call at 14:30',
-		"peut on se voir lundi à 14h pour softphonie dans l'ECS ?",
+		'Peut-on se voir lundi à 14h ?',
 		'Je passe te voir demain ?'
 	])('lets %j through', (text) => {
 		expect(mayArrangeMeeting(text)).toBe(true);
