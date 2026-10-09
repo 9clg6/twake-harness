@@ -170,15 +170,25 @@ export function makeToolRegistry(
 	};
 }
 
-// The tools of a registry but those named, which are neither offered to the model nor run, should
-// it name one all the same
-export function withoutTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+// The tools of a registry whose names it keeps: no other is offered to the model or run, should it
+// name one all the same
+function keptTools(registry: ToolRegistry, kept: (name: string) => boolean): ToolRegistry {
 	return {
 		get definitions() {
-			return registry.definitions.filter((tool) => !names.includes(tool.function.name));
+			return registry.definitions.filter((tool) => kept(tool.function.name));
 		},
-		find: (name) => (names.includes(name) ? null : registry.find(name))
+		find: (name) => (kept(name) ? registry.find(name) : null)
 	};
+}
+
+// The tools of a registry but those named
+export function withoutTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+	return keptTools(registry, (name) => !names.includes(name));
+}
+
+// The tools of a registry of those names alone
+export function onlyTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+	return keptTools(registry, (name) => names.includes(name));
 }
 
 function hasOnlyKeys(args: unknown, keys: readonly string[]): args is Record<string, unknown> {

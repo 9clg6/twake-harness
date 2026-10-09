@@ -21,7 +21,7 @@ import { fenced } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { isListening } from '../sources/repository.js';
 import { sourceOfActivity } from '../sources/sources.js';
-import { TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
+import { MOVED_EVENT_TYPE, TASK_ASSIGNED_EVENT_TYPE } from './event-types.js';
 
 // Someone an event names, as its source knows them
 export interface Person {
@@ -42,8 +42,11 @@ export interface Wakeup {
 	// What its owner's listening journal keeps of it beyond its source, type and id, nothing unless
 	// its source says
 	readonly noted?: Noted;
-	// For an invitation, what its turn checks before the model speaks
+	// For an invitation, or a change to a meeting, what its turn checks before the model speaks
 	readonly invitation?: Invitation;
+	// For an activity that calls for no word at once: its owner's journal keeps it for their brief,
+	// and it wakes nobody
+	readonly forBrief?: true;
 	// For the brief of its owner's working day, the date in their zone it is the brief of: only the
 	// worker role's scheduler sets it, and a turn is a brief's for that alone, never for its type
 	readonly brief?: { readonly date: string };
@@ -76,10 +79,15 @@ function eventData(wakeup: Wakeup): string {
 }
 
 // What the owner's assistant is told, in its owner's language: what arrived, then the event, or
-// that their day starts, for a brief, whose turn reads the rest
+// that their day starts, for a brief, whose turn reads the rest. Of a meeting the harness checks,
+// its type tells whether it is a new invitation or a move: only the calendar listener gives one.
 function told(wakeup: Wakeup, messages: Messages): string {
 	if (wakeup.brief !== undefined) return messages.brief.intro(wakeup.id);
-	if (carriesInvitation(wakeup)) return messages.events.invited(wakeup.id, eventData(wakeup));
+	if (carriesInvitation(wakeup)) {
+		return wakeup.type === MOVED_EVENT_TYPE
+			? messages.events.moved(wakeup.id, eventData(wakeup), wakeup.invitation.scope ?? 'event')
+			: messages.events.invited(wakeup.id, eventData(wakeup));
+	}
 	return wakeup.type === TASK_ASSIGNED_EVENT_TYPE
 		? messages.events.taskAssigned(wakeup.id, eventData(wakeup))
 		: messages.events.published(wakeup.type, wakeup.id, eventData(wakeup));
@@ -101,9 +109,9 @@ function isOwnAction({ actor, recipient }: Wakeup): boolean {
 // domain has one, nobody is woken for their own action, and nobody more often in an hour than the
 // deployment allows. An activity of an application their assistant does not listen to, as they
 // chose or by its default, wakes nothing and leaves nothing. Their listening journal notes each
-// event they are woken for or their cap holds back, and of their own actions a task they assigned
-// themselves, for their brief, none of which wakes them twice; a brief, which the scheduler tries
-// again, it never notes.
+// event they are woken for or their cap holds back, and for their brief, with no turn, a task they
+// assigned themselves or an activity its source keeps for it, such as a meeting's new title, none
+// of which wakes them twice; a brief, which the scheduler tries again, it never notes.
 export async function wake(
 	deps: WakeDeps,
 	wakeup: Wakeup,
@@ -160,9 +168,9 @@ export async function wake(
 				outcome: journaled,
 				noted: wakeup.noted ?? { ids: NOTHING_SHOWN, names: NOTHING_SHOWN }
 			});
-		// A task the owner assigned themselves calls for no word at once and takes none of their
-		// wake-ups: their journal keeps it for their brief
-		if (ownAction) {
+		// A task the owner assigned themselves, or an activity its source keeps for their brief, calls
+		// for no word at once and takes none of their wake-ups: their journal keeps it for their brief
+		if (ownAction || wakeup.forBrief === true) {
 			await noteAs('for_brief');
 			return 'for_brief' as const;
 		}

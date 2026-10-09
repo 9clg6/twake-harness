@@ -1,23 +1,27 @@
 import { z } from 'zod';
 
 import { fenced } from '../llm/data.js';
+import { MEETING_SCOPES } from '../wakeups/event-types.js';
 import { wallTimeIn } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
 // What the wake-up of an invitation carries for the harness to check it, which its turn's payload
 // keeps: its UID, its start and end from DTSTART and DTEND, and the TZID, "UTC", or null for an
-// all-day event
+// all-day event; for a change to a meeting, what it is about, which the answers its turn may
+// prepare follow, a meeting on its own when it says nothing
 export const invitationSchema = z.object({
 	uid: z.string().min(1),
 	start: z.string().nullable(),
 	end: z.string().nullable(),
-	timezone: z.string().nullable()
+	timezone: z.string().nullable(),
+	scope: z.enum(MEETING_SCOPES).optional()
 });
 
 export type Invitation = z.infer<typeof invitationSchema>;
 
 // Whether an event carries an invitation for the harness to check, whichever source it came from:
-// what its wake-up tells, and its turn, follow from that alone, never from its type
+// only the calendar listener gives one, and what its wake-up tells, and its turn, follow from that
+// first, never from its type alone, which then tells a new invitation from a change to a meeting
 export function carriesInvitation<T extends { readonly invitation?: Invitation | undefined }>(
 	event: T | undefined
 ): event is T & { readonly invitation: Invitation } {
