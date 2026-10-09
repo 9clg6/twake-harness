@@ -837,7 +837,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					});
 					if (consent === undefined) throw new Error('a granted consent is not listed');
 					if (created) {
-						request.log.info({ principal: principal.id, domain, level }, 'consent granted');
+						// pino writes the line's own level under `level`
+						request.log.info(
+							{ principal: principal.id, domain, consentLevel: level },
+							'consent granted'
+						);
 					}
 					return reply.code(created ? 201 : 200).send(toConsentView(consent));
 				}

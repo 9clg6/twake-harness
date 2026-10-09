@@ -244,7 +244,7 @@ describe('what my assistant listens to, which I choose', () => {
 			].join('\n\n')
 		);
 		expect(linesSaying('listening waits for its owner')).toEqual([
-			expect.objectContaining({ tool: LISTEN, domain: 'calendar', level: 'read' })
+			expect.objectContaining({ level: 30, tool: LISTEN, domain: 'calendar', consentLevel: 'read' })
 		]);
 		// Until I answer, it does not listen: an invitation wakes nothing
 		expect(linesSaying('listened source set').slice(set)).toEqual([]);

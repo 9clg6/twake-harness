@@ -612,7 +612,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 				contract: 'calendar.invitation.accept.v1',
 				tool: 'accept_invitation',
 				domain: 'calendar',
-				level: 'write',
+				consentLevel: 'write',
 				risk: 'low',
 				principal: 'alice@test.local'
 			});

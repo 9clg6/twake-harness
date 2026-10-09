@@ -180,7 +180,11 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 				'Paul wants an answer about the Q4 budget. Let me read his mail.'
 			)
 		);
-		expect(lastWait()).toMatchObject({ reasons: ['consent'], domain: 'mail', level: 'read' });
+		expect(lastWait()).toMatchObject({
+			reasons: ['consent'],
+			domain: 'mail',
+			consentLevel: 'read'
+		});
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 		// My ✅ lets it read the mail, and the answer it prepared from it waits for me, shown whole
 		await r.client.react(r.room, read.eventId, '✅');
@@ -195,7 +199,7 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		expect(lastWait()).toMatchObject({
 			reasons: ['event_turn', 'high_risk'],
 			domain: 'mail',
-			level: 'write'
+			consentLevel: 'write'
 		});
 		expect(r.h.apisix.contracts.calls.map((c) => `${c.method} ${c.path}`)).toEqual([
 			'GET /contracts/v1/mail/emails'
