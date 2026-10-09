@@ -3,11 +3,19 @@ import { isRecord } from '../matrix/json.js';
 
 // What came of an activity a source published for an owner: woken until the turn it woke ends,
 // then suggested once that turn answered, nothing_useful once it ended on no words, abandoned once
-// it waited too long for admission, failed otherwise; capped when the owner's hourly cap held it
-// back, and for_brief when it called for no word at once, such as a task they assigned themselves,
-// both with no turn
+// it waited too long for admission, share_spent once admission refused it as the owner's day, or
+// the share of it their assistant spends on its own, was spent, failed otherwise; capped when the
+// owner's hourly cap held it back, and for_brief when it called for no word at once, such as a task
+// they assigned themselves, both with no turn
 export type ActivityOutcome =
-	'woken' | 'suggested' | 'nothing_useful' | 'abandoned' | 'failed' | 'capped' | 'for_brief';
+	| 'woken'
+	| 'suggested'
+	| 'nothing_useful'
+	| 'abandoned'
+	| 'share_spent'
+	| 'failed'
+	| 'capped'
+	| 'for_brief';
 
 // The outcomes the turn an activity woke ends on
 export type WokenTurnOutcome = Exclude<ActivityOutcome, 'woken' | 'capped' | 'for_brief'>;
