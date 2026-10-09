@@ -39,7 +39,7 @@ import {
 } from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
-import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
+import { dateIn, describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
 	carriesInvitation,
@@ -757,7 +757,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// zone of the owner's calendar once a read of it named one, the call their yes just ran
 			// included, and in the deployment's until then.
 			const timeZone = await fetchOwnerTimeZone(db, principal.id, config.timeZone);
-			const moment = describeMoment(clock.now(), timeZone, locale);
+			const now = clock.now();
+			const moment = describeMoment(now, timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
 			const offered = comesFromOthers(origin)
@@ -813,7 +814,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						actionsBefore,
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
 						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
-						mayStaySilent: woken
+						mayStaySilent: woken,
+						today: dateIn(now, timeZone)
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>
