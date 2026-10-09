@@ -392,7 +392,7 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		]);
 	});
 
-	it('leaves out my mail when I have not allowed it, which the harness’s own brief says in one line, and reads it, once I allow it again, since the last brief that did', async () => {
+	it('leaves out my mail once I took it back, which the brief says in one line, and reads it, once I allow it again, since the last brief that did', async () => {
 		const seen = briefs().length;
 		const calls = briefCalls().length;
 		const mailboxes = mailboxReads().length;
@@ -407,9 +407,13 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		expect(mailboxReads().slice(mailboxes)).toHaveLength(0);
 		expect(mailReads().slice(emails)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
-		expect(dataOf(told)).toMatchObject({ date: '2026-10-23', not_read: { mails: 'consent' } });
+		expect(dataOf(told)).toMatchObject({ date: '2026-10-23' });
 		expect(dataOf(told)).not.toHaveProperty('mails');
-		expect(friday.body).toContain("Je n'ai pas pu lire tes mails aujourd'hui.");
+		expect(dataOf(told)).not.toHaveProperty('not_read');
+		expect(friday.body).toMatch(
+			/\n\nJe ne lis plus tes mails : pour que je les lise de nouveau, dis-moi « lis mes mails »\.$/
+		);
+		expect(friday.body).not.toContain("Je n'ai pas pu lire tes mails");
 		expect(friday.body).not.toContain('Tes mails non lus');
 		// No call waits for her, and the log says why
 		expect(await r.callsTo('mail')).toHaveLength(pending);

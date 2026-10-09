@@ -281,6 +281,8 @@ describe('the day of the week beside each date my assistant reads', () => {
 	});
 
 	it('names the right day of each meeting my brief lists, its date and times handed in words', async () => {
+		// My brief may read all it reads, which it would otherwise ask me first
+		for (const domain of ['mail', 'tasks']) await grantConsent(h.db, 'alice', domain, 'read');
 		h.apisix.contracts.handler = () => ({
 			status: 200,
 			body: { time_zone: 'Europe/Paris', events: [POINT_MEETING], truncated: false }
