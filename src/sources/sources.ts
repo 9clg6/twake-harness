@@ -4,12 +4,12 @@ export const SOURCES = ['calendar', 'tasks', 'mail', 'drive', 'chat'] as const;
 export type Source = (typeof SOURCES)[number];
 
 // The sources their owner may have their assistant listen to or not: those whose activities the
-// harness takes today, and Mail, which publishes none it takes, so that listening there only has
-// their brief read it
-export const LISTENABLE: readonly Source[] = ['calendar', 'tasks', 'mail'];
+// harness takes today, and Mail and Drive, which publish none it takes, so that listening there only
+// has their brief read them
+export const LISTENABLE: readonly Source[] = ['calendar', 'tasks', 'mail', 'drive'];
 
 // The listenable sources their assistant listens to unless they said otherwise: Mail waits for their
-// yes to the question of their first brief
+// yes to the question of their first brief, and Drive for their asking
 export const LISTENED_BY_DEFAULT: readonly Source[] = ['calendar', 'tasks'];
 
 // The source the calendar producer gave the invitations it published, which the harness gives
