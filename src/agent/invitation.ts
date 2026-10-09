@@ -5,10 +5,11 @@ import { MEETING_SCOPES } from '../wakeups/event-types.js';
 import { wallTimeIn } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
-// What the wake-up of an invitation carries for the harness to check it, which its turn's payload
-// keeps: its UID, its start and end from DTSTART and DTEND, and the TZID, "UTC", or null for an
-// all-day event; for a change to a meeting, what it is about, which the answers its turn may
-// prepare follow, a meeting on its own when it says nothing
+// What the wake-up of a new invitation, a move or a cancellation carries of its meeting, which its
+// turn's payload keeps: its UID, its start and end from DTSTART and DTEND, and the TZID, "UTC", or
+// null for an all-day event; for a change to a meeting, what it is about, which its turn's words
+// and the answers it may prepare follow, a meeting on its own when it says nothing. The harness
+// checks the slot of a new invitation or a move before the model speaks, never a cancellation's.
 export const invitationSchema = z.object({
 	uid: z.string().min(1),
 	start: z.string().nullable(),
@@ -19,9 +20,9 @@ export const invitationSchema = z.object({
 
 export type Invitation = z.infer<typeof invitationSchema>;
 
-// Whether an event carries an invitation for the harness to check, whichever source it came from:
-// only the calendar listener gives one, and what its wake-up tells, and its turn, follow from that
-// first, never from its type alone, which then tells a new invitation from a change to a meeting
+// Whether an event carries a meeting, whichever source it came from: only the calendar listener
+// gives one, and what its wake-up tells, and its turn, follow from that first, never from its type
+// alone, which then tells a new invitation, a move and a cancellation apart
 export function carriesInvitation<T extends { readonly invitation?: Invitation | undefined }>(
 	event: T | undefined
 ): event is T & { readonly invitation: Invitation } {

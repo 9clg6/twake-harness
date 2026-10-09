@@ -920,30 +920,25 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(before);
 	});
 
-	it('wakes nobody for an update, a cancellation or a reply, nor for an invitee without an assistant', async () => {
+	it('wakes nobody for an update without a change or a reply, nor for an invitee without an assistant', async () => {
 		// As the calendar producer's tests sent them: an update, which says nothing of being new, and
-		// one that says it is not; a cancellation; Carol's answer to a meeting Alice organizes; and a
-		// new invitation for someone without an assistant
+		// one that says it is not, neither with a change Calendar computed; Carol's answer to a meeting
+		// Alice organizes; and a new invitation for someone without an assistant
 		const update = notification({
 			uid: 'uid-update',
 			isNewEvent: null,
 			lines: ['SUMMARY:Point Twake Space', 'DTSTART:20261006T150000Z', 'SEQUENCE:1']
 		});
 		const notNew = notification({ uid: 'uid-not-new', isNewEvent: false });
-		const cancellation = notification({
-			uid: 'uid-cancel',
-			method: 'CANCEL',
-			lines: ['DTSTART:20261006T150000Z', 'STATUS:CANCELLED']
-		});
 		const reply = notification({ uid: 'uid-reply', method: 'REPLY', sender: 'carol@test.local' });
 		const nobody = notification({ uid: 'nobody', recipient: 'nobody@test.local' });
 		// Then a new invitation for Alice, its method in lower case: once she is told of it, the
 		// queue, read in order, has taken every notification before it
 		const next = notification({ uid: 'uid-next', method: 'request' });
-		for (const sent of [update, notNew, cancellation, reply, nobody, next]) await publish(sent);
+		for (const sent of [update, notNew, reply, nobody, next]) await publish(sent);
 		await answerTo('uid-next');
 		// No model call names any of them, whatever id it could have been given
-		for (const uid of ['uid-update', 'uid-not-new', 'uid-cancel', 'uid-reply', 'nobody']) {
+		for (const uid of ['uid-update', 'uid-not-new', 'uid-reply', 'nobody']) {
 			expect(r.h.apisix.llm.calls.some((call) => lastUser(call.request).includes(uid))).toBe(false);
 		}
 		// Each was taken all the same, none dead-lettered

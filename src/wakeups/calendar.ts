@@ -9,6 +9,7 @@ import { cut } from '../llm/data.js';
 import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { CALENDAR_SOURCE } from '../sources/sources.js';
 import {
+	CANCELLED_EVENT_TYPE,
 	INVITED_EVENT_TYPE,
 	MOVED_EVENT_TYPE,
 	RENAMED_EVENT_TYPE,
@@ -216,15 +217,23 @@ function veventOf(event: unknown): Vevent {
 
 // The id the calendar producer gave an invitation, which the gateway's audit records carry and an
 // E2E computes again: the hex SHA-256 of its UID exactly as written, its invitee, its SEQUENCE, 0
-// when it has none, and for an occurrence its RECURRENCE-ID exactly as written, joined with |
-function invitationId(vevent: Vevent, uid: string, recipient: string): string {
+// when it has none, and for an occurrence its RECURRENCE-ID exactly as written, joined with |, then
+// what a wake-up that is no new invitation adds after them, so that it is told apart from the
+// invitation at the same SEQUENCE: a cancellation, its method
+function invitationId(
+	vevent: Vevent,
+	uid: string,
+	recipient: string,
+	added: readonly string[]
+): string {
 	const sequence = vevent.parsed.getFirstPropertyValue('sequence');
 	const occurrence = writtenValue(vevent.written, 'RECURRENCE-ID');
 	const parts = [
 		uid,
 		recipient,
 		String(typeof sequence === 'number' ? sequence : 0),
-		...(occurrence === null ? [] : [occurrence])
+		...(occurrence === null ? [] : [occurrence]),
+		...added
 	];
 	return createHash('sha256').update(parts.join('|')).digest('hex');
 }
@@ -255,10 +264,12 @@ function formerTimeOf(change: unknown): string | null {
 type Before = { readonly moved: false } | { readonly moved: true; readonly at: string | null };
 
 // What a change to a meeting its invitee already had is to them: a move of its start or its end,
-// which wakes them, or a new title alone, which their journal keeps for their brief
+// which wakes them, a new title alone, which their journal keeps for their brief, or its
+// cancellation, which wakes them too
 type Change =
 	| { readonly kind: 'moved'; readonly start: Before; readonly end: Before }
-	| { readonly kind: 'renamed' };
+	| { readonly kind: 'renamed' }
+	| { readonly kind: 'cancelled' };
 
 // What a change to a meeting is, from the changes Calendar computed, or null when it neither moved
 // it nor renamed it. The place and the description go first, before anything else of the changes
@@ -282,10 +293,15 @@ function changeOf(changes: unknown, leftOut: string[]): Change | null {
 	return 'summary' in kept ? { kind: 'renamed' } : null;
 }
 
-// The type a meeting's wake-up takes: a new invitation, a move or a new title
+// The type a meeting's wake-up takes: a new invitation, a move, a new title or a cancellation
+const TYPE_OF_CHANGE: Readonly<Record<Change['kind'], string>> = {
+	moved: MOVED_EVENT_TYPE,
+	renamed: RENAMED_EVENT_TYPE,
+	cancelled: CANCELLED_EVENT_TYPE
+};
+
 function typeOf(change: Change | null): string {
-	if (change === null) return INVITED_EVENT_TYPE;
-	return change.kind === 'moved' ? MOVED_EVENT_TYPE : RENAMED_EVENT_TYPE;
+	return change === null ? INVITED_EVENT_TYPE : TYPE_OF_CHANGE[change.kind];
 }
 
 // Whether the invitee declined the meeting, as its VEVENT writes their participation once changed:
@@ -310,8 +326,9 @@ function scopeOf(vevent: Vevent): MeetingScope {
 }
 
 // The wake-up a new invitation brings its invitee, or a change to a meeting they were invited to:
-// a move, which also shows where the meeting was and says what it is about, or a new title, which
-// waits for their brief. What the calendar computed (the times, the organizer's address and the
+// a move, which also shows where the meeting was and says what it is about, a new title, which
+// waits for their brief, or a cancellation, which says what it is about and is told apart from the
+// invitation at its SEQUENCE. What the calendar computed (the times, the organizer's address and the
 // occurrence) is shown apart from what the organizer wrote (the title, the UID and the zone, under
 // untrusted); the description and the location are never read. The check takes the UID and the
 // zone whole. A VEVENT without UID throws a DeadLetterError that says why; a field the calendar
@@ -330,7 +347,12 @@ function wakeupOf(
 	if (typeof uid !== 'string' || uid.length === 0 || writtenUid === null) {
 		throw new DeadLetterError('an invitation without UID');
 	}
-	const id = invitationId(vevent, writtenUid, recipient);
+	const id = invitationId(
+		vevent,
+		writtenUid,
+		recipient,
+		change?.kind === 'cancelled' ? ['CANCEL'] : []
+	);
 	const organizer = organizerOf(vevent.parsed, message['senderEmail'], leftOut);
 	const start = whenOf(vevent.parsed, 'dtstart', leftOut);
 	const end = endOf(vevent.parsed, leftOut);
@@ -386,7 +408,7 @@ function wakeupOf(
 			},
 			names: { computed: { start: start.at, end: end.at, ...previous }, untrusted: shownTitle }
 		},
-		// A new title alone waits for the brief, and leaves its turn nothing to check
+		// A new title alone waits for the brief, and wakes no turn the meeting would go to
 		...(change?.kind === 'renamed'
 			? { forBrief: true as const }
 			: {
@@ -406,21 +428,23 @@ function wakeupOf(
 // effect, and nothing of it is read, kept or logged, even in the dead letters. A new invitation
 // wakes its invitee, and so does a change to the start or the end of a meeting they were already
 // invited to, a REQUEST that is no new invitation, unless its VEVENT as changed says they declined
-// it; a change of its title alone is kept for their brief; any other change, a change to a meeting
-// whose VEVENT says they declined it, a cancellation or a reply is ignored.
+// it; a change of its title alone is kept for their brief; the cancellation of a meeting, of one
+// occurrence of its series or of the whole series, a CANCEL, wakes them too, whatever they
+// answered it; any other change, a change to a meeting whose VEVENT says they declined it, a reply
+// or a counter-proposal is ignored.
 function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 	const recipient = addressOf(message['recipientEmail']);
 	if (recipient === null || matrixLocalpartOfPrincipal(deps.config, recipient) === null) {
 		return { kind: 'foreign' };
 	}
 	const identity: Identity = { source: CALENDAR_SOURCE, recipients: 1 };
-	const method = message['method'];
-	if (typeof method !== 'string' || method.toUpperCase() !== 'REQUEST') {
+	const method = typeof message['method'] === 'string' ? message['method'].toUpperCase() : null;
+	if (method !== 'REQUEST' && method !== 'CANCEL') {
 		return { kind: 'ignored', identity, reason: 'no invitation nor change' };
 	}
 	const leftOut: string[] = [];
-	let change: Change | null = null;
-	if (message['isNewEvent'] !== true) {
+	let change: Change | null = method === 'CANCEL' ? { kind: 'cancelled' } : null;
+	if (method === 'REQUEST' && message['isNewEvent'] !== true) {
 		change = changeOf(message['changes'], leftOut);
 		if (change === null) return { kind: 'ignored', identity, reason: 'no change to tell' };
 	}
@@ -428,7 +452,10 @@ function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 	let wakeup: Wakeup;
 	try {
 		const vevent = veventOf(message['event']);
-		if (change !== null && declinedBy(vevent.parsed, recipient)) {
+		if (
+			(change?.kind === 'moved' || change?.kind === 'renamed') &&
+			declinedBy(vevent.parsed, recipient)
+		) {
 			return { kind: 'ignored', identity: { ...identity, type }, reason: 'declined' };
 		}
 		wakeup = wakeupOf(message, recipient, vevent, change, leftOut);
@@ -451,8 +478,8 @@ function readingOf(message: RabbitMQMessage, deps: WakeDeps): Reading {
 	};
 }
 
-// Listens to Calendar's fanout on the instance's own queue, on Calendar's vhost: a new invitation
-// or a move wakes its invitee's assistant
+// Listens to Calendar's fanout on the instance's own queue, on Calendar's vhost: a new invitation,
+// a move or a cancellation wakes its invitee's assistant
 export function startCalendarListener(
 	deps: WakeDeps,
 	source: CalendarSource,
