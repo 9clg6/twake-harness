@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import type { Config } from '../config.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
@@ -19,6 +19,8 @@ import {
 } from '../consents/repository.js';
 import { requestHtml } from '../consents/request.js';
 import type { Locale, Messages } from '../i18n/messages.js';
+import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
+import type { BriefMarker } from '../matrix/brief.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
 import type { Refusal, RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
@@ -31,27 +33,36 @@ import {
 import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
 import type { SpaceNotifications } from '../suggestions/space.js';
 import { proposalSentence } from '../suggestions/text.js';
-import type { AgentService, OwnerTurnResult, TurnOrigin } from './service.js';
+import type { AgentService, OwnerTurnResult } from './service.js';
 
 const turnPayload = z.object({
 	owner: z.string().min(1),
 	roomId: z.string().min(1),
 	eventId: z.string().min(1),
 	text: z.string().min(1),
-	// Who started the turn: the owner's message, or an event the harness took from the broker
-	origin: z.enum(['owner', 'event']).optional(),
+	// Who started the turn: the owner's message, an event the harness took from the broker, or the
+	// worker role's scheduler, for the brief of the owner's working day
+	origin: z.enum(['owner', 'event', 'brief']).optional(),
 	// The event, when the turn is an event's: its id and CloudEvent type, as its source published
-	// them, and for an invitation, what the harness checks before the model speaks
+	// them, that source, by which its owner's listening journal keeps it, and for an invitation, what
+	// the harness checks before the model speaks. A brief is keyed as an event is, by the id the
+	// scheduler gave it.
 	event: z
 		.object({
 			id: z.string().min(1),
 			type: z.string().min(1),
+			// Not in a turn queued before the journal was
+			source: z.string().min(1).optional(),
 			invitation: invitationSchema.optional()
 		})
-		.optional()
+		.optional(),
+	// For a brief, the date in the owner's zone it is the brief of
+	brief: z.object({ date: z.iso.date() }).optional()
 });
 
 export type TurnPayload = z.infer<typeof turnPayload>;
+
+type PayloadOrigin = NonNullable<TurnPayload['origin']>;
 
 // The prefix that keys a turn an event woke, in its payload and its jobs' dedup keys
 const EVENT_KEY_PREFIX = 'event:';
@@ -64,13 +75,19 @@ const REFUSED_TURN_RETRY_MAX_MS = 60_000;
 
 // What links a turn's contract calls and log lines to their cause: the Matrix id of the owner's
 // message, or, for a turn an event woke, the bare id the event's source gave it, so that the
-// gateway's audit records match it exactly. The prefixed form stays the turn's internal key.
-function correlationIdOf(payload: TurnPayload, origin: TurnOrigin): string {
-	if (origin !== 'event') return payload.eventId;
+// gateway's audit records match it exactly, and for a brief, the id the scheduler gave it, which
+// names no owner. The prefixed form stays the turn's internal key.
+function correlationIdOf(payload: TurnPayload, origin: PayloadOrigin): string {
+	if (origin === 'owner') return payload.eventId;
 	if (payload.event !== undefined) return payload.event.id;
 	return payload.eventId.startsWith(EVENT_KEY_PREFIX)
 		? payload.eventId.slice(EVENT_KEY_PREFIX.length)
 		: payload.eventId;
+}
+
+// A turn queued before the origin was recorded is an event's when its id says so
+function originOf(payload: TurnPayload): PayloadOrigin {
+	return payload.origin ?? (payload.eventId.startsWith(EVENT_KEY_PREFIX) ? 'event' : 'owner');
 }
 
 const resumePayload = z.object({
@@ -100,6 +117,9 @@ export interface SendPayload {
 	readonly html?: string;
 	// The turn answered once it reached one of its limits: there is more to do
 	readonly atLimit?: true;
+	// The text is the brief of the owner's working day: what the matrix role marks the message's
+	// content with, for their client to tell it and its date
+	readonly brief?: BriefMarker;
 }
 
 // The actions a turn has done so far, which the matrix role shows its owner in the turn's status
@@ -154,7 +174,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		reason: RefusalReason,
 		turnLog: FastifyBaseLogger,
 		owner: string,
-		kind: 'event' | 'resumed'
+		kind: 'event' | 'resumed' | 'brief'
 	): Deferral | null {
 		const leftMs = turn.eventMaxDelayMs - job.deferredForMs;
 		if (leftMs <= 0) {
@@ -170,6 +190,41 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		};
 		turnLog.info({ owner, reason, ...deferral }, `${kind} turn deferred`);
 		return deferral;
+	}
+
+	// Sets what came of the activity a turn was woken for in its owner's listening journal, once the
+	// turn ended, in the transaction given under their principal, then says so once committed: once
+	// for each activity, with what identifies it and none of its content
+	async function settleWith(
+		owner: string,
+		event: TurnPayload['event'],
+		outcome: WokenTurnOutcome,
+		turnLog: FastifyBaseLogger,
+		alongside: (tx: Tx) => Promise<unknown>
+	): Promise<void> {
+		const source = event?.source;
+		const settled = await withPrincipal(db, { id: owner }, async (tx) => {
+			await alongside(tx);
+			return event === undefined || source === undefined
+				? false
+				: settleActivity(tx, owner, source, event.id, outcome);
+		});
+		if (settled && event !== undefined) {
+			turnLog.info(
+				{ source, eventId: event.id, type: event.type, owner, outcome },
+				'activity noted'
+			);
+		}
+	}
+
+	// What came of the activity a turn was woken for, on its own
+	function settle(
+		owner: string,
+		event: TurnPayload['event'],
+		outcome: WokenTurnOutcome,
+		turnLog: FastifyBaseLogger
+	): Promise<void> {
+		return settleWith(owner, event, outcome, turnLog, () => Promise.resolve());
 	}
 
 	// The owner's assistant, when this room is still its room
@@ -448,6 +503,47 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		});
 	}
 
+	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
+	// a message of its own, marked as the brief of its date. Refused by admission, it waits as a turn
+	// an event woke does, and the line that says so says why.
+	async function sendBrief(
+		job: Job,
+		payload: TurnPayload,
+		assistant: AssistantRecord,
+		correlationId: string,
+		turnLog: FastifyBaseLogger
+	): Promise<Deferral | null> {
+		const { owner, roomId, eventId, text, brief } = payload;
+		if (brief === undefined) throw new Error('turn payload is malformed');
+		const result = await agent.runBrief({
+			principal: { id: owner },
+			roomId,
+			told: text,
+			date: brief.date,
+			log: turnLog,
+			correlationId,
+			assistantName: assistant.name
+		});
+		if (result.kind === 'busy') return deferOrAbandon(job, result.reason, turnLog, owner, 'brief');
+		if (result.kind !== 'ok') {
+			turnLog.warn({ result: result.kind }, 'brief dropped');
+			return null;
+		}
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId,
+				text: result.text,
+				html: result.html,
+				brief: { date: brief.date }
+			} satisfies SendPayload,
+			dedupKey: `send:${eventId}`,
+			groupKey: `send:${roomId}`
+		});
+		return null;
+	}
+
 	return startJobWorker({
 		db,
 		log,
@@ -479,16 +575,19 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			const parsed = turnPayload.safeParse(job.payload);
 			if (!parsed.success) throw new Error('turn payload is malformed');
 			const { owner, roomId, eventId, text } = parsed.data;
-			// A turn queued before the origin was recorded is an event's when its id says so
-			const origin =
-				parsed.data.origin ?? (eventId.startsWith(EVENT_KEY_PREFIX) ? 'event' : 'owner');
+			const origin = originOf(parsed.data);
 			const assistant = await roomAssistant(owner, roomId);
 			if (assistant === null) {
 				log.info({ owner, roomId }, 'turn dropped: no assistant for this room');
+				// Nobody was told of the activity it was woken for
+				if (origin === 'event') await settle(owner, parsed.data.event, 'failed', log);
 				return null;
 			}
 			const correlationId = correlationIdOf(parsed.data, origin);
 			const turnLog = log.child({ reqId: correlationId, roomId });
+			if (origin === 'brief') {
+				return sendBrief(job, parsed.data, assistant, correlationId, turnLog);
+			}
 			// A turn woken by an event posted to the API answers no message of the room
 			const actionsDone = eventId.startsWith('$')
 				? reportActions(turnLog, { asUserId: assistant.userId, roomId, replyTo: eventId })
@@ -505,13 +604,20 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				...(actionsDone === null ? {} : { actionsDone })
 			});
 			if (result.kind === 'busy' && origin === 'event') {
-				return deferOrAbandon(job, result.reason, turnLog, owner, 'event');
+				const deferral = deferOrAbandon(job, result.reason, turnLog, owner, 'event');
+				if (deferral === null) await settle(owner, parsed.data.event, 'abandoned', turnLog);
+				return deferral;
 			}
 			if (result.kind !== 'ok') turnLog.warn({ result }, 'turn did not succeed');
+			// An activity the assistant found nothing useful in leaves nothing in the room
+			if (origin === 'event' && result.kind === 'ok' && result.silent === true) {
+				await settle(owner, parsed.data.event, 'nothing_useful', turnLog);
+				return null;
+			}
 			// Read once the turn is over: the owner may have changed their language in it
 			const { notices } = await fetchOwnerMessages(db, owner, locale);
-			await enqueueJob(db, {
-				kind: 'send',
+			const send = {
+				kind: 'send' as const,
 				payload: {
 					...(await replyTo(result, assistant, roomId, notices)),
 					// A turn woken by an event posted to the API answers no message of the room
@@ -519,8 +625,26 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				},
 				dedupKey: `send:${eventId}`,
 				groupKey: `send:${roomId}`
-			});
+			};
+			if (origin !== 'event') {
+				await enqueueJob(db, send);
+				return null;
+			}
+			// What came of the activity is settled with what tells its owner of it, or not at all
+			await settleWith(
+				owner,
+				parsed.data.event,
+				result.kind === 'ok' ? 'suggested' : 'failed',
+				turnLog,
+				(tx) => enqueueJob(tx, send)
+			);
 			return null;
+		},
+		// A turn an activity woke that failed for good told its owner nothing of it
+		failedForGood: async (job) => {
+			const parsed = turnPayload.safeParse(job.payload);
+			if (job.kind !== 'turn' || !parsed.success || originOf(parsed.data) !== 'event') return;
+			await settle(parsed.data.owner, parsed.data.event, 'failed', log);
 		}
 	});
 }

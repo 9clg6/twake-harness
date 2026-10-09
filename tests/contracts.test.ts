@@ -95,6 +95,7 @@ describe('contracts as tools', () => {
 				'clarify',
 				'consents_list',
 				'consents_withdraw',
+				'listening_journal',
 				'memory',
 				'set_language',
 				'scoped_sessions_list',

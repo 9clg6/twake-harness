@@ -158,6 +158,11 @@ export function renderQuotedMarkdown(text: string): string {
 	return unwrapSingleParagraph(sanitizeHtml(quotedMarkdown.render(text), QUOTED_SANITIZE).trim());
 }
 
+// A text as HTML shows it, word for word: what someone wrote never becomes markup
+export function escapeHtml(text: string): string {
+	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+}
+
 // A text the harness laid out itself, as plain text and as HTML, such as its request about a call:
 // its HTML goes through the same filter as an answer's
 export function makeLaidOutText(body: string, html: string): RichText {

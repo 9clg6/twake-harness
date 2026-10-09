@@ -44,7 +44,7 @@ import { getMessages, type Messages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
-import { announceCommands, commandOf } from './commands.js';
+import { announceCommands, announceCreatorCommands, commandOf } from './commands.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { makeEnsureEncryption, routeEncryptionSetups } from './encryption.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
@@ -60,6 +60,7 @@ import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
+import { isBriefMarker, markBrief, type BriefMarker } from './brief.js';
 import { makeLaidOutText, makeRichText } from './format.js';
 import {
 	isPendingIdentityQuestion,
@@ -158,6 +159,9 @@ interface SendJob {
 	readonly html?: string;
 	// The turn answered once it reached one of its limits
 	readonly atLimit?: true;
+	// The text is the brief of its owner's working day: what its content is marked with, for their
+	// client to tell it and its date
+	readonly brief?: BriefMarker;
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
@@ -230,7 +234,8 @@ function isSendJob(value: unknown): value is SendJob {
 		(job['questionMarker'] === undefined || isYesNoQuestion(job['questionMarker'])) &&
 		(job['identityQuestion'] === undefined || isPendingIdentityQuestion(job['identityQuestion'])) &&
 		(job['html'] === undefined || typeof job['html'] === 'string') &&
-		(job['atLimit'] === undefined || job['atLimit'] === true)
+		(job['atLimit'] === undefined || job['atLimit'] === true) &&
+		(job['brief'] === undefined || isBriefMarker(job['brief']))
 	);
 }
 
@@ -481,6 +486,33 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		creatorRooms.set(roomId, isIn ? true : Date.now() + NOT_CREATOR_ROOM_MS);
 		return isIn;
+	}
+
+	// Announces the creator's commands in each room it is in with someone, in the language of the
+	// one member it talks to there, else the deployment's, one room at a time and until the role
+	// stops: the number of rooms it went over, and of those it wrote them in. A room whose members
+	// cannot be read is skipped.
+	async function announceCreatorCommandsAtStart(): Promise<{ rooms: number; announced: number }> {
+		let rooms = 0;
+		let announced = 0;
+		for (const roomId of await admin.joinedRooms(creator)) {
+			if (closing) break;
+			try {
+				const members = (await admin.joinedMembers(creator, roomId)) ?? [];
+				const [member, ...more] = members.filter((userId) => userId !== creator);
+				if (member === undefined) continue;
+				const owner = more.length === 0 ? principalOfMatrixUser(config, member) : null;
+				const toOwner = owner === null ? messages : await fetchMessages(owner);
+				const room = { roomId, creatorUserId: creator };
+				rooms += 1;
+				if ((await announceCreatorCommands({ admin, log }, room, toOwner)) === 'announced') {
+					announced += 1;
+				}
+			} catch (err: unknown) {
+				log.warn({ roomId, err }, 'creator commands not announced at start');
+			}
+		}
+		return { rooms, announced };
 	}
 
 	// Suggestions from the messages of the channels the listener is in
@@ -762,10 +794,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 					return;
 				}
 				// Synapse delivers nothing sent before the join, so the creator opens the conversation
-				// itself rather than let a first message go unanswered.
+				// itself rather than let a first message go unanswered. Its commands are announced
+				// first, so that the client offers them after « / » once the help shows.
 				if (invited === creator) {
 					const owner = principalOfMatrixUser(config, event.sender ?? '');
 					const toOwner = owner === null ? messages : await fetchMessages(owner);
+					await announceCreatorCommands(
+						{ admin, log },
+						{ roomId, creatorUserId: creator },
+						toOwner
+					);
 					await appservice.botIntent.sendEvent(roomId, makeRichText(helpText(toOwner)));
 				}
 			},
@@ -972,9 +1010,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return !isAssistantUserId(config, userId) && userId !== listenerUserId(config);
 	}
 
-	// Whether a room the owner invited their assistant into is an encrypted room of the owner and
-	// other people (a direct conversation or a channel): there it reads, for its owner alone, and never
-	// writes
+	// Whether a room the owner invited their assistant into is an encrypted room of the owner, still
+	// in it, and other people (a direct conversation or a channel): there it reads, for its owner
+	// alone, and never writes
 	async function isOwnersEncryptedRoom(
 		intent: Intent,
 		roomId: string,
@@ -986,6 +1024,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			'join',
 			'invite'
 		]);
+		const owner = members.find((member) => member.membershipFor === ownerUserId);
+		if (owner?.membership !== 'join') return false;
 		const others = members.filter(
 			(member) => member.membershipFor !== ownerUserId && isPerson(member.membershipFor)
 		);
@@ -1361,8 +1401,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		)
 	);
 
-	// A conversation the assistant reads for its owner: it is forgotten once the assistant leaves or
-	// is removed, and left, without a word, once a third person comes in
+	// A room an assistant reads for its owner: it is forgotten once the assistant leaves or is
+	// removed, and left, without a word, once a newcomer who has not said yes comes in, or its owner
+	// or the last other person goes
 	appservice.on(
 		'room.event',
 		guard(
@@ -1384,12 +1425,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 						if (membership === 'leave' || membership === 'ban') await forget('removed');
 						continue;
 					}
-					if (!consent && membership !== 'join' && membership !== 'invite') continue;
-					// An assistant coming in asks no one's yes
+					// An assistant coming in or going asks no one's yes
 					if (!consent && !isPerson(event.state_key ?? '')) continue;
 					const intent = appservice.getIntentForUserId(listened.userId);
 					const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
-					// A newcomer who has not said yes, a withdrawn request or a no: it leaves without a word
+					// A newcomer who has not said yes, the owner or the last other person gone, a
+					// withdrawn request or a no: it leaves without a word
 					if (
 						(await isOwnersEncryptedRoom(intent, roomId, ownerUserId, listened.userId)) &&
 						(await otherMemberAccepted(intent, roomId, ownerUserId, listened.userId))
@@ -1741,11 +1782,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (turn !== null) {
 				await feedback.answerReady(turn, request === undefined ? 'answer' : 'question');
 			}
-			const { text, html, questionMarker, identityQuestion } = job.payload;
+			const { text, html, questionMarker, identityQuestion, brief } = job.payload;
 			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
 			const sent = await intent.sendEvent(
 				job.payload.roomId,
-				markQuestion(content, questionMarker)
+				markBrief(markQuestion(content, questionMarker), brief)
 			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (request !== undefined) {
@@ -1840,6 +1881,19 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	} catch (err: unknown) {
 		log.warn({ err }, 'assistant names not requested at start');
 	}
+	// The rooms the creator is in with someone get its commands as a room it joins does, in the
+	// background: those it joined before it announced any, or that refused them then. A room that
+	// holds them already is left as it is.
+	inFlight.track(
+		announceCreatorCommandsAtStart().then(
+			(pass) => {
+				log.info(pass, 'creator commands checked at start');
+			},
+			(err: unknown) => {
+				log.warn({ err }, 'creator commands not announced at start');
+			}
+		)
+	);
 	// The creator reads and writes encrypted rooms too, as Twake Chat opens its direct messages
 	// encrypted. Its setup comes before the first push, as the assistants' do: a setup a push starts
 	// and that fails leaves the push unanswered in the SDK.

@@ -4,7 +4,11 @@ import { findCalendarOperation, zoneOfAnswer } from '../agent/calendar.js';
 import { fetchOwnerLocale } from '../assistants/locale.js';
 import type { Config } from '../config.js';
 import type { WaitReason } from '../consents/consent.js';
-import { readDelegationCode, type DelegationCode } from '../consents/delegation.js';
+import {
+	consentStepOf,
+	readDelegationRefusal,
+	type DelegationRefusal
+} from '../consents/delegation.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import { hasConsent, insertPendingCall, type PendingCallInput } from '../consents/repository.js';
 import { makeOwnerRequest, requestText } from '../consents/request.js';
@@ -136,11 +140,11 @@ type Sending =
 	| { readonly kind: 'preview'; readonly locale: Locale };
 
 // What a contract answered: its status, 0 when it could not be called, the preview header it
-// carries back, if any, and its body; what the model reads of it; and the broker's refusal to act
-// for the owner, when the gateway relayed one
+// carries back, if any, and its body; what the model reads of it; and the refusal to act for the
+// owner until they give what it lacks, the broker's or the contract's, when the gateway relayed one
 interface Answered extends PreviewAnswer {
 	readonly result: unknown;
-	readonly delegation: DelegationCode | null;
+	readonly delegation: DelegationRefusal | null;
 }
 
 // A contract becomes a tool that calls it through APISIX, naming the owner so that the gateway
@@ -299,7 +303,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		let echoed: string | null = null;
 		let body: unknown = null;
 		let result: unknown;
-		let delegation: DelegationCode | null = null;
+		let delegation: DelegationRefusal | null = null;
 		try {
 			const response = await fetchImpl(request.url, {
 				method: contract.method.toUpperCase(),
@@ -311,7 +315,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			echoed = response.headers.get(PREVIEW_HEADER);
 			body = parseBody(await response.text());
 			result = { status, body };
-			delegation = readDelegationCode(status, body);
+			delegation = readDelegationRefusal(status, body);
 		} catch (err: unknown) {
 			result = {
 				error: `the contract could not be called: ${err instanceof Error ? err.message : String(err)}`
@@ -325,22 +329,24 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 				principal: context.principalId,
 				...loggedArguments(request.url, calendar?.loggedArguments ?? {}),
 				...(sending.kind === 'preview' ? { preview: true } : {}),
-				...(delegation === null ? {} : { delegation })
+				...(delegation === null ? {} : { delegation: delegation.code })
 			},
 			'contract called'
 		);
 		return { status, echoed, body, result, delegation };
 	}
 
-	// The platform's broker lacks the owner's permission for their assistant to act for them: the
-	// call waits for them, and the turn ends with the harness's own request, which names the
-	// application as a first use does, tells them why and gives them the deployment's consent link,
-	// never one from the answer, which a contract could have written. A call that carries the digest
-	// of the preview its owner allowed keeps it for when it runs.
+	// The platform lacks what it needs from the owner to act for them: the broker, their permission
+	// for their assistant to act for them, or, for Twake Space, an API token of theirs that Space
+	// accepts for the call. The call waits for them, and the turn ends with the harness's own
+	// request, which names the application as a first use does, tells them why and gives them the
+	// deployment's consent link, at the step where they give what lacks, never one from the answer,
+	// which a contract could have written. A call that carries the digest of the preview its owner
+	// allowed keeps it for when it runs.
 	async function waitForDelegation(
 		values: Record<string, unknown>,
 		context: ToolContext,
-		code: DelegationCode,
+		refusal: DelegationRefusal,
 		previewDigest: string | null,
 		locale: Locale
 	): Promise<ToolOutcome> {
@@ -354,13 +360,17 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		const request = getMessages(locale).consent.delegation(
 			application.name,
 			contract.level,
-			code,
-			makeOptionalOwnerConsentLink(config.consent.brokerConsentUrl, context.principalId)
+			refusal,
+			makeOptionalOwnerConsentLink(
+				config.consent.brokerConsentUrl,
+				context.principalId,
+				consentStepOf(refusal.code)
+			)
 		);
 		const pendingCallId = await freeze(values, context, ['delegation'], request, previewDigest);
 		if (isConversationGone(pendingCallId)) return { result: pendingCallId };
 		return {
-			result: { status: 'awaiting_owner', reason: 'delegation', code },
+			result: { status: 'awaiting_owner', reason: 'delegation', code: refusal.code },
 			final: request,
 			pendingCallId
 		};
@@ -422,8 +432,9 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			const built = build(values);
 			if ('error' in built) return { result: { error: built.error } };
 			const answered = await send(built, context, { kind: 'preview', locale });
-			// The broker refuses a preview as it would the call: its owner gives that permission
-			// first, and sees the preview once it may be asked for. The call for a whole series they
+			// The platform refuses a preview as it would the call: its owner gives what it lacks
+			// first, that permission or their Twake Space API token, and sees the preview once it may
+			// be asked for. The call for a whole series they
 			// were about to be asked about waits for it without the series, which only their yes to
 			// that question sets: once they gave it, the contract refuses the call for one occurrence
 			// again, and the question comes then.
@@ -504,6 +515,12 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		};
 	}
 
+	// What a turn nobody attends reads of a call that would wait for its owner: nothing was done,
+	// nothing waits, and nobody was asked, for the reasons the call would have waited
+	function notAsked(reasons: readonly WaitReason[]): ToolOutcome {
+		return { result: { status: 'not_asked', reasons } };
+	}
+
 	return {
 		definition,
 		argumentKeys,
@@ -524,10 +541,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// A call that waits is frozen, and the turn ends with the harness's own request. The call
 			// its owner allowed runs as it was frozen, unless something their yes did not answer
 			// applies now, such as writing they took back since: it then waits again, and the request
-			// asks about everything that applies.
+			// asks about everything that applies. A turn nobody attends makes no such call.
 			const reasons = await reasonsToWait(context);
 			if (reasons.some((reason) => !answeredReasons.includes(reason))) {
-				return ask(values, context, reasons);
+				return context.unattended === true ? notAsked(reasons) : ask(values, context, reasons);
 			}
 			const built = build(values);
 			if ('error' in built) return { result: { error: built.error } };
@@ -536,13 +553,15 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			const answered = await send(built, context, { kind: 'action', previewDigest });
 			// The organization agent acts for no user: nobody could give it that permission
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
+				if (context.unattended === true) return notAsked(['delegation']);
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
 			}
 			// A recurring invitation its contract answers only for the whole series: the call for every
 			// occurrence, the only one that sets series, waits for its owner, as any call does, the
-			// organization agent having nobody to ask
+			// organization agent having nobody to ask, and a turn nobody attends making no such call
 			if (owner !== ORGANIZATION_PRINCIPAL && refusedAsRecurring(contract, values, answered)) {
+				if (context.unattended === true) return notAsked(['series']);
 				return ask(wholeSeriesValues(values), context, ['series']);
 			}
 			// A read of the owner's calendar that succeeded refreshes the zone their turns state the

@@ -17,6 +17,7 @@ import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
+import { LISTENING_JOURNAL_TOOL, makeListeningJournalTool } from '../journal/tool.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
@@ -30,6 +31,7 @@ import {
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
+import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -63,6 +65,7 @@ import {
 	type ToolRegistry,
 	type TurnOrigin,
 	WITHDRAW_OWN_CONSENTS,
+	withoutTools,
 	WRITE_OWN_MEMORY,
 	WRITE_OWN_SETTINGS
 } from './tools.js';
@@ -87,6 +90,12 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WRITE_OWN_MEMORY,
 	WITHDRAW_OWN_CONSENTS
 ];
+
+// The tools a turn that comes from others, an event's or a suggestion's, is never offered, even
+// once its owner's yes resumed it, whatever their rights: the owner's listening journal, which
+// tells them in their own turns what their assistant saw, and would show such a turn the text third
+// parties wrote in every other activity
+const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [LISTENING_JOURNAL_TOOL];
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -207,6 +216,8 @@ export type OwnerTurnResult =
 			readonly request?: OwnerRequest;
 			// The turn reached one of its limits before it answered: there is more to do
 			readonly atLimit?: true;
+			// A turn an activity woke found nothing useful to say: its answer is empty, for nobody
+			readonly silent?: true;
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
@@ -226,6 +237,7 @@ export interface AgentService {
 	runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult>;
 	// What the owner's assistant proposes from the messages of a channel, if anything
 	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
+	runBrief(input: BriefInput): Promise<BriefResult>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -291,7 +303,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				// Each application once, as consents_list names it
 				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort(),
 				consentMetrics
-			})
+			}),
+			makeListeningJournalTool({ clock, timeZone: config.timeZone })
 		],
 		() => contracts.tools
 	);
@@ -652,13 +665,19 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			const moment = describeMoment(clock.now(), timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
+			const turnTools = comesFromOthers(origin)
+				? withoutTools(tools, TOOLS_HIDDEN_FROM_EVENT_TURNS)
+				: tools;
+			// The turn an activity woke, rather than the one its owner's yes resumed from it, may say
+			// nothing
+			const woken = origin === 'event' && approved === null;
 			// The names of the tools the model is given, which its rules are built on
-			const toolNames = tools.definitions.map((tool) => tool.function.name);
+			const toolNames = turnTools.definitions.map((tool) => tool.function.name);
 			try {
 				const turn = await runTurn(
 					{
 						llm,
-						tools,
+						tools: turnTools,
 						log,
 						maxToolCalls: config.turn.maxToolCalls,
 						maxTurnTokens: config.turn.maxTokens,
@@ -679,6 +698,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 											messages
 										),
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
+							woken,
 							memory,
 							skills,
 							history,
@@ -689,7 +709,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						context,
 						actionsBefore,
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
-						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone })
+						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
+						mayStaySilent: woken
 					}
 				);
 				const saved = await withPrincipal(db, principal, (tx) =>
@@ -705,7 +726,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
 					...(turn.request === undefined ? {} : { request: turn.request }),
-					...(turn.atLimit === true ? { atLimit: true } : {})
+					...(turn.atLimit === true ? { atLimit: true } : {}),
+					...(turn.silent === true ? { silent: true } : {})
 				};
 			} catch (err: unknown) {
 				if (err instanceof TurnError || err instanceof LlmError) {
@@ -719,6 +741,23 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	const suggestions = makeSuggestionRunner({ config, db, llm, contracts, admission, gate, clock });
 
+	// The brief of the owner's working day, which the worker role's scheduler asks for: the
+	// assistant speaks as in its owner's turns, given no tool
+	const briefs = makeBriefRunner({
+		config,
+		db,
+		llm,
+		tools,
+		admission,
+		gate,
+		clock,
+		persona: (assistantName, messages) =>
+			withLanguage(
+				assistantName === undefined ? defaultPrompt([]) : assistantPrompt(assistantName, []),
+				messages
+			)
+	});
+
 	return {
 		llm,
 		tools,
@@ -727,6 +766,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		admission,
 		runOwnerTurn,
 		runAllowedCall,
-		runSuggestion: suggestions.run
+		runSuggestion: suggestions.run,
+		runBrief: briefs.run
 	};
 }

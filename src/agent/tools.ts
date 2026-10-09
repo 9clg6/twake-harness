@@ -102,6 +102,10 @@ export interface ToolContext {
 	// For that call, when its contract showed them what it would do: the digest of that preview,
 	// which the call carries so that its contract refuses it should what it acts on have changed
 	readonly previewDigest?: string;
+	// Nobody waits on the turn to answer a question, as on the brief the worker role asks for: a call
+	// that would wait for its owner is not made, or not frozen once the broker refused it, and its
+	// result says why
+	readonly unattended?: true;
 }
 
 // What the model reads when its turn's conversation was erased with its assistant while the turn
@@ -159,6 +163,17 @@ export function makeToolRegistry(
 		},
 		find: (name) =>
 			byName.get(name) ?? extra().find((tool) => tool.definition.function.name === name) ?? null
+	};
+}
+
+// The tools of a registry but those named, which are neither offered to the model nor run, should
+// it name one all the same
+export function withoutTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+	return {
+		get definitions() {
+			return registry.definitions.filter((tool) => !names.includes(tool.function.name));
+		},
+		find: (name) => (names.includes(name) ? null : registry.find(name))
 	};
 }
 

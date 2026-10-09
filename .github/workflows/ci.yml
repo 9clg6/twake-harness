@@ -115,6 +115,14 @@ jobs:
             helm template agent-$role charts/twake-harness --set role=$role --set config.matrixServerName=example.org --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set secretEnv.MATRIX_HS_TOKEN=h --set config.eventsClientIds=dispatcher > /tmp/events-$role.yaml
             if grep -q EVENTS_CLIENT_IDS /tmp/events-$role.yaml; then exit 1; fi
           done
+      # BRIEF_ENABLED is rendered on the worker role only, and only when config.briefEnabled is on
+      - run: |
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/worker-default.yaml
+          if grep -q BRIEF_ENABLED /tmp/worker-default.yaml; then exit 1; fi
+          helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.briefEnabled=true > /tmp/worker-brief.yaml
+          grep -A1 BRIEF_ENABLED /tmp/worker-brief.yaml | grep -q '"true"'
+          helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.briefEnabled=true > /tmp/api-brief.yaml
+          if grep -q BRIEF_ENABLED /tmp/api-brief.yaml; then exit 1; fi
       # TURN_MAX_TOOL_CALLS is rendered only when config.turnMaxToolCalls is set, as an integer
       - run: helm template agent-harness charts/twake-harness --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k > /tmp/default.yaml && ! grep -q TURN_MAX_TOOL_CALLS /tmp/default.yaml
       - run: |
@@ -296,8 +304,10 @@ jobs:
           helm template agent-worker charts/twake-harness --set role=worker --set config.authJwksUrl=https://example/jwks --set config.authIssuer=x --set config.authAudience=y --set secretEnv.DATABASE_URL=postgres://x --set config.apisixBaseUrl=http://apisix --set secretEnv.APISIX_CONSUMER_KEY=k --set config.delegationReminderHour=0 > /tmp/reminder-zero.yaml
           grep -A1 DELEGATION_REMINDER_HOUR /tmp/reminder-zero.yaml | grep -q '"0"'
 
+  # The image does not wait for the tests: a pull request runs them before its merge, and on main
+  # they run beside the image and its chart
   image:
-    needs: [check, test, chart]
+    needs: [check, chart]
     runs-on: ${{ github.event.pull_request.head.repo.fork && 'ubuntu-latest' || 'linagora' }}
     steps:
       - uses: actions/checkout@v4

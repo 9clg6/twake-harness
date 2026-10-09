@@ -17,6 +17,15 @@ export interface AssistantRecord {
 	readonly locale: Locale | null;
 }
 
+// An assistant in its room, which its owner has not removed
+export type ActiveAssistant = AssistantRecord & { readonly roomId: string };
+
+// Whether an assistant is one its owner has not removed, in its room, as the assistants table says:
+// listActiveAssistants reads the rooms index alone
+export function isActiveAssistant(assistant: AssistantRecord | null): assistant is ActiveAssistant {
+	return assistant !== null && assistant.deletedAt === null && assistant.roomId !== null;
+}
+
 interface AssistantRow {
 	owner: string;
 	user_id: string;

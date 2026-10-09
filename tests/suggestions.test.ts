@@ -8,6 +8,7 @@ import { eventually } from './helpers/feedback.js';
 import { startE2eeClient, type E2eeClient } from './helpers/e2ee-client.js';
 import {
 	MEETING_CATALOG,
+	toolsOf,
 	type ChatRequest,
 	type ContractCall,
 	type ScriptedReply
@@ -290,6 +291,16 @@ describe('the assistant proposes from the messages of channels', () => {
 		expect(posted[0]?.path).toBe('/contracts/v1/calendar/meetings');
 		expect(posted[0]?.headers['x-twake-on-behalf-of']).toBe(ALICE);
 		expect(posted[0]?.body).toMatchObject({ title: 'Point lundi', attendees: [BOB] });
+	});
+
+	it("offers the turn the owner's yes resumed none of the tools of their own turns", async () => {
+		// That turn is still the channel's: after the meeting, the model is not offered the owner's
+		// listening journal
+		const resumed = await eventually(() =>
+			h.apisix.llm.calls.find((c) => (c.request.messages.at(-1)?.content ?? '').includes('m-1'))
+		);
+		expect(toolsOf(resumed?.request)).toContain('create_meeting');
+		expect(toolsOf(resumed?.request)).not.toContain('listening_journal');
 	});
 
 	it('proposes once a day at most three times, and once per room per twelve hours', async () => {
@@ -591,38 +602,62 @@ describe('the assistant proposes from the messages of channels', () => {
 	// D128 of Twake Chat: the owner of an encrypted direct conversation invites their assistant,
 	// warned first; it reads both sides for its owner alone and never writes there
 	describe('an assistant its owner invites into an encrypted direct conversation', () => {
-		it('comes only on the yes of the other person, proposes to its owner alone, never writes, and leaves on a no', async () => {
+		interface Conversation {
+			readonly owner: MatrixUser;
+			readonly other: MatrixUser;
+			readonly ownerClient: E2eeClient;
+			readonly otherClient: E2eeClient;
+			readonly room: string;
+			readonly assistant: string;
+			// The rows that name the room among the conversations an assistant reads
+			listened(): Promise<number>;
+			// As Twake Chat writes them: each keyed by its sender, the assistant in the content
+			ask(requested?: boolean): Promise<string>;
+			answer(accepted: boolean): Promise<string>;
+			// What the assistant wrote in the room, as the other person's client received it
+			written(): readonly unknown[];
+			stop(): Promise<void>;
+		}
+
+		// An encrypted direct conversation of two people, each with their own assistant, the first
+		// one's not invited yet
+		async function encryptedConversation(): Promise<Conversation> {
 			const tag = Math.random().toString(36).slice(2, 7);
 			const owner = await becomeAssistantOwner(`o${tag}`);
 			const other = await becomeAssistantOwner(`t${tag}`);
 			const ownerClient = await startE2eeClient(h.synapse.url, owner);
 			const otherClient = await startE2eeClient(h.synapse.url, other);
-			try {
-				const room = await ownerClient.createDirectRoom(other.userId);
-				await otherClient.joinRoom(room);
-				const principal = `o${tag}@test.local`;
-				const rows = await withPrincipal(
-					h.db,
-					{ id: principal },
-					(tx) => tx.sql<{ user_id: string }[]>`
-						select user_id from assistants where owner = ${principal}`
-				);
-				const assistant = rows[0]?.user_id ?? '';
-				const listened = async (): Promise<number> =>
-					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`).length;
-				// As Twake Chat writes them: each keyed by its sender, the assistant in the content
-				const ask = (): Promise<string> =>
+			const room = await ownerClient.createDirectRoom(other.userId);
+			await otherClient.joinRoom(room);
+			const principal = `o${tag}@test.local`;
+			const rows = await withPrincipal(
+				h.db,
+				{ id: principal },
+				(tx) => tx.sql<{ user_id: string }[]>`
+					select user_id from assistants where owner = ${principal}`
+			);
+			const assistant = rows[0]?.user_id ?? '';
+			return {
+				owner,
+				other,
+				ownerClient,
+				otherClient,
+				room,
+				assistant,
+				listened: async () =>
+					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`).length,
+				ask: (requested = true) =>
 					ownerClient.client.sendStateEvent(
 						room,
 						'app.twake.chat.assistant_request',
 						owner.userId,
 						{
 							assistant_id: assistant,
-							requested: true,
+							requested,
 							ts: Date.now()
 						}
-					);
-				const answer = (accepted: boolean): Promise<string> =>
+					),
+				answer: (accepted) =>
 					otherClient.client.sendStateEvent(
 						room,
 						'app.twake.chat.assistant_consent',
@@ -632,58 +667,103 @@ describe('the assistant proposes from the messages of channels', () => {
 							accepted,
 							ts: Date.now()
 						}
-					);
+					),
+				written: () =>
+					otherClient.events.filter(
+						(e) => e.roomId === room && e.sender === assistant && e.type === 'm.room.message'
+					),
+				stop: async () => {
+					await ownerClient.stop();
+					await otherClient.stop();
+				}
+			};
+		}
 
+		// The conversation once the other person said yes and the owner invited their assistant in
+		async function listenedConversation(): Promise<Conversation> {
+			const c = await encryptedConversation();
+			await c.ask();
+			await c.answer(true);
+			await c.ownerClient.client.inviteUser(c.assistant, c.room);
+			await until(async () => ((await c.listened()) === 1 ? true : null));
+			return c;
+		}
+
+		// Once something made it go: the room forgotten, the assistant out of it, without a word
+		async function goneWithoutAWord(c: Conversation, viewer: MatrixUser): Promise<void> {
+			await until(async () => ((await c.listened()) === 0 ? true : null));
+			await until(async () =>
+				(await h.synapse.joinedMembers(viewer, c.room)).includes(c.assistant) ? null : true
+			);
+			expect(c.written()).toHaveLength(0);
+		}
+
+		it('comes only on the yes of the other person, proposes to its owner alone, never writes, and leaves on a no', async () => {
+			const c = await encryptedConversation();
+			try {
 				// Invited before the other person said yes: it leaves without a word
-				await ask();
-				await ownerClient.client.inviteUser(assistant, room);
-				expect(await listenerStaysFor(owner, room, assistant)).toBe(false);
-				expect(await listened()).toBe(0);
+				await c.ask();
+				await c.ownerClient.client.inviteUser(c.assistant, c.room);
+				expect(await listenerStaysFor(c.owner, c.room, c.assistant)).toBe(false);
+				expect(await c.listened()).toBe(0);
 
 				// Asked, then accepted: it comes and stays
-				await ask();
-				await answer(true);
-				await ownerClient.client.inviteUser(assistant, room);
-				await until(async () =>
-					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`)
-						.length === 1
-						? true
-						: null
-				);
-				expect(await listenerStaysFor(owner, room, assistant)).toBe(true);
+				await c.ask();
+				await c.answer(true);
+				await c.ownerClient.client.inviteUser(c.assistant, c.room);
+				await until(async () => ((await c.listened()) === 1 ? true : null));
+				expect(await listenerStaysFor(c.owner, c.room, c.assistant)).toBe(true);
 
 				// The other person writes: a proposal goes to the owner, none to the other person
 				const before = space.calls.length;
-				await otherClient.sendText(room, 'ok on parle lundi à 10h');
+				await c.otherClient.sendText(c.room, 'ok on parle lundi à 10h');
 				const call = await until(() =>
-					space.calls.slice(before).find((c) => c.body['matrixRoomId'] === room)
+					space.calls.slice(before).find((made) => made.body['matrixRoomId'] === c.room)
 				);
-				expect(call.body['matrixUserId']).toBe(owner.userId);
+				expect(call.body['matrixUserId']).toBe(c.owner.userId);
 				await sleep(3000);
 				expect(
-					space.calls.slice(before).filter((c) => c.body['matrixUserId'] === other.userId)
+					space.calls.slice(before).filter((made) => made.body['matrixUserId'] === c.other.userId)
 				).toHaveLength(0);
 				// Not a word from the assistant in the conversation
-				expect(
-					otherClient.events
-						.filter((e) => e.roomId === room && e.sender === assistant)
-						.filter((e) => e.type === 'm.room.message')
-				).toHaveLength(0);
+				expect(c.written()).toHaveLength(0);
 
 				// The other person says no: it leaves without a word, and the room is forgotten
-				await answer(false);
-				await until(async () => ((await listened()) === 0 ? true : null));
-				await until(async () =>
-					(await h.synapse.joinedMembers(owner, room)).includes(assistant) ? null : true
-				);
-				expect(
-					otherClient.events.filter(
-						(e) => e.roomId === room && e.sender === assistant && e.type === 'm.room.message'
-					)
-				).toHaveLength(0);
+				await c.answer(false);
+				await goneWithoutAWord(c, c.owner);
 			} finally {
-				await ownerClient.stop();
-				await otherClient.stop();
+				await c.stop();
+			}
+		});
+
+		it('leaves without a word once its owner leaves the conversation', async () => {
+			const c = await listenedConversation();
+			try {
+				await c.ownerClient.client.leaveRoom(c.room);
+				await goneWithoutAWord(c, c.other);
+			} finally {
+				await c.stop();
+			}
+		});
+
+		it('leaves without a word once a third person is invited', async () => {
+			const c = await listenedConversation();
+			try {
+				const third = await h.synapse.registerUser(`x${Math.random().toString(36).slice(2, 7)}`);
+				await c.ownerClient.client.inviteUser(third.userId, c.room);
+				await goneWithoutAWord(c, c.owner);
+			} finally {
+				await c.stop();
+			}
+		});
+
+		it('leaves without a word once its owner withdraws the request', async () => {
+			const c = await listenedConversation();
+			try {
+				await c.ask(false);
+				await goneWithoutAWord(c, c.owner);
+			} finally {
+				await c.stop();
 			}
 		});
 

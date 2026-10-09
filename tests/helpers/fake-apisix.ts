@@ -35,6 +35,9 @@ export interface ScriptedReply {
 	// The tokens the model reports it read and wrote for this answer, over the fake's own, or null
 	// when it reports none
 	usage?: { readonly promptTokens: number; readonly completionTokens: number } | null;
+	// The status the gateway answers with instead of a completion, as when the model's provider
+	// fails: the call is recorded all the same
+	failWith?: number;
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -167,6 +170,13 @@ export function lastUserContent(request: ChatRequest): string {
 		}
 	}
 	return '';
+}
+
+// The tools a request to the model offers, by their names
+export function toolsOf(request: ChatRequest | undefined): string[] {
+	return (request?.tools ?? []).map(
+		(tool) => (tool as { function: { name: string } }).function.name
+	);
 }
 
 // The default script answers like a very literal model: it echoes the last user message.
@@ -434,6 +444,54 @@ export function brokerRefusal(
 				: 'The user has not let their agent act for them yet: they must open the consent link.',
 			code,
 			consent_url: consentUrl
+		}
+	};
+}
+
+// What the gateway relays from the token broker for a Twake Space route when it holds no Space API
+// token of the owner's: an RFC 9457 problem that says so, with a consent link that anyone answering
+// the call, a contract included, could have written
+export function brokerSpaceTokenRefusal(consentUrl: string = BROKER_CONSENT_URL): ContractReply {
+	return {
+		status: 401,
+		body: {
+			type: 'urn:twake:problem:space_token_missing',
+			title: 'Space token missing',
+			status: 401,
+			detail:
+				'The user has not given their agent a Twake Space API token yet: they must open the consent link.',
+			code: 'space_token_missing',
+			consent_url: consentUrl
+		}
+	};
+}
+
+// What a Twake Space contract answers when Space refuses the owner's API token: it expired, was
+// revoked, or its account left the organization
+export function spaceTokenRejection(): ContractReply {
+	return {
+		status: 401,
+		body: {
+			type: 'urn:twake:problem:space_token_rejected',
+			title: 'Space token rejected',
+			status: 401,
+			detail: 'Twake Space no longer accepts the API token the user gave their agent.',
+			code: 'space_token_rejected'
+		}
+	};
+}
+
+// What it answers when the owner's API token lacks the scope the call needs, as Space names it
+export function spaceScopeRefusal(scope: string): ContractReply {
+	return {
+		status: 403,
+		body: {
+			type: 'urn:twake:problem:space_scope_missing',
+			title: 'Space scope missing',
+			status: 403,
+			detail: `The user's Twake Space API token lacks the ${scope} scope this call needs.`,
+			code: 'space_scope_missing',
+			scope
 		}
 	};
 }
@@ -787,6 +845,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
 			if (reply.hold !== undefined) await reply.hold;
 			llm.calls.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
+			if (reply.failWith !== undefined) {
+				sendJson(res, reply.failWith, { error: 'the model failed' });
+				return;
+			}
 			const message: Record<string, unknown> = {
 				role: 'assistant',
 				content: reply.content ?? null

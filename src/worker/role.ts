@@ -3,12 +3,14 @@ import type { FastifyInstance } from 'fastify';
 
 import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { buildApp } from '../app.js';
+import { startBriefScheduler } from '../briefs/schedule.js';
 import type { Config } from '../config.js';
 import { startExpiryScheduler } from '../consents/expiry.js';
 import { makeConsentMetrics } from '../consents/metrics.js';
 import { startReminderScheduler } from '../consents/reminder.js';
 import { startCurationScheduler } from '../curation/curation.js';
 import type { Db } from '../db/client.js';
+import { startListeningJournalPurgeScheduler } from '../journal/purge.js';
 import { startSuggestionPurgeScheduler } from '../suggestions/retention.js';
 import { startActivityListener } from '../wakeups/activity.js';
 import { startCalendarListener } from '../wakeups/calendar.js';
@@ -17,6 +19,8 @@ import { startWakeupPurgeScheduler } from '../wakeups/retention.js';
 
 // How often the role looks whether the hour of the daily reminders has come
 const REMINDER_CHECK_MS = 60_000;
+// How often the role looks whose brief of their working day is due
+const BRIEF_CHECK_MS = 60_000;
 
 export interface WorkerRoleOptions {
 	readonly config: Config;
@@ -24,10 +28,13 @@ export interface WorkerRoleOptions {
 	readonly logStream?: Writable;
 	// The first wait before the listener tries again, a message or to listen, a second unless set
 	readonly retryDelayMs?: number;
-	// The present the daily reminders read, the system clock unless set
+	// The present the daily reminders, the briefs and the listening journals read, the system clock
+	// unless set
 	readonly clock?: Clock;
 	// How often the role looks whether their hour has come, a minute unless set
 	readonly reminderCheckMs?: number;
+	// How often the role looks whose brief is due, a minute unless set
+	readonly briefCheckMs?: number;
 }
 
 export interface WorkerRole {
@@ -38,13 +45,15 @@ export interface WorkerRole {
 }
 
 // The daily curation, the hourly expiry of the requests nobody answered, the hourly purges of the
-// wake-ups past their retention and of the suggestions nothing reads any more, each starting with
-// a pass at once, and the daily reminders of the permissions about to expire, at their hour; the
+// wake-ups and of the listening journals past their retention and of the suggestions nothing reads
+// any more, each starting with a pass at once, the daily reminders of the permissions about to
+// expire, at their hour, and the briefs of the owners' working days, from eight in their zones; the
 // expiries are counted on the metrics the role serves. With the activity exchange or Calendar's
 // fanout configured, the role also listens to it, and connects to the broker for that alone, once
 // for each.
 export async function startWorkerRole(options: WorkerRoleOptions): Promise<WorkerRole> {
 	const { config, db } = options;
+	const clock = options.clock ?? SYSTEM_CLOCK;
 	const consentMetrics = makeConsentMetrics();
 	// The sources it listens to, by the name its health check gives them
 	const listeners = new Map<string, Listener>();
@@ -63,7 +72,7 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			),
 		...(options.logStream === undefined ? {} : { logStream: options.logStream })
 	});
-	const deps = { config, db, log: app.log };
+	const deps = { config, db, log: app.log, clock };
 	const listening =
 		options.retryDelayMs === undefined ? {} : { retryDelayMs: options.retryDelayMs };
 	if (config.activity !== null) {
@@ -80,15 +89,19 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 		consentMetrics
 	);
 	const purge = startWakeupPurgeScheduler(db, app.log, config.wakeups.retentionMs);
+	const journalPurge = startListeningJournalPurgeScheduler(
+		db,
+		app.log,
+		config.wakeups.retentionMs,
+		clock
+	);
 	const suggestionPurge = startSuggestionPurgeScheduler(
 		db,
 		app.log,
 		config.consent.requestLifetimeMs
 	);
-	const reminders = startReminderScheduler(
-		{ ...deps, clock: options.clock ?? SYSTEM_CLOCK },
-		options.reminderCheckMs ?? REMINDER_CHECK_MS
-	);
+	const reminders = startReminderScheduler(deps, options.reminderCheckMs ?? REMINDER_CHECK_MS);
+	const briefs = startBriefScheduler(deps, options.briefCheckMs ?? BRIEF_CHECK_MS);
 	return {
 		app,
 		stop: async () => {
@@ -96,8 +109,10 @@ export async function startWorkerRole(options: WorkerRoleOptions): Promise<Worke
 			curation.stop();
 			expiry.stop();
 			purge.stop();
+			journalPurge.stop();
 			suggestionPurge.stop();
 			await reminders.stop();
+			await briefs.stop();
 			await app.close();
 		}
 	};
