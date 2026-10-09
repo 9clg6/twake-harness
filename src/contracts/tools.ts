@@ -504,6 +504,12 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		};
 	}
 
+	// What a turn nobody attends reads of a call that would wait for its owner: nothing was done,
+	// nothing waits, and nobody was asked, for the reasons the call would have waited
+	function notAsked(reasons: readonly WaitReason[]): ToolOutcome {
+		return { result: { status: 'not_asked', reasons } };
+	}
+
 	return {
 		definition,
 		argumentKeys,
@@ -524,10 +530,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			// A call that waits is frozen, and the turn ends with the harness's own request. The call
 			// its owner allowed runs as it was frozen, unless something their yes did not answer
 			// applies now, such as writing they took back since: it then waits again, and the request
-			// asks about everything that applies.
+			// asks about everything that applies. A turn nobody attends makes no such call.
 			const reasons = await reasonsToWait(context);
 			if (reasons.some((reason) => !answeredReasons.includes(reason))) {
-				return ask(values, context, reasons);
+				return context.unattended === true ? notAsked(reasons) : ask(values, context, reasons);
 			}
 			const built = build(values);
 			if ('error' in built) return { result: { error: built.error } };
@@ -536,13 +542,15 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			const answered = await send(built, context, { kind: 'action', previewDigest });
 			// The organization agent acts for no user: nobody could give it that permission
 			if (answered.delegation !== null && owner !== ORGANIZATION_PRINCIPAL) {
+				if (context.unattended === true) return notAsked(['delegation']);
 				const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 				return waitForDelegation(values, context, answered.delegation, previewDigest, locale);
 			}
 			// A recurring invitation its contract answers only for the whole series: the call for every
 			// occurrence, the only one that sets series, waits for its owner, as any call does, the
-			// organization agent having nobody to ask
+			// organization agent having nobody to ask, and a turn nobody attends making no such call
 			if (owner !== ORGANIZATION_PRINCIPAL && refusedAsRecurring(contract, values, answered)) {
+				if (context.unattended === true) return notAsked(['series']);
 				return ask(wholeSeriesValues(values), context, ['series']);
 			}
 			// A read of the owner's calendar that succeeded refreshes the zone their turns state the

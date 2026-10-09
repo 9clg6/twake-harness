@@ -222,6 +222,11 @@ spec:
             - name: DELEGATION_REMINDER_HOUR
               value: {{ $reminderHour | int64 | quote }}
             {{- end }}
+            {{- /* The worker role wakes the assistants for their owners' briefs, which the harness refuses with under two days of wake-ups kept */}}
+            {{- if .Values.config.briefEnabled }}
+            - name: BRIEF_ENABLED
+              value: "true"
+            {{- end }}
             {{- end }}
             {{- /* Every role that maps an owner's email to their Matrix id, or names an assistant, needs these */}}
             {{- with .Values.config.matrixServerName }}
