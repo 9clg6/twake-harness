@@ -686,6 +686,85 @@ describe('the assistant proposes from the messages of channels', () => {
 				await otherClient.stop();
 			}
 		});
+
+		it('in an encrypted channel, comes only once every other person said yes, and leaves when a newcomer has not', async () => {
+			const tag = Math.random().toString(36).slice(2, 7);
+			const owner = await becomeAssistantOwner(`c${tag}`);
+			const first = await becomeAssistantOwner(`f${tag}`);
+			const second = await becomeAssistantOwner(`s${tag}`);
+			const clients = await Promise.all(
+				[owner, first, second].map((user) => startE2eeClient(h.synapse.url, user))
+			);
+			const [ownerClient, firstClient, secondClient] = clients as [
+				E2eeClient,
+				E2eeClient,
+				E2eeClient
+			];
+			try {
+				const room = await ownerClient.client.createRoom({
+					preset: 'private_chat',
+					name: 'secret channel',
+					invite: [first.userId, second.userId],
+					initial_state: [ENCRYPTION],
+					// As Twake Chat opens a channel: every member may answer a request
+					power_level_content_override: { events: { 'app.twake.chat.assistant_consent': 0 } }
+				});
+				await firstClient.joinRoom(room);
+				await secondClient.joinRoom(room);
+				const principal = `c${tag}@test.local`;
+				const rows = await withPrincipal(
+					h.db,
+					{ id: principal },
+					(tx) => tx.sql<{ user_id: string }[]>`
+						select user_id from assistants where owner = ${principal}`
+				);
+				const assistant = rows[0]?.user_id ?? '';
+				const listened = async (): Promise<number> =>
+					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`).length;
+				const ask = (): Promise<string> =>
+					ownerClient.client.sendStateEvent(
+						room,
+						'app.twake.chat.assistant_request',
+						owner.userId,
+						{
+							assistant_id: assistant,
+							requested: true,
+							ts: Date.now()
+						}
+					);
+				const answer = (client: E2eeClient, accepted: boolean): Promise<string> =>
+					client.client.sendStateEvent(room, 'app.twake.chat.assistant_consent', client.userId, {
+						assistant_id: assistant,
+						accepted,
+						ts: Date.now()
+					});
+
+				// One yes of two: it leaves without a word
+				await ask();
+				await answer(firstClient, true);
+				await ownerClient.client.inviteUser(assistant, room);
+				expect(await listenerStaysFor(owner, room, assistant)).toBe(false);
+				expect(await listened()).toBe(0);
+
+				// Both said yes: it stays
+				await ask();
+				await answer(firstClient, true);
+				await answer(secondClient, true);
+				await ownerClient.client.inviteUser(assistant, room);
+				await until(async () => ((await listened()) === 1 ? true : null));
+				expect(await listenerStaysFor(owner, room, assistant)).toBe(true);
+
+				// A newcomer who has not said yes: it leaves, and the room is forgotten
+				const newcomer = await h.synapse.registerUser(`n${tag}`);
+				await ownerClient.client.inviteUser(newcomer.userId, room);
+				await until(async () => ((await listened()) === 0 ? true : null));
+				await until(async () =>
+					(await h.synapse.joinedMembers(owner, room)).includes(assistant) ? null : true
+				);
+			} finally {
+				for (const client of clients) await client.stop();
+			}
+		});
 	});
 });
 
