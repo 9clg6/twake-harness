@@ -80,7 +80,14 @@ import {
 
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
-import { makeSuggestionRunner, type SuggestionInput, type SuggestionResult } from './suggestion.js';
+import {
+	makeSuggestionRunner,
+	makeSuggestionTools,
+	readMeeting,
+	suggestionMaxToolCalls,
+	type SuggestionInput,
+	type SuggestionResult
+} from './suggestion.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -99,11 +106,11 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WITHDRAW_OWN_CONSENTS
 ];
 
-// The tools a turn that comes from others, an event's or a suggestion's, is never offered, even
-// once its owner's yes resumed it, whatever their rights: the owner's listening journal, which
-// tells them in their own turns what their assistant saw, and would show such a turn the text third
-// parties wrote in every other activity; and the tools by which they choose what their assistant
-// listens to, which a third party's text never changes
+// The tools a turn an event started is never offered, even once its owner's yes resumed it,
+// whatever their rights: the owner's listening journal, which tells them in their own turns what
+// their assistant saw, and would show such a turn the text third parties wrote in every other
+// activity; and the tools by which they choose what their assistant listens to, which a third
+// party's text never changes. A suggestion's turn is offered its own two tools alone.
 const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 	LISTENING_JOURNAL_TOOL,
 	...LISTENING_TOOLS
@@ -628,12 +635,30 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
 				: [];
 			const actions = opened.actions.filter((action) => !withheld.includes(action));
-			const memory = actions.includes('memory.read_own')
-				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
-				: { memory: [], user: [] };
-			const skills = actions.includes('skills.read_own')
-				? await withPrincipal(db, principal, (tx) => listSkills(tx))
-				: [];
+			// A turn resumed from a suggestion's call is still that suggestion's, whatever its owner may
+			// do in their own turns: it reads none of their memory or skills, may look for slots with the
+			// people of the meeting their yes allowed and prepare that meeting again, which waits for
+			// them once more, and makes no more calls than the suggestion could
+			const suggestion =
+				origin === 'suggestion'
+					? {
+							tools: makeSuggestionTools(
+								contracts,
+								principal.id,
+								readMeeting(approved?.arguments)?.attendees ?? [],
+								null
+							),
+							maxToolCalls: suggestionMaxToolCalls(config)
+						}
+					: null;
+			const memory =
+				suggestion === null && actions.includes('memory.read_own')
+					? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
+					: { memory: [], user: [] };
+			const skills =
+				suggestion === null && actions.includes('skills.read_own')
+					? await withPrincipal(db, principal, (tx) => listSkills(tx))
+					: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
 			// A resumed turn keeps the correlation id of the turn that froze its call, so that the
 			// gateway's audit links both
@@ -744,7 +769,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							input.event.invitation.scope ?? 'event'
 						] ?? null)
 					: null;
-			const turnTools = meetingTools === null ? offered : onlyTools(offered, meetingTools);
+			const turnTools =
+				suggestion?.tools ?? (meetingTools === null ? offered : onlyTools(offered, meetingTools));
 			// The turn an activity woke, rather than the one its owner's yes resumed from it, may say
 			// nothing
 			const woken = origin === 'event' && approved === null;
@@ -756,7 +782,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						llm,
 						tools: turnTools,
 						log,
-						maxToolCalls: config.turn.maxToolCalls,
+						maxToolCalls: suggestion?.maxToolCalls ?? config.turn.maxToolCalls,
 						maxTurnTokens: config.turn.maxTokens,
 						historyMaxChars: config.turn.historyMaxChars
 					},
@@ -779,7 +805,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							memory,
 							skills,
 							history,
-							nudgeInterval: config.turn.memoryNudgeInterval
+							nudgeInterval: suggestion === null ? config.turn.memoryNudgeInterval : 0
 						}),
 						history,
 						message: told.message,

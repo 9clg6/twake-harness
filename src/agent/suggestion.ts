@@ -19,7 +19,7 @@ import type { Admission } from './admission.js';
 import { describeMoment, findTimeZone, type Clock } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
-import { makeToolRegistry, type Tool } from './tools.js';
+import { makeToolRegistry, type Tool, type ToolRegistry } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 
 const FIND_SLOTS = 'find_meeting_slots';
@@ -28,6 +28,11 @@ const CREATE_MEETING = 'create_meeting';
 // The most calls a suggestion may make: a search for slots, a second search, the meeting, and the
 // meeting again once a guard refused it
 const MAX_TOOL_CALLS = 4;
+
+// The calls a suggestion may make, and the turn its owner's yes resumes from it
+export function suggestionMaxToolCalls(config: Config): number {
+	return Math.min(config.turn.maxToolCalls, MAX_TOOL_CALLS);
+}
 
 // The longest title and the most attendees of a suggestion's meeting, which its second try at
 // another time carries again
@@ -188,6 +193,30 @@ function guardMeeting(tool: Tool, allowed: ReadonlySet<string>, declined: string
 	};
 }
 
+// What a suggestion may call, and the turn its owner's yes resumes from it: slots for the owner
+// and the people it may invite, and the meeting with those people alone, never on the slot the
+// owner declined
+export function makeSuggestionTools(
+	contracts: ContractCatalog,
+	owner: string,
+	people: readonly string[],
+	declined: string | null
+): ToolRegistry {
+	const invited = new Set(
+		people.map((p) => p.toLowerCase()).filter((p) => p !== owner.toLowerCase())
+	);
+	const searched = new Set([...invited, owner.toLowerCase()]);
+	return makeToolRegistry([], () =>
+		contracts.tools
+			.filter((t) => [FIND_SLOTS, CREATE_MEETING].includes(t.definition.function.name))
+			.map((t) =>
+				t.definition.function.name === CREATE_MEETING
+					? guardMeeting(t, invited, declined)
+					: guardSlots(t, searched)
+			)
+	);
+}
+
 // Whether the owner's assistant has something to propose from the messages. It bypasses the
 // session of a turn on purpose: the quoted messages go to the model and nowhere else, not in a
 // history, not in the memory. What it freezes is a pending call of origin suggestion, whose write
@@ -227,16 +256,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 			.map((e) => e.toLowerCase())
 			.filter((e, i, all) => e !== owner.toLowerCase() && all.indexOf(e) === i);
 		if (others.length === 0) return { kind: 'none', reason: 'nobody_else' };
-		const searched = new Set([...others, owner.toLowerCase()]);
-		const registry = makeToolRegistry([], () =>
-			contracts.tools
-				.filter((t) => [FIND_SLOTS, CREATE_MEETING].includes(t.definition.function.name))
-				.map((t) =>
-					t.definition.function.name === CREATE_MEETING
-						? guardMeeting(t, new Set(others), payload.retry?.start ?? null)
-						: guardSlots(t, searched)
-				)
-		);
+		const registry = makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
 		const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
 		const moment = describeMoment(clock.now(), timeZone, locale);
 		const messages = getMessages(locale);
@@ -257,7 +277,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							llm,
 							tools: registry,
 							log: turnLog,
-							maxToolCalls: Math.min(config.turn.maxToolCalls, MAX_TOOL_CALLS),
+							maxToolCalls: suggestionMaxToolCalls(config),
 							maxTurnTokens: config.turn.maxTokens,
 							historyMaxChars: config.turn.historyMaxChars
 						},
