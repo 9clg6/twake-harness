@@ -58,10 +58,11 @@ function writing(names: Names, datePattern: string): Writing {
 }
 
 const WRITINGS: readonly Writing[] = [
-	// « mardi 13 octobre 2026 », « mardi 13 octobre », « jeudi 1er octobre »
+	// « mardi 13 octobre 2026 », « mardi 13 octobre », « jeudi 1er octobre », « mardi, 13 octobre »,
+	// « mardi le 13 octobre »
 	writing(
 		FRENCH,
-		`\\s+(?<day>\\d{1,2})(?:er)?\\s+(?<month>${FRENCH.months.join('|')})(?:\\s+(?<year>\\d{4}))?`
+		`,?\\s+(?:le\\s+)?(?<day>\\d{1,2})(?:er)?\\s+(?<month>${FRENCH.months.join('|')})(?:\\s+(?<year>\\d{4}))?`
 	),
 	// "Tuesday, October 13, 2026", "Tuesday October 13th"
 	writing(

@@ -138,6 +138,25 @@ describe('the day of the week of a date as the model writes it', () => {
 		);
 	});
 
+	it('reads a French date written after its day and a comma', () => {
+		expect(withTrueWeekdays('C’est accepté pour lundi, 13 octobre 2026 à 17 h.', today)).toBe(
+			'C’est accepté pour mardi, 13 octobre 2026 à 17 h.'
+		);
+		expect(withTrueWeekdays('Lundi, 13 octobre : point E2E.', today)).toBe(
+			'Mardi, 13 octobre : point E2E.'
+		);
+	});
+
+	it('reads a French date written after its day and « le »', () => {
+		expect(withTrueWeekdays('Rendez-vous lundi le 13 octobre à 17 h.', today)).toBe(
+			'Rendez-vous mardi le 13 octobre à 17 h.'
+		);
+		expect(withTrueWeekdays('LUNDI LE 13 OCTOBRE 2026', today)).toBe('MARDI LE 13 OCTOBRE 2026');
+		expect(withTrueWeekdays('C’est noté pour lundi, le 13 octobre.', today)).toBe(
+			'C’est noté pour mardi, le 13 octobre.'
+		);
+	});
+
 	it('leaves a day that is right, a date there is not, and a day without a date as written', () => {
 		for (const words of [
 			'Ta réunion est mardi 13 octobre 2026 à 17 h, et Noël vendredi 25 décembre.',
