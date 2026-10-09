@@ -71,3 +71,17 @@ export async function saveBriefChoices(tx: Tx, owner: string, brief: BriefChoice
 			brief_paused_until = excluded.brief_paused_until,
 			brief_stopped = excluded.brief_stopped`;
 }
+
+// The instant an owner's last brief read their mail; null until a brief did
+export async function findBriefMailsReadAt(tx: Tx, owner: string): Promise<Date | null> {
+	const rows = await tx.sql<{ brief_mails_read_at: Date | null }[]>`
+		select brief_mails_read_at from owner_settings where owner = ${owner}`;
+	return rows[0]?.brief_mails_read_at ?? null;
+}
+
+// Keeps the instant a brief read an owner's mail, in place of the one before, the rest kept
+export async function saveBriefMailsReadAt(tx: Tx, owner: string, at: Date): Promise<void> {
+	await tx.sql`
+		insert into owner_settings (owner, brief_mails_read_at) values (${owner}, ${at})
+		on conflict (owner) do update set brief_mails_read_at = excluded.brief_mails_read_at`;
+}
