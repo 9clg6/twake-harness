@@ -525,8 +525,7 @@ describe('my assistant asks before it first uses an application', () => {
 		});
 		expect(read.body.answer).toBe(
 			[
-				'This is the first time I need to read your data in calendar. Do you allow it? I would start with this:',
-				JSON.stringify(slot, null, 2),
+				'This is the first time I need to read your data in calendar. Do you allow it?',
 				'Answer yes or no in your next message.'
 			].join('\n\n')
 		);
