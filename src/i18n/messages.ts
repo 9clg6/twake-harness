@@ -74,8 +74,14 @@ export interface Messages {
 		// Why admission refused a turn, and when to send the message again: the owner's limit for the
 		// day, which lifts at midnight in the deployment's zone, ASSISTANT_TIMEZONE, whatever the zone
 		// of their calendar; too many of their turns at once, whether over their turns per minute or
-		// past the queue of a full replica; or too many turns on the whole platform
+		// past the queue of a full replica; or too many turns on the whole platform. The share of their
+		// day that the turns activities wake and the briefs spend refuses none of the owner's words:
+		// should a turn of theirs be refused for it, they would read the notice of a spent day.
 		busy(reason: RefusalReason): string;
+		// What the assistant tells its owner, once a day, when it spent the share of their day it may
+		// spend on its own: it reacts to nothing on its own until midnight in the deployment's zone,
+		// their next brief will name what came meanwhile, and it still answers them
+		readonly shareSpent: string;
 		readonly recovered: string;
 		readonly noEscrow: string;
 		// Why an assistant leaves a room where others than its owner are: everyone there reads it
@@ -546,6 +552,7 @@ const ENGLISH: Messages = {
 		busy: (reason) => {
 			switch (reason) {
 				case 'user_budget':
+				case 'event_share':
 					return 'I have reached my limit for the day and cannot take this message. It lifts at midnight: please send it again then.';
 				case 'user_rate':
 				case 'user_queue_full':
@@ -554,6 +561,8 @@ const ENGLISH: Messages = {
 					return 'The platform is receiving many requests right now and I cannot take this message. Please send it again in a moment.';
 			}
 		},
+		shareSpent:
+			"I have used the part of today's quota kept for what I do on my own, so I will not react to your activities on my own again until midnight. My next brief will name what comes in until then, and I still answer whenever you write to me.",
 		recovered:
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
@@ -880,6 +889,7 @@ const FRENCH: Messages = {
 		busy: (reason) => {
 			switch (reason) {
 				case 'user_budget':
+				case 'event_share':
 					return "J'ai atteint ma limite du jour et je ne peux pas prendre ce message. Elle se lève à minuit : renvoie-le à ce moment-là.";
 				case 'user_rate':
 				case 'user_queue_full':
@@ -888,6 +898,8 @@ const FRENCH: Messages = {
 					return 'La plateforme reçoit beaucoup de demandes en ce moment et je ne peux pas prendre ce message. Renvoie-le dans un instant.';
 			}
 		},
+		shareSpent:
+			"J'ai utilisé la part de mon quota du jour réservée à ce que je fais de moi-même : je ne réagirai plus de moi-même à tes activités jusqu'à minuit. Mon prochain brief nommera ce qui arrive d'ici là, et je te réponds toujours quand tu m'écris.",
 		recovered:
 			'Mon identité est restaurée depuis le séquestre. Les messages chiffrés pour mon ancien appareil restent illisibles tant que leurs clés ne sont pas restaurées ; tout ce qui suit fonctionne normalement.',
 		noEscrow:

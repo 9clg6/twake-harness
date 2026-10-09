@@ -85,6 +85,10 @@ config:
   admissionUserDailyTokens: ''
   # Turns the whole harness may start per minute; default 400
   admissionGlobalPerMinute: ''
+  # The share of each user's daily tokens kept for their own words, from 0 to 1: the turns activities
+  # wake and the briefs may spend the rest, after which activities wake nobody until midnight and a
+  # brief is laid out with no model call. Empty means the harness default, 0.5
+  chatReserve: ''
   # The most characters of past conversation a turn shows the model, its most recent exchanges
   # whole; the session keeps every message. Empty means the harness default, 24000
   turnHistoryMaxChars: ''

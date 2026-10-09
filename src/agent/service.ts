@@ -584,8 +584,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
 		const { principal } = input;
-		// Admitted before anything else runs; the slot is held until the turn ends
-		const decision = await admission.admit(principal.id);
+		// Admitted before anything else runs; the slot is held until the turn ends. A yes that resumes
+		// a call spends its owner's day as their words do, whatever turn froze the call.
+		const decision = await admission.admit(principal.id, input.origin ?? 'owner');
 		if (!decision.ok) return { kind: 'busy', ...decision.refusal };
 		try {
 			return await gate.run(principal.id, () => runAdmittedTurn(input));
@@ -838,7 +839,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					saveSessionMessages(tx, session.id, turn.messages)
 				);
 				if (!saved) return { kind: 'missing' };
-				await admission.recordUsage(principal.id, turn.tokens);
+				await admission.recordUsage(principal.id, turn.tokens, input.origin ?? 'owner');
 				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
 				return {
 					kind: 'ok',

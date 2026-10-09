@@ -125,6 +125,12 @@ spec:
               value: {{ $value | int64 | quote }}
             {{- end }}
             {{- end }}
+            {{- /* A share from 0 to 1, rendered as given, so 0 counts */}}
+            {{- $chatReserve := .Values.config.chatReserve }}
+            {{- if and (not (kindIs "invalid" $chatReserve)) (ne (toString $chatReserve) "") }}
+            - name: CHAT_RESERVE
+              value: {{ $chatReserve | toString | quote }}
+            {{- end }}
             {{- with .Values.config.turnHistoryMaxChars }}
             - name: TURN_HISTORY_MAX_CHARS
               value: {{ . | int64 | quote }}
