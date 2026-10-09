@@ -235,11 +235,35 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(told).toMatch(
 			/^\[brief\] Ma journée de travail commence : c'est l'heure de mon brief du matin \(id brief-2026-10-12-[0-9a-f]{16}\)\.\n/
 		);
+		// Each date and time written in words beside it, in her language and zone
+		const [standup, review, lunch] = dayOf('2026-10-12')['events'] as Record<string, unknown>[];
+		const monday = (time: string): string => `lundi 12 octobre 2026, ${time}`;
 		expect(dataOf(told)).toEqual({
 			date: '2026-10-12',
+			date_in_words: 'lundi 12 octobre 2026',
 			calendar: {
 				time_zone: 'Europe/Paris',
-				meetings: dayOf('2026-10-12')['events'],
+				meetings: [
+					{
+						...standup,
+						recurrence_id_in_words: monday('09:00'),
+						start_in_words: monday('09:00'),
+						end_in_words: monday('09:30')
+					},
+					{
+						...review,
+						start_in_words: monday('09:15'),
+						end_in_words: monday('10:00'),
+						conflicts: [
+							{
+								uid: 'standup',
+								recurrence_id: '2026-10-12T09:00:00+02:00',
+								recurrence_id_in_words: monday('09:00')
+							}
+						]
+					},
+					{ ...lunch, start_in_words: monday('12:30'), end_in_words: monday('13:30') }
+				],
 				truncated: false
 			}
 		});
@@ -385,7 +409,11 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(dateOf(brief)).toBe('2026-10-22');
 		expect(dayReads().slice(reads)).toHaveLength(0);
 		const told = lastUser(briefCalls().slice(calls).at(0));
-		expect(dataOf(told)).toEqual({ date: '2026-10-22', not_read: { calendar: 'consent' } });
+		expect(dataOf(told)).toEqual({
+			date: '2026-10-22',
+			date_in_words: 'jeudi 22 octobre 2026',
+			not_read: { calendar: 'consent' }
+		});
 		// The brief is all her assistant said, and no call waits for her
 		expect(r.client.messages.filter((m) => m.sender === r.assistantId).slice(said)).toEqual([
 			brief

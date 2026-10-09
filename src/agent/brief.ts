@@ -5,7 +5,7 @@ import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { getMessages, type Messages } from '../i18n/messages.js';
+import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { LlmError, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { fenced } from '../llm/data.js';
 import { escapeHtml, renderQuotedMarkdown } from '../matrix/format.js';
@@ -15,10 +15,11 @@ import { ensureRoomSession, saveSessionMessages } from '../sessions/repository.j
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import type { Admission, Refusal } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
-import { describeMoment, type Clock } from './clock.js';
+import { describeMoment, type Clock, type TimeZone } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runTool, type ToolContext, type ToolRegistry } from './tools.js';
+import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
 // The calendar's operation the brief reads the day of, and the most meetings it reads of one
 const LIST_EVENTS = 'list_calendar_events';
@@ -211,19 +212,26 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	}
 
 	// The brief as the model writes it from the day, in one call with no tool and no history, and
-	// the tokens it took: no text when the model failed or wrote nothing
+	// the tokens it took: no text when the model failed or wrote nothing. As in a turn, the model
+	// reads each date it is handed written in words beside it, in its owner's zone and language,
+	// and the day of each date it writes is named from the date.
 	async function written(
 		system: string,
 		told: string,
-		log: FastifyBaseLogger
+		log: FastifyBaseLogger,
+		owner: { readonly date: string; readonly timeZone: TimeZone; readonly locale: Locale }
 	): Promise<{ readonly text: string | null; readonly tokens: number }> {
-		const prompt: LlmMessage[] = [
-			{ role: 'system', content: system },
-			{ role: 'user', content: told }
-		];
+		const prompt: LlmMessage[] = withDatesInWords(
+			[
+				{ role: 'system', content: system },
+				{ role: 'user', content: told }
+			],
+			owner.timeZone,
+			owner.locale
+		);
 		try {
 			const completion = await llm.complete(prompt, []);
-			const text = withoutCallMarkup(completion.content ?? '').trim();
+			const text = withTrueWeekdays(withoutCallMarkup(completion.content ?? '').trim(), owner.date);
 			const tokens =
 				(completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
 			if (text.length > 0) return { text, tokens };
@@ -287,7 +295,7 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			history: [],
 			nudgeInterval: 0
 		});
-		const model = await written(system, told, log);
+		const model = await written(system, told, log, { date, timeZone, locale });
 		// Its date in words, as the owner reads it: the brief's own, whatever day it goes out on. The
 		// model's brief repeats titles people wrote, unasked, every morning: its Markdown renders with
 		// nothing that acts, as the harness quotes the model in its requests, never their HTML or links

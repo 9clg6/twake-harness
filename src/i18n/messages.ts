@@ -689,7 +689,8 @@ const ENGLISH: Messages = {
 			'## Now',
 			`Date and time: ${words}, time zone ${timeZone}.`,
 			`In ISO 8601: ${iso}.`,
-			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.'
+			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.',
+			'Each date handed to you as data is written in words beside it, its day of the week included, under a key ending in _in_words: copy that day rather than work it out from the date.'
 		].join('\n'),
 	addressing: null,
 	ownerDevices: {
@@ -999,7 +1000,8 @@ const FRENCH: Messages = {
 			'## Maintenant',
 			`Date et heure : ${words}, fuseau ${timeZone}.`,
 			`En ISO 8601 : ${iso}.`,
-			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
+			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+			"Chaque date qu'on te donne en données est écrite en toutes lettres à côté d'elle, jour de la semaine compris, sous une clé qui finit par _in_words : reprends ce jour plutôt que de le déduire de la date."
 		].join('\n'),
 	addressing:
 		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer.",
