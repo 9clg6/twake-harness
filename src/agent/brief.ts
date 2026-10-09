@@ -41,10 +41,11 @@ import {
 import { findBriefMailsReadAt, saveBriefMailsReadAt } from '../settings/repository.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
 import { withoutCallMarkup } from './call-markup.js';
-import { describeMoment, isoIn, type Clock } from './clock.js';
+import { describeMoment, isoIn, type Clock, type TimeZone } from './clock.js';
 import type { TurnGate } from './gate.js';
 import { buildSystemPrompt } from './prompt.js';
 import { runTool, type ToolContext, type ToolOutcome, type ToolRegistry } from './tools.js';
+import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
 // The calendar's operation the brief reads the day and the invitations of, and the most meetings it
 // reads of the day
@@ -227,7 +228,7 @@ const DOMAINS: Readonly<Record<keyof Sections, string>> = {
 // mail at, which their next brief reads it from, when it read it
 interface Reads {
 	readonly sections: Sections;
-	readonly timeZone: string;
+	readonly timeZone: TimeZone;
 	readonly mailsReadAt: Date | null;
 }
 
@@ -829,19 +830,26 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 	}
 
 	// The brief as the model writes it from its reads, in one call with no tool and no history, and
-	// the tokens it took: no text when the model failed or wrote nothing
+	// the tokens it took: no text when the model failed or wrote nothing. As in a turn, the model
+	// reads each date it is handed written in words beside it, in its owner's zone and language,
+	// and the day of each date it writes is named from the date.
 	async function written(
 		system: string,
 		told: string,
-		log: FastifyBaseLogger
+		log: FastifyBaseLogger,
+		owner: { readonly date: string; readonly timeZone: TimeZone; readonly locale: Locale }
 	): Promise<{ readonly text: string | null; readonly tokens: number }> {
-		const prompt: LlmMessage[] = [
-			{ role: 'system', content: system },
-			{ role: 'user', content: told }
-		];
+		const prompt: LlmMessage[] = withDatesInWords(
+			[
+				{ role: 'system', content: system },
+				{ role: 'user', content: told }
+			],
+			owner.timeZone,
+			owner.locale
+		);
 		try {
 			const completion = await llm.complete(prompt, []);
-			const text = withoutCallMarkup(completion.content ?? '').trim();
+			const text = withTrueWeekdays(withoutCallMarkup(completion.content ?? '').trim(), owner.date);
 			const tokens =
 				(completion.usage?.promptTokens ?? 0) + (completion.usage?.completionTokens ?? 0);
 			if (text.length > 0) return { text, tokens };
@@ -903,7 +911,9 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			nudgeInterval: 0
 		});
 		const model =
-			refusedFor === null ? await written(system, told, log) : { text: null, tokens: 0 };
+			refusedFor === null
+				? await written(system, told, log, { date, timeZone, locale })
+				: { text: null, tokens: 0 };
 		// The model's brief repeats titles people wrote, unasked, every morning: its Markdown renders
 		// with nothing that acts, as the harness quotes the model in its requests, never their HTML or
 		// links
