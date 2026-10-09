@@ -35,6 +35,9 @@ export interface ScriptedReply {
 	// The tokens the model reports it read and wrote for this answer, over the fake's own, or null
 	// when it reports none
 	usage?: { readonly promptTokens: number; readonly completionTokens: number } | null;
+	// The status the gateway answers with instead of a completion, as when the model's provider
+	// fails: the call is recorded all the same
+	failWith?: number;
 }
 
 export type LlmScript = (request: ChatRequest, callIndex: number) => ScriptedReply;
@@ -787,6 +790,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
 			if (reply.hold !== undefined) await reply.hold;
 			llm.calls.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
+			if (reply.failWith !== undefined) {
+				sendJson(res, reply.failWith, { error: 'the model failed' });
+				return;
+			}
 			const message: Record<string, unknown> = {
 				role: 'assistant',
 				content: reply.content ?? null

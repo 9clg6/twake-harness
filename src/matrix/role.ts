@@ -60,6 +60,7 @@ import { makeListenerGuard, makeWorkTracker } from './listeners.js';
 import { buildRegistration, creatorUserId, isAssistantUserId } from './registration.js';
 import { makeChatFeedback, type TurnOutcome, type TurnRef } from './feedback.js';
 import { makeConsentRequests } from './consent-requests.js';
+import { isBriefMarker, markBrief, type BriefMarker } from './brief.js';
 import { makeLaidOutText, makeRichText } from './format.js';
 import {
 	isPendingIdentityQuestion,
@@ -158,6 +159,9 @@ interface SendJob {
 	readonly html?: string;
 	// The turn answered once it reached one of its limits
 	readonly atLimit?: true;
+	// The text is the brief of its owner's working day: what its content is marked with, for their
+	// client to tell it and its date
+	readonly brief?: BriefMarker;
 }
 
 const recoverPayload = z.object({ owner: z.string().min(1) });
@@ -230,7 +234,8 @@ function isSendJob(value: unknown): value is SendJob {
 		(job['questionMarker'] === undefined || isYesNoQuestion(job['questionMarker'])) &&
 		(job['identityQuestion'] === undefined || isPendingIdentityQuestion(job['identityQuestion'])) &&
 		(job['html'] === undefined || typeof job['html'] === 'string') &&
-		(job['atLimit'] === undefined || job['atLimit'] === true)
+		(job['atLimit'] === undefined || job['atLimit'] === true) &&
+		(job['brief'] === undefined || isBriefMarker(job['brief']))
 	);
 }
 
@@ -1734,11 +1739,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (turn !== null) {
 				await feedback.answerReady(turn, request === undefined ? 'answer' : 'question');
 			}
-			const { text, html, questionMarker, identityQuestion } = job.payload;
+			const { text, html, questionMarker, identityQuestion, brief } = job.payload;
 			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
 			const sent = await intent.sendEvent(
 				job.payload.roomId,
-				markQuestion(content, questionMarker)
+				markBrief(markQuestion(content, questionMarker), brief)
 			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (request !== undefined) {

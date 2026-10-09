@@ -2,7 +2,7 @@ import MarkdownIt from 'markdown-it';
 
 import type { DomainLabel } from '../contracts/domains.js';
 import type { Messages } from '../i18n/messages.js';
-import { renderQuotedMarkdown } from '../matrix/format.js';
+import { escapeHtml, renderQuotedMarkdown } from '../matrix/format.js';
 import type { ConsentLevel, WaitReason } from './consent.js';
 
 // A call the harness froze, as its request to the owner tells of it
@@ -67,10 +67,6 @@ const SAID_HTML_BYTES = SAID_LENGTH * 6;
 // holds them. With the model's words, 12,000 bytes at most in each, and the rest of the request,
 // the encrypted event stays under 60 KiB, well within the 64 KiB a Matrix event may take.
 export const CALL_BYTES = 16_384;
-
-function escapeHtml(text: string): string {
-	return text.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-}
 
 // The bytes a text takes in the event that carries the request, escaped as its JSON holds it: a
 // quotation mark, a backslash or a line break takes two, a control character six

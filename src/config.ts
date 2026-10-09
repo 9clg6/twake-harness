@@ -145,6 +145,11 @@ export interface Config {
 		// twice: an event replayed after it is a new one
 		readonly retentionMs: number;
 	};
+	// The brief of each owner's working day, which the worker role asks their assistant for in their
+	// room, from eight on weekdays in their zone
+	readonly brief: {
+		readonly enabled: boolean;
+	};
 	// Calendar's fanout of the notifications it sends each invitee, which the worker role listens
 	// to when it is set, for the new invitations
 	readonly calendar: CalendarSource | null;
@@ -259,6 +264,7 @@ const envSchema = z.object({
 		.int()
 		.min(HOUR_MS)
 		.default(30 * 24 * HOUR_MS),
+	BRIEF_ENABLED: z.enum(['true', 'false']).default('false'),
 	GATEWAY_SHARED_SECRET: z.string().default(''),
 	ESCROW_ENABLED: z.enum(['true', 'false']).default('false'),
 	OPENBAO_PATH: z.string().min(1).default('openbao'),
@@ -280,6 +286,11 @@ const envSchema = z.object({
 });
 
 export type Env = Record<string, string | undefined>;
+
+// The least a wake-up is kept when the briefs are on: a brief is one wake-up of its owner's date,
+// which must outlast that date wherever it runs, an owner who moves west living its morning again
+// up to a day later
+const BRIEF_MIN_RETENTION_MS = 2 * 24 * HOUR_MS;
 
 function isHttpsUrl(value: string): boolean {
 	return URL.canParse(value) && new URL(value).protocol === 'https:';
@@ -407,6 +418,11 @@ export function loadConfig(env: Env): Config {
 			`invalid configuration: ASSISTANT_TIMEZONE ${JSON.stringify(values.ASSISTANT_TIMEZONE)} is not a time zone the runtime knows; give an IANA name such as Europe/Paris`
 		);
 	}
+	if (values.BRIEF_ENABLED === 'true' && values.WAKEUPS_RETENTION_MS < BRIEF_MIN_RETENTION_MS) {
+		throw new Error(
+			`invalid configuration: BRIEF_ENABLED needs WAKEUPS_RETENTION_MS of two days at least, ${BRIEF_MIN_RETENTION_MS}, so that no brief goes twice for one date`
+		);
+	}
 	return {
 		role: values.HARNESS_ROLE,
 		host: values.HOST,
@@ -481,6 +497,7 @@ export function loadConfig(env: Env): Config {
 		rabbitmq: { prefix: values.RABBITMQ_PREFIX },
 		activity: values.ACTIVITY_ENABLED === 'true' ? activitySource(values) : null,
 		wakeups: { perHour: values.WAKEUPS_PER_HOUR, retentionMs: values.WAKEUPS_RETENTION_MS },
+		brief: { enabled: values.BRIEF_ENABLED === 'true' },
 		calendar: values.CALENDAR_ENABLED === 'true' ? calendarSource(values) : null,
 		gateway: {
 			sharedSecret: values.GATEWAY_SHARED_SECRET.length > 0 ? values.GATEWAY_SHARED_SECRET : null
