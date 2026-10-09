@@ -15,6 +15,10 @@ export const MOVED_EVENT_TYPE = 'com.twake.calendar.event.moved.v1';
 // brief: its own name too
 export const RENAMED_EVENT_TYPE = 'com.twake.calendar.event.renamed.v1';
 
+// The type the harness gives the cancellation of a meeting Calendar notifies an invitee of, of the
+// meeting, one occurrence of its series or the whole series: its own name too
+export const CANCELLED_EVENT_TYPE = 'com.twake.calendar.event.cancelled.v1';
+
 // What a change to a meeting is about, as its turn tells it: a meeting on its own, one occurrence of
 // a series, or the whole series
 export const MEETING_SCOPES = ['event', 'occurrence', 'series'] as const;

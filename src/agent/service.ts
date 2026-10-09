@@ -31,7 +31,11 @@ import {
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
-import { MOVED_EVENT_TYPE, type MeetingScope } from '../wakeups/event-types.js';
+import {
+	CANCELLED_EVENT_TYPE,
+	MOVED_EVENT_TYPE,
+	type MeetingScope
+} from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
 import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
 import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
@@ -107,14 +111,16 @@ const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 // The tools alone that a turn a meeting's change woke is given, by the type of that change and
 // what it is about, among those its owner's rights and the rule above leave it: for a move of a
 // meeting or of a whole series, the check of its new slot and the answers to it; for a move of one
-// occurrence of a series, which the answers cannot reach apart from the rest of it, none. The turn
-// their yes resumes is told of no event, and is not held to them.
+// occurrence of a series, which the answers cannot reach apart from the rest of it, none; for a
+// cancellation, which the model only tells, none. The turn their yes resumes is told of no event,
+// and is not held to them.
 const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
 const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
 	string,
 	Readonly<Record<MeetingScope, readonly string[]>>
 > = new Map([
-	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }]
+	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }],
+	[CANCELLED_EVENT_TYPE, { event: [], series: [], occurrence: [] }]
 ]);
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
@@ -206,8 +212,9 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
-	// The event of a turn of origin event: its id and CloudEvent type, and for an invitation, what
-	// the harness checks before the model speaks
+	// The event of a turn of origin event: its id and CloudEvent type, and for a new invitation, a
+	// move or a cancellation, the meeting, whose slot the harness checks before the model speaks
+	// unless it is cancelled
 	readonly event?: {
 		readonly id: string;
 		readonly type: string;
@@ -343,11 +350,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	const gate = makeTurnGate();
 	const admission = makeAdmission({ config, db, log: deps.log, clock });
 
-	// What the model is told. An invitation an event brings has its slot checked by the harness
-	// before the model speaks, from the UID and the times its wake-up carries, through the same
-	// tools and context as the model's calls: what the calendar answered follows what the wake-up
-	// told, as data. Any other message is told as it is. A read of that check that waits for its
-	// owner, such as the first read of their calendar, ends the turn on the harness's question.
+	// What the model is told. An invitation an event brings, or a move, has its slot checked by the
+	// harness before the model speaks, from the UID and the times its wake-up carries, through the
+	// same tools and context as the model's calls: what the calendar answered follows what the
+	// wake-up told, as data. A cancellation leaves nothing to check, and any other message is told
+	// as it is. A read of that check that waits for its owner, such as the first read of their
+	// calendar, ends the turn on the harness's question.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
@@ -355,7 +363,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		messages: Messages
 	): Promise<Told> {
 		const event = input.origin === 'event' ? input.event : undefined;
-		if (!carriesInvitation(event)) return { message: input.message, question: null };
+		if (!carriesInvitation(event) || event.type === CANCELLED_EVENT_TYPE) {
+			return { message: input.message, question: null };
+		}
 		const { invitation } = event;
 		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
