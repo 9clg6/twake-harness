@@ -9,6 +9,7 @@ import { makeOwnerConsentLink } from '../contracts/consent-link.js';
 import { withPrincipal } from '../db/client.js';
 import { getMessages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
+import { fetchOwnerTimeZone } from '../settings/time-zone.js';
 import type { WakeDeps } from '../wakeups/wake.js';
 import { DelegationRouteMissingError, fetchDelegation, type Delegation } from './broker.js';
 
@@ -21,7 +22,7 @@ export interface ReminderDeps extends WakeDeps {
 }
 
 // Whether a permission is due its reminder now: it has not expired, and it expires five days of
-// the calendar after today at most, both days as the wall clock of the zone reads them
+// the calendar after today at most, both days as the wall clock of the owner's zone reads them
 function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
 	if (delegation.expiresAt.getTime() <= now.getTime()) return false;
 	const today = wallDayAt(now, timeZone).date;
@@ -31,13 +32,17 @@ function isDue(delegation: Delegation, now: Date, timeZone: string): boolean {
 // Reminds one owner, when their permission is due its reminder and they were never reminded of
 // the one they gave on that date, with the deployment's consent link bound to them: the reminder
 // is kept with the message it queues, or not at all, in place of the one of the permission they
-// gave before, an owner having one kept at most. Resolves to whether it queued one.
+// gave before, an owner having one kept at most. Their days are counted, and the expiry dated, in
+// the zone of their calendar, the deployment's until a read of it named one. Resolves to whether
+// it queued one.
 async function remindOwner(deps: ReminderDeps, link: string, owner: string): Promise<boolean> {
 	const { config, db, clock } = deps;
 	const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 	if (!isActiveAssistant(assistant)) return false;
 	const delegation = await fetchDelegation(config, owner);
-	if (delegation === null || !isDue(delegation, clock.now(), config.timeZone)) return false;
+	if (delegation === null) return false;
+	const timeZone = await fetchOwnerTimeZone(db, owner, config.timeZone);
+	if (!isDue(delegation, clock.now(), timeZone)) return false;
 	const queued = await withPrincipal(db, { id: owner }, async (tx) => {
 		// Read again: the owner may have removed their assistant while the broker answered
 		const current = await findAssistant(tx, owner);
@@ -51,7 +56,7 @@ async function remindOwner(deps: ReminderDeps, link: string, owner: string): Pro
 			delete from delegation_reminders
 			where owner = ${owner} and consented_at <> ${delegation.consentedAt}`;
 		const locale = localeOf(current, config.locale);
-		const expiry = describeMoment(delegation.expiresAt, config.timeZone, locale);
+		const expiry = describeMoment(delegation.expiresAt, timeZone, locale);
 		await enqueueJob(tx, {
 			kind: 'send',
 			payload: {
@@ -74,9 +79,10 @@ async function remindOwner(deps: ReminderDeps, link: string, owner: string): Pro
 
 // The day's pass: each owner whose assistant is in its room, one after the other, is reminded in
 // that room when the broker says their permission for their assistant to act for them expires
-// within five days. An owner the broker could not be asked about is skipped with a warning, which
-// names the path the gateway publishes no route at when that is why, and the pass goes on with
-// the next one. A pass told to stop stops before the next owner.
+// within five days, as the zone of their calendar counts them. An owner the broker could not be
+// asked about is skipped with a warning, which names the path the gateway publishes no route at
+// when that is why, and the pass goes on with the next one. A pass told to stop stops before the
+// next owner.
 async function remindExpiringDelegations(
 	deps: ReminderDeps,
 	link: string,
@@ -107,7 +113,8 @@ export interface ReminderScheduler {
 }
 
 // Looks at once whether the day's pass is due, then every checkMs. It is due once a day, during the
-// reminders' hour on the wall clock of ASSISTANT_TIMEZONE, and then only: a pass that failed
+// reminders' hour on the wall clock of ASSISTANT_TIMEZONE, whatever the zone of each owner's
+// calendar, which counts their days and dates their reminder, and then only: a pass that failed
 // runs again at the next look within that hour, and a role started after it, or a pass that failed
 // throughout it, waits for the next day's, which misses nobody, a permission being reminded of
 // from five days before it expires. Kept by owner and by date of consent, a reminder goes out

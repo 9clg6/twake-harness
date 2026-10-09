@@ -1,6 +1,9 @@
 import { afterAll, afterEach, beforeAll, describe, expect, it } from 'vitest';
 
+import { findTimeZone } from '../src/agent/clock.js';
 import { loadConfig, type Config } from '../src/config.js';
+import { withPrincipal } from '../src/db/client.js';
+import { saveOwnerTimeZone } from '../src/settings/repository.js';
 import { startWorkerRole, type WorkerRole } from '../src/worker/role.js';
 import { logSink, until, type LogSink } from './helpers/activity.js';
 import { makeSettableClock } from './helpers/clock.js';
@@ -319,5 +322,94 @@ describe('my assistant reminds me to renew my permission for it to act for me be
 		expect(
 			await r.client.waitForMessage(room, r.assistantId, (t) => t.startsWith(REMINDER), 60_000)
 		).toContain('expire le mercredi 31 mars 2027 à 12:00.');
+	});
+});
+
+describe('my assistant counts the days before my permission expires, and tells me when, in the zone of my calendar', () => {
+	let r: ConsentRoom;
+	let worker: WorkerRole | null = null;
+	// What the role started last writes
+	let logs: LogSink = logSink();
+	const clock = makeSettableClock('2026-10-12T07:00:00Z');
+
+	// The worker role on the harness's database, reading the suite's clock, and looking often
+	// whether the hour of the reminders has come
+	async function startWorker(): Promise<void> {
+		logs = logSink();
+		worker = await startWorkerRole({
+			config: { ...r.h.config, role: 'worker' },
+			db: r.h.db,
+			logStream: logs.stream,
+			clock,
+			reminderCheckMs: 50
+		});
+	}
+
+	async function stopWorker(): Promise<void> {
+		await worker?.stop();
+		worker = null;
+	}
+
+	// The passes the role started last made so far, by how many owners each reminded
+	const passes = (): unknown[] =>
+		logs
+			.lines()
+			.filter((line) => line['msg'] === 'delegation reminders passed')
+			.map((line) => line['reminded']);
+
+	// Keeps a zone for my calendar, as a read of it that names one does
+	async function keepMyZone(zone: string): Promise<void> {
+		const timeZone = findTimeZone(zone);
+		if (timeZone === null) throw new Error(`the runtime knows no zone ${zone}`);
+		await withPrincipal(r.h.db, { id: ALICE }, (tx) => saveOwnerTimeZone(tx, ALICE, timeZone));
+	}
+
+	beforeAll(async () => {
+		r = await startConsentRoom({
+			ASSISTANT_LOCALE: 'fr',
+			ASSISTANT_TIMEZONE: 'Europe/Paris',
+			BROKER_CONSENT_URL
+		});
+	}, 240_000);
+	afterEach(stopWorker);
+	afterAll(async () => {
+		if (r !== undefined) await r.close();
+	});
+
+	it("reminds me, at the hour the deployment sets on its wall clock, five days before my permission expires in my zone, six in the deployment's", async () => {
+		const seen = r.saying(REMINDER).length;
+		await keepMyZone('America/New_York');
+		r.h.apisix.delegation = (owner) =>
+			owner === ALICE ? brokerDelegation('2026-09-18T00:00:00Z', '2026-10-18T00:00:00Z') : null;
+		// Nine in Paris on Monday 12 October, three in the morning in New York: the permission expires
+		// on Sunday 18 in Paris, six days later, and on Saturday 17 in New York, five days later
+		clock.set('2026-10-12T07:00:00Z');
+		await startWorker();
+		await until('the pass ended', () => passes().length === 1);
+		expect(passes()).toEqual([1]);
+		expect(await r.nextSaying(REMINDER, seen)).toContain(
+			'expire le samedi 17 octobre 2026 à 20:00.'
+		);
+	});
+
+	it('reminds me no earlier than five days before my permission expires in my zone, when the deployment counts five already', async () => {
+		const seen = r.saying(REMINDER).length;
+		// My calendar moved to Auckland since
+		await keepMyZone('Pacific/Auckland');
+		r.h.apisix.delegation = (owner) =>
+			owner === ALICE ? brokerDelegation('2026-09-24T18:00:00Z', '2026-10-24T18:00:00Z') : null;
+		// Nine in Paris on Monday 19 October, eight in the evening in Auckland: the permission expires
+		// on Saturday 24 in Paris, five days later, and on Sunday 25 in Auckland, six days later
+		clock.set('2026-10-19T07:00:00Z');
+		await startWorker();
+		await until('the pass of that day ended', () => passes().length === 1);
+		expect(passes()).toEqual([0]);
+		// Nine in Paris the next day
+		clock.set('2026-10-20T07:00:00Z');
+		expect(await r.nextSaying(REMINDER, seen)).toContain(
+			'expire le dimanche 25 octobre 2026 à 07:00.'
+		);
+		await until('the pass of the next day ended', () => passes().length === 2);
+		expect(passes()).toEqual([0, 1]);
 	});
 });
