@@ -748,6 +748,27 @@ describe('the assistant proposes from the messages of channels', () => {
 			}
 		});
 
+		it('keeps the yes of a person who changes their display name', async () => {
+			const c = await listenedConversation();
+			try {
+				await sleep(1100);
+				await c.otherClient.client.setDisplayName('Renamed person');
+				await until(async () => {
+					const state = await h.synapse.request(
+						c.owner,
+						'GET',
+						`/_matrix/client/v3/rooms/${encodeURIComponent(c.room)}/state/m.room.member/${encodeURIComponent(c.other.userId)}`
+					);
+					return state.body['displayname'] === 'Renamed person' ? true : null;
+				});
+				await sleep(4000);
+				expect(await c.listened()).toBe(1);
+				expect(await isJoined(c.owner, c.room, c.assistant)).toBe(true);
+			} finally {
+				await c.stop();
+			}
+		});
+
 		it('leaves without a word once its owner leaves the conversation', async () => {
 			const c = await listenedConversation();
 			try {

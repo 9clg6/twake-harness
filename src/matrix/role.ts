@@ -1042,6 +1042,27 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			(event) => event.state_key !== ownerUserId && isPerson(event.state_key ?? '')
 		);
 		if (others.length === 0) return 'no_other_person';
+		const ts = (event: { origin_server_ts?: number }): number => event.origin_server_ts ?? 0;
+		// When each person's stay began: a profile change, or an invite turned join, keeps it, so
+		// that it never asks their yes again; their member events are walked back by `replaces_state`
+		const stayStart = new Map<string, number>();
+		for (const member of others) {
+			let current = member as RoomEvent & { origin_server_ts?: number };
+			for (let hops = 0; hops < 50; hops += 1) {
+				const unsigned = (current as { unsigned?: Record<string, unknown> }).unsigned;
+				const before = (unsigned?.['prev_content'] as { membership?: string } | undefined)
+					?.membership;
+				const replaces = unsigned?.['replaces_state'];
+				if (
+					before === undefined ||
+					!['join', 'invite'].includes(before) ||
+					typeof replaces !== 'string'
+				)
+					break;
+				current = (await intent.underlyingClient.getEvent(roomId, replaces)) as typeof current;
+			}
+			stayStart.set(member.state_key ?? '', ts(current));
+		}
 		const owned = (event: RoomEvent, type: string): boolean =>
 			event.type === type &&
 			event.state_key === event.sender &&
@@ -1053,7 +1074,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				event.content?.['requested'] === true
 		);
 		if (request === undefined) return 'not_everyone_accepted';
-		const ts = (event: { origin_server_ts?: number }): number => event.origin_server_ts ?? 0;
 		// A person's answer to this assistant: an entry of the `answers` map of their consent, its time
 		// the earlier of its own and the event's (a skewed clock never hides a yes), or the legacy
 		// content, one assistant, timed by the event
@@ -1073,10 +1093,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				accepted = event.content?.['accepted'];
 			} else return null;
 			// Only after the request and after the person's latest join or invite
-			const since = Math.max(
-				ts(request),
-				ts(joinedOrInvited.find((m) => m.state_key === event.sender) ?? {})
-			);
+			const since = Math.max(ts(request), stayStart.get(event.sender ?? '') ?? 0);
 			return accepted === true && at > since;
 		};
 		const accepted = others.every((member) =>
