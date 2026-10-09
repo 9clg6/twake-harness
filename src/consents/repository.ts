@@ -552,6 +552,27 @@ export async function closeHeldRequest(
 	return result.count === 1;
 }
 
+// What the call was frozen for went ahead without it: its request closes as expired, unanswered or
+// allowed and not run yet, so that a yes to it runs nothing. What it would have sent is erased, with
+// the question and the digest of what its owner was shown. The request, when it closed unanswered,
+// as one past its lifetime does; null when its yes, which stays recorded, was still to run, or when
+// it was decided otherwise, or ran.
+export async function expireWaitingCall(
+	tx: Tx,
+	owner: string,
+	id: string
+): Promise<ClosedRequest | null> {
+	const rows = await tx.sql<ClosedRow[]>`
+		update pending_calls set status = 'expired', decided_at = now(), arguments = null,
+			request_text = null, preview_digest = null
+		where id = ${id} and owner = ${owner} and status = 'open'
+		returning id, domain, level, reasons`;
+	const [unanswered] = closedRequests(rows);
+	if (unanswered !== undefined) return unanswered;
+	await closeHeldRequest(tx, owner, id, 'expired');
+	return null;
+}
+
 // Where a call was frozen, which is where its owner's answer resumes it: the owner's room, a turn
 // through the API's chat in its session, or a direct call through the API's tool route. The API's
 // channels say so in their names, apart from the chat in the room that consents record.

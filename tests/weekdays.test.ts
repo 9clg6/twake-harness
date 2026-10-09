@@ -299,7 +299,8 @@ describe('the day of the week beside each date my assistant reads', () => {
 		const told = lastUserContent(
 			h.apisix.llm.calls[before]?.request ?? { model: '', messages: [] }
 		);
-		expect(dataIn(told, 'calendar-data')).toEqual({
+		// Its day, and its day's meetings, whatever else the brief reads
+		expect(dataIn(told, 'brief-data')).toMatchObject({
 			date: '2026-10-13',
 			date_in_words: 'mardi 13 octobre 2026',
 			calendar: {

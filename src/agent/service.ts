@@ -2,6 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
+import { BRIEF_SETTINGS_TOOL, makeBriefSettingsTool } from '../briefs/tool.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
 import { replayOutcome, type ConsentMetrics, type ReplayOutcome } from '../consents/metrics.js';
@@ -38,7 +39,12 @@ import {
 	type MeetingScope
 } from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
-import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
+import {
+	makeBriefRunner,
+	type BriefInput,
+	type BriefResult,
+	type BriefResumeInput
+} from './brief.js';
 import { dateIn, describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
@@ -110,11 +116,13 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 // The tools a turn an event started is never offered, even once its owner's yes resumed it,
 // whatever their rights: the owner's listening journal, which tells them in their own turns what
 // their assistant saw, and would show such a turn the text third parties wrote in every other
-// activity; and the tools by which they choose what their assistant listens to, which a third
-// party's text never changes. A suggestion's turn is offered its own two tools alone.
+// activity; the tools by which they choose what their assistant listens to, which a third party's
+// text never changes; and the settings of their morning brief, which only they move, pause or
+// stop. A suggestion's turn is offered its own two tools alone.
 const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
 	LISTENING_JOURNAL_TOOL,
-	...LISTENING_TOOLS
+	...LISTENING_TOOLS,
+	BRIEF_SETTINGS_TOOL
 ];
 
 // The tools alone that a turn a meeting's change woke is given, by the type of that change and
@@ -298,6 +306,8 @@ export interface AgentService {
 	// What the owner's assistant proposes from the messages of a channel, if anything
 	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
 	runBrief(input: BriefInput): Promise<BriefResult>;
+	// The owner's yes to the question a brief gave way to: that day's brief
+	resumeBrief(input: BriefResumeInput): Promise<BriefResult>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -369,7 +379,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				config,
 				consentMetrics,
 				domains: () => contracts.domainDescriptions
-			})
+			}),
+			makeBriefSettingsTool({ clock, timeZone: config.timeZone })
 		],
 		() => contracts.tools
 	);
@@ -872,11 +883,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		admission,
 		gate,
 		clock,
+		consentMetrics,
 		persona: (assistantName, messages) =>
 			withLanguage(
 				assistantName === undefined ? defaultPrompt([]) : assistantPrompt(assistantName, []),
 				messages
-			)
+			),
+		runFrozenCall
 	});
 
 	return {
@@ -888,6 +901,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		runOwnerTurn,
 		runAllowedCall,
 		runSuggestion: suggestions.run,
-		runBrief: briefs.run
+		runBrief: briefs.run,
+		resumeBrief: briefs.resume
 	};
 }
