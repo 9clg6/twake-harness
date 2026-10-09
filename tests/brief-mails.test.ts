@@ -21,7 +21,7 @@ import {
 } from './helpers/brief.js';
 import { makeSettableClock } from './helpers/clock.js';
 import { startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
-import { grantConsent, withdrawConsent } from './helpers/consents.js';
+import { allowBriefReads, grantConsent, withdrawConsent } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import type { ChatRequest, ContractCall } from './helpers/fake-apisix.js';
 
@@ -258,9 +258,7 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 
 	beforeEach(async () => {
 		await seenEveryDay(r.h.db, ALICE);
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(r.h.db, ALICE);
 		inbox = { mails: [], more: false };
 		r.h.apisix.llm.script = (request) =>
 			lastUser(request).startsWith('[brief]')

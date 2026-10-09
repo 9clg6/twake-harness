@@ -8,7 +8,7 @@ import {
 	startConsentRoom,
 	type ConsentRoom
 } from './helpers/consent-room.js';
-import { grantConsent } from './helpers/consents.js';
+import { allowBriefReads } from './helpers/consents.js';
 import type { DecryptedMessage } from './helpers/e2ee-client.js';
 import {
 	BROKER_CONSENT_URL,
@@ -187,9 +187,7 @@ describe('my brief gives way to the question about my permission when the platfo
 		r.h.apisix.contracts.spec = CATALOG;
 		for (const app of r.h.apps) expect(await app.agent.contracts.load()).toBeGreaterThan(0);
 		// She allowed every read of her brief: its first one asks her nothing of them
-		for (const domain of ['calendar', 'mail', 'tasks']) {
-			await grantConsent(r.h.db, ALICE, domain, 'read');
-		}
+		await allowBriefReads(r.h.db, ALICE);
 		r.h.apisix.contracts.handler = (call) =>
 			broker ??
 			(call.path === LIST_EVENTS
