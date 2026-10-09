@@ -7,6 +7,7 @@ import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
+import { BRIEF_QUESTION } from '../briefs/questions.js';
 import { findBriefWait } from '../briefs/waits.js';
 import type { PendingQuestion, ResumeRequest } from '../consents/consent.js';
 import {
@@ -424,22 +425,24 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return settleRefusedYes(job, request, assistant, refusal, turnLog);
 	}
 
-	// The brief that gave way to the question about the owner's permission, which their yes
-	// resumes: that day's brief goes out, marked as the brief of its date, or, while the broker
-	// still refuses, the question again, marked as a question, either one answering their yes. A
-	// brief refused for the share of the day the assistant spends on its own goes out laid out by
-	// the harness, and the assistant tells its owner so, once a day, as for the brief of the morning.
+	// The brief that gave way to the question about the owner's permission, or to the question of
+	// their first brief, which their yes resumes: that day's brief goes out, marked as the brief of
+	// its date, or, while the broker refuses, its question, marked as a question, either one
+	// answering their yes. A brief refused for the share of the day the assistant spends on its own
+	// goes out laid out by the harness, and the assistant tells its owner so, once a day, as for the
+	// brief of the morning.
 	async function resumeBrief(
 		job: Job,
 		request: ResumeRequest,
 		assistant: AssistantRecord,
 		turnLog: FastifyBaseLogger
 	): Promise<Deferral | null> {
-		const { owner, roomId, pendingCallId } = request;
+		const { owner, roomId, pendingCallId, through } = request;
 		const result = await agent.resumeBrief({
 			principal: { id: owner },
 			roomId,
 			pendingCallId,
+			through,
 			log: turnLog,
 			assistantName: assistant.name
 		});
@@ -498,10 +501,16 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			return null;
 		}
 		const turnLog = log.child({ reqId: `resume:${pendingCallId}`, roomId });
-		const waiting = await withPrincipal(db, { id: owner }, (tx) => findBriefWait(tx, owner));
-		if (waiting?.pendingCallId === pendingCallId) {
-			return resumeBrief(job, request, assistant, turnLog);
-		}
+		// The question of the owner's first brief, the one that waits for their answer or an older
+		// one, is the brief's own, which no turn could run
+		const brief = await withPrincipal(
+			db,
+			{ id: owner },
+			async (tx) =>
+				(await findBriefWait(tx, owner))?.pendingCallId === pendingCallId ||
+				(await findPendingCall(tx, owner, pendingCallId))?.tool === BRIEF_QUESTION
+		);
+		if (brief) return resumeBrief(job, request, assistant, turnLog);
 		const actionsDone =
 			request.replyTo === undefined
 				? null
@@ -638,11 +647,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
-	// a message of its own, marked as the brief of its date, or the question about their permission
-	// it gave way to, marked as a question. Refused by admission for rate or room, it waits as a turn
-	// an event woke does, and the line that says so says why. Refused for a spent day, it goes out
-	// laid out by the harness, and once the share of the day the assistant spends on its own was
-	// spent, the assistant tells its owner so, once a day.
+	// a message of its own, marked as the brief of its date, or the question it gave way to, about
+	// their permission or the reads of their first brief, marked as a question, or what it says once
+	// it stops for want of their answer. Refused by admission for rate or room, it waits as a turn an
+	// event woke does, and the line that says so says why. Refused for a spent day, it goes out laid
+	// out by the harness, and once the share of the day the assistant spends on its own was spent,
+	// the assistant tells its owner so, once a day.
 	async function sendBrief(
 		job: Job,
 		payload: TurnPayload,
@@ -664,7 +674,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		if (result.kind === 'busy') return deferOrAbandon(job, result.reason, turnLog, owner, 'brief');
 		// A brief that waits for its owner's answer says nothing while the broker still refuses
 		if (result.kind === 'withheld') return null;
-		if (result.kind !== 'ok' && result.kind !== 'question') {
+		if (result.kind !== 'ok' && result.kind !== 'question' && result.kind !== 'notice') {
 			turnLog.warn({ result: result.kind }, 'brief dropped');
 			return null;
 		}
@@ -676,7 +686,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				text: result.text,
 				...(result.kind === 'ok'
 					? { html: result.html, brief: { date: brief.date } }
-					: await asking(owner, result.pendingCallId))
+					: result.kind === 'question'
+						? await asking(owner, result.pendingCallId)
+						: {})
 			} satisfies SendPayload,
 			dedupKey: `send:${eventId}`,
 			groupKey: `send:${roomId}`

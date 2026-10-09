@@ -3,6 +3,7 @@
 
 import type { RefusalReason } from '../agent/admission.js';
 import type { Weekday } from '../agent/clock.js';
+import type { BriefDomain } from '../briefs/questions.js';
 import type { UntoldKind } from '../briefs/untold.js';
 import type { ConsentLevel } from '../consents/consent.js';
 import type { DelegationRefusal, SpaceScope } from '../consents/delegation.js';
@@ -282,6 +283,16 @@ export interface Messages {
 				readonly tasks: string;
 			};
 		};
+		// The first brief presents itself, the days and time of the owner's wall clock it goes out on
+		// and how to set them, then asks in one question for the reads they did not allow
+		ask(days: readonly Weekday[], time: string, domains: readonly BriefDomain[]): string;
+		// What the assistant says once the owner said no to that question, and once they left it
+		// unanswered twice, with how to resume the brief
+		readonly refused: string;
+		readonly paused: string;
+		// The first brief after the owner took back the read of an application says so in one line,
+		// with what to tell the assistant to give it back
+		withdrawn(domain: BriefDomain): string;
 	};
 	// What a suggestion says when it asks its owner to let their assistant read an application
 	readonly suggestions: {
@@ -372,6 +383,76 @@ function withDeOrDApostrophe(name: string): string {
 // words, as a request carries no buttons, and in their next message, the only one that answers it
 const ENGLISH_HOW_TO_ANSWER = 'Answer yes or no in your next message.';
 const FRENCH_HOW_TO_ANSWER = 'Réponds par oui ou non dans ton prochain message.';
+
+// The days of the week, Monday first, in each language
+const ENGLISH_WEEKDAYS: Record<Weekday, string> = {
+	monday: 'Monday',
+	tuesday: 'Tuesday',
+	wednesday: 'Wednesday',
+	thursday: 'Thursday',
+	friday: 'Friday',
+	saturday: 'Saturday',
+	sunday: 'Sunday'
+};
+const FRENCH_WEEKDAYS: Record<Weekday, string> = {
+	monday: 'lundi',
+	tuesday: 'mardi',
+	wednesday: 'mercredi',
+	thursday: 'jeudi',
+	friday: 'vendredi',
+	saturday: 'samedi',
+	sunday: 'dimanche'
+};
+
+// « a, b et c », "a, b and c"
+function listed(items: readonly string[], and: string): string {
+	const last = items.at(-1) ?? '';
+	return items.length < 2 ? last : `${items.slice(0, -1).join(', ')} ${and} ${last}`;
+}
+
+// The days a brief goes out on, as a sentence says them: Monday to Friday, every day, or each day
+const WORKING_DAYS = 'monday,tuesday,wednesday,thursday,friday';
+function englishDays(days: readonly Weekday[]): string {
+	if (days.join(',') === WORKING_DAYS) return 'Monday to Friday';
+	if (days.length === 7) return 'every day';
+	return `on ${listed(
+		days.map((day) => ENGLISH_WEEKDAYS[day]),
+		'and'
+	)}`;
+}
+function frenchDays(days: readonly Weekday[]): string {
+	if (days.join(',') === WORKING_DAYS) return 'du lundi au vendredi';
+	if (days.length === 7) return 'tous les jours';
+	return listed(
+		days.map((day) => `le ${FRENCH_WEEKDAYS[day]}`),
+		'et'
+	);
+}
+
+// What the brief reads of each application, as its question names it, in each language
+const ENGLISH_BRIEF_READS: Record<BriefDomain, string> = {
+	calendar: 'your calendar',
+	mail: 'your emails',
+	tasks: 'your tasks'
+};
+const FRENCH_BRIEF_READS: Record<BriefDomain, string> = {
+	calendar: 'ton agenda',
+	mail: 'tes mails',
+	tasks: 'tes tâches'
+};
+
+// The line of the brief after the owner took back the read of an application, in each language
+const ENGLISH_BRIEF_WITHDRAWN: Record<BriefDomain, string> = {
+	calendar: 'I no longer read your calendar: to have me read it again, tell me "read my calendar".',
+	mail: 'I no longer read your emails: to have me read them again, tell me "read my emails".',
+	tasks: 'I no longer read your tasks: to have me read them again, tell me "read my tasks".'
+};
+const FRENCH_BRIEF_WITHDRAWN: Record<BriefDomain, string> = {
+	calendar:
+		'Je ne lis plus ton agenda : pour que je le lise de nouveau, dis-moi « lis mon agenda ».',
+	mail: 'Je ne lis plus tes mails : pour que je les lise de nouveau, dis-moi « lis mes mails ».',
+	tasks: 'Je ne lis plus tes tâches : pour que je les lise de nouveau, dis-moi « lis mes tâches ».'
+};
 
 // The scopes of a Twake Space API token as Space's own pages name them, in each language, so that
 // an owner finds on its « API tokens » page the one their token lacks
@@ -483,31 +564,6 @@ const FR_MEETING: Readonly<Record<MeetingScope, string>> = {
 	occurrence: "une occurrence d'une série de réunions",
 	series: 'une série de réunions'
 };
-
-// The days of the week, as each language names them in a sentence
-const EN_WEEKDAYS: Readonly<Record<Weekday, string>> = {
-	monday: 'Monday',
-	tuesday: 'Tuesday',
-	wednesday: 'Wednesday',
-	thursday: 'Thursday',
-	friday: 'Friday',
-	saturday: 'Saturday',
-	sunday: 'Sunday'
-};
-const FR_WEEKDAYS: Readonly<Record<Weekday, string>> = {
-	monday: 'lundi',
-	tuesday: 'mardi',
-	wednesday: 'mercredi',
-	thursday: 'jeudi',
-	friday: 'vendredi',
-	saturday: 'samedi',
-	sunday: 'dimanche'
-};
-
-// Words listed as the language joins them: "a, b and c"
-function listed(locale: Locale, words: readonly string[]): string {
-	return new Intl.ListFormat(locale, { type: 'conjunction' }).format(words);
-}
 
 // Words that start a sentence, with a capital
 function capitalized(words: string): string {
@@ -803,7 +859,19 @@ const ENGLISH: Messages = {
 				mails: 'I could not read your emails today.',
 				tasks: 'I could not read your tasks today.'
 			}
-		}
+		},
+		ask: (days, time, domains) =>
+			[
+				`I will send you a brief of your day: your meetings, your invitations awaiting your answer, your important emails and your tasks. It goes out ${englishDays(days)} at ${time}; to change it, tell me for instance "brief at 7:30" or "no brief on Wednesdays".`,
+				`To write it, may I read ${listed(
+					domains.map((domain) => ENGLISH_BRIEF_READS[domain]),
+					'and'
+				)}? ${ENGLISH_HOW_TO_ANSWER} You can take back each read on its own.`
+			].join('\n'),
+		refused: 'All right, I will not send you a brief. To get it back, tell me "resume my brief".',
+		paused:
+			'You did not answer, so I am pausing your brief. To get it back, tell me "resume my brief".',
+		withdrawn: (domain) => ENGLISH_BRIEF_WITHDRAWN[domain]
 	},
 	suggestions: {
 		consentContext: (author) =>
@@ -826,8 +894,8 @@ const ENGLISH: Messages = {
 					? []
 					: [
 							`all of ${listed(
-								'en',
-								days.map((day) => EN_WEEKDAYS[day])
+								days.map((day) => ENGLISH_WEEKDAYS[day]),
+								'and'
 							)}`
 						])
 			];
@@ -839,7 +907,8 @@ const ENGLISH: Messages = {
 			'## Now',
 			`Date and time: ${words}, time zone ${timeZone}.`,
 			`In ISO 8601: ${iso}.`,
-			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.'
+			'Use them to place "today", "tomorrow" or "this afternoon", and give contracts RFC 3339 times with this offset.',
+			'Each date handed to you as data is written in words beside it, its day of the week included, under a key ending in _in_words: copy that day rather than work it out from the date.'
 		].join('\n'),
 	addressing: null,
 	ownerDevices: {
@@ -1180,7 +1249,20 @@ const FRENCH: Messages = {
 				mails: "Je n'ai pas pu lire tes mails aujourd'hui.",
 				tasks: "Je n'ai pas pu lire tes tâches aujourd'hui."
 			}
-		}
+		},
+		ask: (days, time, domains) =>
+			[
+				`Je t'enverrai un brief de ta journée : tes réunions, tes invitations en attente, tes mails importants et tes tâches. Il part ${frenchDays(days)} à ${time} ; pour le régler, dis-moi par exemple « brief à 7:30 » ou « pas de brief le mercredi ».`,
+				`Pour l'écrire, puis-je lire ${listed(
+					domains.map((domain) => FRENCH_BRIEF_READS[domain]),
+					'et'
+				)} ? ${FRENCH_HOW_TO_ANSWER} Tu pourras retirer chaque lecture à part.`
+			].join('\n'),
+		refused:
+			"D'accord, je n'enverrai pas de brief. Pour le reprendre, dis-moi « reprends le brief ».",
+		paused:
+			"Tu n'as pas répondu : je mets ton brief en pause. Pour le reprendre, dis-moi « reprends le brief ».",
+		withdrawn: (domain) => FRENCH_BRIEF_WITHDRAWN[domain]
 	},
 	suggestions: {
 		consentContext: (author) =>
@@ -1202,8 +1284,8 @@ const FRENCH: Messages = {
 					? []
 					: [
 							`tout ${listed(
-								'fr',
-								days.map((day) => `le ${FR_WEEKDAYS[day]}`)
+								days.map((day) => `le ${FRENCH_WEEKDAYS[day]}`),
+								'et'
 							)}`
 						])
 			];
@@ -1215,7 +1297,8 @@ const FRENCH: Messages = {
 			'## Maintenant',
 			`Date et heure : ${words}, fuseau ${timeZone}.`,
 			`En ISO 8601 : ${iso}.`,
-			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage."
+			"Sers-t'en pour situer « aujourd'hui », « demain » ou « cet après-midi », et donne aux contrats des heures RFC 3339 avec ce décalage.",
+			"Chaque date qu'on te donne en données est écrite en toutes lettres à côté d'elle, jour de la semaine compris, sous une clé qui finit par _in_words : reprends ce jour plutôt que de le déduire de la date."
 		].join('\n'),
 	addressing:
 		"Tutoie la personne qui t'écrit : adresse-toi à elle avec « tu », simplement, et jamais avec « vous », sauf si elle te demande explicitement de la vouvoyer.",

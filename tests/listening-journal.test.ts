@@ -245,23 +245,29 @@ describe('what my assistant saw today', () => {
 		await l.answerTo(road12.id);
 		// I ask at half past nine
 		clock.set(FRIDAY_MORNING);
+		// Each time written in words beside it, in my zone
 		expect(await l.ask()).toEqual({
 			time_zone: 'Europe/Paris',
 			since: '2026-10-09T00:00:00+02:00',
+			since_in_words: 'Friday, October 9, 2026, 00:00',
 			activities: [
 				{
 					source: 'twake://calendar',
 					type: INVITED,
 					received_at: '2026-10-09T00:10:00+02:00',
+					received_at_in_words: 'Friday, October 9, 2026, 00:10',
 					outcome: 'suggested',
 					start: '2026-10-09T09:00:00+02:00',
+					start_in_words: 'Friday, October 9, 2026, 09:00',
 					end: '2026-10-09T10:00:00+02:00',
+					end_in_words: 'Friday, October 9, 2026, 10:00',
 					untrusted: { uid: 'budget-review', title: 'Budget review' }
 				},
 				{
 					source: 'twake://tasks',
 					type: ASSIGNED,
 					received_at: '2026-10-09T00:15:00+02:00',
+					received_at_in_words: 'Friday, October 9, 2026, 00:15',
 					outcome: 'suggested',
 					object: { type: 'task', id: '1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e', key: 'ROAD-12' },
 					untrusted: { title: 'Write the quarterly report' }
@@ -494,6 +500,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				source: 'twake://tasks',
 				type: ASSIGNED,
 				received_at: '2026-10-09T08:00:00+02:00',
+				received_at_in_words: 'Friday, October 9, 2026, 08:00',
 				outcome: 'suggested',
 				object: { type: 'task', id: 'task-1', key: 'ROAD-1' },
 				untrusted: { title: 'Told' }
@@ -502,6 +509,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				source: 'twake://tasks',
 				type: ASSIGNED,
 				received_at: '2026-10-09T08:05:00+02:00',
+				received_at_in_words: 'Friday, October 9, 2026, 08:05',
 				outcome: 'abandoned',
 				object: { type: 'task', id: 'task-2', key: 'ROAD-2' },
 				untrusted: { title: 'Given up' }
@@ -510,6 +518,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				source: 'twake://tasks',
 				type: ASSIGNED,
 				received_at: '2026-10-09T08:10:00+02:00',
+				received_at_in_words: 'Friday, October 9, 2026, 08:10',
 				outcome: 'capped',
 				object: { type: 'task', id: 'task-3', key: 'ROAD-3' },
 				untrusted: { title: 'Held back' }
