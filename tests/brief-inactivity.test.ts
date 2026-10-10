@@ -209,47 +209,38 @@ describe('my brief pauses once I have neither written nor read in my room for te
 		expect(next.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-11-19' });
 	}, 120_000);
 
-	it('puts the pause off by a receipt of mine in my room, private or public, as by a message', async () => {
+	it('puts the pause off by a public receipt of mine in my room, as by a message', async () => {
 		const seen = said().length;
-		// Last seen on Friday 6 November: the brief would stop on Monday 23. She reads her room on
-		// Friday 20 at one, privately.
-		await seenAt('2026-11-06T10:00:00Z');
-		clock.set('2026-11-20T12:00:00Z');
-		await receipt(r.alice, r.room, lastSaid().eventId, 'm.read.private');
-		await until('her private receipt counted', async () => {
-			return (await lastSeen()) === '2026-11-20T12:00:00.000Z';
-		});
-		await pass('2026-11-23T07:00:00Z');
-		const monday = await nextSaid(seen);
-		expect(monday.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-11-23' });
-		// Last seen on Monday 9 November: the brief would stop on Tuesday 24. She reads it on Monday
-		// 23, publicly.
+		// Last seen on Monday 9 November: the brief would stop on Tuesday 24. She reads her room on
+		// Monday 23 at one, publicly.
 		await seenAt('2026-11-09T10:00:00Z');
 		clock.set('2026-11-23T12:00:00Z');
-		await receipt(r.alice, r.room, monday.eventId, 'm.read');
+		await receipt(r.alice, r.room, lastSaid().eventId, 'm.read');
 		await until('her public receipt counted', async () => {
 			return (await lastSeen()) === '2026-11-23T12:00:00.000Z';
 		});
 		await pass('2026-11-24T07:00:00Z');
-		const tuesday = await nextSaid(seen + 1);
+		const tuesday = await nextSaid(seen);
 		expect(tuesday.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-11-24' });
 		// Last seen on Tuesday 10 November: the brief would stop on Wednesday 25. She writes on
 		// Tuesday 24.
 		await seenAt('2026-11-10T10:00:00Z');
 		clock.set('2026-11-24T12:00:00Z');
 		await r.client.sendText(r.room, 'Bonjour');
-		expect((await nextSaid(seen + 2)).body).toBe('Heard: Bonjour');
+		expect((await nextSaid(seen + 1)).body).toBe('Heard: Bonjour');
 		expect(await lastSeen()).toBe('2026-11-24T12:00:00.000Z');
 		await pass('2026-11-25T07:00:00Z');
-		const wednesday = await nextSaid(seen + 3);
+		const wednesday = await nextSaid(seen + 2);
 		expect(wednesday.content[BRIEF_CONTENT_KEY]).toEqual({ date: '2026-11-25' });
 	}, 120_000);
 
-	it('counts neither the receipts of anyone else in my room nor my words and receipts in another room', async () => {
+	it('counts neither a private receipt of mine nor the receipts of anyone else in my room, nor my words and receipts in another room', async () => {
 		const seen = said().length;
 		// Last seen on Wednesday 11 November: the brief stops on Thursday 26
 		await seenAt('2026-11-11T10:00:00Z');
 		clock.set('2026-11-25T12:00:00Z');
+		// Her private receipt in her room, hers alone, which a Synapse before 1.162 still pushes
+		await receipt(r.alice, r.room, lastSaid().eventId, 'm.read.private');
 		// Her assistant's own receipt in her room
 		const assistant: MatrixUser = { userId: r.assistantId, accessToken: r.h.config.matrix.asToken };
 		await receipt(

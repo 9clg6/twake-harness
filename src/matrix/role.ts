@@ -549,8 +549,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 
-	// The read receipts Synapse pushes, public and private: the owner's in their assistant's room
-	// count as seeing them there, anyone else's, and any of another room, count for nothing
+	// The public read receipts Synapse pushes: the owner's in their assistant's room count as seeing
+	// them there, anyone else's, and any of another room, count for nothing
 	appservice.on(
 		'ephemeral.event',
 		guard(
