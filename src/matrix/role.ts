@@ -18,6 +18,7 @@ import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { requestNaming } from '../assistants/naming.js';
 import { readIdentity } from '../assistants/provisioning.js';
+import { noteOwnerSeen } from '../briefs/activity.js';
 import {
 	claimDialogQuestion,
 	claimProvisionedWelcome,
@@ -71,6 +72,7 @@ import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.
 import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
+import { readersOf } from './receipts.js';
 import { makeAppserviceStorage } from './storage.js';
 import { makeSuggestionIntake } from '../suggestions/intake.js';
 import { listenerUserId, makeChannelListener } from '../suggestions/listener.js';
@@ -537,6 +539,36 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			'to-device received'
 		);
 	});
+
+	// The owner was seen in their assistant's room: a message of theirs there, or a read receipt.
+	// Only the instant the role received it is kept, and only for the room their brief goes to. A
+	// failure costs their brief a sighting of them, and their message nothing.
+	async function ownerSeen(owner: string, roomId: string): Promise<void> {
+		try {
+			await withPrincipal(db, { id: owner }, (tx) => noteOwnerSeen(tx, owner, roomId, clock.now()));
+		} catch (err: unknown) {
+			log.warn({ owner, roomId, err }, 'owner sighting not kept');
+		}
+	}
+
+	// The public read receipts Synapse pushes: the owner's in their assistant's room count as seeing
+	// them there, anyone else's, and any of another room, count for nothing
+	appservice.on(
+		'ephemeral.event',
+		guard(
+			'read receipt',
+			async (event: Record<string, unknown>) => {
+				const receipt = readersOf(event);
+				if (receipt === null) return;
+				const room = await assistantRoom(receipt.roomId);
+				if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
+				const ownerUserId = matrixUserIdOfPrincipal(config, room.owner);
+				if (ownerUserId === null || !receipt.userIds.has(ownerUserId)) return;
+				await ownerSeen(room.owner, receipt.roomId);
+			},
+			(event: Record<string, unknown>) => ({ roomId: event['room_id'] })
+		)
+	);
 
 	// Synapse pushes no to-device message while it holds the role for down, as it does for a while
 	// once the role stopped, and its push of to-device messages (MSC2409) can skip a key share when
@@ -1144,7 +1176,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// Who comes into an assistant's room: anyone but its owner makes it leave, as it answers its owner
 	// in a direct room only for now. The owner has joined: their devices are in the room, the greeting
-	// can be encrypted for them.
+	// can be encrypted for them. Each change of the owner's name comes as a member event of theirs
+	// too: an assistant still named after their identifier then takes their first name.
 	appservice.on(
 		'room.event',
 		guard(
@@ -1166,6 +1199,20 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				) {
 					await leaveNoLongerDirect(roomId, room.owner, room.userId);
 					return;
+				}
+				const ownerName = event.content?.['displayname'];
+				if (
+					membership === 'join' &&
+					ownerUserId !== null &&
+					event.state_key === ownerUserId &&
+					typeof ownerName === 'string'
+				) {
+					// A failure leaves the greeting to go out all the same
+					try {
+						await assistants.followOwnerName(room.owner, ownerName);
+					} catch (err: unknown) {
+						log.warn({ roomId, owner: room.owner, err }, 'owner name not followed');
+					}
 				}
 				if (membership !== 'join' || room.welcome === null) return;
 				if (event.state_key !== ownerUserId) return;
@@ -1521,6 +1568,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		const room = await assistantRoom(roomId);
 		if (room !== null) {
+			// Any message of its owner, with words or not, sees them there
+			if (
+				room.owner !== ORGANIZATION_PRINCIPAL &&
+				principalOfMatrixUser(config, sender) === room.owner
+			) {
+				await ownerSeen(room.owner, roomId);
+			}
 			if (text === null) return;
 			const eventId = raw.event_id ?? `${roomId}:${Date.now()}`;
 			let owner: string;
@@ -1898,10 +1952,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			)
 		);
 	}
-	// An assistant flagged when the harness started naming assistants after their owner's first name
-	// takes it, if it still goes by a default name it had before, and goes by its name in its rooms.
-	// Once: its naming job clears the flag once the name is settled, and keeps it for the next start
-	// when the owner's name cannot be read.
+	// An assistant flagged when the harness started naming assistants after their owner's first name,
+	// or when its owner got a name while it went by their identifier, takes it, if it still goes by a
+	// default name it had before, and goes by its name in its rooms. Once: its naming job clears the
+	// flag once the name is settled, and keeps it for the next start when the owner's name cannot be
+	// read.
 	const owners = new Set(assistantsAtStart.map(({ owner }) => owner));
 	owners.delete(ORGANIZATION_PRINCIPAL);
 	try {

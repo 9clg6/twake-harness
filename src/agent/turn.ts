@@ -1,5 +1,6 @@
 import type { FastifyBaseLogger } from 'fastify';
 
+import type { Locale } from '../i18n/messages.js';
 import type {
 	LlmClient,
 	LlmCompletion,
@@ -9,14 +10,17 @@ import type {
 } from '../llm/client.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withoutCallMarkup } from './call-markup.js';
+import type { TimeZone } from './clock.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	runTool,
 	toolCallStatus,
 	type ToolCallStatus,
 	type ToolContext,
-	type ToolRegistry
+	type ToolRegistry,
+	type TurnBrief
 } from './tools.js';
+import { withDatesInWords, withTrueWeekdays } from './weekdays.js';
 
 export interface TurnInput {
 	readonly systemPrompt: string;
@@ -36,6 +40,11 @@ export interface TurnInput {
 	readonly actionsDone?: (actions: number) => void;
 	// Whether the model may end the turn on no words at all, as a turn an activity woke may
 	readonly mayStaySilent?: boolean;
+	// The owner's day, as ISO 8601 writes it, in which the model's words read a date without its year
+	readonly today: string;
+	// The owner's zone and language, in which each date the model reads is written in words
+	readonly timeZone: TimeZone;
+	readonly locale: Locale;
 }
 
 export interface TurnOutput {
@@ -49,6 +58,8 @@ export interface TurnOutput {
 	readonly pendingCallId?: string;
 	// That question in its parts, when the harness laid it out as a request about the call
 	readonly request?: OwnerRequest;
+	// The brief the owner asked for, when the turn ended on it
+	readonly brief?: TurnBrief;
 	// The turn reached one of its limits before it answered: there is more to do
 	readonly atLimit?: true;
 }
@@ -219,14 +230,17 @@ function cutShort(
 
 // One model call, with the tools it may call, whose tokens its turn adds to those it spent: a call
 // that ran out of budget while thinking is made once more with twice the budget, up to the ceiling,
-// unless it has tools and the turn spent all its tokens
+// unless it has tools and the turn spent all its tokens. The model reads each date it is handed
+// written in words beside it, in its owner's zone and language.
 async function askModel(
 	deps: TurnDeps,
 	iteration: number,
-	prompt: readonly LlmMessage[],
+	messages: readonly LlmMessage[],
 	tools: readonly LlmToolDefinition[],
-	spent: Spent
+	spent: Spent,
+	owner: Pick<TurnInput, 'today' | 'timeZone' | 'locale'>
 ): Promise<Asked> {
+	const prompt = withDatesInWords(messages, owner.timeZone, owner.locale);
 	deps.log.info(
 		{ iteration, messageCount: prompt.length, characters: countCharacters(prompt) },
 		'model asked'
@@ -248,6 +262,12 @@ async function askModel(
 			spend(deps.log, iteration, completion, spent);
 			logAnswer(deps.log, iteration, completion);
 		}
+	}
+	// Whatever the turn does with the model's words, the owner reads, the conversation keeps and a
+	// request quotes them with the day of each date named from the date; the debug line of
+	// logAnswer keeps them as the model wrote them
+	if (completion.content !== null) {
+		completion = { ...completion, content: withTrueWeekdays(completion.content, owner.today) };
 	}
 	return { completion, cut: cutShort(deps, tools, completion, spent) };
 }
@@ -271,7 +291,11 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// What this turn adds to the conversation, which the model always reads whole
 	const messages: LlmMessage[] =
 		input.message === null ? [] : [{ role: 'user', content: input.message }];
-	const past = computeVisibleHistory(input.history, deps.historyMaxChars);
+	// The past conversation as the model reads it, each date in words, cut to what it may read
+	const past = computeVisibleHistory(
+		withDatesInWords(input.history, input.timeZone, input.locale),
+		deps.historyMaxChars
+	);
 	if (past.length < input.history.length) {
 		deps.log.info(
 			{ historyMessages: input.history.length, shownMessages: past.length },
@@ -294,7 +318,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			iteration,
 			[system, ...past, ...messages],
 			deps.tools.definitions,
-			spent
+			spent,
+			input
 		);
 		iteration += 1;
 		// The model ran out while thinking past the tokens of the turn: its last call, without tools,
@@ -383,7 +408,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					messages: [...input.history, ...messages],
 					tokens: spent.tokens,
 					...(outcome.pendingCallId === undefined ? {} : { pendingCallId: outcome.pendingCallId }),
-					...(outcome.request === undefined ? {} : { request: outcome.request })
+					...(outcome.request === undefined ? {} : { request: outcome.request }),
+					...(outcome.brief === undefined ? {} : { brief: outcome.brief })
 				};
 			}
 			if (tool !== null && args !== null) input.actionsDone?.(actions);
@@ -407,7 +433,14 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		role: 'system',
 		content: `${input.systemPrompt}\n\n${wrapUpInstruction(deps, reached)}`
 	};
-	const asked = await askModel(deps, iteration, [instructed, ...past, ...messages], [], spent);
+	const asked = await askModel(
+		deps,
+		iteration,
+		[instructed, ...past, ...messages],
+		[],
+		spent,
+		input
+	);
 	// A model with no tools may still call one, through the API or in its text: those calls are
 	// not for the owner, its words beside them are
 	const written = asked.completion.content ?? '';

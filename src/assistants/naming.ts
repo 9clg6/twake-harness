@@ -36,16 +36,32 @@ export function defaultNameFor(messages: Messages, owner: Namesake): string {
 		: shortened(messages.defaultAssistantName(owner.localpart));
 }
 
-// The default names an assistant had before it took its owner's first name: « Assistant », then
-// the owner's whole Matrix name, or their localpart, in either language, cut as they were
+// The default name an assistant had after a whole name before it took its owner's first name, cut
+// as it was
+function formerDefaultNameAfter(messages: Messages, name: string): string {
+	return messages.formerDefaultAssistantName(name).slice(0, MAX_NAME_LENGTH);
+}
+
+// The names an assistant took from its owner's localpart, as it does when the homeserver gives the
+// owner no other name, or their identifier for one, in either language: the default name of today
+// and the one before it
+export function namesAfterLocalpart(localpart: string): string[] {
+	return LOCALES.flatMap((locale) => {
+		const messages = getMessages(locale);
+		return [
+			defaultNameFor(messages, { name: null, localpart }),
+			formerDefaultNameAfter(messages, localpart)
+		];
+	});
+}
+
+// The default names an assistant had before it took its owner's first name: « Assistant », the
+// owner's whole Matrix name, in either language, or a name after their localpart
 export function formerDefaultNames(owner: Namesake): string[] {
-	const names = owner.name === null ? [owner.localpart] : [owner.name, owner.localpart];
-	const fromOwner = LOCALES.flatMap((locale) =>
-		names.map((name) =>
-			getMessages(locale).formerDefaultAssistantName(name).slice(0, MAX_NAME_LENGTH)
-		)
-	);
-	return [FORMER_DEFAULT_NAME, ...fromOwner];
+	const { name } = owner;
+	const fromName =
+		name === null ? [] : LOCALES.map((locale) => formerDefaultNameAfter(getMessages(locale), name));
+	return [FORMER_DEFAULT_NAME, ...fromName, ...namesAfterLocalpart(owner.localpart)];
 }
 
 // Asks the matrix role to show the owner's assistant under its name: the job reads the name when it

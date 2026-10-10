@@ -461,10 +461,14 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			id,
 			actor: 'e2e.organizer@dev.twake.lin-saas.com',
 			reason: 'invited',
+			// Each time written in words beside it, in the deployment's zone, as no read of Alice's
+			// calendar named her own
 			object: {
 				type: 'event',
 				start: '2026-10-06T17:00:00+02:00',
+				start_in_words: 'Tuesday, October 6, 2026, 15:00',
 				end: '2026-10-06T18:00:00+02:00',
+				end_in_words: 'Tuesday, October 6, 2026, 16:00',
 				organizer: 'e2e.organizer@dev.twake.lin-saas.com'
 			},
 			// What the organizer wrote: the title, and the UID and the zone too
@@ -508,6 +512,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(shown?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06T15:00:00Z',
+			start_in_words: 'Tuesday, October 6, 2026, 15:00',
 			end: null,
 			organizer: 'dave@test.local'
 		});
@@ -569,7 +574,9 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			tool: 'read_freebusy',
 			arguments: {
 				start: '2026-10-06T17:00:00+02:00',
+				start_in_words: 'Tuesday, October 6, 2026, 15:00',
 				end: '2026-10-06T18:00:00+02:00',
+				end_in_words: 'Tuesday, October 6, 2026, 16:00',
 				exclude: [uid]
 			},
 			result: { status: 200, body: FREE }
@@ -612,7 +619,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 				contract: 'calendar.invitation.accept.v1',
 				tool: 'accept_invitation',
 				domain: 'calendar',
-				level: 'write',
+				consentLevel: 'write',
 				risk: 'low',
 				principal: 'alice@test.local'
 			});
@@ -920,30 +927,37 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(r.h.apisix.contracts.calls).toHaveLength(before);
 	});
 
-	it('wakes nobody for an update, a cancellation or a reply, nor for an invitee without an assistant', async () => {
+	it('wakes nobody for an update without a change or a reply, nor for an invitee without an assistant', async () => {
 		// As the calendar producer's tests sent them: an update, which says nothing of being new, and
-		// one that says it is not; a cancellation; Carol's answer to a meeting Alice organizes; and a
-		// new invitation for someone without an assistant
+		// one that says it is not, neither with a change Calendar computed; Carol's answer to a meeting
+		// Alice organizes, which waits for Alice's brief; and a new invitation for someone without an
+		// assistant
 		const update = notification({
 			uid: 'uid-update',
 			isNewEvent: null,
 			lines: ['SUMMARY:Point Twake Space', 'DTSTART:20261006T150000Z', 'SEQUENCE:1']
 		});
 		const notNew = notification({ uid: 'uid-not-new', isNewEvent: false });
-		const cancellation = notification({
-			uid: 'uid-cancel',
-			method: 'CANCEL',
-			lines: ['DTSTART:20261006T150000Z', 'STATUS:CANCELLED']
+		const reply = notification({
+			uid: 'uid-reply',
+			method: 'REPLY',
+			sender: 'carol@test.local',
+			lines: [
+				'SUMMARY:Point',
+				'DTSTART:20261006T150000Z',
+				'DTEND:20261006T160000Z',
+				'ORGANIZER;CN=Alice:mailto:alice@test.local',
+				'ATTENDEE;PARTSTAT=ACCEPTED:mailto:carol@test.local'
+			]
 		});
-		const reply = notification({ uid: 'uid-reply', method: 'REPLY', sender: 'carol@test.local' });
 		const nobody = notification({ uid: 'nobody', recipient: 'nobody@test.local' });
 		// Then a new invitation for Alice, its method in lower case: once she is told of it, the
 		// queue, read in order, has taken every notification before it
 		const next = notification({ uid: 'uid-next', method: 'request' });
-		for (const sent of [update, notNew, cancellation, reply, nobody, next]) await publish(sent);
+		for (const sent of [update, notNew, reply, nobody, next]) await publish(sent);
 		await answerTo('uid-next');
 		// No model call names any of them, whatever id it could have been given
-		for (const uid of ['uid-update', 'uid-not-new', 'uid-cancel', 'uid-reply', 'nobody']) {
+		for (const uid of ['uid-update', 'uid-not-new', 'uid-reply', 'nobody']) {
 			expect(r.h.apisix.llm.calls.some((call) => lastUser(call.request).includes(uid))).toBe(false);
 		}
 		// Each was taken all the same, none dead-lettered
@@ -1017,7 +1031,9 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		});
 		expect(checkIn(told)?.['arguments']).toEqual({
 			start: '2026-10-09T09:00:00+02:00',
+			start_in_words: 'Friday, October 9, 2026, 07:00',
 			end: '2026-10-09T10:30:00+02:00',
+			end_in_words: 'Friday, October 9, 2026, 08:30',
 			exclude: ['uid-duration']
 		});
 	});
@@ -1110,6 +1126,7 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(ofSeries?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06T17:00:00+02:00',
+			start_in_words: 'Tuesday, October 6, 2026, 15:00',
 			end: null,
 			organizer: 'bob@test.local'
 		});
@@ -1120,10 +1137,12 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(ofOccurrence?.object).toEqual({
 			type: 'event',
 			start: '2026-10-13T18:00:00+02:00',
+			start_in_words: 'Tuesday, October 13, 2026, 16:00',
 			end: null,
 			organizer: 'bob@test.local',
 			// In its zone, as its times are: the RECURRENCE-ID as written goes into its id alone
-			occurrence: '2026-10-13T17:00:00+02:00'
+			occurrence: '2026-10-13T17:00:00+02:00',
+			occurrence_in_words: 'Tuesday, October 13, 2026, 15:00'
 		});
 	});
 
@@ -1141,6 +1160,8 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		expect(shownIn(allDay)?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06',
+			start_in_words: 'Tuesday, October 6, 2026',
+			// The day after its last, as iCalendar writes it: no day named
 			end: '2026-10-08',
 			organizer: 'bob@test.local'
 		});
@@ -1149,13 +1170,16 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 		// calendar named its own
 		expect(checkIn(allDay)?.['arguments']).toEqual({
 			start: '2026-10-06T00:00:00+00:00',
+			start_in_words: 'Tuesday, October 6, 2026, 00:00',
 			end: '2026-10-08T00:00:00+00:00',
+			end_in_words: 'Thursday, October 8, 2026, 00:00',
 			exclude: ['all-day']
 		});
 		const utc = await toldOfInvitation(idOf('utc'));
 		expect(shownIn(utc)?.object).toEqual({
 			type: 'event',
 			start: '2026-10-06T15:00:00Z',
+			start_in_words: 'Tuesday, October 6, 2026, 15:00',
 			end: null,
 			organizer: 'bob@test.local'
 		});

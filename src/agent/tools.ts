@@ -52,6 +52,14 @@ export interface ToolOutcome {
 	// That question in its parts, when the harness laid it out as a request about the call:
 	// `final` is its plain text
 	readonly request?: OwnerRequest;
+	// The brief the turn ends on, when `final` is the brief the owner asked for
+	readonly brief?: TurnBrief;
+}
+
+// A brief a turn ends on: the date it is of, and its HTML, which the harness laid out
+export interface TurnBrief {
+	readonly date: string;
+	readonly html: string;
 }
 
 // How a tool call ended, as the info logs report it: never the arguments or the result
@@ -106,6 +114,9 @@ export interface ToolContext {
 	// that would wait for its owner is not made, or not frozen once the broker refused it, and its
 	// result says why
 	readonly unattended?: true;
+	// For such a turn, the brief: a call the broker refused waits for its owner all the same, and the
+	// turn gives way to the harness's question about what they must give the platform first
+	readonly asksDelegation?: true;
 }
 
 // What the model reads when its turn's conversation was erased with its assistant while the turn
@@ -143,6 +154,10 @@ export interface Tool {
 	// The argument keys the tool accepts; anything else is refused before it runs
 	readonly argumentKeys: readonly string[];
 	readonly requiredAction: string | null;
+	// For a tool of the harness's own whose call may wait for its owner, as listening to an
+	// application they have not let their assistant read: what its frozen calls name in place of a
+	// contract, by which the call their yes allowed finds the tool again
+	readonly frozenAs?: string;
 	run(args: unknown, context: ToolContext): Promise<ToolOutcome>;
 }
 
@@ -166,15 +181,25 @@ export function makeToolRegistry(
 	};
 }
 
-// The tools of a registry but those named, which are neither offered to the model nor run, should
-// it name one all the same
-export function withoutTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+// The tools of a registry whose names it keeps: no other is offered to the model or run, should it
+// name one all the same
+function keptTools(registry: ToolRegistry, kept: (name: string) => boolean): ToolRegistry {
 	return {
 		get definitions() {
-			return registry.definitions.filter((tool) => !names.includes(tool.function.name));
+			return registry.definitions.filter((tool) => kept(tool.function.name));
 		},
-		find: (name) => (names.includes(name) ? null : registry.find(name))
+		find: (name) => (kept(name) ? registry.find(name) : null)
 	};
+}
+
+// The tools of a registry but those named
+export function withoutTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+	return keptTools(registry, (name) => !names.includes(name));
+}
+
+// The tools of a registry of those names alone
+export function onlyTools(registry: ToolRegistry, names: readonly string[]): ToolRegistry {
+	return keptTools(registry, (name) => names.includes(name));
 }
 
 function hasOnlyKeys(args: unknown, keys: readonly string[]): args is Record<string, unknown> {

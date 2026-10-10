@@ -17,6 +17,7 @@ import { fetchOwnerMessages, localeOf } from './assistants/locale.js';
 import { requestNaming } from './assistants/naming.js';
 import { readIdentity, requestPreparation, requestRecovery } from './assistants/provisioning.js';
 import { findAssistant, setAssistantRoomId } from './assistants/repository.js';
+import { findBriefQuestion, refuseBriefQuestion } from './briefs/questions.js';
 import { makeAssistantService, type AssistantService } from './assistants/service.js';
 import { makeJwtAuthenticator, type Authenticator } from './auth/jwt.js';
 import type { Config } from './config.js';
@@ -60,6 +61,7 @@ import {
 	muteRoomFor,
 	readCallArguments,
 	readSettings,
+	writeEnabled,
 	writeSettings
 } from './suggestions/repository.js';
 import {
@@ -106,6 +108,8 @@ const provisionBodySchema = z.object({ timezone: z.string().min(1).max(64).optio
 
 // The direct room the owner's client opened with the assistant
 const homeBodySchema = z.object({ roomId: z.string().min(1).max(255) });
+
+const suggestionSwitchSchema = z.object({ enabled: z.boolean() }).strict();
 
 // How long the room a client names may wait for the assistant to join it, and how often it looks
 const HOME_JOIN_WAIT_MS = 5_000;
@@ -275,17 +279,23 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 	}
 
 	// What the owner's assistant says in their room, in their language, once they refused a call
-	// asked there; nothing when the room is no longer the assistant's
+	// asked there: how to resume their brief, when it was the question of their first brief; nothing
+	// when the room is no longer the assistant's
 	async function refusalNotice(
 		principal: Principal,
 		roomId: string,
 		pendingCallId: string
 	): Promise<EnqueueInput | null> {
-		const assistant = await withPrincipal(db, principal, (tx) => findAssistant(tx, principal.id));
+		const { assistant, question } = await withPrincipal(db, principal, async (tx) => ({
+			assistant: await findAssistant(tx, principal.id),
+			question: await findBriefQuestion(tx, principal.id)
+		}));
 		if (assistant === null || assistant.deletedAt !== null || assistant.roomId !== roomId) {
 			return null;
 		}
-		const text = getMessages(localeOf(assistant, config.locale)).consent.refused;
+		const messages = getMessages(localeOf(assistant, config.locale));
+		const text =
+			question?.pendingCallId === pendingCallId ? messages.brief.refused : messages.consent.refused;
 		return refusalNoticeJob(assistant.userId, roomId, pendingCallId, text);
 	}
 
@@ -510,6 +520,30 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			await fetchOwnerMessages(db, owner, config.locale)
 		);
 		return reply.code(204).send();
+	});
+
+	// The owner's switch of the suggestions, as GET and PUT /v1/suggestions/settings show and turn it,
+	// for a provisioner whose clients hold no token of the harness: whether the assistant reads the
+	// owner's messages in channels and offers them actions. It needs no assistant, as the listener
+	// reads every member; the rooms the owner muted stay as they are.
+	app.get('/v1/provisioning/assistants/:owner/suggestions', async (request, reply) => {
+		const admitted = await admitProvisioner(request, reply);
+		if (admitted === null) return reply;
+		const { owner } = admitted;
+		const { enabled } = await withPrincipal(db, { id: owner }, (tx) => readSettings(tx, owner));
+		return { enabled };
+	});
+
+	app.put('/v1/provisioning/assistants/:owner/suggestions', async (request, reply) => {
+		const admitted = await admitProvisioner(request, reply);
+		if (admitted === null) return reply;
+		const { client, owner } = admitted;
+		const parsed = suggestionSwitchSchema.safeParse(request.body);
+		if (!parsed.success) return reply.code(400).send({ error: 'invalid request' });
+		const { enabled } = parsed.data;
+		await withPrincipal(db, { id: owner }, (tx) => writeEnabled(tx, owner, enabled));
+		request.log.info({ client, owner, enabled }, 'suggestions switched');
+		return { enabled };
 	});
 
 	// The owner's recovery, asked by their provisioner as it asks for the assistant: the provisioner
@@ -837,7 +871,11 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					});
 					if (consent === undefined) throw new Error('a granted consent is not listed');
 					if (created) {
-						request.log.info({ principal: principal.id, domain, level }, 'consent granted');
+						// pino writes the line's own level under `level`
+						request.log.info(
+							{ principal: principal.id, domain, consentLevel: level },
+							'consent granted'
+						);
 					}
 					return reply.code(created ? 201 : 200).send(toConsentView(consent));
 				}
@@ -963,6 +1001,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							await muteRoomFor(tx, principal.id, suggestion.roomId, NOT_USEFUL_MUTE_MS);
 						}
 						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
+						// A no to the question of the owner's first brief stops their brief, as in the chat
+						await refuseBriefQuestion(tx, principal.id, id);
 						if (notice !== null) await enqueueJob(tx, notice);
 						// Another time is tried once: the second suggestion is not offered a third
 						if (

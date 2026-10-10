@@ -161,7 +161,7 @@ describe("my assistant sends me the platform's consent link, and tries again onc
 		expect(waits.at(-1)).toMatchObject({
 			tool: 'search_mail',
 			domain: 'mail',
-			level: 'read',
+			consentLevel: 'read',
 			reasons: ['delegation'],
 			principal: 'alice@test.local'
 		});

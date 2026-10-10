@@ -2,9 +2,11 @@ import type { FastifyBaseLogger } from 'fastify';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant, holdAssistantInRoom } from '../assistants/repository.js';
+import { BRIEF_NOW_TOOL, makeBriefNowTool } from '../briefs/now.js';
+import { BRIEF_SETTINGS_TOOL, makeBriefSettingsTool } from '../briefs/tool.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
-import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
+import { replayOutcome, type ConsentMetrics, type ReplayOutcome } from '../consents/metrics.js';
 import {
 	approvePendingCall,
 	grantConsent,
@@ -22,6 +24,7 @@ import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
+import { makeQuietHoursTool, QUIET_HOURS_TOOL } from '../quiet/tool.js';
 import {
 	createSession,
 	ensureRoomSession,
@@ -30,9 +33,22 @@ import {
 	type SessionRecord
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
+import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
+import {
+	CANCELLED_EVENT_TYPE,
+	COUNTERED_EVENT_TYPE,
+	MOVED_EVENT_TYPE,
+	type MeetingScope
+} from '../wakeups/event-types.js';
 import { makeAdmission, type Admission, type Refusal } from './admission.js';
-import { makeBriefRunner, type BriefInput, type BriefResult } from './brief.js';
-import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
+import {
+	makeBriefRunner,
+	withBriefAskedFor,
+	type BriefInput,
+	type BriefResult,
+	type BriefResumeInput
+} from './brief.js';
+import { dateIn, describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import {
 	carriesInvitation,
@@ -51,6 +67,7 @@ import {
 	makeConsentsWithdrawTool,
 	makeToolRegistry,
 	memoryTool,
+	onlyTools,
 	runTool,
 	toolCallStatus,
 	sessionSearchTool,
@@ -63,6 +80,7 @@ import {
 	type ToolContext,
 	type ToolOutcome,
 	type ToolRegistry,
+	type TurnBrief,
 	type TurnOrigin,
 	WITHDRAW_OWN_CONSENTS,
 	withoutTools,
@@ -72,7 +90,15 @@ import {
 
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
-import { makeSuggestionRunner, type SuggestionInput, type SuggestionResult } from './suggestion.js';
+import { SUGGEST_CALL, makeSuggestionConsentTool } from '../suggestions/consent.js';
+import {
+	makeSuggestionRunner,
+	makeSuggestionTools,
+	readMeeting,
+	suggestionMaxToolCalls,
+	type SuggestionInput,
+	type SuggestionResult
+} from './suggestion.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -91,11 +117,52 @@ const WITHHELD_FROM_EVENT_TURNS: readonly string[] = [
 	WITHDRAW_OWN_CONSENTS
 ];
 
-// The tools a turn that comes from others, an event's or a suggestion's, is never offered, even
-// once its owner's yes resumed it, whatever their rights: the owner's listening journal, which
-// tells them in their own turns what their assistant saw, and would show such a turn the text third
-// parties wrote in every other activity
-const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [LISTENING_JOURNAL_TOOL];
+// The tools a turn an event started is never offered, even once its owner's yes resumed it,
+// whatever their rights: the owner's listening journal, which tells them in their own turns what
+// their assistant saw, and would show such a turn the text third parties wrote in every other
+// activity; the tools by which they choose what their assistant listens to, which a third party's
+// text never changes; the settings of their morning brief, which only they move, pause or stop;
+// their brief at once, which only they ask for; and their quiet hours, which only they set. A
+// suggestion's turn is offered its own two tools alone.
+const TOOLS_HIDDEN_FROM_EVENT_TURNS: readonly string[] = [
+	LISTENING_JOURNAL_TOOL,
+	...LISTENING_TOOLS,
+	BRIEF_SETTINGS_TOOL,
+	BRIEF_NOW_TOOL,
+	QUIET_HOURS_TOOL
+];
+
+// The tools alone that a turn a meeting's change woke is given, by the type of that change and
+// what it is about, among those its owner's rights and the rule above leave it: for a move of a
+// meeting or of a whole series, the check of its new slot and the answers to it; for a move of one
+// occurrence of a series, which the answers cannot reach apart from the rest of it, none; for a
+// cancellation, which the model only tells, none; for a counter-proposal, whatever it is about, the
+// check of the time proposed alone, as the owner changes a meeting's time in Calendar. The turn
+// their yes resumes is told of no event, and is not held to them.
+const ANSWERS_TO_A_MOVE = ['read_freebusy', 'accept_invitation', 'decline_invitation'];
+const CHECK_ALONE = ['read_freebusy'];
+const TOOLS_OF_MEETING_CHANGES: ReadonlyMap<
+	string,
+	Readonly<Record<MeetingScope, readonly string[]>>
+> = new Map([
+	[MOVED_EVENT_TYPE, { event: ANSWERS_TO_A_MOVE, series: ANSWERS_TO_A_MOVE, occurrence: [] }],
+	[CANCELLED_EVENT_TYPE, { event: [], series: [], occurrence: [] }],
+	[COUNTERED_EVENT_TYPE, { event: CHECK_ALONE, series: CHECK_ALONE, occurrence: CHECK_ALONE }]
+]);
+
+// What follows what a meeting's wake-up told once the harness checked it, by its type, which only
+// the calendar listener gives: a move's new slot, a counter-proposal's time, or else a new
+// invitation's slot
+function availabilityOf(
+	type: string,
+	calendarData: string,
+	scope: MeetingScope,
+	messages: Messages
+): string {
+	if (type === MOVED_EVENT_TYPE) return messages.events.movedAvailability(calendarData, scope);
+	if (type === COUNTERED_EVENT_TYPE) return messages.events.counteredAvailability(calendarData);
+	return messages.events.availability(calendarData);
+}
 
 // The harness's own question to an owner about a call it froze, on which the turn ends
 interface Question {
@@ -137,7 +204,7 @@ const CONTRACT_CHANGED = {
 // the harness's new question, when the call waits for its owner again; and the harness's own
 // notice, when the call did not run as its owner allowed it: its contract refused it, as what it
 // acts on changed since the preview its owner was shown, or, asked anew what the call would do,
-// did it
+// did it; or when a call of the harness's own confirms what it did
 interface Replayed {
 	readonly messages: LlmMessage[];
 	readonly question: Question | null;
@@ -167,6 +234,13 @@ function statusOf(result: unknown): number | null {
 	return typeof status === 'number' ? status : null;
 }
 
+// What came of a call of the harness's own its owner allowed, which answers no HTTP status: whether
+// it did what it was asked
+function ownReplayOutcome(result: unknown): ReplayOutcome {
+	if (typeof result !== 'object' || result === null) return 'failed';
+	return (result as Record<string, unknown>)['success'] === true ? 'ok' : 'failed';
+}
+
 export interface OwnerTurnInput {
 	readonly principal: Principal;
 	readonly target: SessionTarget;
@@ -179,8 +253,9 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
-	// The event of a turn of origin event: its id and CloudEvent type, and for an invitation, what
-	// the harness checks before the model speaks
+	// The event of a turn of origin event: its id and CloudEvent type, and for a new invitation, a
+	// move, a cancellation or a counter-proposal, the meeting, whose slot, or the time proposed, the
+	// harness checks before the model speaks unless it is cancelled
 	readonly event?: {
 		readonly id: string;
 		readonly type: string;
@@ -214,6 +289,8 @@ export type OwnerTurnResult =
 			readonly pendingCallId?: string;
 			// That question in its parts, when the harness laid it out as a request about the call
 			readonly request?: OwnerRequest;
+			// The brief the owner asked for, when the turn ended on it
+			readonly brief?: TurnBrief;
 			// The turn reached one of its limits before it answered: there is more to do
 			readonly atLimit?: true;
 			// A turn an activity woke found nothing useful to say: its answer is empty, for nobody
@@ -238,6 +315,8 @@ export interface AgentService {
 	// What the owner's assistant proposes from the messages of a channel, if anything
 	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
 	runBrief(input: BriefInput): Promise<BriefResult>;
+	// The owner's yes to the question a brief gave way to: that day's brief
+	resumeBrief(input: BriefResumeInput): Promise<BriefResult>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -304,18 +383,38 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				applications: () => [...new Set(contracts.contracts.map((c) => c.domain))].sort(),
 				consentMetrics
 			}),
-			makeListeningJournalTool({ clock, timeZone: config.timeZone })
+			makeListeningJournalTool({ clock, timeZone: config.timeZone }),
+			...makeListeningTools({
+				config,
+				consentMetrics,
+				domains: () => contracts.domainDescriptions
+			}),
+			makeBriefSettingsTool({ clock, timeZone: config.timeZone }),
+			makeQuietHoursTool({
+				timeZone: config.timeZone,
+				locale: config.locale,
+				defaults: config.quietHours
+			}),
+			// The brief its owner asks for exists while the briefs are on alone, written as the
+			// scheduler's are, once the service is made
+			...(config.brief.enabled
+				? [makeBriefNowTool({ brief: (context) => briefs.inTurn(context) })]
+				: [])
 		],
 		() => contracts.tools
 	);
+	// What the owner's yes to a suggestion's question about a permission runs, which no model and no
+	// direct tool call ever finds: the replay of that call alone
+	const suggestionConsent = makeSuggestionConsentTool({ config });
 	const gate = makeTurnGate();
 	const admission = makeAdmission({ config, db, log: deps.log, clock });
 
-	// What the model is told. An invitation an event brings has its slot checked by the harness
-	// before the model speaks, from the UID and the times its wake-up carries, through the same
-	// tools and context as the model's calls: what the calendar answered follows what the wake-up
-	// told, as data. Any other message is told as it is. A read of that check that waits for its
-	// owner, such as the first read of their calendar, ends the turn on the harness's question.
+	// What the model is told. An invitation an event brings, a move or a counter-proposal has its
+	// slot, or the time proposed, checked by the harness before the model speaks, from the UID and
+	// the times its wake-up carries, through the same tools and context as the model's calls: what
+	// the calendar answered follows what the wake-up told, as data. A cancellation leaves nothing to
+	// check, and any other message is told as it is. A read of that check that waits for its owner,
+	// such as the first read of their calendar, ends the turn on the harness's question.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
@@ -323,7 +422,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		messages: Messages
 	): Promise<Told> {
 		const event = input.origin === 'event' ? input.event : undefined;
-		if (!carriesInvitation(event)) return { message: input.message, question: null };
+		if (!carriesInvitation(event) || event.type === CANCELLED_EVENT_TYPE) {
+			return { message: input.message, question: null };
+		}
 		const { invitation } = event;
 		let question: Question | null = null;
 		const run: ToolRunner = async (name, args) => {
@@ -338,7 +439,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const timeZone = await fetchOwnerTimeZone(db, context.principalId, config.timeZone);
 		const check = await checkAvailability(run, invitation, { timeZone });
 		log.info({ freeBusyStatus: check.freeBusyStatus, reason: check.reason }, 'invitation checked');
-		const availability = messages.events.availability(check.data);
+		const availability = availabilityOf(
+			event.type,
+			check.data,
+			invitation.scope ?? 'event',
+			messages
+		);
 		return {
 			message: input.message === null ? availability : `${input.message}\n${availability}`,
 			question
@@ -346,11 +452,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	}
 
 	// Runs the call its owner allowed, exactly as it was frozen. A tool that no longer stands for
-	// the contract the owner allowed, at the same level, runs nothing. The call waits for nothing the
-	// owner's yes answered; one that waits for its owner again, such as one the platform's broker
-	// still refuses or one in an application whose writing they took back since, comes back with
-	// the harness's new question. A call whose contract showed its owner what it would do carries
-	// the digest of that preview, which the contract checks.
+	// the contract the owner allowed, at the same level, runs nothing; a call of the harness's own,
+	// such as listening to an application, finds its tool by the name it was frozen under, and a
+	// suggestion's question about a permission finds the tool kept for it. The call
+	// waits for nothing the owner's yes answered; one that waits for its owner again, such as one
+	// the platform's broker still refuses or one in an application whose writing they took back
+	// since, comes back with the harness's new question. A call whose contract showed its owner what
+	// it would do carries the digest of that preview, which the contract checks.
 	async function runFrozenCall(
 		approved: ApprovedCall,
 		pendingCallId: string,
@@ -358,12 +466,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		log: FastifyBaseLogger
 	): Promise<ToolOutcome> {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
-		const tool = tools.find(approved.tool);
+		const tool = approved.contract === SUGGEST_CALL ? suggestionConsent : tools.find(approved.tool);
 		const unchanged =
-			definition !== undefined &&
 			tool !== null &&
-			definition.id === approved.contract &&
-			definition.level === approved.level;
+			(definition === undefined
+				? tool.frozenAs === approved.contract
+				: definition.id === approved.contract && definition.level === approved.level);
 		const outcome: ToolOutcome = unchanged
 			? await runTool(tool, approved.arguments, {
 					...context,
@@ -375,7 +483,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		const httpStatus = statusOf(outcome.result);
 		const changed = changedSincePreview(approved, outcome);
 		if (question === null) {
-			consentMetrics.replayed(approved, replayOutcome(httpStatus));
+			consentMetrics.replayed(
+				approved,
+				definition === undefined ? ownReplayOutcome(outcome.result) : replayOutcome(httpStatus)
+			);
 			log.info(
 				{
 					pendingCallId,
@@ -432,7 +543,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			question,
 			// A call that did not run as its owner allowed it ends the turn on the harness's notice:
 			// one its contract refused, as what it acts on changed since the preview they were shown,
-			// or one a preview asked for anew did, which the tool's outcome carries without a question
+			// or one a preview asked for anew did, which the tool's outcome carries without a question.
+			// So does a call of the harness's own, on its words that confirm what it did.
 			notice: changedSincePreview(approved, outcome)
 				? consent.changed
 				: question === null
@@ -491,8 +603,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 
 	async function runOwnerTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
 		const { principal } = input;
-		// Admitted before anything else runs; the slot is held until the turn ends
-		const decision = await admission.admit(principal.id);
+		// Admitted before anything else runs; the slot is held until the turn ends. A yes that resumes
+		// a call spends its owner's day as their words do, whatever turn froze the call.
+		const decision = await admission.admit(principal.id, input.origin ?? 'owner');
 		if (!decision.ok) return { kind: 'busy', ...decision.refusal };
 		try {
 			return await gate.run(principal.id, () => runAdmittedTurn(input));
@@ -558,12 +671,30 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
 				: [];
 			const actions = opened.actions.filter((action) => !withheld.includes(action));
-			const memory = actions.includes('memory.read_own')
-				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
-				: { memory: [], user: [] };
-			const skills = actions.includes('skills.read_own')
-				? await withPrincipal(db, principal, (tx) => listSkills(tx))
-				: [];
+			// A turn resumed from a suggestion's call is still that suggestion's, whatever its owner may
+			// do in their own turns: it reads none of their memory or skills, may look for slots with the
+			// people of the meeting their yes allowed and prepare that meeting again, which waits for
+			// them once more, and makes no more calls than the suggestion could
+			const suggestion =
+				origin === 'suggestion'
+					? {
+							tools: makeSuggestionTools(
+								contracts,
+								principal.id,
+								readMeeting(approved?.arguments)?.attendees ?? [],
+								null
+							),
+							maxToolCalls: suggestionMaxToolCalls(config)
+						}
+					: null;
+			const memory =
+				suggestion === null && actions.includes('memory.read_own')
+					? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
+					: { memory: [], user: [] };
+			const skills =
+				suggestion === null && actions.includes('skills.read_own')
+					? await withPrincipal(db, principal, (tx) => listSkills(tx))
+					: [];
 			const log = input.log.child({ session: session.id, principal: principal.id });
 			// A resumed turn keeps the correlation id of the turn that froze its call, so that the
 			// gateway's audit links both
@@ -662,12 +793,21 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			// zone of the owner's calendar once a read of it named one, the call their yes just ran
 			// included, and in the deployment's until then.
 			const timeZone = await fetchOwnerTimeZone(db, principal.id, config.timeZone);
-			const moment = describeMoment(clock.now(), timeZone, locale);
+			const now = clock.now();
+			const moment = describeMoment(now, timeZone, locale);
 			// The call its owner allowed is the first action of the turn that goes on from it
 			if (actionsBefore > 0) input.actionsDone?.(actionsBefore);
-			const turnTools = comesFromOthers(origin)
+			const offered = comesFromOthers(origin)
 				? withoutTools(tools, TOOLS_HIDDEN_FROM_EVENT_TURNS)
 				: tools;
+			const meetingTools =
+				origin === 'event' && carriesInvitation(input.event)
+					? (TOOLS_OF_MEETING_CHANGES.get(input.event.type)?.[
+							input.event.invitation.scope ?? 'event'
+						] ?? null)
+					: null;
+			const turnTools =
+				suggestion?.tools ?? (meetingTools === null ? offered : onlyTools(offered, meetingTools));
 			// The turn an activity woke, rather than the one its owner's yes resumed from it, may say
 			// nothing
 			const woken = origin === 'event' && approved === null;
@@ -679,7 +819,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						llm,
 						tools: turnTools,
 						log,
-						maxToolCalls: config.turn.maxToolCalls,
+						maxToolCalls: suggestion?.maxToolCalls ?? config.turn.maxToolCalls,
 						maxTurnTokens: config.turn.maxTokens,
 						historyMaxChars: config.turn.historyMaxChars
 					},
@@ -702,7 +842,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							memory,
 							skills,
 							history,
-							nudgeInterval: config.turn.memoryNudgeInterval
+							nudgeInterval: suggestion === null ? config.turn.memoryNudgeInterval : 0
 						}),
 						history,
 						message: told.message,
@@ -710,14 +850,25 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						actionsBefore,
 						limitNotice: (actions) => messages.notices.turnLimit(actions),
 						...(input.actionsDone === undefined ? {} : { actionsDone: input.actionsDone }),
-						mayStaySilent: woken
+						mayStaySilent: woken,
+						today: dateIn(now, timeZone),
+						timeZone,
+						locale
 					}
 				);
+				// A turn that ended on the brief its owner asked for takes what the earlier briefs named
+				// out of the conversation, as a newer brief does
 				const saved = await withPrincipal(db, principal, (tx) =>
-					saveSessionMessages(tx, session.id, turn.messages)
+					saveSessionMessages(
+						tx,
+						session.id,
+						turn.brief === undefined
+							? turn.messages
+							: withBriefAskedFor(turn.messages, history.length)
+					)
 				);
 				if (!saved) return { kind: 'missing' };
-				await admission.recordUsage(principal.id, turn.tokens);
+				await admission.recordUsage(principal.id, turn.tokens, input.origin ?? 'owner');
 				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
 				return {
 					kind: 'ok',
@@ -726,6 +877,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
 					...(turn.request === undefined ? {} : { request: turn.request }),
+					...(turn.brief === undefined ? {} : { brief: turn.brief }),
 					...(turn.atLimit === true ? { atLimit: true } : {}),
 					...(turn.silent === true ? { silent: true } : {})
 				};
@@ -739,10 +891,19 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
-	const suggestions = makeSuggestionRunner({ config, db, llm, contracts, admission, gate, clock });
+	const suggestions = makeSuggestionRunner({
+		config,
+		db,
+		llm,
+		contracts,
+		admission,
+		gate,
+		clock,
+		consentMetrics
+	});
 
-	// The brief of the owner's working day, which the worker role's scheduler asks for: the
-	// assistant speaks as in its owner's turns, given no tool
+	// The brief of the owner's working day, which the worker role's scheduler asks for, or the owner
+	// in their turn: the assistant speaks as in its owner's turns, given no tool
 	const briefs = makeBriefRunner({
 		config,
 		db,
@@ -751,11 +912,13 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		admission,
 		gate,
 		clock,
+		consentMetrics,
 		persona: (assistantName, messages) =>
 			withLanguage(
 				assistantName === undefined ? defaultPrompt([]) : assistantPrompt(assistantName, []),
 				messages
-			)
+			),
+		runFrozenCall
 	});
 
 	return {
@@ -767,6 +930,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		runOwnerTurn,
 		runAllowedCall,
 		runSuggestion: suggestions.run,
-		runBrief: briefs.run
+		runBrief: briefs.run,
+		resumeBrief: briefs.resume
 	};
 }

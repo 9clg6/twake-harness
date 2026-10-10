@@ -87,8 +87,19 @@ export function midnightIn(instant: Date, timeZone: string): Date {
 
 // The instant the next day starts in the zone, at its midnight, daylight saving time included
 export function nextMidnightIn(instant: Date, timeZone: string): Date {
-	const today = Date.parse(`${dateIn(instant, timeZone)}T00:00:00Z`);
-	return startOfDayIn(new Date(today + 86_400_000).toISOString().slice(0, 10), timeZone);
+	return startOfDayIn(dayAfter(dateIn(instant, timeZone)), timeZone);
+}
+
+// The day after a day, both as dateIn gives them
+export function dayAfter(day: string): string {
+	return new Date(Date.parse(`${day}T00:00:00Z`) + 86_400_000).toISOString().slice(0, 10);
+}
+
+// The instant a time of a day of the zone names on its wall clock, daylight saving time included:
+// the day as dateIn gives it, and the time in minutes after midnight, under a day's
+export function instantIn(day: string, minutes: number, timeZone: string): Date {
+	const wall = `${day}T${timeOfDay(minutes)}:00`;
+	return new Date(wallTimeIn(wall, timeZone) ?? `${wall}Z`);
 }
 
 // The zone's offset at that instant, in minutes, daylight saving time included, whatever the
@@ -165,18 +176,68 @@ export function isoIn(instant: Date, timeZone: string): string {
 	return `${dateIn(instant, timeZone)}T${field('hour')}:${field('minute')}:${field('second')}${formatOffset(offsetMinutesAt(instant, timeZone))}`;
 }
 
-// The day and the hour of a zone's wall clock at an instant: 2026-10-08 and 9 at nine in the
-// morning there
+// The day, the hour and the minute of a zone's wall clock at an instant: 2026-10-08, 9 and 30 at
+// half past nine in the morning there
 export interface WallDay {
 	readonly date: string;
 	readonly hour: number;
+	readonly minute: number;
 }
 
 export function wallDayAt(instant: Date, timeZone: string): WallDay {
-	return { date: dateIn(instant, timeZone), hour: Number(wallClock(instant, timeZone)('hour')) };
+	const field = wallClock(instant, timeZone);
+	return {
+		date: dateIn(instant, timeZone),
+		hour: Number(field('hour')),
+		minute: Number(field('minute'))
+	};
 }
 
 // How many days of the calendar go from one day to another, both as dateIn gives them
 export function daysFrom(from: string, to: string): number {
 	return Math.round((Date.parse(to) - Date.parse(from)) / 86_400_000);
+}
+
+// The days of the week, Monday first
+export const WEEKDAYS = [
+	'monday',
+	'tuesday',
+	'wednesday',
+	'thursday',
+	'friday',
+	'saturday',
+	'sunday'
+] as const;
+export type Weekday = (typeof WEEKDAYS)[number];
+
+// The day of the week of a day as dateIn gives it
+export function weekdayOf(date: string): Weekday {
+	const day = new Date(`${date}T00:00:00Z`).getUTCDay();
+	return WEEKDAYS[(day + 6) % 7] ?? 'monday';
+}
+
+// A day written as dateIn writes it
+const DAY = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+// Whether a text is a day of the calendar as dateIn writes it: 2026-10-20, never 2026-02-30
+export function isCalendarDay(text: string): boolean {
+	const match = DAY.exec(text);
+	if (match === null) return false;
+	const [, year = '', month = '', day = ''] = match;
+	return isCalendarDate(year, month, day);
+}
+
+// A time of day in minutes after midnight, as a wall clock shows it: 07:30 for 450
+export function timeOfDay(minutes: number): string {
+	return `${pad(Math.floor(minutes / 60))}:${pad(minutes % 60)}`;
+}
+
+// A time of day as the model or a deployment writes it, 07:30, in minutes after midnight, when it
+// falls on the quarter hour; null otherwise
+export function quarterHourOf(time: string): number | null {
+	const match = /^(\d{1,2}):(\d{2})$/.exec(time.trim());
+	if (match === null) return null;
+	const hours = Number(match[1]);
+	const minutes = Number(match[2]);
+	return hours > 23 || minutes > 59 || minutes % 15 !== 0 ? null : hours * 60 + minutes;
 }

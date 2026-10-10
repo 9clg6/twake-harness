@@ -1,23 +1,30 @@
 import { z } from 'zod';
 
 import { fenced } from '../llm/data.js';
+import { MEETING_SCOPES } from '../wakeups/event-types.js';
 import { wallTimeIn } from './clock.js';
 import type { ToolOutcome } from './tools.js';
 
-// What the wake-up of an invitation carries for the harness to check it, which its turn's payload
-// keeps: its UID, its start and end from DTSTART and DTEND, and the TZID, "UTC", or null for an
-// all-day event
+// What the wake-up of a new invitation, a move, a cancellation or a counter-proposal carries of its
+// meeting, which its turn's payload keeps: its UID, its start and end from DTSTART and DTEND, the
+// time proposed for a counter-proposal, and the TZID, "UTC", or null for an all-day event; for a
+// change to a meeting or a counter-proposal, what it is about, which its turn's words and the
+// answers it may prepare follow, a meeting on its own when it says nothing. The harness checks the
+// slot of a new invitation or a move, and the time a counter-proposal proposes, before the model
+// speaks, never a cancellation's.
 export const invitationSchema = z.object({
 	uid: z.string().min(1),
 	start: z.string().nullable(),
 	end: z.string().nullable(),
-	timezone: z.string().nullable()
+	timezone: z.string().nullable(),
+	scope: z.enum(MEETING_SCOPES).optional()
 });
 
 export type Invitation = z.infer<typeof invitationSchema>;
 
-// Whether an event carries an invitation for the harness to check, whichever source it came from:
-// what its wake-up tells, and its turn, follow from that alone, never from its type
+// Whether an event carries a meeting, whichever source it came from: only the calendar listener
+// gives one, and what its wake-up tells, and its turn, follow from that first, never from its type
+// alone, which then tells a new invitation, a move, a cancellation and a counter-proposal apart
 export function carriesInvitation<T extends { readonly invitation?: Invitation | undefined }>(
 	event: T | undefined
 ): event is T & { readonly invitation: Invitation } {
@@ -70,6 +77,16 @@ function timeOf(
 	return time === null
 		? { ok: false, reason: `${NOT_CHECKED}unknown time zone` }
 		: { ok: true, time };
+}
+
+// The instant a start of the invitation names, read as its slot's is: null for one it cannot read
+export function instantOfStart(
+	start: string | null,
+	timezone: string | null,
+	defaultZone: string
+): Date | null {
+	const time = timeOf(start, timezone, defaultZone, 'start');
+	return time.ok ? new Date(time.time) : null;
 }
 
 // The invitation's own period, as read_freebusy takes it, or why it is not asked: the contract

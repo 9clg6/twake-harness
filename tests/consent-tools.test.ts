@@ -4,12 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { buildApp } from '../src/app.js';
 import { runMigrations } from '../src/db/migrate.js';
-import {
-	MAIL_RECEIVED,
-	mailEvent,
-	startActivityExchange,
-	type ActivityExchange
-} from './helpers/activity.js';
+import { activityEvent, startActivityExchange, type ActivityExchange } from './helpers/activity.js';
 import { startTestHarness, type TestHarness } from './helpers/app.js';
 import { makeClient, type TestClient } from './helpers/client.js';
 import { call, readCatalog, startConsentRoom, type ConsentRoom } from './helpers/consent-room.js';
@@ -66,7 +61,7 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 	let activity: ActivityExchange;
 	let r: ConsentRoom;
 	beforeAll(async () => {
-		activity = await startActivityExchange([MAIL_RECEIVED]);
+		activity = await startActivityExchange();
 		r = await startConsentRoom({
 			...activity.settings,
 			ADMISSION_USER_PER_MINUTE: '100'
@@ -109,7 +104,13 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		await allow('Find the budget in my mail');
 		expect(await told('What may you access?')).toEqual({
 			consents: [
-				{ domain: 'mail', level: 'read', granted_by: 'chat', granted_at: expect.any(String) }
+				{
+					domain: 'mail',
+					level: 'read',
+					granted_by: 'chat',
+					granted_at: expect.any(String),
+					granted_at_in_words: expect.any(String)
+				}
 			]
 		});
 	});
@@ -233,7 +234,13 @@ describe('I ask my assistant what it may access, and take accesses back', () => 
 		};
 		await allow('Search my notes');
 		const seen = r.saying('Told:').length;
-		await activity.publish(mailEvent('evt-withdraw', 'alice@test.local', 'Stop using my notes'));
+		await activity.publish(
+			activityEvent({
+				id: 'evt-withdraw',
+				recipient: 'alice@test.local',
+				object: { type: 'task', id: 'task-withdraw', key: 'ROAD-20', title: 'Stop using my notes' }
+			})
+		);
 		const refusal = (await r.nextSaying('Told:', seen)).slice('Told: '.length);
 		expect(JSON.parse(refusal)).toMatchObject({ error: 'needs_owner_approval' });
 		// My notes stay open to it

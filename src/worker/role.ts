@@ -47,7 +47,7 @@ export interface WorkerRole {
 // The daily curation, the hourly expiry of the requests nobody answered, the hourly purges of the
 // wake-ups and of the listening journals past their retention and of the suggestions nothing reads
 // any more, each starting with a pass at once, the daily reminders of the permissions about to
-// expire, at their hour, and the briefs of the owners' working days, from eight in their zones; the
+// expire, at their hour, and the briefs of the owners' working days, at the times they chose; the
 // expiries are counted on the metrics the role serves. With the activity exchange or Calendar's
 // fanout configured, the role also listens to it, and connects to the broker for that alone, once
 // for each.

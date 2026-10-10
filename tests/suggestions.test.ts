@@ -11,7 +11,8 @@ import {
 	toolsOf,
 	type ChatRequest,
 	type ContractCall,
-	type ScriptedReply
+	type ScriptedReply,
+	type ToolCall
 } from './helpers/fake-apisix.js';
 import { startMatrixHarness, type MatrixTestHarness } from './helpers/matrix-harness.js';
 import { startFakeSpace, type FakeSpace } from './helpers/space.js';
@@ -305,14 +306,190 @@ describe('the assistant proposes from the messages of channels', () => {
 		expect(posted[0]?.body).toMatchObject({ title: 'Point lundi', attendees: [BOB] });
 	});
 
-	it("offers the turn the owner's yes resumed none of the tools of their own turns", async () => {
-		// That turn is still the channel's: after the meeting, the model is not offered the owner's
-		// listening journal
+	it("offers the turn the owner's yes resumed the suggestion's two tools alone", async () => {
+		// That turn is still the channel's: after the meeting, the model is offered none of the tools
+		// of the owner's own turns, their other contracts, sessions, memory, listening journal or the
+		// choice of what their assistant listens to
 		const resumed = await eventually(() =>
 			h.apisix.llm.calls.find((c) => (c.request.messages.at(-1)?.content ?? '').includes('m-1'))
 		);
-		expect(toolsOf(resumed?.request)).toContain('create_meeting');
-		expect(toolsOf(resumed?.request)).not.toContain('listening_journal');
+		expect(toolsOf(resumed?.request).sort()).toEqual(['create_meeting', 'find_meeting_slots']);
+	});
+
+	it("reaches nothing else of the owner's in that turn, and those two tools for the people of the meeting alone", async () => {
+		interface Waiting {
+			id: string;
+			channel: string;
+		}
+		const waiting = await eventually(async () => {
+			const { body } = await h.api.get<{ pending_calls: Waiting[] }>(BOB, '/v1/pending-calls');
+			return body.pending_calls[0]?.channel === 'room' ? body.pending_calls[0] : undefined;
+		});
+		// What the owner keeps for their own turns: a note and a skill
+		const noted = await h.api.post(BOB, '/v1/tool', {
+			tool: 'memory',
+			arguments: { action: 'add', target: 'memory', content: 'Bob garde ses vendredis' }
+		});
+		expect(noted.status).toBe(200);
+		const skill = await h.api.post(BOB, '/v1/skills', {
+			name: 'weekly-review',
+			description: 'How Bob runs his weekly review',
+			content: 'List what the week brought.'
+		});
+		expect(skill.status).toBe(201);
+		h.apisix.contracts.handler = (c: ContractCall) => ({
+			status: 200,
+			body: c.method === 'POST' ? { uid: 'm-3' } : { slots: [] }
+		});
+		// Once the meeting is made, the model reaches for the owner's events, their conversations, and
+		// the calendar of a person the meeting does not invite
+		const reach = (name: string, args: Record<string, unknown>): ToolCall => ({
+			id: `reach_${name}`,
+			type: 'function',
+			function: { name, arguments: JSON.stringify(args) }
+		});
+		h.apisix.llm.script = (request) =>
+			(request.messages.at(-1)?.content ?? '').includes('m-3')
+				? {
+						content: null,
+						toolCalls: [
+							reach('list_calendar_events', { from: '2026-10-12' }),
+							reach('scoped_sessions_list', {}),
+							reach('find_meeting_slots', {
+								email: [CAROL, BOB],
+								duration: 30,
+								start: '2026-10-12T08:00:00+02:00',
+								end: '2026-10-12T18:00:00+02:00'
+							})
+						]
+					}
+				: proposeMonday(request);
+		try {
+			const calls = h.apisix.contracts.calls.length;
+			const approved = await h.api.post(BOB, `/v1/pending-calls/${waiting?.id ?? ''}/approve`, {});
+			expect(approved.status).toBe(202);
+			// What the model reads of its calls: none of them ran
+			const answered = await eventually(() =>
+				h.apisix.llm.calls.find((c) =>
+					c.request.messages.some((m) => m.tool_call_id === 'reach_find_meeting_slots')
+				)
+			);
+			const results = (answered?.request.messages ?? [])
+				.filter((m) => (m.tool_call_id ?? '').startsWith('reach_'))
+				.map((m) => m.content);
+			expect(results).toEqual([
+				expect.stringContaining('unknown tool list_calendar_events'),
+				expect.stringContaining('unknown tool scoped_sessions_list'),
+				expect.stringContaining('people_not_allowed')
+			]);
+			// The meeting its owner allowed is all that reached the calendar
+			expect(h.apisix.contracts.calls.slice(calls).map((c) => `${c.method} ${c.path}`)).toEqual([
+				'POST /contracts/v1/calendar/meetings'
+			]);
+			// ...and the model read neither the owner's note nor their skill
+			const system = answered?.request.messages[0]?.content ?? '';
+			expect(system).not.toContain('Bob garde ses vendredis');
+			expect(system).not.toContain('weekly-review');
+		} finally {
+			h.apisix.llm.script = proposeMonday;
+		}
+	});
+
+	it('ends that turn at the four calls a suggestion may make', async () => {
+		const tag = Math.random().toString(36).slice(2, 7);
+		const owner = `g${tag}@test.local`;
+		const user = await h.synapse.registerUser(`g${tag}`);
+		const other = await h.synapse.registerUser(`h${tag}`);
+		// An owner who keeps the room their assistant opened with them, where a yes from Space resumes
+		// the turn, and someone without an assistant
+		expect((await h.api.post(owner, '/v1/assistants', { name: 'Ada' })).status).toBe(201);
+		await grantConsent(h.db, owner, 'calendar', 'read');
+		const room = await openChannel(user, [other]);
+		await say(other, room, 'On se voit quand ?');
+		await say(user, room, 'on se voit lundi à 10h ?');
+		interface Waiting {
+			id: string;
+			channel: string;
+		}
+		const waiting = await until(async () => {
+			const { body } = await h.api.get<{ pending_calls: Waiting[] }>(owner, '/v1/pending-calls');
+			return body.pending_calls[0]?.channel === 'room' ? body.pending_calls[0] : null;
+		});
+		h.apisix.contracts.handler = (c: ContractCall) => ({
+			status: 200,
+			body: c.method === 'POST' ? { uid: 'm-4' } : { slots: [] }
+		});
+		// Once the meeting is made, the model asks for five searches at once, with the people of the
+		// meeting
+		const search = (i: number): ToolCall => ({
+			id: `search_${i}`,
+			type: 'function',
+			function: {
+				name: 'find_meeting_slots',
+				arguments: JSON.stringify({
+					email: [owner, `h${tag}@test.local`],
+					duration: 30,
+					start: '2026-10-12T08:00:00+02:00',
+					end: '2026-10-12T18:00:00+02:00'
+				})
+			}
+		});
+		h.apisix.llm.script = (request) =>
+			(request.messages.at(-1)?.content ?? '').includes('m-4')
+				? { content: null, toolCalls: [1, 2, 3, 4, 5].map(search) }
+				: proposeMonday(request);
+		try {
+			const searches = (): number =>
+				h.apisix.contracts.calls.filter(
+					(c) => c.path === '/contracts/v1/calendar/availability/slots'
+				).length;
+			const before = searches();
+			const logged = h.logLines().length;
+			const approved = await h.api.post(owner, `/v1/pending-calls/${waiting.id}/approve`, {});
+			expect(approved.status).toBe(202);
+			await until(() =>
+				h
+					.logLines()
+					.slice(logged)
+					.some((line) => line['msg'] === 'turn finished' && line['principal'] === owner)
+			);
+			expect(searches() - before).toBe(4);
+		} finally {
+			h.apisix.llm.script = proposeMonday;
+		}
+	});
+
+	it("offers every tool still to a turn of the owner's own, and to the one their yes resumes", async () => {
+		// Every tool of the registry, those a suggestion's turn goes without among them
+		const every = (h.apps[0]?.agent.tools.definitions ?? []).map((d) => d.function.name).sort();
+		expect(every).toEqual(
+			expect.arrayContaining([
+				'create_meeting',
+				'find_meeting_slots',
+				'list_calendar_events',
+				'listening_journal',
+				'memory',
+				'scoped_sessions_list'
+			])
+		);
+		h.apisix.contracts.handler = () => ({ status: 200, body: { uid: 'm-5' } });
+		const asked = llmCalls();
+		const chat = await h.api.post<{ pending_call?: { id: string } }>(BOB, '/v1/chat', {
+			message: 'Prépare un point lundi'
+		});
+		expect(chat.status).toBe(200);
+		const id = chat.body.pending_call?.id ?? '';
+		expect((await h.api.post(BOB, `/v1/pending-calls/${id}/approve`, {})).status).toBe(200);
+		const calls = h.apisix.llm.calls.slice(asked);
+		const own = calls.find((c) => c.request.messages.at(-1)?.content === 'Prépare un point lundi');
+		const resumed = calls.find((c) => (c.request.messages.at(-1)?.content ?? '').includes('m-5'));
+		expect([toolsOf(own?.request).sort(), toolsOf(resumed?.request).sort()]).toEqual([
+			every,
+			every
+		]);
+		// ...and what the owner keeps for them
+		expect(own?.request.messages[0]?.content).toContain('Bob garde ses vendredis');
+		expect(own?.request.messages[0]?.content).toContain('weekly-review');
 	});
 
 	it('proposes once a day at most three times, and once per room per twelve hours', async () => {

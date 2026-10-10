@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { Writable } from 'node:stream';
 
 import type { Config } from '../../src/config.js';
@@ -84,6 +85,12 @@ export async function startCalendarFanout(broker: TestBroker): Promise<CalendarF
 			await channel.waitForConfirms();
 		}
 	};
+}
+
+// The id Calendar's notification of a new invitation to a single meeting gets for its invitee,
+// which their assistant's turn is told of
+export function invitationId(uid: string, invitee: string): string {
+	return createHash('sha256').update(`${uid}|${invitee}|0`).digest('hex');
 }
 
 // What the owner said last in a request to the model, or nothing, as the fake gateway reads it

@@ -1,4 +1,3 @@
-import { createHash } from 'node:crypto';
 import { afterAll, beforeAll, describe, expect, it } from 'vitest';
 
 import { withPrincipal } from '../src/db/client.js';
@@ -10,8 +9,11 @@ import {
 	HARNESS_PASSWORD,
 	HARNESS_USER,
 	INVITED,
+	invitationId,
 	lastUser,
 	logSink,
+	MAIL_RECEIVED,
+	mailEvent,
 	PREFIX,
 	startActivityBroker,
 	startCalendarFanout,
@@ -38,7 +40,6 @@ const THURSDAY_LATE = '2026-10-08T21:50:00Z';
 const FRIDAY_EARLY = '2026-10-08T22:10:00Z';
 const FRIDAY_LATER = '2026-10-08T22:15:00Z';
 const FRIDAY_MORNING = '2026-10-09T07:30:00Z';
-const FRIDAY = '2026-10-09';
 
 // What the organizer of the budget review wrote of its place and agenda, which the journal never
 // keeps
@@ -70,12 +71,6 @@ function budgetReview(uid: string): Record<string, unknown> {
 		eventPath: `/calendars/a/b/${uid}.ics`,
 		isNewEvent: true
 	};
-}
-
-// The id Calendar's notification of a new invitation gets for its invitee, Alice, which her
-// assistant's turn is told of
-function invitationId(uid: string): string {
-	return createHash('sha256').update(`${uid}|${ALICE}|0`).digest('hex');
 }
 
 let serial = 0;
@@ -214,10 +209,14 @@ async function startListening(
 describe('what my assistant saw today', () => {
 	let l: Listening;
 	let worker: WorkerRole;
-	// Both roles read the same present
+	// Both roles read the same present, and the worker listens to the mails that arrive too
 	const clock = makeSettableClock(THURSDAY_LATE);
 	beforeAll(async () => {
-		l = await startListening('today', { api: clock, worker: clock });
+		l = await startListening(
+			'today',
+			{ api: clock, worker: clock },
+			{ ACTIVITY_TYPES: [ASSIGNED, MAIL_RECEIVED].join(',') }
+		);
 		worker = await l.listen();
 	}, 240_000);
 	afterAll(async () => {
@@ -239,30 +238,36 @@ describe('what my assistant saw today', () => {
 		// Just after midnight, he invites me to the budget review, then assigns me ROAD-12
 		clock.set(FRIDAY_EARLY);
 		await calendar.publish(budgetReview('budget-review'));
-		await l.answerTo(invitationId('budget-review'));
+		await l.answerTo(invitationId('budget-review', ALICE));
 		clock.set(FRIDAY_LATER);
 		const road12 = assignment();
 		await l.publish(road12);
 		await l.answerTo(road12.id);
 		// I ask at half past nine
 		clock.set(FRIDAY_MORNING);
+		// Each time written in words beside it, in my zone
 		expect(await l.ask()).toEqual({
 			time_zone: 'Europe/Paris',
 			since: '2026-10-09T00:00:00+02:00',
+			since_in_words: 'Friday, October 9, 2026, 00:00',
 			activities: [
 				{
 					source: 'twake://calendar',
 					type: INVITED,
 					received_at: '2026-10-09T00:10:00+02:00',
+					received_at_in_words: 'Friday, October 9, 2026, 00:10',
 					outcome: 'suggested',
 					start: '2026-10-09T09:00:00+02:00',
+					start_in_words: 'Friday, October 9, 2026, 09:00',
 					end: '2026-10-09T10:00:00+02:00',
+					end_in_words: 'Friday, October 9, 2026, 10:00',
 					untrusted: { uid: 'budget-review', title: 'Budget review' }
 				},
 				{
 					source: 'twake://tasks',
 					type: ASSIGNED,
 					received_at: '2026-10-09T00:15:00+02:00',
+					received_at_in_words: 'Friday, October 9, 2026, 00:15',
 					outcome: 'suggested',
 					object: { type: 'task', id: '1b2c3d4e-5f6a-4b7c-8d9e-0f1a2b3c4d5e', key: 'ROAD-12' },
 					untrusted: { title: 'Write the quarterly report' }
@@ -273,7 +278,7 @@ describe('what my assistant saw today', () => {
 		// anyone wrote
 		for (const [id, source, type] of [
 			[thursday.id, 'twake://tasks', ASSIGNED],
-			[invitationId('budget-review'), 'twake://calendar', INVITED],
+			[invitationId('budget-review', ALICE), 'twake://calendar', INVITED],
 			[road12.id, 'twake://tasks', ASSIGNED]
 		] as const) {
 			const lines = l.noted(id);
@@ -365,6 +370,48 @@ describe('what my assistant saw today', () => {
 		]);
 		expect(await l.r.nextSaying(FAILED, notices)).toBe(`${FAILED}. Please try again in a moment.`);
 	});
+
+	it('keeps a task I assign myself for my brief, which my journal tells me, and nothing of my other actions', async () => {
+		const said = l.r.saying('').length;
+		const handled = (id: string): Record<string, unknown>[] =>
+			l.logs.lines().filter((line) => line['msg'] === 'event handled' && line['eventId'] === id);
+		// I assign myself ROAD-16, which comes twice, then send myself a mail
+		const mine = {
+			...assignment({ type: 'task', id: 'task-16', key: 'ROAD-16', title: 'Renew my badge' }),
+			twakeactor: ALICE
+		};
+		const myMail = { ...mailEvent(`mail-${mine.id}`, ALICE), twakeactor: ALICE };
+		await l.publish(mine);
+		await l.publish(mine);
+		await l.publish(myMail);
+		await until('my mail was handled', () => handled(myMail.id).length > 0);
+		expect(handled(mine.id).map((line) => line['outcome'])).toEqual(['for_brief', 'duplicate']);
+		expect(handled(myMail.id).map((line) => line['outcome'])).toEqual(['ignored']);
+		expect(l.noted(mine.id)).toEqual([
+			expect.objectContaining({
+				level: 30,
+				source: 'twake://tasks',
+				type: ASSIGNED,
+				owner: ALICE,
+				outcome: 'for_brief'
+			})
+		]);
+		expect(l.noted(myMail.id)).toEqual([]);
+		expect(turnCalls(l.r.h.apisix.llm.calls, mine.id)).toHaveLength(0);
+		const { activities } = await l.ask();
+		expect(activities).toContainEqual(
+			expect.objectContaining({
+				object: { type: 'task', id: 'task-16', key: 'ROAD-16' },
+				outcome: 'for_brief',
+				untrusted: { title: 'Renew my badge' }
+			})
+		);
+		expect(activities.filter((activity) => activity['source'] === 'twake://mail')).toEqual([]);
+		// Nothing reached my room but the answer to my question
+		expect(l.r.saying('').slice(said)).toEqual([
+			expect.objectContaining({ body: expect.stringMatching(/^Saw: /) })
+		]);
+	});
 });
 
 describe('the outcome of each activity, and what is kept of it', () => {
@@ -375,16 +422,16 @@ describe('the outcome of each activity, and what is kept of it', () => {
 	const clock = makeSettableClock(FRIDAY_MORNING);
 	const workerClock = makeSettableClock(FRIDAY_EARLY);
 
-	// The tokens Alice spent on a day, as admission counts them: past her daily budget, her turns
-	// are refused
-	async function spend(day: string, tokens: number): Promise<void> {
-		await withPrincipal(
-			l.r.h.db,
-			{ id: ALICE },
-			(tx) => tx.sql`
-				insert into usage_daily (owner, day, tokens) values (${ALICE}, ${day}, ${tokens})
-				on conflict (owner, day) do update set tokens = excluded.tokens`
-		);
+	// The turns Alice started this minute, as admission counts them: past her turns per minute, her
+	// turns are refused until the minute passes, or until she started none
+	async function rush(turns: number): Promise<void> {
+		await withPrincipal(l.r.h.db, { id: ALICE }, async (tx) => {
+			await tx.sql`delete from usage_window where owner = ${ALICE}`;
+			if (turns === 0) return;
+			await tx.sql`
+				insert into usage_window (owner, at, turns)
+				values (${ALICE}, date_trunc('second', now()), ${turns})`;
+		});
 	}
 
 	// Starts the worker role again, which purges what it keeps at once, at the present of its clock
@@ -423,8 +470,8 @@ describe('the outcome of each activity, and what is kept of it', () => {
 		const told = assignment({ type: 'task', id: 'task-1', key: 'ROAD-1', title: 'Told' });
 		await l.publish(told);
 		await l.answerTo(told.id);
-		// My day is spent: the turn of the next one waits, then is given up
-		await spend(FRIDAY, 200_000);
+		// My minute is spent: the turn of the next one waits, then is given up
+		await rush(100);
 		workerClock.set('2026-10-09T06:05:00Z');
 		const given = assignment({ type: 'task', id: 'task-2', key: 'ROAD-2', title: 'Given up' });
 		await l.publish(given);
@@ -433,7 +480,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				.logLines()
 				.some((line) => line['msg'] === 'event turn abandoned' && line['reqId'] === given.id)
 		);
-		await spend(FRIDAY, 0);
+		await rush(0);
 		// Past my two wake-ups of the hour, and delivered twice
 		workerClock.set('2026-10-09T06:10:00Z');
 		const held = assignment({ type: 'task', id: 'task-3', key: 'ROAD-3', title: 'Held back' });
@@ -453,6 +500,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				source: 'twake://tasks',
 				type: ASSIGNED,
 				received_at: '2026-10-09T08:00:00+02:00',
+				received_at_in_words: 'Friday, October 9, 2026, 08:00',
 				outcome: 'suggested',
 				object: { type: 'task', id: 'task-1', key: 'ROAD-1' },
 				untrusted: { title: 'Told' }
@@ -461,6 +509,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				source: 'twake://tasks',
 				type: ASSIGNED,
 				received_at: '2026-10-09T08:05:00+02:00',
+				received_at_in_words: 'Friday, October 9, 2026, 08:05',
 				outcome: 'abandoned',
 				object: { type: 'task', id: 'task-2', key: 'ROAD-2' },
 				untrusted: { title: 'Given up' }
@@ -469,6 +518,7 @@ describe('the outcome of each activity, and what is kept of it', () => {
 				source: 'twake://tasks',
 				type: ASSIGNED,
 				received_at: '2026-10-09T08:10:00+02:00',
+				received_at_in_words: 'Friday, October 9, 2026, 08:10',
 				outcome: 'capped',
 				object: { type: 'task', id: 'task-3', key: 'ROAD-3' },
 				untrusted: { title: 'Held back' }
