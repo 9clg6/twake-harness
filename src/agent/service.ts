@@ -91,6 +91,7 @@ import {
 export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 import { SUGGEST_CALL, makeSuggestionConsentTool } from '../suggestions/consent.js';
+import { AVAILABILITY_SHARING_CALL, makeAvailabilitySharingTool } from '../suggestions/sharing.js';
 import {
 	makeAvailabilityAnswerer,
 	makeSuggestionRunner,
@@ -410,6 +411,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// What the owner's yes to a suggestion's question about a permission runs, which no model and no
 	// direct tool call ever finds: the replay of that call alone
 	const suggestionConsent = makeSuggestionConsentTool({ config });
+	// What the invitee's yes to the question about sharing their availability runs, which no model
+	// and no direct tool call ever finds: the replay of that call alone
+	const availabilitySharing = makeAvailabilitySharingTool({ config });
 	const gate = makeTurnGate();
 	const admission = makeAdmission({ config, db, log: deps.log, clock });
 
@@ -470,7 +474,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		log: FastifyBaseLogger
 	): Promise<ToolOutcome> {
 		const definition = contracts.contracts.find((c) => c.toolName === approved.tool);
-		const tool = approved.contract === SUGGEST_CALL ? suggestionConsent : tools.find(approved.tool);
+		const tool =
+			approved.contract === SUGGEST_CALL
+				? suggestionConsent
+				: approved.contract === AVAILABILITY_SHARING_CALL
+					? availabilitySharing
+					: tools.find(approved.tool);
 		const unchanged =
 			tool !== null &&
 			(definition === undefined
@@ -907,7 +916,12 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	});
 
 	// The invitee's assistant answers a colleague's availability request, with no model and no quota
-	const availability = makeAvailabilityAnswerer({ config, db, tools, clock });
+	const availability = makeAvailabilityAnswerer({
+		config,
+		db,
+		tools,
+		clock
+	});
 
 	// The brief of the owner's working day, which the worker role's scheduler asks for, or the owner
 	// in their turn: the assistant speaks as in its owner's turns, given no tool

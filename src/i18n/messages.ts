@@ -336,6 +336,20 @@ export interface Messages {
 		// The line a proposal adds when the invitee's assistant answered that they are free at the
 		// proposed time: the invitee named as the harness computed their address
 		inviteeFree(invitee: string): string;
+		// What the harness asks an invitee, in their own room, the first time a colleague's assistant
+		// asks for their availability, and what it tells them once no answer came or they took the
+		// sharing back
+		readonly availabilitySharing: {
+			// The question, naming the colleague and the period: only free slots go out, the sharing
+			// holds for every colleague, and it is taken back on the agreements page. The application
+			// itself is named under it, as any question about a first use is.
+			question(organizer: string, period: string): string;
+			// What ends the invitee's turn at their yes, as a suggestion's question has its own words
+			readonly granted: string;
+			// What the harness says in the invitee's room once no answer came within the window, so
+			// that a yes after it still counts for the requests that follow
+			readonly noAnswer: string;
+		};
 	};
 	// What the harness says once the owner chose whether their assistant listens to an application,
 	// named as the catalog names it, on which their turn ends
@@ -944,7 +958,15 @@ const ENGLISH: Messages = {
 		consentGranted:
 			'Thank you. I will propose time slots for the messages that arrange a meeting with you.',
 		inviteeNotSeen: (invitee) => `I could not see the availability of ${invitee}.`,
-		inviteeFree: (invitee) => `${invitee} is free at that time.`
+		inviteeFree: (invitee) => `${invitee} is free at that time.`,
+		availabilitySharing: {
+			question: (organizer, period) =>
+				`${organizer} is asking me for your availability ${period}. May I share it with colleagues? I would share your free slots only, never what fills them. This holds for every colleague, and you can take it back any time on the agreements page.`,
+			granted:
+				'Thank you. I will share your free slots with colleagues when their assistants ask me, and you can take it back any time on the agreements page.',
+			noAnswer:
+				'You did not answer about sharing your availability, so I will not share it. A yes later still counts for the requests that follow, and you can allow it on the agreements page.'
+		}
 	},
 	sources: {
 		listening: (application) =>
@@ -1366,7 +1388,15 @@ const FRENCH: Messages = {
 		consentGranted:
 			'Merci. Je te proposerai des créneaux pour les messages qui fixent un rendez-vous avec toi.',
 		inviteeNotSeen: (invitee) => `Je n'ai pas pu voir les disponibilités de ${invitee}.`,
-		inviteeFree: (invitee) => `${invitee} est libre à cette heure-là.`
+		inviteeFree: (invitee) => `${invitee} est libre à cette heure-là.`,
+		availabilitySharing: {
+			question: (organizer, period) =>
+				`${organizer} me demande tes disponibilités ${period}. Puis-je les partager avec tes collègues ? Je ne partagerais que tes créneaux libres, jamais ce qui les remplit. Cela vaut pour tous tes collègues, et tu peux le retirer à tout moment sur la page des accords.`,
+			granted:
+				'Merci. Je partagerai tes créneaux libres avec tes collègues quand leurs assistants me le demanderont, et tu peux le retirer à tout moment sur la page des accords.',
+			noAnswer:
+				"Tu n'as pas répondu au sujet du partage de tes disponibilités, je ne les partage donc pas. Un oui plus tard compte pour les demandes suivantes, et tu peux l'accorder sur la page des accords."
+		}
 	},
 	sources: {
 		listening: (application) => `J'écoute ${application} : je te préviens de ce qui t'y arrive.`,

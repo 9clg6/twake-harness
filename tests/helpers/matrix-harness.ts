@@ -138,19 +138,22 @@ export async function startMatrixHarness(
 		apps.push(replica);
 	}
 	let workers: JobWorker[] = [];
-	const startTurnWorkers = (options: { readonly firstReplicaOnly?: boolean } = {}): void => {
-		workers = apps.slice(0, options.firstReplicaOnly === true ? 1 : apps.length).map((replica) =>
-			startTurnWorker({
-				db,
-				agent: replica.agent,
-				log: replica.log,
-				locale: config.locale,
-				turn: config.turn,
-				requestLifetimeMs: config.consent.requestLifetimeMs,
-				suggestions: { config, space: spaceFromConfig(config, replica.log) },
-				pollIntervalMs: 100
-			})
-		);
+	const startTurnWorkers = (workerOptions: { readonly firstReplicaOnly?: boolean } = {}): void => {
+		workers = apps
+			.slice(0, workerOptions.firstReplicaOnly === true ? 1 : apps.length)
+			.map((replica) =>
+				startTurnWorker({
+					db,
+					agent: replica.agent,
+					log: replica.log,
+					locale: config.locale,
+					turn: config.turn,
+					requestLifetimeMs: config.consent.requestLifetimeMs,
+					suggestions: { config, space: spaceFromConfig(config, replica.log) },
+					pollIntervalMs: 100,
+					...(options.clock === undefined ? {} : { clock: options.clock })
+				})
+			);
 	};
 	const stopTurnWorkers = async (): Promise<void> => {
 		for (const worker of workers) await worker.stop();
