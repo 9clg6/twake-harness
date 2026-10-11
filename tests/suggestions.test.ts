@@ -1625,6 +1625,9 @@ describe('the assistant proposes from the messages of channels', () => {
 				expect((await rowsFor(c.ownerPrincipal)).n).toBe(0);
 				expect(await availabilityJobs(c.ownerPrincipal)).toBe(0);
 				expect(await availabilityJobs(c.otherPrincipal)).toBe(0);
+				// The workers come back, as every other suite that stops them does: the suggestions of
+				// the suites after this one still run
+				h.startTurnWorkers();
 			});
 		});
 
