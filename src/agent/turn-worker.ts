@@ -27,6 +27,7 @@ import type { YesNoQuestion } from '../matrix/questions.js';
 import { spentForTheDay, type Refusal, type RefusalReason } from './admission.js';
 import { invitationSchema } from './invitation.js';
 import { matrixUserIdOfPrincipal } from '../principals/identity.js';
+import { availabilityPayloadSchema } from '../suggestions/availability.js';
 import {
 	suggestPayloadSchema,
 	SUGGEST_MAX_AGE_MS,
@@ -583,7 +584,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			jobLog.info({ owner, pendingCallId: result.pendingCallId }, 'suggestion asks for consent');
 			await sendSuggestionQuestion(owner, result);
 		}
-		if (result.kind === 'asked' || result.kind === 'waiting') {
+		if (result.kind === 'asked' || result.kind === 'waiting' || result.kind === 'availability') {
 			return { retryInMs: Math.min(SUGGEST_RECHECK_MS, leftMs) };
 		}
 		if (result.kind !== 'proposed') {
@@ -616,17 +617,26 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			},
 			'suggestion made'
 		);
-		// A listened conversation's proposal says the invitee's availability was not seen, in the same
-		// line, in Space and in the owner's assistant room alike
+		// A listened conversation's proposal says what the invitee's assistant answered of their
+		// availability, in the same line, in Space and in the owner's assistant room alike: that they
+		// are free at this time, or that it could not be seen
 		const sentence = proposalSentence(
 			result.locale,
 			proposal,
 			result.invitee === undefined
 				? {}
 				: {
-						inviteeNotSeen: getMessages(result.locale).suggestions.inviteeNotSeen(
-							result.invitee.address
-						)
+						...(result.invitee.availability === 'seen_free'
+							? {
+									inviteeFree: getMessages(result.locale).suggestions.inviteeFree(
+										result.invitee.address
+									)
+								}
+							: {
+									inviteeNotSeen: getMessages(result.locale).suggestions.inviteeNotSeen(
+										result.invitee.address
+									)
+								})
 					}
 		);
 		const matrixUserId = matrixUserIdOfPrincipal(settings.config, owner);
@@ -731,7 +741,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	return startJobWorker({
 		db,
 		log,
-		kinds: options.suggestions === undefined ? ['turn', 'resume'] : ['turn', 'resume', 'suggest'],
+		kinds:
+			options.suggestions === undefined
+				? ['turn', 'resume']
+				: ['turn', 'resume', 'suggest', 'availability'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
 		handler: async (job) => {
@@ -747,6 +760,22 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 					log.warn(
 						{ job: job.id, reason: err instanceof Error ? err.name : 'error' },
 						'suggestion failed'
+					);
+				}
+				return null;
+			}
+			if (job.kind === 'availability') {
+				const asked = availabilityPayloadSchema.safeParse(job.payload);
+				if (!asked.success) {
+					log.warn({ job: job.id }, 'availability dropped: malformed');
+					return null;
+				}
+				try {
+					await agent.runAvailability(asked.data, log);
+				} catch (err: unknown) {
+					log.warn(
+						{ job: job.id, reason: err instanceof Error ? err.name : 'error' },
+						'availability failed'
 					);
 				}
 				return null;

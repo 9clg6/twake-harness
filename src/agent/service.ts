@@ -92,6 +92,7 @@ export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 import { SUGGEST_CALL, makeSuggestionConsentTool } from '../suggestions/consent.js';
 import {
+	makeAvailabilityAnswerer,
 	makeSuggestionRunner,
 	makeSuggestionTools,
 	readMeeting,
@@ -99,6 +100,7 @@ import {
 	type SuggestionInput,
 	type SuggestionResult
 } from './suggestion.js';
+import type { AvailabilityPayload } from '../suggestions/availability.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
@@ -314,6 +316,8 @@ export interface AgentService {
 	runAllowedCall(input: AllowedCallInput): Promise<AllowedCallResult>;
 	// What the owner's assistant proposes from the messages of a channel, if anything
 	runSuggestion(input: SuggestionInput): Promise<SuggestionResult>;
+	// The invitee's assistant answers one colleague's availability request, with no model and no quota
+	runAvailability(payload: AvailabilityPayload, log: FastifyBaseLogger): Promise<void>;
 	runBrief(input: BriefInput): Promise<BriefResult>;
 	// The owner's yes to the question a brief gave way to: that day's brief
 	resumeBrief(input: BriefResumeInput): Promise<BriefResult>;
@@ -902,6 +906,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		consentMetrics
 	});
 
+	// The invitee's assistant answers a colleague's availability request, with no model and no quota
+	const availability = makeAvailabilityAnswerer({ config, db, tools, clock });
+
 	// The brief of the owner's working day, which the worker role's scheduler asks for, or the owner
 	// in their turn: the assistant speaks as in its owner's turns, given no tool
 	const briefs = makeBriefRunner({
@@ -930,6 +937,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		runOwnerTurn,
 		runAllowedCall,
 		runSuggestion: suggestions.run,
+		runAvailability: availability.run,
 		runBrief: briefs.run,
 		resumeBrief: briefs.resume
 	};

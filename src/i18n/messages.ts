@@ -333,6 +333,9 @@ export interface Messages {
 		// The line a proposal adds when the invitee's availability could not be seen, their assistant
 		// not having shared it: the invitee named as the harness computed their address
 		inviteeNotSeen(invitee: string): string;
+		// The line a proposal adds when the invitee's assistant answered that they are free at the
+		// proposed time: the invitee named as the harness computed their address
+		inviteeFree(invitee: string): string;
 	};
 	// What the harness says once the owner chose whether their assistant listens to an application,
 	// named as the catalog names it, on which their turn ends
@@ -940,7 +943,8 @@ const ENGLISH: Messages = {
 			`I would like to propose a time slot for a message of ${author} in a conversation.`,
 		consentGranted:
 			'Thank you. I will propose time slots for the messages that arrange a meeting with you.',
-		inviteeNotSeen: (invitee) => `I could not see the availability of ${invitee}.`
+		inviteeNotSeen: (invitee) => `I could not see the availability of ${invitee}.`,
+		inviteeFree: (invitee) => `${invitee} is free at that time.`
 	},
 	sources: {
 		listening: (application) =>
@@ -1361,7 +1365,8 @@ const FRENCH: Messages = {
 			`Je voudrais te proposer un créneau pour un message de ${author} dans une conversation.`,
 		consentGranted:
 			'Merci. Je te proposerai des créneaux pour les messages qui fixent un rendez-vous avec toi.',
-		inviteeNotSeen: (invitee) => `Je n'ai pas pu voir les disponibilités de ${invitee}.`
+		inviteeNotSeen: (invitee) => `Je n'ai pas pu voir les disponibilités de ${invitee}.`,
+		inviteeFree: (invitee) => `${invitee} est libre à cette heure-là.`
 	},
 	sources: {
 		listening: (application) => `J'écoute ${application} : je te préviens de ce qui t'y arrive.`,
