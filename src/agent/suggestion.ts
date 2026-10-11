@@ -31,6 +31,7 @@ import {
 	type AvailabilityPayload,
 	type Window
 } from '../suggestions/availability.js';
+import { noteAvailabilityRequest } from '../suggestions/availability-journal.js';
 import { askSuggestionConsent } from '../suggestions/consent.js';
 import { SUGGEST_MAX_AGE_MS, type Retry, type SuggestPayload } from '../suggestions/job.js';
 import {
@@ -454,7 +455,19 @@ export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRu
 				matrixLocalpartOfPrincipal(config, request.organizer) !== null &&
 				(await hasConsent(tx, invitee, AVAILABILITY_DOMAIN, 'read')) &&
 				isActiveAssistant(assistant);
-			if (!allowed) await answerAvailabilityRequest(tx, requestId, NO_AVAILABILITY_ANSWER);
+			if (!allowed) {
+				await answerAvailabilityRequest(tx, requestId, NO_AVAILABILITY_ANSWER);
+				// The invitee's journal keeps the request their assistant answered none, so that
+				// « what did you see today? » tells them a colleague asked
+				await noteAvailabilityRequest(
+					tx,
+					invitee,
+					request,
+					NO_AVAILABILITY_ANSWER,
+					'not_shared',
+					clock.now()
+				);
+			}
 			return { request, allowed };
 		});
 		if (found === null) {
@@ -504,9 +517,13 @@ export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRu
 		const answer: AvailabilityAnswer = read
 			? { slots: candidates.map((slot) => slotArguments(slot, timeZone)) }
 			: NO_AVAILABILITY_ANSWER;
-		await withPrincipal(db, { id: invitee }, (tx) =>
-			answerAvailabilityRequest(tx, requestId, answer)
-		);
+		const outcome = read ? 'answered' : 'not_shared';
+		await withPrincipal(db, { id: invitee }, async (tx) => {
+			await answerAvailabilityRequest(tx, requestId, answer);
+			// The invitee's journal keeps the one activity this request leaves, with the colleague, the
+			// period, the asked time, the duration and the candidate slots given, and nothing else
+			await noteAvailabilityRequest(tx, invitee, request, answer, outcome, now);
+		});
 		log.info(
 			{
 				owner: invitee,
