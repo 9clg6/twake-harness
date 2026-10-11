@@ -2,21 +2,37 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import { localeOf } from '../assistants/locale.js';
-import { findAssistant } from '../assistants/repository.js';
+import { findAssistant, isActiveAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import type { ContractCatalog } from '../contracts/catalog.js';
 import type { ContractDefinition } from '../contracts/openapi.js';
-import { hasConsent } from '../consents/repository.js';
+import { AVAILABILITY_DOMAIN } from '../consents/consent.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
+import { hasConsent, rewritePendingCallArguments } from '../consents/repository.js';
 import { requestText, type OwnerRequest } from '../consents/request.js';
 import { readJsonColumn, withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
 import { fenced } from '../llm/data.js';
 import { LlmError, type LlmClient } from '../llm/client.js';
+import { enqueueJob } from '../jobs/queue.js';
+import { matrixLocalpartOfPrincipal } from '../principals/identity.js';
 import { ensurePrincipal } from '../principals/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
+import {
+	answerAvailabilityRequest,
+	availabilityGroup,
+	clearAvailabilityRequest,
+	findAvailabilityRequest,
+	findAvailabilityRequestFor,
+	NO_AVAILABILITY_ANSWER,
+	windowsOf,
+	writeAvailabilityRequest,
+	type AvailabilityAnswer,
+	type AvailabilityPayload,
+	type Window
+} from '../suggestions/availability.js';
 import { askSuggestionConsent } from '../suggestions/consent.js';
-import type { Retry, SuggestPayload } from '../suggestions/job.js';
+import { SUGGEST_MAX_AGE_MS, type Retry, type SuggestPayload } from '../suggestions/job.js';
 import {
 	candidateSlots,
 	firstCandidate,
@@ -41,6 +57,7 @@ import type { ToolRunner } from './invitation.js';
 import { buildSystemPrompt } from './prompt.js';
 import {
 	makeToolRegistry,
+	onlyTools,
 	runTool,
 	type Tool,
 	type ToolContext,
@@ -49,9 +66,9 @@ import {
 } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 
-const FIND_SLOTS = 'find_meeting_slots';
-const CREATE_MEETING = 'create_meeting';
-const READ_FREEBUSY = 'read_freebusy';
+export const FIND_SLOTS = 'find_meeting_slots';
+export const CREATE_MEETING = 'create_meeting';
+export const READ_FREEBUSY = 'read_freebusy';
 
 // The single tool the model gets in a listened conversation, where the harness searches the owner's
 // calendar itself and never reads the invitee's
@@ -97,6 +114,10 @@ export type SuggestionResult =
 	  }
 	// That question still waits for the owner
 	| { readonly kind: 'waiting' }
+	// A listened conversation whose invitee may be a colleague: the harness wrote an availability
+	// request for their assistant and queued the job that answers it, and now waits for that answer,
+	// re-reading it until the request's own window closes. Nothing was proposed yet.
+	| { readonly kind: 'availability'; readonly requestId: string }
 	| {
 			readonly kind: 'proposed';
 			readonly pendingCallId: string;
@@ -106,8 +127,12 @@ export type SuggestionResult =
 			readonly answer: string;
 			readonly request: OwnerRequest | null;
 			// A listened conversation: the invitee, whose own calendar this assistant never read, so
-			// their availability was not seen. The proposal says so, and the log records it.
-			readonly invitee?: { readonly address: string; readonly availability: 'not_seen' };
+			// their availability was not seen, or whose assistant answered that they are free at the
+			// proposed time. The proposal says which, and the log records it.
+			readonly invitee?: {
+				readonly address: string;
+				readonly availability: 'not_seen' | 'seen_free';
+			};
 	  };
 
 export interface SuggestionDeps {
@@ -336,13 +361,18 @@ function makeOwnerReaders(
 	run: ToolRunner,
 	owner: string,
 	timeZone: string,
-	durationMs: number
+	durationMs: number,
+	// Told each time a read actually reached the calendar, so that a caller can tell a calendar it
+	// read and found free nowhere from one it could not read at all
+	onRead?: () => void
 ): SlotReaders {
 	const bodyOf = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
 		const outcome = await run(name, args);
 		if (outcome === null) return undefined;
 		const status = answeredStatus(outcome);
-		return status !== null && status >= 200 && status < 300 ? answeredBody(outcome) : undefined;
+		if (status === null || status < 200 || status >= 300) return undefined;
+		onRead?.();
+		return answeredBody(outcome);
 	};
 	return {
 		async ownerFree(window) {
@@ -385,6 +415,110 @@ function readRetryRequest(retry: Retry, timeZone: string): ListenedRequest | nul
 		},
 		title: retry.title
 	};
+}
+
+export interface AvailabilityDeps {
+	readonly config: Config;
+	readonly db: Db;
+	// The tools a turn runs, of which the invitee's assistant reads their own free/busy alone
+	readonly tools: ToolRegistry;
+	readonly clock: Clock;
+}
+
+export interface AvailabilityRunner {
+	run(payload: AvailabilityPayload, log: FastifyBaseLogger): Promise<void>;
+}
+
+// The invitee's assistant answers one availability request. It runs under the invitee's principal,
+// with no model, no admission and no quota: it reads the invitee's own free/busy, applies the same
+// candidate rule as a suggestion, and writes the slots back into the request. Without an assistant,
+// without a room of their own, when the organizer is not a colleague, or without the sharing of
+// their availability, it answers none, and the organizer falls back on their own calendar alone.
+// Never a word of the conversation, never the organizer's address in a log, never a slot in one.
+export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRunner {
+	const { config, db, tools, clock } = deps;
+	const reads = onlyTools(tools, [FIND_SLOTS, READ_FREEBUSY]);
+
+	async function run(payload: AvailabilityPayload, log: FastifyBaseLogger): Promise<void> {
+		const invitee = payload.owner;
+		const requestId = payload.requestId;
+		// What authorizes the answer, under the invitee's own principal: the request is theirs as a
+		// party to it, their assistant is active with a room of its own, the organizer is a colleague
+		// of the same mail domain, and they let their assistant share their availability
+		const found = await withPrincipal(db, { id: invitee }, async (tx) => {
+			await ensurePrincipal(tx, { id: invitee });
+			const request = await findAvailabilityRequest(tx, requestId);
+			if (request === null) return null;
+			const assistant = await findAssistant(tx, invitee);
+			const allowed =
+				matrixLocalpartOfPrincipal(config, request.organizer) !== null &&
+				(await hasConsent(tx, invitee, AVAILABILITY_DOMAIN, 'read')) &&
+				isActiveAssistant(assistant);
+			if (!allowed) await answerAvailabilityRequest(tx, requestId, NO_AVAILABILITY_ANSWER);
+			return { request, allowed };
+		});
+		if (found === null) {
+			log.info({ owner: invitee, requestId }, 'availability dropped: nothing asked');
+			return;
+		}
+		if (!found.allowed) {
+			log.info({ owner: invitee, requestId, outcome: 'none', slots: 0 }, 'availability answered');
+			return;
+		}
+		const { request } = found;
+		const timeZone = await fetchOwnerTimeZone(db, invitee, config.timeZone);
+		const now = clock.now();
+		// Whether a read actually reached the invitee's calendar: a window it could not read at all
+		// answers none, where a calendar it read and found free nowhere answers no candidate
+		let read = false;
+		const context: ToolContext = {
+			principalId: invitee,
+			actions: ['contracts.call', 'contracts.act'],
+			// The invitee's own free/busy, read on the request's own standing basis: the sharing of
+			// their availability is what authorizes the answer, never the read consent of their own
+			// calendar, which this asks their owner for nothing about
+			answeredReasons: ['consent'],
+			db,
+			correlationId: `availability-${requestId}`,
+			log
+		};
+		const readers = makeOwnerReaders(
+			async (name, args) => {
+				const tool = reads.find(name);
+				return tool === null ? null : runTool(tool, args, context);
+			},
+			invitee,
+			timeZone,
+			request.durationMs,
+			() => {
+				read = true;
+			}
+		);
+		const asked: Asked = {
+			day: request.periodStart,
+			until: request.periodEnd,
+			minutes: request.askedMinutes,
+			durationMs: request.durationMs
+		};
+		const candidates = await candidateSlots(asked, now, timeZone, readers);
+		const answer: AvailabilityAnswer = read
+			? { slots: candidates.map((slot) => slotArguments(slot, timeZone)) }
+			: NO_AVAILABILITY_ANSWER;
+		await withPrincipal(db, { id: invitee }, (tx) =>
+			answerAvailabilityRequest(tx, requestId, answer)
+		);
+		log.info(
+			{
+				owner: invitee,
+				requestId,
+				outcome: read ? 'answered' : 'none',
+				slots: candidates.length
+			},
+			'availability answered'
+		);
+	}
+
+	return { run };
 }
 
 const proposeArgs = z.object({
@@ -482,7 +616,10 @@ export function makeListenedTools(
 	invitee: string,
 	declined: string | null,
 	timeZone: string,
-	now: Date
+	now: Date,
+	// What the model asked for, read from its one tool: the period, the asked time and the length,
+	// which the organizer's assistant writes into the availability request it makes of the invitee
+	onAsked?: (asked: Asked) => void
 ): ToolRegistry {
 	const propose: Tool = {
 		definition: {
@@ -512,6 +649,7 @@ export function makeListenedTools(
 		run: async (args, context) => {
 			const request = readListenedRequest(args);
 			if ('error' in request) return { result: request };
+			onAsked?.(request.asked);
 			return proposeListenedMeeting(
 				contracts,
 				owner,
@@ -609,8 +747,22 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		// A listened conversation: the harness searches the owner's calendar alone, and the model gets
 		// one tool of the harness's own instead of the two contracts. Anywhere else the model searches
 		// and prepares the meeting itself, as today.
+		// What the model asked for, captured from its one tool for the request the organizer's
+		// assistant makes of the invitee
+		let askedFor: Asked | null = null;
+		const colleague = matrixLocalpartOfPrincipal(config, other) !== null;
 		const registry = listened
-			? makeListenedTools(contracts, owner, other, payload.retry?.start ?? null, timeZone, now)
+			? makeListenedTools(
+					contracts,
+					owner,
+					other,
+					payload.retry?.start ?? null,
+					timeZone,
+					now,
+					(a) => {
+						askedFor = a;
+					}
+				)
 			: makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
 		const moment = describeMoment(now, timeZone, locale);
 		const messages = getMessages(locale);
@@ -723,24 +875,141 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				await admission.recordUsage(owner, turn.tokens, 'suggestion');
 				if (turn.pendingCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
 				const pendingCallId = turn.pendingCallId;
-				const body = await readFrozenMeeting(db, owner, pendingCallId);
+				const call = await withPrincipal(
+					db,
+					principal,
+					async (tx) =>
+						tx.sql<{ id: string; tool: string; arguments: unknown }[]>`
+						select id, tool, arguments from pending_calls where id = ${pendingCallId} and owner = ${owner}`
+				);
+				const frozen = call[0];
+				const body =
+					frozen?.tool === CREATE_MEETING ? readMeeting(readJsonColumn(frozen.arguments)) : null;
 				if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
-				return {
+				const frozenSlot = (
+					availability: 'not_seen' | 'seen_free',
+					start: string,
+					end: string
+				): SuggestionResult => ({
 					kind: 'proposed',
 					pendingCallId,
 					locale,
 					proposal: {
 						title: body.title,
-						start: body.start,
-						end: body.end,
+						start,
+						end,
 						attendees: body.attendees,
 						timeZone:
 							(body.time_zone !== undefined ? findTimeZone(body.time_zone) : null) ?? timeZone
 					},
 					answer: turn.answer,
 					request: turn.request ?? null,
-					...(listened ? { invitee: { address: other, availability: 'not_seen' as const } } : {})
+					...(listened ? { invitee: { address: other, availability } } : {})
+				});
+				// Anywhere but a listened conversation, or for a message the model never named a day in,
+				// the suggestion is what it always was: the owner's own calendar alone
+				if (!listened || askedFor === null) return frozenSlot('not_seen', body.start, body.end);
+				const asked: Asked = askedFor;
+				// The request the organizer's assistant made of the invitee this message, which it wrote
+				// when it first ran and now finds again to read the answer
+				const existing = await withPrincipal(db, principal, (tx) =>
+					findAvailabilityRequestFor(tx, owner, payload.roomId, payload.eventId)
+				);
+				// The first time: a request for the invitee's assistant, and the job that answers it. The
+				// model froze the meeting at the owner's own first slot, which the invitation proposes as
+				// it stands if nothing comes back in time. The colleague check is the harness's, so a
+				// request never crosses to another mail domain.
+				if (existing === null) {
+					if (!colleague) return frozenSlot('not_seen', body.start, body.end);
+					const callId = frozen?.id ?? pendingCallId;
+					const requestId = await withPrincipal(db, principal, async (tx) => {
+						const id = await writeAvailabilityRequest(tx, {
+							organizer: owner,
+							invitee: other,
+							roomId: payload.roomId,
+							eventId: payload.eventId,
+							askedAt: new Date(payload.at),
+							periodStart: asked.day,
+							periodEnd: asked.until,
+							askedMinutes: asked.minutes,
+							durationMs: asked.durationMs,
+							pendingCallId: callId
+						});
+						await enqueueJob(tx, {
+							kind: 'availability',
+							payload: { owner: other, organizer: owner, requestId: id },
+							dedupKey: `availability:${id}`,
+							groupKey: availabilityGroup(other)
+						});
+						return id;
+					});
+					turnLog.info({ owner, requestId }, 'availability requested');
+					return { kind: 'availability', requestId };
+				}
+				// A later pass: the request is this message's, and its answer may have come. While no
+				// answer came and the request's window is still open, the suggestion waits again, and the
+				// handler re-runs it within the window. Past the window, or once an answer came, the
+				// invitation reads what it holds.
+				if (existing.answer === null) {
+					if (Date.now() - existing.askedAt.getTime() <= SUGGEST_MAX_AGE_MS) {
+						return { kind: 'availability', requestId: existing.id };
+					}
+					await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
+					return frozenSlot('not_seen', body.start, body.end);
+				}
+				const windows = windowsOf(existing.answer);
+				// The invitee's assistant answered nothing, or named no candidate: the invitation falls
+				// back on the owner's calendar alone, as when nothing was asked, and says so
+				if (windows.length === 0) {
+					await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
+					return frozenSlot('not_seen', body.start, body.end);
+				}
+				// The organizer's own free/busy over each candidate, the first it is free at: the meeting
+				// the invitation proposes, which the frozen call takes the place of. The model never sees
+				// a candidate: only the harness reads the organizer's calendar and rewrites the call, and
+				// the owner's question shows the slot it settled on.
+				const crossContext: ToolContext = {
+					principalId: owner,
+					origin: 'suggestion',
+					actions: prepared.actions.filter((a) => a === 'contracts.call' || a === 'contracts.act'),
+					db,
+					correlationId: `suggest-${payload.eventId}`,
+					log: turnLog
 				};
+				const readers = makeOwnerReaders(
+					async (name, callArgs) => {
+						const tool = contracts.tools.find((t) => t.definition.function.name === name);
+						return tool === undefined ? null : runTool(tool, callArgs, crossContext);
+					},
+					owner,
+					timeZone,
+					existing.durationMs
+				);
+				let chosen: Window | null = null;
+				for (const window of windows) {
+					if (await readers.ownerFree(window)) {
+						chosen = window;
+						break;
+					}
+				}
+				if (chosen === null) {
+					await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
+					return { kind: 'none', reason: 'no_common_slot' };
+				}
+				const { start, end } = slotArguments(chosen, timeZone);
+				await withPrincipal(db, principal, async (tx) => {
+					await rewritePendingCallArguments(tx, owner, pendingCallId, {
+						body: {
+							title: body.title,
+							start,
+							end,
+							time_zone: body.time_zone ?? timeZone,
+							attendees: body.attendees
+						}
+					});
+					await clearAvailabilityRequest(tx, existing.id);
+				});
+				return frozenSlot('seen_free', start, end);
 			});
 		} finally {
 			decision.release();

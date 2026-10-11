@@ -18,11 +18,18 @@ export interface Asked {
 	readonly durationMs: number;
 }
 
+// A span the readers look over: the two instants alone, which both a candidate and an answered
+// window give
+export interface Span {
+	readonly start: Date;
+	readonly end: Date;
+}
+
 // What the code reads to build the candidates: the owner's own free/busy over one slot, and the
 // owner's free slots over a window, both with the owner's address alone, never the invitee's
 export interface SlotReaders {
-	ownerFree(window: Slot): Promise<boolean>;
-	ownerSlots(window: Slot): Promise<readonly Slot[]>;
+	ownerFree(window: Span): Promise<boolean>;
+	ownerSlots(window: Span): Promise<readonly Slot[]>;
 }
 
 // The most candidates a suggestion keeps, and how far it looks for them

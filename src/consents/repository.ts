@@ -471,6 +471,20 @@ export async function supersedeApprovedCall(tx: Tx, owner: string, id: string): 
 		where id = ${id} and owner = ${owner} and status = 'approved' and replayed_at is null`;
 }
 
+// The call a suggestion froze is proposed at another time, once the invitee's assistant answered:
+// what it would run changes, and only while the call still waits for its owner, whose question
+// names the slot no more than it did before. A call already decided keeps what it was decided on.
+export async function rewritePendingCallArguments(
+	tx: Tx,
+	owner: string,
+	id: string,
+	args: unknown
+): Promise<void> {
+	await tx.sql`
+		update pending_calls set arguments = ${JSON.stringify(args)}::jsonb
+		where id = ${id} and owner = ${owner} and status = 'open'`;
+}
+
 // The call ran, and the conversation holds it: what it sent is erased, with the question and the
 // digest it carried
 export async function markReplayed(tx: Tx, id: string): Promise<void> {

@@ -28,11 +28,13 @@ function format(locale: Locale, timeZone: string, date: Date, options: Intl.Date
 // The sentence a suggestion says, written by the harness from the call the model prepared, in the
 // owner's language: the model's own words never reach the notification, only the slot, the title
 // as plain text and the addresses that will be invited. A suggestion whose invitee's availability
-// could not be seen adds the harness's own line saying so, without a reason.
+// could not be seen adds the harness's own line saying so, without a reason; one the invitee's
+// assistant answered adds the line saying they are free at the proposed time. The two never come
+// together.
 export function proposalSentence(
 	locale: Locale,
 	proposal: Proposal,
-	options: { readonly inviteeNotSeen?: string } = {}
+	options: { readonly inviteeNotSeen?: string; readonly inviteeFree?: string } = {}
 ): string {
 	const { timeZone } = proposal;
 	const start = new Date(proposal.start);
@@ -49,6 +51,6 @@ export function proposalSentence(
 		locale === 'fr'
 			? `Vous avez du temps libre le ${day}, de ${from} à ${to}. Planifier « ${title} » avec ${who} ?`
 			: `You are free on ${day}, from ${from} to ${to}. Schedule “${title}” with ${who}?`;
-	const { inviteeNotSeen } = options;
-	return inviteeNotSeen === undefined ? sentence : `${sentence}\n${inviteeNotSeen}`;
+	const extra = options.inviteeFree ?? options.inviteeNotSeen;
+	return extra === undefined ? sentence : `${sentence}\n${extra}`;
 }

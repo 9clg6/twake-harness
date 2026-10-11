@@ -2,7 +2,16 @@ import type { Db, Tx } from '../db/client.js';
 import { readJsonColumn } from '../db/client.js';
 
 export type JobKind =
-	'turn' | 'send' | 'recover' | 'resume' | 'progress' | 'prepare' | 'name' | 'revoke' | 'suggest';
+	| 'turn'
+	| 'send'
+	| 'recover'
+	| 'resume'
+	| 'progress'
+	| 'prepare'
+	| 'name'
+	| 'revoke'
+	| 'suggest'
+	| 'availability';
 
 export interface Job {
 	readonly id: number;
@@ -148,15 +157,18 @@ export async function requeueStaleJobs(db: Db, leaseMs: number): Promise<number>
 // The jobs an assistant's erasure takes with it, by the payload field that names it: its owner's
 // turns, an event's included, whatever their state, which then keep nothing; its owner's namings,
 // so that none shows the deleted assistant's name again; its owner's suggestions, with the messages
-// of a channel they quote; the recoveries and preparations of its owner that failed for good, which
+// of a channel they quote; the availability requests their assistant answered or asked for, which
+// then keep nothing; the recoveries and preparations of its owner that failed for good, which
 // no route shows; and what it was to send, answers and status counts. A kind these lists do not
 // name stays, as one a later build adds: so do the revocations of the owner's permission at the
 // broker, the one this erasure queues after them included.
-const OWNER_JOBS: readonly JobKind[] = ['turn', 'resume', 'name', 'suggest'];
+const OWNER_JOBS: readonly JobKind[] = ['turn', 'resume', 'name', 'suggest', 'availability'];
 const OWNER_JOBS_FAILED: readonly JobKind[] = ['recover', 'prepare'];
 const ASSISTANT_JOBS: readonly JobKind[] = ['send', 'progress'];
 
-// Deletes the jobs of the owner's assistant, the account it speaks as, in the transaction given
+// Deletes the jobs of the owner's assistant, the account it speaks as, in the transaction given. An
+// availability request is queued for the invitee, whose payload names them in `owner`, and asked by
+// the organizer, whose payload names them in `organizer`: either one's erasure takes it.
 export async function deleteJobsOf(tx: Tx, owner: string, userId: string): Promise<void> {
 	// A payload is kept as the JSON text of its fields
 	const field = (key: string) => tx.sql`(payload #>> '{}')::jsonb ->> ${key}`;
@@ -166,6 +178,7 @@ export async function deleteJobsOf(tx: Tx, owner: string, userId: string): Promi
 				(kind in ${tx.sql(OWNER_JOBS)} or (kind in ${tx.sql(OWNER_JOBS_FAILED)} and status = 'failed'))
 				and ${field('owner')} = ${owner}
 			)
+			or (kind = 'availability' and ${field('organizer')} = ${owner})
 			or (kind in ${tx.sql(ASSISTANT_JOBS)} and ${field('asUserId')} = ${userId})`;
 }
 
