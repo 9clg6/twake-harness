@@ -1,7 +1,7 @@
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest';
 
 import { readJsonColumn, withPrincipal } from '../src/db/client.js';
-import { dateIn, instantIn, isoIn } from '../src/agent/clock.js';
+import { dateIn, describeMoment, instantIn, isoIn } from '../src/agent/clock.js';
 import { listActivitiesSince, purgeActivities } from '../src/journal/repository.js';
 import { activityView } from '../src/journal/tool.js';
 import { buildRegistration } from '../src/matrix/registration.js';
@@ -112,6 +112,17 @@ const proposeMonday = (request: ChatRequest): ScriptedReply => {
 describe('the assistant proposes from the messages of channels', () => {
 	let h: MatrixTestHarness;
 	let space: FakeSpace;
+	// The present the harness reads. Until a suite sets a moment of its own, it follows the real
+	// clock, so that every suite that leaves it be reads the same windows a system clock would;
+	// a suite that scripts a moment moves it for the harness and every role at once.
+	let moment: Date | null = null;
+	const clock = { now: (): Date => moment ?? new Date() };
+	const setMoment = (iso: string): void => {
+		moment = new Date(iso);
+	};
+	const resetMoment = (): void => {
+		moment = null;
+	};
 	const users = new Map<string, MatrixUser>();
 	let alice: MatrixUser;
 	let bob: MatrixUser;
@@ -210,6 +221,7 @@ describe('the assistant proposes from the messages of channels', () => {
 	beforeAll(async () => {
 		space = await startFakeSpace();
 		h = await startMatrixHarness({
+			clock,
 			env: {
 				SUGGESTIONS_ENABLED: 'true',
 				SPACE_API_URL: space.url,
@@ -999,6 +1011,13 @@ describe('the assistant proposes from the messages of channels', () => {
 		it("proposes from the owner's calendar alone, says the invitee was not seen, and writes nothing", async () => {
 			const c = await listenedConversation();
 			const dm = await ownerRoom(c);
+			// The invitee's assistant has no room of its own, so it answers none itself rather than ask
+			// its owner: set under their principal, since the assistants table is theirs alone to write
+			await withPrincipal(
+				h.db,
+				{ id: c.otherPrincipal },
+				(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+			);
 			const spaceBefore = space.calls.length;
 			const contractsBefore = h.apisix.contracts.calls.length;
 			const llmBefore = h.apisix.llm.calls.length;
@@ -1064,6 +1083,13 @@ describe('the assistant proposes from the messages of channels', () => {
 		it('proposes another time without the model, at the nearest free slot, and never the refused one', async () => {
 			const c = await listenedConversation();
 			const dm = await ownerRoom(c);
+			// The invitee's assistant has no room of its own, so it answers none itself rather than ask
+			// its owner: set under their principal, since the assistants table is theirs alone to write
+			await withPrincipal(
+				h.db,
+				{ id: c.otherPrincipal },
+				(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+			);
 			const spaceBefore = space.calls.length;
 			await c.otherClient.sendText(c.room, 'on se fait une réunion lundi à 8h ?');
 			const first = await until(() =>
@@ -1151,6 +1177,13 @@ describe('the assistant proposes from the messages of channels', () => {
 		it("invites the room's other member when its owner alone writes, the invitee being no author", async () => {
 			const c = await listenedConversation();
 			await ownerRoom(c);
+			// The invitee's assistant has no room of its own, so it answers none itself rather than ask
+			// its owner: set under their principal, since the assistants table is theirs alone to write
+			await withPrincipal(
+				h.db,
+				{ id: c.otherPrincipal },
+				(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+			);
 			const spaceBefore = space.calls.length;
 			const contractsBefore = h.apisix.contracts.calls.length;
 			const llmBefore = h.apisix.llm.calls.length;
@@ -1188,6 +1221,13 @@ describe('the assistant proposes from the messages of channels', () => {
 		it("proposes to the listening assistant's owner when the other member writes, the author invited", async () => {
 			const c = await listenedConversation();
 			await ownerRoom(c);
+			// The invitee's assistant has no room of its own, so it answers none itself rather than ask
+			// its owner: set under their principal, since the assistants table is theirs alone to write
+			await withPrincipal(
+				h.db,
+				{ id: c.otherPrincipal },
+				(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+			);
 			const spaceBefore = space.calls.length;
 			// The other member writes: the proposal still goes to the owner of the assistant that
 			// listens, who is the organizer, and the author is the one invited
@@ -1202,6 +1242,13 @@ describe('the assistant proposes from the messages of channels', () => {
 
 		it('stays listening, and declines a second assistant, when the other member invites their own', async () => {
 			const c = await listenedConversation();
+			// The invitee's assistant has no room of its own, so it answers none itself rather than ask
+			// its owner: set under their principal, since the assistants table is theirs alone to write
+			await withPrincipal(
+				h.db,
+				{ id: c.otherPrincipal },
+				(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+			);
 			const rows = await withPrincipal(
 				h.db,
 				{ id: c.otherPrincipal },
@@ -1231,6 +1278,13 @@ describe('the assistant proposes from the messages of channels', () => {
 		it('comes only on the yes of the other person, proposes to its owner alone, never writes, and leaves on a no', async () => {
 			const c = await encryptedConversation();
 			try {
+				// The invitee's assistant has no room of its own, so it answers none itself rather than
+				// ask its owner: set under their principal, since the assistants table is theirs alone
+				await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+				);
 				// Invited before the other person said yes: it leaves without a word
 				await c.ask();
 				await c.ownerClient.client.inviteUser(c.assistant, c.room);
@@ -1325,6 +1379,12 @@ describe('the assistant proposes from the messages of channels', () => {
 			// A message the prefilter reads: a day, a time and a meeting, so that the suggestion runs
 			const ASKING = 'on se fait une réunion lundi à 8h ?';
 
+			// A suite that scripted a moment of its own puts the harness back on the real clock, so
+			// that the suites after it read the same windows a system clock would
+			afterEach(() => {
+				resetMoment();
+			});
+
 			// What a log line with this message carries, at the level the deployment writes. The lines
 			// are read from `since` on, so that a suite sees only what its own turn wrote and never a
 			// line an earlier suite left behind
@@ -1407,6 +1467,389 @@ describe('the assistant proposes from the messages of channels', () => {
 				};
 			};
 
+			// The invitee's own assistant room, restored where a suite cleared it, and the client
+			// that reads what the harness asks them there: their assistant alone writes in it
+			async function inviteeRoom(c: Conversation): Promise<{ room: string; assistant: string }> {
+				const rows = await h.db.sql<{ room_id: string; user_id: string }[]>`
+					select room_id, user_id from assistant_rooms where owner = ${c.otherPrincipal} limit 1`;
+				const room = rows[0]?.room_id ?? '';
+				const assistant = rows[0]?.user_id ?? '';
+				await h.db.sql`update assistants set room_id = ${room} where owner = ${c.otherPrincipal}`;
+				await c.otherClient.joinRoom(room);
+				return { room, assistant };
+			}
+
+			// The question the harness asked the invitee about sharing their availability, once their
+			// own assistant wrote it in their room: the event that carries it, and its text, which
+			// names the colleague and the period
+			async function sharingQuestion(
+				c: Conversation,
+				room: string,
+				assistant: string
+			): Promise<{ eventId: string; text: string }> {
+				const text = await c.otherClient.waitForMessage(
+					room,
+					assistant,
+					(t) => t.includes(c.ownerPrincipal) && t.includes('asking me for your availability'),
+					60_000
+				);
+				const found = c.otherClient.messages.find(
+					(m) => m.roomId === room && m.sender === assistant && m.body === text
+				);
+				return { eventId: found?.eventId ?? '', text };
+			}
+
+			// The organizer's proposal, once the suggestion settled: the line of the outcome the invitee
+			// was seen as, from `since` on so that an earlier suite's line is never taken, and the slot
+			// the frozen call names
+			async function proposalSeen(
+				c: Conversation,
+				invitee: 'seen_free' | 'not_seen',
+				since: number
+			): Promise<{ pendingCallId: string; start: number; end: number }> {
+				const line = await until(
+					() => logged('suggestion made', since).find((l) => l['invitee'] === invitee),
+					90_000
+				);
+				const id = line['pendingCallId'] as string;
+				const body = await frozenBody(c.ownerPrincipal, id);
+				return {
+					pendingCallId: id,
+					start: Date.parse(String(body?.['start'])),
+					end: Date.parse(String(body?.['end']))
+				};
+			}
+
+			// What the invitee's assistant answered of the newest request, as the organizer's code reads
+			// it: nothing when no answer was written, else whether it answered none or with slots
+			async function answerOf(c: Conversation): Promise<{ none: boolean; slots: number } | null> {
+				const rows = await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) =>
+						tx.sql<{ answer: unknown }[]>`
+						select answer from availability_requests
+						where organizer = ${c.ownerPrincipal} order by asked_at desc limit 1`
+				);
+				const answer = readJsonColumn(rows[0]?.answer);
+				if (typeof answer !== 'object' || answer === null) return null;
+				const record = answer as Record<string, unknown>;
+				if (record['none'] === true) return { none: true, slots: 0 };
+				const slots = Array.isArray(record['slots']) ? record['slots'].length : 0;
+				return { none: false, slots };
+			}
+
+			it('asks the invitee, naming the colleague and the period, on the first request with no sharing and no refusal', async () => {
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: () => true,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				const asked = askedDay();
+				const period = describeMoment(
+					new Date(`${asked}T12:00:00Z`),
+					'Europe/Paris',
+					h.config.locale
+				).date;
+				const linesBefore = h.logLines().length;
+				const contractsBefore = h.apisix.contracts.calls.length;
+				await c.otherClient.sendText(c.room, ASKING);
+
+				// The harness asks the invitee in their own room, naming the colleague and the period,
+				// and says what only goes out and how it is taken back
+				const question = await sharingQuestion(c, room, assistant);
+				expect(question.text).toContain(c.ownerPrincipal);
+				expect(question.text).toContain(period);
+				expect(question.text).toContain('free slots only');
+				expect(question.text).toContain('every colleague');
+				expect(question.text).toContain('agreements page');
+
+				// The request stays unanswered while the question waits, and no word of the invitee's is
+				// read: the organizer's own suggestion is deferred within the window, never proposing yet
+				await until(
+					() =>
+						logged('availability asks about the sharing', linesBefore).find(
+							(line) => line['owner'] === c.otherPrincipal
+						) !== undefined
+				);
+				expect(await answerOf(c)).toBeNull();
+				expect(logged('suggestion made', linesBefore)).toHaveLength(0);
+				expect(
+					h.apisix.contracts.calls
+						.slice(contractsBefore)
+						.some((call) => call.headers['x-twake-on-behalf-of'] === c.otherPrincipal)
+				).toBe(false);
+				// The question is the one the harness keeps open for the invitee
+				const open = await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) =>
+						tx.sql<{ n: string }[]>`
+						select count(*) as n from pending_calls where owner = ${c.otherPrincipal}
+							and contract = 'harness.share_availability' and status = 'open'`
+				);
+				expect(Number(open[0]?.n ?? 0)).toBe(1);
+			});
+
+			it('answers the request with the invitee free, once they say yes within the window', async () => {
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				const asked = askedDay();
+				const askedAt = at(asked, '10:00');
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: (start) => Date.parse(start) === askedAt,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				const question = await sharingQuestion(c, room, assistant);
+
+				// The invitee says yes in words: the sharing is granted, and the request is answered
+				await c.otherClient.sendText(room, 'oui');
+				const seen = await proposalSeen(c, 'seen_free', linesBefore);
+				expect(seen.start).toBe(askedAt);
+				expect(seen.end).toBe(askedAt + 30 * 60_000);
+				// The sharing stands from their yes, and the question is decided
+				const sharing = await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) =>
+						tx.sql<{ n: string }[]>`
+						select count(*) as n from consents where owner = ${c.otherPrincipal}
+							and domain = 'availability' and level = 'read'`
+				);
+				expect(Number(sharing[0]?.n ?? 0)).toBe(1);
+				expect(question.eventId).toBeTruthy();
+			});
+
+			it('keeps the invitee’s no, falls back without a reason, and asks nothing on the next request', async () => {
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: () => true,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				// A second message, a day later, so that a new request is made of a new event
+				const ASKING2 = 'on se fait une réunion lundi à 9h ?';
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				await sharingQuestion(c, room, assistant);
+
+				// The invitee says no in words: the refusal is kept, and the organizer's invitation
+				// falls back on their own calendar, with no word of why
+				await c.otherClient.sendText(room, 'non');
+				const first = await proposalSeen(c, 'not_seen', linesBefore);
+				expect(first.pendingCallId).toBeTruthy();
+				const kept = await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) =>
+						tx.sql<{ n: string }[]>`
+						select count(*) as n from availability_sharing_refusals
+						where owner = ${c.otherPrincipal}`
+				);
+				expect(Number(kept[0]?.n ?? 0)).toBe(1);
+				// No sharing was granted, and the organizer knows nothing of the no
+				expect(
+					await withPrincipal(
+						h.db,
+						{ id: c.otherPrincipal },
+						(tx) =>
+							tx.sql`select 1 from consents where owner = ${c.otherPrincipal} and domain = 'availability'`
+					)
+				).toHaveLength(0);
+
+				// The next request asks no question: the invitee's assistant answers none itself, and
+				// the organizer falls back again, in the same words. The room's one-suggestion window
+				// is cleared, as a next day would clear it, so that a second request is made at all.
+				const questionsBefore = c.otherClient.messages.filter(
+					(m) => m.roomId === room && m.sender === assistant
+				).length;
+				await withPrincipal(
+					h.db,
+					{ id: c.ownerPrincipal },
+					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
+				);
+				const lines2 = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING2);
+				const second = await proposalSeen(c, 'not_seen', lines2);
+				expect(second.pendingCallId).not.toBe(first.pendingCallId);
+				await sleep(3000);
+				expect(
+					c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant).length
+				).toBe(questionsBefore);
+			});
+
+			it('falls back on the organizer’s calendar, and tells the invitee so, once the window closes with no answer', async () => {
+				// The window is read at an hour the suite scripts: the message is sent on the real
+				// clock, then the harness moves ten minutes on, and the question the invitee never
+				// answered is spent
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: () => true,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				const linesBefore = h.logLines().length;
+				const sentAt = Date.now();
+				await c.otherClient.sendText(c.room, ASKING);
+				await sharingQuestion(c, room, assistant);
+				// Ten minutes on, still inside the message's own window: the invitee never answered
+				setMoment(new Date(sentAt + 11 * 60_000).toISOString());
+
+				// The invitation falls back on the organizer's own calendar, without a word of why,
+				const first = await proposalSeen(c, 'not_seen', linesBefore);
+				expect(first.pendingCallId).toBeTruthy();
+				// ...and the invitee reads, in their own room, that no answer came and a yes later
+				// still counts
+				await c.otherClient.waitForMessage(
+					room,
+					assistant,
+					(t) => t.includes('did not answer') && t.includes('agreements page'),
+					60_000
+				);
+				// The request is answered none, which is what the organizer read
+				expect(await answerOf(c)).toMatchObject({ none: true });
+			});
+
+			it('lets a yes given after the window still count, answering the next request without a question', async () => {
+				// The window is read at an hour the suite scripts: the message is sent on the real
+				// clock, then the harness moves ten minutes on, the question the invitee never answered
+				// is spent, and only then do they say yes
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: () => true,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				const linesBefore = h.logLines().length;
+				const sentAt = Date.now();
+				await c.otherClient.sendText(c.room, ASKING);
+				await sharingQuestion(c, room, assistant);
+				// Ten minutes on, still inside the message's own window: the invitee never answered
+				setMoment(new Date(sentAt + 11 * 60_000).toISOString());
+				await proposalSeen(c, 'not_seen', linesBefore);
+				await c.otherClient.waitForMessage(
+					room,
+					assistant,
+					(t) => t.includes('did not answer') && t.includes('agreements page'),
+					60_000
+				);
+				await c.otherClient.sendText(room, 'oui');
+				// The yes after the window still grants the sharing, and the next request reads it
+				// without a question the harness would ask
+				const ASKING2 = 'on se fait une réunion lundi à 9h ?';
+				await until(
+					async () =>
+						(
+							await withPrincipal(
+								h.db,
+								{ id: c.otherPrincipal },
+								(tx) =>
+									tx.sql`select 1 from consents where owner = ${c.otherPrincipal}
+									and domain = 'availability' and level = 'read'`
+							)
+						).length > 0
+				);
+				// The host moves back to the real clock: the yes's own request has a message a day later,
+				// so the next one is a new request of a new event
+				await withPrincipal(
+					h.db,
+					{ id: c.ownerPrincipal },
+					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
+				);
+				const questionsBefore = c.otherClient.messages.filter(
+					(m) =>
+						m.roomId === room &&
+						m.sender === assistant &&
+						String(m.body).includes('asking me for your availability')
+				).length;
+				const lines2 = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING2);
+				const second = await proposalSeen(c, 'seen_free', lines2);
+				expect(second.pendingCallId).toBeTruthy();
+				// No question was asked about the sharing: the yes already answered it
+				await sleep(3000);
+				expect(
+					c.otherClient.messages.filter(
+						(m) =>
+							m.roomId === room &&
+							m.sender === assistant &&
+							String(m.body).includes('asking me for your availability')
+					).length
+				).toBe(questionsBefore);
+			});
+
+			it('falls back with no question once the invitee takes the share back on the agreements page', async () => {
+				// The invitee allowed the sharing, so the first request is answered at once; taking it
+				// back keeps their refusal, and the next request falls back with no question
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				await shareAvailability(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: () => true,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				// The agreements page takes the sharing back, which keeps the refusal
+				expect(
+					(await h.api.delete(c.otherPrincipal, '/v1/consents/availability/read')).status
+				).toBe(204);
+				const kept = await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) =>
+						tx.sql`select 1 from availability_sharing_refusals where owner = ${c.otherPrincipal}`
+				);
+				expect(kept).toHaveLength(1);
+				const ASKING2 = 'on se fait une réunion lundi à 9h ?';
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				const first = await proposalSeen(c, 'not_seen', linesBefore);
+				expect(first.pendingCallId).toBeTruthy();
+				// The next request, a day later, asks no question either
+				const questionsBefore = c.otherClient.messages.filter(
+					(m) => m.roomId === room && m.sender === assistant
+				).length;
+				await withPrincipal(
+					h.db,
+					{ id: c.ownerPrincipal },
+					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
+				);
+				const lines2 = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING2);
+				const second = await proposalSeen(c, 'not_seen', lines2);
+				expect(second.pendingCallId).not.toBe(first.pendingCallId);
+				await sleep(3000);
+				expect(
+					c.otherClient.messages.filter((m) => m.roomId === room && m.sender === assistant).length
+				).toBe(questionsBefore);
+			});
+
 			it('proposes the asked time and says the invitee is free, reading their calendar for them alone', async () => {
 				const c = await listenedConversation();
 				await inviteeAssistant(c);
@@ -1472,6 +1915,13 @@ describe('the assistant proposes from the messages of channels', () => {
 					inviteeSlots: () => [],
 					organizerFree: () => true
 				});
+				// The invitee's assistant has no room of its own, which is what keeps it from answering:
+				// set under their principal, since the assistants table is theirs alone to write
+				await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+				);
 				const before = h.apisix.contracts.calls.length;
 				const linesBefore = h.logLines().length;
 				await c.otherClient.sendText(c.room, ASKING);
@@ -1700,6 +2150,13 @@ describe('the assistant proposes from the messages of channels', () => {
 				// says so, with the colleague and the period and no slot
 				const c = await listenedConversation();
 				await ownerRoom(c);
+				// Their assistant's room taken away, under their principal as the assistants table is
+				// theirs alone to write: with no room it answers none itself rather than ask its owner
+				await withPrincipal(
+					h.db,
+					{ id: c.otherPrincipal },
+					(tx) => tx.sql`update assistants set room_id = null where owner = ${c.otherPrincipal}`
+				);
 				const asked = askedDay();
 				h.apisix.contracts.handler = availabilityHandler({
 					invitee: c.otherPrincipal,
@@ -1839,11 +2296,75 @@ describe('the assistant proposes from the messages of channels', () => {
 					outcome: 'answered'
 				});
 			});
+
+			// The invitee's own /delete: last in the block, since deleting their assistant takes the
+			// room the suites before read their question in
+			it('asks the question again once the invitee deletes their assistant, wiping the kept refusal', async () => {
+				// The invitee kept their no; their /delete erases it, so a new assistant asks again
+				const c = await listenedConversation();
+				await inviteeAssistant(c);
+				const { room, assistant } = await inviteeRoom(c);
+				await ownerRoom(c);
+				h.apisix.contracts.handler = availabilityHandler({
+					invitee: c.otherPrincipal,
+					inviteeFree: () => true,
+					inviteeSlots: () => [],
+					organizerFree: () => true
+				});
+				const linesBefore = h.logLines().length;
+				await c.otherClient.sendText(c.room, ASKING);
+				await sharingQuestion(c, room, assistant);
+				await c.otherClient.sendText(room, 'non');
+				await proposalSeen(c, 'not_seen', linesBefore);
+				expect(
+					await withPrincipal(
+						h.db,
+						{ id: c.otherPrincipal },
+						(tx) =>
+							tx.sql`select 1 from availability_sharing_refusals where owner = ${c.otherPrincipal}`
+					)
+				).toHaveLength(1);
+				// The invitee deletes their assistant: the refusal goes, and a new assistant is made
+				expect((await h.api.delete(c.otherPrincipal, '/v1/assistants/me')).status).toBe(204);
+				expect(
+					await withPrincipal(
+						h.db,
+						{ id: c.otherPrincipal },
+						(tx) =>
+							tx.sql`select 1 from availability_sharing_refusals where owner = ${c.otherPrincipal}`
+					)
+				).toHaveLength(0);
+				const again = await h.api.post<{ roomId: string; userId: string }>(
+					c.otherPrincipal,
+					'/v1/assistants',
+					{ name: 'Assistant encore' }
+				);
+				expect(again.status).toBe(201);
+				await h.db
+					.sql`update assistants set room_id = ${again.body.roomId} where owner = ${c.otherPrincipal}`;
+				await c.otherClient.joinRoom(again.body.roomId);
+				// The next request asks the question again, in the new assistant's room
+				await withPrincipal(
+					h.db,
+					{ id: c.ownerPrincipal },
+					(tx) => tx.sql`delete from suggestions where owner = ${c.ownerPrincipal}`
+				);
+				await c.otherClient.sendText(c.room, 'on se fait une réunion mardi à 8h ?');
+				const text = await c.otherClient.waitForMessage(
+					again.body.roomId,
+					again.body.userId,
+					(t) => t.includes(c.ownerPrincipal) && t.includes('asking me for your availability'),
+					60_000
+				);
+				expect(text).toContain('free slots only');
+			});
 		});
 
 		interface Pair {
 			readonly owner: MatrixUser;
 			readonly other: MatrixUser;
+			readonly ownerPrincipal: string;
+			readonly otherPrincipal: string;
 			readonly ownerClient: E2eeClient;
 			readonly otherClient: E2eeClient;
 			readonly room: string;
@@ -1913,6 +2434,8 @@ describe('the assistant proposes from the messages of channels', () => {
 			return {
 				owner,
 				other,
+				ownerPrincipal: `o${tag}@test.local`,
+				otherPrincipal: `t${tag}@test.local`,
 				ownerClient,
 				otherClient,
 				room,
@@ -1929,6 +2452,15 @@ describe('the assistant proposes from the messages of channels', () => {
 		it('lets two assistants read one direct conversation, and every message reaches both owners with the same context', async () => {
 			const p = await pairWithTwoAssistants(true);
 			try {
+				// Each owner's assistant has no room of its own, so it answers none itself rather than
+				// ask its owner: set under each principal, since the assistants table is theirs alone
+				for (const who of [p.ownerPrincipal, p.otherPrincipal]) {
+					await withPrincipal(
+						h.db,
+						{ id: who },
+						(tx) => tx.sql`update assistants set room_id = null where owner = ${who}`
+					);
+				}
 				expect(await isJoined(p.owner, p.room, p.ownerAssistant)).toBe(true);
 				expect(await isJoined(p.owner, p.room, p.otherAssistant)).toBe(true);
 				const before = space.calls.length;

@@ -8,7 +8,12 @@ import type { ContractCatalog } from '../contracts/catalog.js';
 import type { ContractDefinition } from '../contracts/openapi.js';
 import { AVAILABILITY_DOMAIN } from '../consents/consent.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
-import { hasConsent, rewritePendingCallArguments } from '../consents/repository.js';
+import {
+	hasConsent,
+	insertPendingCall,
+	rewritePendingCallArguments,
+	type PendingCallInput
+} from '../consents/repository.js';
 import { requestText, type OwnerRequest } from '../consents/request.js';
 import { readJsonColumn, withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Locale } from '../i18n/messages.js';
@@ -29,11 +34,17 @@ import {
 	writeAvailabilityRequest,
 	type AvailabilityAnswer,
 	type AvailabilityPayload,
+	type AvailabilityRequest,
 	type Window
 } from '../suggestions/availability.js';
 import { noteAvailabilityRequest } from '../suggestions/availability-journal.js';
 import { askSuggestionConsent } from '../suggestions/consent.js';
 import { SUGGEST_MAX_AGE_MS, type Retry, type SuggestPayload } from '../suggestions/job.js';
+import {
+	AVAILABILITY_SHARING_CALL,
+	AVAILABILITY_SHARING_TOOL,
+	hasRefusedAvailabilitySharing
+} from '../suggestions/sharing.js';
 import {
 	candidateSlots,
 	firstCandidate,
@@ -430,12 +441,29 @@ export interface AvailabilityRunner {
 	run(payload: AvailabilityPayload, log: FastifyBaseLogger): Promise<void>;
 }
 
+// The period a colleague asked about, named in the invitee's own language for the question about the
+// sharing: the day they named, and, when they named a range of days, the last one, both as the
+// invitee's calendar zone writes them
+function availabilityPeriodOf(
+	request: AvailabilityRequest,
+	timeZone: string,
+	locale: Locale
+): string {
+	const start = describeMoment(new Date(`${request.periodStart}T12:00:00Z`), timeZone, locale).date;
+	if (request.periodEnd === null) return start;
+	const end = describeMoment(new Date(`${request.periodEnd}T12:00:00Z`), timeZone, locale).date;
+	return locale === 'fr' ? `du ${start} au ${end}` : `from ${start} to ${end}`;
+}
+
 // The invitee's assistant answers one availability request. It runs under the invitee's principal,
 // with no model, no admission and no quota: it reads the invitee's own free/busy, applies the same
-// candidate rule as a suggestion, and writes the slots back into the request. Without an assistant,
-// without a room of their own, when the organizer is not a colleague, or without the sharing of
-// their availability, it answers none, and the organizer falls back on their own calendar alone.
-// Never a word of the conversation, never the organizer's address in a log, never a slot in one.
+// candidate rule as a suggestion, and writes the slots back into the request. The first time a
+// colleague asks, while the invitee lets their assistant share nothing of their availability and
+// kept no refusal, it asks them the question in their own room and leaves the request unanswered:
+// their yes grants the sharing and the job answers on a later pass. Without an assistant, without a
+// room of their own, when the organizer is not a colleague, or once they refused and the refusal
+// stands, it answers none, and the organizer falls back on their own calendar alone. Never a word of
+// the conversation, never the organizer's address in a log, never a slot in one.
 export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRunner {
 	const { config, db, tools, clock } = deps;
 	const reads = onlyTools(tools, [FIND_SLOTS, READ_FREEBUSY]);
@@ -451,11 +479,57 @@ export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRu
 			const request = await findAvailabilityRequest(tx, requestId);
 			if (request === null) return null;
 			const assistant = await findAssistant(tx, invitee);
-			const allowed =
-				matrixLocalpartOfPrincipal(config, request.organizer) !== null &&
-				(await hasConsent(tx, invitee, AVAILABILITY_DOMAIN, 'read')) &&
-				isActiveAssistant(assistant);
+			const colleague = matrixLocalpartOfPrincipal(config, request.organizer) !== null;
+			const sharing = await hasConsent(tx, invitee, AVAILABILITY_DOMAIN, 'read');
+			const active = colleague && isActiveAssistant(assistant);
+			const allowed = active && sharing;
 			if (!allowed) {
+				// A colleague's first request, with an assistant of the invitee's own and no refusal kept:
+				// the harness asks them, once, and leaves the request for the job to answer once they said
+				// yes. A question already waiting for them, the sharing's own or the first-use question of
+				// a suggestion that reads the same application, is not asked again: a newer one replaces
+				// it, as any question of the room does.
+				if (active && !(await hasRefusedAvailabilitySharing(tx, invitee))) {
+					const open = await tx.sql<{ id: string }[]>`
+						select id from pending_calls
+						where owner = ${invitee} and domain = ${AVAILABILITY_DOMAIN} and level = 'read'
+							and status = 'open'
+						limit 1`;
+					if (open.length > 0) return { request, allowed: false, question: null };
+					const locale = localeOf(assistant, config.locale);
+					const messages = getMessages(locale);
+					const period = availabilityPeriodOf(request, config.timeZone, locale);
+					// The question is the harness's own, naming the colleague and the period, and not a
+					// first-use question about the application: the invitee is asked about the sharing
+					// itself, so the request carries its sentence as the question and shows no call.
+					const ownerRequest: OwnerRequest = {
+						said: null,
+						question: messages.suggestions.availabilitySharing.question(request.organizer, period),
+						call: null,
+						summary: null,
+						howToAnswer: messages.consent.howToAnswer
+					};
+					const call: PendingCallInput = {
+						owner: invitee,
+						tool: AVAILABILITY_SHARING_TOOL,
+						contract: AVAILABILITY_SHARING_CALL,
+						domain: AVAILABILITY_DOMAIN,
+						level: 'read',
+						reasons: ['consent'],
+						arguments: {},
+						previewDigest: null,
+						correlationId: `availability-${requestId}`,
+						origin: 'suggestion',
+						sessionId: null,
+						request: requestText(ownerRequest)
+					};
+					const pendingCallId = await insertPendingCall(tx, call);
+					return {
+						request,
+						allowed: false,
+						question: { pendingCallId, request: ownerRequest }
+					};
+				}
 				await answerAvailabilityRequest(tx, requestId, NO_AVAILABILITY_ANSWER);
 				// The invitee's journal keeps the request their assistant answered none, so that
 				// « what did you see today? » tells them a colleague asked
@@ -468,10 +542,14 @@ export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRu
 					clock.now()
 				);
 			}
-			return { request, allowed };
+			return { request, allowed, question: null };
 		});
 		if (found === null) {
 			log.info({ owner: invitee, requestId }, 'availability dropped: nothing asked');
+			return;
+		}
+		if (found.question !== null) {
+			log.info({ owner: invitee, requestId }, 'availability asks about the sharing');
 			return;
 		}
 		if (!found.allowed) {
@@ -968,17 +1046,21 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				// handler re-runs it within the window. Past the window, or once an answer came, the
 				// invitation reads what it holds.
 				if (existing.answer === null) {
-					if (Date.now() - existing.askedAt.getTime() <= SUGGEST_MAX_AGE_MS) {
+					if (clock.now().getTime() - existing.askedAt.getTime() <= SUGGEST_MAX_AGE_MS) {
 						return { kind: 'availability', requestId: existing.id };
 					}
-					await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
+					// The window closed with no answer: the invitation falls back on the owner's
+					// calendar. The row is left for the invitee's own job, which tells them no answer
+					// came and answers the request none; clearing it here would race that job and lose
+					// the notice. A later request of the same message overwrites the row.
 					return frozenSlot('not_seen', body.start, body.end);
 				}
 				const windows = windowsOf(existing.answer);
 				// The invitee's assistant answered nothing, or named no candidate: the invitation falls
-				// back on the owner's calendar alone, as when nothing was asked, and says so
+				// back on the owner's calendar alone, as when nothing was asked, and says so. The row is
+				// left as it is, so that the invitee's own job, which reads it to tell them no answer
+				// came, is never raced by a clear here; a later request of the same message overwrites it.
 				if (windows.length === 0) {
-					await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
 					return frozenSlot('not_seen', body.start, body.end);
 				}
 				// The organizer's own free/busy over each candidate, the first it is free at: the meeting

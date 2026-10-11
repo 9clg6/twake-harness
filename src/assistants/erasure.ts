@@ -2,6 +2,7 @@ import type { Tx } from '../db/client.js';
 import { deleteJobsOf } from '../jobs/queue.js';
 import { forgetIdentityQuestion } from '../matrix/owner-cross-signing-repository.js';
 import { clearAvailabilityRequests } from '../suggestions/availability.js';
+import { clearAvailabilitySharingRefusal } from '../suggestions/sharing.js';
 import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 
 // Erases, in the transaction given under the owner's principal, what the harness keeps of their
@@ -52,6 +53,9 @@ export async function eraseAssistant(
 	await tx.sql`delete from suggestions where owner = ${owner}`;
 	// The availability requests their assistant asked for or answered, which then keep no slot
 	await clearAvailabilityRequests(tx, owner);
+	// The refusal they kept of the question about sharing their availability: the next assistant
+	// asks them again
+	await clearAvailabilitySharingRefusal(tx, owner);
 	await tx.sql`delete from brief_delegation_waits where owner = ${owner}`;
 	await tx.sql`delete from brief_questions where owner = ${owner}`;
 	// What the owner's quiet hours hold would wake it as they end, as a job would
