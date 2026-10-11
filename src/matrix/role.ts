@@ -1048,6 +1048,29 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return !isAssistantUserId(config, userId) && userId !== listenerUserId(config);
 	}
 
+	// The room's other member, read in the room whatever they wrote, as their platform address: the
+	// one member left once the assistant and its owner are taken out. Null when the room holds none,
+	// or when their identifier maps to no address, as a member of another server's does, and then
+	// nothing is proposed.
+	async function otherMemberPrincipal(
+		roomId: string,
+		assistantUserId: string,
+		owner: string
+	): Promise<string | null> {
+		const ownerUserId = matrixUserIdOfPrincipal(config, owner);
+		if (ownerUserId === null) return null;
+		const members = await appservice
+			.getIntentForUserId(assistantUserId)
+			.underlyingClient.getRoomMembers(roomId, undefined, ['join', 'invite']);
+		const other = members.find(
+			(member) =>
+				member.membershipFor !== assistantUserId &&
+				member.membershipFor !== ownerUserId &&
+				!isAssistantUserId(config, member.membershipFor)
+		);
+		return other === undefined ? null : principalOfMatrixUser(config, other.membershipFor);
+	}
+
 	// What a room the owner invited their assistant into is worth to it: an encrypted room of the
 	// owner, still in it, with other people (a direct conversation or a channel) who all said yes
 	// since they came: there it reads, for its owner alone, and never writes. Twake Chat's request
@@ -1558,10 +1581,21 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const text = textOf(raw);
 		const listened = await listenedRooms(roomId);
 		if (listened.length > 0) {
-			// Never a turn there: what one of its assistants reads proposes to that owner alone
-			for (const { owner } of listened) {
+			// Never a turn there: what one of its assistants reads proposes to that owner alone. The
+			// pair's other member is read in the room, whether they wrote the message or not, so a
+			// silent member is still the one invited; a member of another server has no address and
+			// nothing is proposed.
+			for (const { owner, userId } of listened) {
 				if (raw.event_id !== undefined && text !== null) {
-					await suggestions.onMessage(roomId, { sender, eventId: raw.event_id, text }, owner);
+					const other = await otherMemberPrincipal(roomId, userId, owner);
+					if (other !== null) {
+						await suggestions.onMessage(
+							roomId,
+							{ sender, eventId: raw.event_id, text },
+							owner,
+							other
+						);
+					}
 				}
 			}
 			return;

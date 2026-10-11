@@ -32,8 +32,14 @@ export interface SuggestionIntake {
 	// held of it is dropped, for that owner or, without one, for all
 	forget(roomId: string, owner?: string): void;
 	// A clear message of a channel the listener is in; with `onlyFor`, a message of an encrypted
-	// room whose owner invited their assistant, which proposes to that owner alone
-	onMessage(roomId: string, message: ChannelMessage, onlyFor?: string): Promise<void>;
+	// room whose owner invited their assistant, which proposes to that owner alone, with `other`
+	// the room's other member, invited whether they wrote the message or not
+	onMessage(
+		roomId: string,
+		message: ChannelMessage,
+		onlyFor?: string,
+		other?: string
+	): Promise<void>;
 	// The role stops: what is held goes, and nothing is looked for any more
 	stop(): void;
 }
@@ -98,7 +104,7 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			clearInterval(sweeping);
 			recent.clear();
 		},
-		async onMessage(roomId, message, onlyFor) {
+		async onMessage(roomId, message, onlyFor, other) {
 			if (!config.suggestions.enabled) return;
 			sweep();
 			const sender = principalOfMatrixUser(config, message.sender);
@@ -144,8 +150,11 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 					at: now(),
 					quoted,
 					// A listened conversation, whose owner alone the message is read for, proposes from
-					// their own calendar alone
-					...(onlyFor === undefined ? {} : { listened: true })
+					// their own calendar alone, and invites the conversation's other member whether they
+					// wrote the message or not
+					...(onlyFor === undefined
+						? {}
+						: { listened: true, ...(other === undefined ? {} : { other }) })
 				};
 				const added = await enqueueJob(db, {
 					kind: 'suggest',
