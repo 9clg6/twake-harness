@@ -19,8 +19,10 @@ import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
-import { LISTENING_JOURNAL_TOOL, makeListeningJournalTool } from '../journal/tool.js';
+import { listActivitiesSince, type Activity } from '../journal/repository.js';
+import { activityView, LISTENING_JOURNAL_TOOL, makeListeningJournalTool } from '../journal/tool.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
+import { isRecord } from '../matrix/json.js';
 import { listMemory } from '../memory/repository.js';
 import { ORGANIZATION_PRINCIPAL, type Principal } from '../principals/principal.js';
 import { ensurePrincipal } from '../principals/repository.js';
@@ -37,6 +39,7 @@ import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
 import {
 	CANCELLED_EVENT_TYPE,
 	COUNTERED_EVENT_TYPE,
+	INVITED_EVENT_TYPE,
 	MOVED_EVENT_TYPE,
 	type MeetingScope
 } from '../wakeups/event-types.js';
@@ -53,6 +56,7 @@ import { makeTurnGate, type TurnGate } from './gate.js';
 import {
 	carriesInvitation,
 	checkAvailability,
+	instantOfStart,
 	type Invitation,
 	type ToolRunner
 } from './invitation.js';
@@ -92,6 +96,10 @@ export type { TurnOrigin } from './tools.js';
 import { runTurn, TurnError } from './turn.js';
 import { SUGGEST_CALL, makeSuggestionConsentTool } from '../suggestions/consent.js';
 import { AVAILABILITY_SHARING_CALL, makeAvailabilitySharingTool } from '../suggestions/sharing.js';
+import {
+	AVAILABILITY_REQUEST_TYPE,
+	AVAILABILITY_SOURCE
+} from '../suggestions/availability-journal.js';
 import {
 	makeAvailabilityAnswerer,
 	makeSuggestionRunner,
@@ -256,12 +264,14 @@ export interface OwnerTurnInput {
 	readonly origin?: TurnOrigin;
 	// The name the owner gave the assistant answering in this turn, when there is one
 	readonly assistantName?: string;
-	// The event of a turn of origin event: its id and CloudEvent type, and for a new invitation, a
-	// move, a cancellation or a counter-proposal, the meeting, whose slot, or the time proposed, the
-	// harness checks before the model speaks unless it is cancelled
+	// The event of a turn of origin event: its id and CloudEvent type, the person whose action it
+	// was, when its source named one, and for a new invitation, a move, a cancellation or a
+	// counter-proposal, the meeting, whose slot, or the time proposed, the harness checks before the
+	// model speaks unless it is cancelled
 	readonly event?: {
 		readonly id: string;
 		readonly type: string;
+		readonly actor?: { readonly email: string; readonly uuid: string | null } | undefined;
 		readonly invitation?: Invitation | undefined;
 	};
 	// The call its owner just allowed: the turn runs it as frozen, then goes on from there, with
@@ -422,7 +432,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	// the times its wake-up carries, through the same tools and context as the model's calls: what
 	// the calendar answered follows what the wake-up told, as data. A cancellation leaves nothing to
 	// check, and any other message is told as it is. A read of that check that waits for its owner,
-	// such as the first read of their calendar, ends the turn on the harness's question.
+	// such as the first read of their calendar, ends the turn on the harness's question. A new
+	// invitation whose slot the owner's assistant had already proposed to its organizer says so, from
+	// the owner's journal, beside what the calendar answered.
 	async function messageFor(
 		input: OwnerTurnInput,
 		context: ToolContext,
@@ -453,10 +465,72 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			invitation.scope ?? 'event',
 			messages
 		);
+		// What the owner's journal adds when their assistant had proposed this slot to its organizer
+		const mention = await mentionOfProposal(
+			db,
+			context.principalId,
+			event,
+			invitation,
+			timeZone,
+			messages
+		);
+		const told = mention === null ? availability : `${availability}\n${mention}`;
 		return {
-			message: input.message === null ? availability : `${input.message}\n${availability}`,
+			message: input.message === null ? told : `${input.message}\n${told}`,
 			question
 		};
+	}
+
+	// What a new invitation's turn adds when the owner's assistant had already proposed its slot to
+	// the organizer: it reads the owner's listening journal, where their assistant's availability
+	// answers leave one row naming the colleague who asked and the candidate slots it gave, and says
+	// so beside what the calendar answered. A row only the purge has not erased the names of is read,
+	// so the mention goes once those are erased, after a week. A move, a cancellation, a
+	// counter-proposal, and an invitation whose source named no actor, add nothing.
+	async function mentionOfProposal(
+		database: Db,
+		owner: string,
+		event: { readonly type: string; readonly actor?: { readonly email: string } | undefined },
+		invitation: Invitation,
+		timeZone: string,
+		messages: Messages
+	): Promise<string | null> {
+		if (event.type !== INVITED_EVENT_TYPE || event.actor === undefined) return null;
+		const startsAt = instantOfStart(invitation.start, invitation.timezone, timeZone);
+		if (startsAt === null) return null;
+		const organizer = event.actor.email.toLowerCase();
+		const rows = await withPrincipal(database, { id: owner }, (tx) =>
+			listActivitiesSince(tx, owner, new Date(0))
+		);
+		const proposed = rows.some((row) => proposesSlot(row, organizer, startsAt.getTime(), timeZone));
+		return proposed ? messages.events.proposedSlot : null;
+	}
+
+	// Whether a journal row is the owner's assistant's answer to the organizer given, whose display
+	// fields name that organizer and a candidate slot starting at the instant given: absent once the
+	// purge erased those fields
+	function proposesSlot(
+		row: Activity,
+		organizer: string,
+		start: number,
+		timeZone: string
+	): boolean {
+		if (row.names === null) return false;
+		if (
+			row.outcome !== 'answered' ||
+			row.source !== AVAILABILITY_SOURCE ||
+			row.type !== AVAILABILITY_REQUEST_TYPE
+		) {
+			return false;
+		}
+		const view = activityView(row, timeZone);
+		const named = view['organizer'];
+		if (typeof named !== 'string' || named.toLowerCase() !== organizer) return false;
+		const slots = view['slots'];
+		return (
+			Array.isArray(slots) &&
+			slots.some((slot) => isRecord(slot) && Date.parse(String(slot['start'])) === start)
+		);
 	}
 
 	// Runs the call its owner allowed, exactly as it was frozen. A tool that no longer stands for

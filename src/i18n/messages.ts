@@ -201,6 +201,10 @@ export interface Messages {
 		// What follows an invitation once the harness checked its slot: what the calendar answered,
 		// fenced as data, then the model tells the owner and prepares the acceptance
 		availability(calendarData: string): string;
+		// What a new invitation's turn adds when the owner's assistant had already proposed its slot
+		// to the organizer, from their listening journal: the model tells the owner so beside what the
+		// calendar answered. Nothing once the display fields the purge erases are gone.
+		readonly proposedSlot: string;
 		// A change Calendar notified to the start or the end of a meeting the owner is invited to, of
 		// one occurrence of a series or of the whole series, handed over fenced as data
 		moved(eventId: string, eventData: string, scope: MeetingScope): string;
@@ -824,6 +828,8 @@ const ENGLISH: Messages = {
 				'Tell me in a few words, in the language of our conversation, who invites me, to what and when, and whether I am free over that slot, or what it conflicts with. If the check could not be made, say so and why. Do not call read_freebusy again for this invitation.',
 				'Write those words and, in the same answer, call accept_invitation for it with its uid: I am then asked, under your words, whether to accept it, and nothing is sent before my yes. Do not ask me yourself.'
 			].join('\n'),
+		proposedSlot:
+			'Tell me too, in the same words, that you had already proposed this slot to the person who invites me, as you answered their assistant.',
 		moved: (eventId, eventData, scope) =>
 			[
 				`[event] The time of ${EN_MEETING[scope]} I am invited to has changed (id ${eventId}). ${EN_EVENT_DATA}`,
@@ -1248,6 +1254,8 @@ const FRENCH: Messages = {
 				"Dis-moi en quelques mots, dans la langue de notre conversation, qui m'invite, à quoi et quand, et si je suis libre sur ce créneau, ou avec quoi cela entre en conflit. Si la vérification n'a pas pu se faire, dis-le et explique pourquoi. N'appelle plus read_freebusy pour cette invitation.",
 				"Écris ces mots et, dans la même réponse, appelle accept_invitation pour elle avec son uid : on me demande alors, sous tes mots, si je l'accepte, et rien n'est envoyé avant mon oui. Ne me le demande pas toi-même."
 			].join('\n'),
+		proposedSlot:
+			"Dis-moi aussi, dans les mêmes mots, que tu avais déjà proposé ce créneau à la personne qui m'invite, en répondant à son assistant.",
 		moved: (eventId, eventData, scope) =>
 			[
 				`[événement] L'horaire d'${FR_MEETING[scope]} à laquelle on m'invite a changé (id ${eventId}). ${FR_EVENT_DATA}`,

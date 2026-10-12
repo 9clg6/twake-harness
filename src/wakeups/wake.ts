@@ -192,6 +192,11 @@ async function queueTurn(
 			id: wakeup.id,
 			type: wakeup.type,
 			source: wakeup.source,
+			// Who its source named as the actor of the activity, when it names one: a new invitation's
+			// turn reads the owner's journal for the slot their assistant had proposed to that person
+			...(wakeup.actor.email === null
+				? {}
+				: { actor: { email: wakeup.actor.email, uuid: wakeup.actor.uuid } }),
 			...(wakeup.invitation === undefined ? {} : { invitation: wakeup.invitation })
 		},
 		...(wakeup.brief === undefined ? {} : { brief: wakeup.brief })
