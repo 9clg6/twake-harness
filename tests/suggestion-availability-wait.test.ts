@@ -305,4 +305,30 @@ describe('a listened suggestion that waits for an availability answer', () => {
 			moment = null;
 		}
 	});
+
+	// The drop this flow must still make. A suggestion that never made an availability request is
+	// dropped the moment its window closes, as before, and reaches neither the model nor the owner.
+	// This is the case the window's own length makes load-bearing: the job's window and the request's
+	// are the same ten minutes, so the pass that reads the invitee's silence is the one the age check
+	// would otherwise delete. Only a suggestion already carrying a request is let through.
+	it('drops an expired suggestion that never asked for availability, without reaching the model', async () => {
+		const frank = await ownerNamed('frank');
+		h.apisix.llm.script = failingModel;
+		try {
+			const message = await suggestListened(frank);
+			// The first pass fails at the model and asks for another try, as a listened suggestion does
+			expect(await pass(message)).toBe('deferred');
+			// The window closes before the gateway comes back: this one asked for no availability, so
+			// the pass that follows is dropped rather than run
+			moment = new Date(Date.now() + SUGGEST_MAX_AGE_MS + 1);
+			h.apisix.llm.script = proposingModel;
+			expect(await pass(message)).toBe('done');
+			expect(await written(frank)).toEqual([]);
+			expect(await requests(frank)).toEqual([]);
+			expect(await waitingCalls(frank)).toEqual([]);
+		} finally {
+			h.apisix.llm.script = proposingModel;
+			moment = null;
+		}
+	});
 });
