@@ -126,6 +126,11 @@ export type SuggestionResult =
 	  }
 	// That question still waits for the owner
 	| { readonly kind: 'waiting' }
+	// The model could not be reached this pass, on a listened conversation whose window is still open:
+	// the handler tries the suggestion again within the window, and says nothing once it closes. A
+	// first pass that failed wrote nothing, so the try that follows reaches the model again and, if it
+	// answers, settles the message as any first pass would.
+	| { readonly kind: 'retry' }
 	// A listened conversation whose invitee may be a colleague: the harness wrote an availability
 	// request for their assistant and queued the job that answers it, and now waits for that answer,
 	// re-reading it until the request's own window closes. Nothing was proposed yet.
@@ -1068,6 +1073,107 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 					{ principal: owner, origin: 'suggestion' },
 					{ level: log.level === 'debug' || log.level === 'trace' ? 'info' : log.level }
 				);
+				// A listened conversation whose message already made an availability request settles from
+				// that request alone, never the model: the model ran once when the request was written, it
+				// cannot see the invitee's own calendar, and re-running it on every pass would freeze a
+				// call and leak it each time. While no answer came and the window is open, the suggestion
+				// waits again and the handler re-runs this within the window; past the window, or once an
+				// answer came, it reads the frozen call the request kept and crosses the invitee's answer
+				// with the organizer's own free/busy, as a retry does.
+				if (listened) {
+					const armed = await withPrincipal(db, principal, (tx) =>
+						findAvailabilityRequestFor(tx, owner, payload.roomId, payload.eventId)
+					);
+					if (armed !== null) {
+						if (
+							armed.answer === null &&
+							clock.now().getTime() - armed.askedAt.getTime() <= SUGGEST_MAX_AGE_MS
+						) {
+							return { kind: 'availability', requestId: armed.id };
+						}
+						const held = await readFrozenMeeting(db, owner, armed.pendingCallId);
+						if (held === null) return { kind: 'none', reason: 'not_a_meeting' };
+						// The proposal the frozen call is rewritten into, or read as it stands: the model
+						// never sees this pass, and the owner's question shows the slot it settled on
+						const settled = (
+							availability: 'not_seen' | 'seen_free',
+							start: string,
+							end: string
+						): SuggestionResult => ({
+							kind: 'proposed',
+							pendingCallId: armed.pendingCallId,
+							locale,
+							proposal: {
+								title: held.title,
+								start,
+								end,
+								attendees: held.attendees,
+								timeZone:
+									(held.time_zone !== undefined ? findTimeZone(held.time_zone) : null) ?? timeZone
+							},
+							answer: '',
+							request: null,
+							invitee: { address: other, availability }
+						});
+						// The window closed with no answer: the invitation falls back on the owner's
+						// calendar. The row is left for the invitee's own job, which tells them no answer
+						// came and answers the request none; clearing it here would race that job and lose
+						// the notice. A later request of the same message overwrites the row.
+						if (armed.answer === null) {
+							return settled('not_seen', held.start, held.end);
+						}
+						const candidates = windowsOf(armed.answer);
+						// The invitee's assistant answered nothing, or named no candidate: the invitation
+						// falls back on the owner's calendar alone, as when nothing was asked, and says so.
+						if (candidates.length === 0) {
+							return settled('not_seen', held.start, held.end);
+						}
+						// The organizer's own free/busy over each candidate, the first it is free at: the
+						// meeting the invitation proposes, which the frozen call takes the place of.
+						const crossContext: ToolContext = {
+							principalId: owner,
+							origin: 'suggestion',
+							actions,
+							db,
+							correlationId: `suggest-${payload.eventId}`,
+							log: turnLog
+						};
+						const readers = makeOwnerReaders(
+							async (name, callArgs) => {
+								const tool = contracts.tools.find((t) => t.definition.function.name === name);
+								return tool === undefined ? null : runTool(tool, callArgs, crossContext);
+							},
+							owner,
+							timeZone,
+							armed.durationMs
+						);
+						let chosen: Window | null = null;
+						for (const window of candidates) {
+							if (await readers.ownerFree(window)) {
+								chosen = window;
+								break;
+							}
+						}
+						if (chosen === null) {
+							await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, armed.id));
+							return { kind: 'none', reason: 'no_common_slot' };
+						}
+						const { start, end } = slotArguments(chosen, timeZone);
+						await withPrincipal(db, principal, async (tx) => {
+							await rewritePendingCallArguments(tx, owner, armed.pendingCallId, {
+								body: {
+									title: held.title,
+									start,
+									end,
+									time_zone: held.time_zone ?? timeZone,
+									attendees: held.attendees
+								}
+							});
+							await clearAvailabilityRequest(tx, armed.id);
+						});
+						return settled('seen_free', start, end);
+					}
+				}
 				let turn;
 				try {
 					turn = await runTurn(
@@ -1107,6 +1213,13 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				} catch (err: unknown) {
 					if (err instanceof TurnError || err instanceof LlmError) {
 						turnLog.warn({ reason: err.name }, 'suggestion failed');
+						// A listened suggestion whose window is still open tries again rather than
+						// abandoning: nothing was written this pass, so the try that follows runs the model
+						// again and settles the message if it answers. Past the window it says nothing, as
+						// any suggestion that reached the model and got nowhere.
+						if (listened && clock.now().getTime() - payload.at <= SUGGEST_MAX_AGE_MS) {
+							return { kind: 'retry' };
+						}
 						return { kind: 'none', reason: 'model_failed' };
 					}
 					throw err;
