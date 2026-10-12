@@ -18,7 +18,13 @@ import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from '
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
 import { startTestIssuer, type TestIssuer } from './jwks-server.js';
-import { reservePort, startTestSynapse, SYNAPSE_SERVER_NAME, type TestSynapse } from './synapse.js';
+import {
+	callbackHost,
+	reservePort,
+	startTestSynapse,
+	SYNAPSE_SERVER_NAME,
+	type TestSynapse
+} from './synapse.js';
 
 export interface MatrixTestHarness {
 	// Stops and starts the matrix role again on the same database and encryption stores, or
@@ -109,7 +115,7 @@ export async function startMatrixHarness(
 	};
 	const config = loadConfig(settings);
 	const synapse = await startTestSynapse(
-		{ file: buildRegistrationFile(config, `http://host.docker.internal:${port}`) },
+		{ file: buildRegistrationFile(config, `http://${callbackHost()}:${port}`) },
 		options.synapse
 	);
 	apisix.matrixUpstream = synapse.url;

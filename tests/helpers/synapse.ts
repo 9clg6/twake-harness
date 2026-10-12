@@ -94,6 +94,28 @@ function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+// The host Synapse and the broker use to call the app service back. `host.docker.internal` by
+// default, which the containers resolve to `host-gateway`, the Docker host's own address, as the
+// suites have always done, and as CI and a plain `docker run` expect. Where the app service is
+// itself a container on the same Docker host, that address names the host, not the service: set
+// this to an address the test containers reach it on, such as the service's address on the
+// default Docker bridge.
+export function callbackHost(): string {
+	return process.env['HARNESS_CALLBACK_HOST'] ?? 'host.docker.internal';
+}
+
+// The extra host entries the test containers need: `host.docker.internal` resolves on the host to
+// the address the callback host names, `host-gateway` unless overridden.
+function callbackExtraHosts(): { host: string; ipAddress: string }[] {
+	const override = process.env['HARNESS_CALLBACK_HOST_ADDRESS'];
+	return [
+		{
+			host: 'host.docker.internal',
+			ipAddress: override === undefined || override === '' ? 'host-gateway' : override
+		}
+	];
+}
+
 const GENEROUS = { per_second: 1000, burst_count: 1000 };
 
 // A real Synapse, configured with the harness registration, that pushes to this host.
@@ -167,14 +189,15 @@ export async function startTestSynapse(
 	});
 	await writeFile(configPath, dump(config));
 	await writeFile(join(dir, 'harness.yaml'), dump(registration.file));
-	const container: StartedTestContainer = await new GenericContainer(IMAGE)
+	const builder = new GenericContainer(IMAGE)
 		.withEnvironment(hostIdentity())
 		.withBindMounts([{ source: dir, target: '/data' }])
 		.withExposedPorts(8008)
-		.withExtraHosts([{ host: 'host.docker.internal', ipAddress: 'host-gateway' }])
+		.withExtraHosts(callbackExtraHosts());
+	const started: StartedTestContainer = await builder
 		.withWaitStrategy(Wait.forHttp('/_matrix/client/versions', 8008))
 		.start();
-	const url = `http://${container.getHost()}:${container.getMappedPort(8008)}`;
+	const url = `http://${started.getHost()}:${started.getMappedPort(8008)}`;
 
 	async function request(
 		user: MatrixUser | null,
@@ -393,7 +416,7 @@ export async function startTestSynapse(
 		whoami,
 		logs: async () => {
 			// The log stream follows the container and never ends: read what is there, then let go
-			const stream = await container.logs();
+			const stream = await started.logs();
 			const chunks: string[] = [];
 			await new Promise<void>((resolve) => {
 				const done = (): void => {
@@ -411,7 +434,7 @@ export async function startTestSynapse(
 			return chunks.join('');
 		},
 		stop: async () => {
-			await container.stop();
+			await started.stop();
 		}
 	};
 }
