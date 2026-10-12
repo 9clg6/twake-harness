@@ -46,6 +46,9 @@ export const DEFAULT_LEASE_MS = 15 * 60 * 1000;
 
 export interface JobWorker {
 	stop(): Promise<void>;
+	// Runs one job through the worker's own handler, without claiming it: a test driving the deferral
+	// of a job by hand, so that how many passes it takes never depends on the host's speed
+	pass(job: Job): Promise<void>;
 }
 
 // Polls the queue and runs jobs up to a concurrency; a failing job is tried again after the waits of
@@ -118,6 +121,7 @@ export function startJobWorker(options: JobWorkerOptions): JobWorker {
 			if (timer !== null) clearTimeout(timer);
 			if (polling !== null) await polling;
 			await Promise.allSettled([...inflight]);
-		}
+		},
+		pass: runOne
 	};
 }

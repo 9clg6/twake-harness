@@ -602,7 +602,12 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			jobLog.info({ owner, pendingCallId: result.pendingCallId }, 'suggestion asks for consent');
 			await sendSuggestionQuestion(owner, result);
 		}
-		if (result.kind === 'asked' || result.kind === 'waiting' || result.kind === 'availability') {
+		if (
+			result.kind === 'asked' ||
+			result.kind === 'waiting' ||
+			result.kind === 'availability' ||
+			result.kind === 'retry'
+		) {
 			return { retryInMs: Math.min(SUGGEST_RECHECK_MS, leftMs) };
 		}
 		if (result.kind !== 'proposed') {
