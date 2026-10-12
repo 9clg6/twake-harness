@@ -25,9 +25,20 @@ import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js'
 import type { BriefMarker } from '../matrix/brief.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
 import { spentForTheDay, type Refusal, type RefusalReason } from './admission.js';
+import { SYSTEM_CLOCK, type Clock } from './clock.js';
 import { invitationSchema } from './invitation.js';
 import { matrixUserIdOfPrincipal } from '../principals/identity.js';
-import { availabilityPayloadSchema } from '../suggestions/availability.js';
+import {
+	answerAvailabilityRequest,
+	availabilityPayloadSchema,
+	findAvailabilityRequest,
+	NO_AVAILABILITY_ANSWER,
+	type AvailabilityPayload
+} from '../suggestions/availability.js';
+import {
+	AVAILABILITY_SHARING_CALL,
+	hasRefusedAvailabilitySharing
+} from '../suggestions/sharing.js';
 import {
 	suggestPayloadSchema,
 	SUGGEST_MAX_AGE_MS,
@@ -163,11 +174,15 @@ export interface TurnWorkerOptions {
 	readonly pollIntervalMs?: number;
 	// How many turns this replica runs at once
 	readonly concurrency?: number;
+	// The present the worker reads for the windows of a suggestion and of the question about sharing
+	// an invitee's availability, set by a test instead of the system clock
+	readonly clock?: Clock;
 }
 
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	const { db, agent, log, locale, turn, requestLifetimeMs } = options;
+	const clock = options.clock ?? SYSTEM_CLOCK;
 
 	// A turn nobody can send again waits out admission refusing it: the owner asked for no event's
 	// turn, and their yes resumes a call they already allowed. It is tried again later, each time
@@ -685,6 +700,94 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		});
 	}
 
+	// The invitee's assistant answers one colleague's availability request. The first time, with no
+	// sharing and no refusal kept, the harness asked the invitee in their own room: the request stays
+	// unanswered while that question waits, and the job re-reads it within the request's window, up
+	// to ten minutes past the message. A yes lets the answer go on a later pass; once the window
+	// closes with no answer, the harness tells the invitee so, and a yes later still counts for the
+	// requests that follow.
+	async function availability(
+		payload: AvailabilityPayload,
+		jobLog: FastifyBaseLogger
+	): Promise<Deferral | null> {
+		const { owner, requestId } = payload;
+		await agent.runAvailability(payload, jobLog);
+		const pending = await withPrincipal(db, { id: owner }, async (tx) => {
+			const request = await findAvailabilityRequest(tx, requestId);
+			if (request === null) return null;
+			const call = await tx.sql<{ id: string }[]>`
+				select id from pending_calls
+				where owner = ${owner} and contract = ${AVAILABILITY_SHARING_CALL} and status = 'open'
+				order by created_at desc limit 1`;
+			const assistant = await findAssistant(tx, owner);
+			const refused = await hasRefusedAvailabilitySharing(tx, owner);
+			return { request, callId: call[0]?.id ?? null, assistant, refused };
+		});
+		if (pending === null) return null;
+		const { request, callId, assistant, refused } = pending;
+		if (request.answer !== null) return null;
+		const leftMs = request.askedAt.getTime() + SUGGEST_MAX_AGE_MS - clock.now().getTime();
+		if (leftMs <= 0) {
+			await withPrincipal(db, { id: owner }, (tx) =>
+				answerAvailabilityRequest(tx, requestId, NO_AVAILABILITY_ANSWER)
+			);
+			// What the invitee reads once no answer came: their sharing was not granted, a yes later
+			// still counts, and they can allow it on the agreements page
+			if (assistant?.roomId !== null && assistant !== null) {
+				const { suggestions } = await fetchOwnerMessages(db, owner, locale);
+				await enqueueJob(db, {
+					kind: 'send',
+					payload: {
+						asUserId: assistant.userId,
+						roomId: assistant.roomId,
+						text: suggestions.availabilitySharing.noAnswer
+					} satisfies SendPayload,
+					dedupKey: `send:availability-no-answer:${requestId}`,
+					groupKey: `send:${assistant.roomId}`
+				});
+			}
+			jobLog.info({ owner, requestId }, 'availability unanswered: window over');
+			return null;
+		}
+		// The question about the sharing the harness just asked, or one still waiting from an earlier
+		// pass: it goes to the invitee's room, and the job waits for their answer. A question already
+		// sent for this call is not sent again: the job's later passes only wait for the answer.
+		if (callId !== null && assistant?.roomId !== null && assistant !== null) {
+			const call = await withPrincipal(db, { id: owner }, (tx) =>
+				findPendingCall(tx, owner, callId)
+			);
+			const alreadySent = await withPrincipal(db, { id: owner }, async (tx) => {
+				const rows = await tx.sql`
+					select 1 from pending_calls where id = ${callId} and request_event_id is not null`;
+				return rows.length > 0;
+			});
+			if (alreadySent) return { retryInMs: Math.min(SUGGEST_RECHECK_MS, leftMs) };
+			const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+			const text = call?.request ?? '';
+			await enqueueJob(db, {
+				kind: 'send',
+				payload: {
+					asUserId: assistant.userId,
+					roomId: assistant.roomId,
+					text,
+					request: { pendingCallId: callId, owner },
+					...(questionMarker === null ? {} : { questionMarker })
+				} satisfies SendPayload,
+				dedupKey: `send:availability-sharing:${callId}`,
+				groupKey: `send:${assistant.roomId}`
+			});
+		}
+		// A refusal the invitee just kept: the request is theirs to answer no more, and the organizer
+		// falls back on their own calendar
+		if (refused && callId === null) {
+			await withPrincipal(db, { id: owner }, (tx) =>
+				answerAvailabilityRequest(tx, requestId, NO_AVAILABILITY_ANSWER)
+			);
+			return null;
+		}
+		return { retryInMs: Math.min(SUGGEST_RECHECK_MS, leftMs) };
+	}
+
 	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
 	// a message of its own, marked as the brief of its date, or the question it gave way to, about
 	// their permission or the reads of their first brief, marked as a question, or what it says once
@@ -771,7 +874,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 					return null;
 				}
 				try {
-					await agent.runAvailability(asked.data, log);
+					return await availability(asked.data, log.child({ reqId: `availability:${job.id}` }));
 				} catch (err: unknown) {
 					log.warn(
 						{ job: job.id, reason: err instanceof Error ? err.name : 'error' },

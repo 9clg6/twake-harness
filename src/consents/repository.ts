@@ -1,7 +1,16 @@
 import { isStringArray, readJsonColumn, type Tx } from '../db/client.js';
 import type { TurnOrigin } from '../agent/tools.js';
 import type { YesNoQuestion } from '../matrix/questions.js';
-import type { ConsentLevel, ConsentSource, WaitReason } from './consent.js';
+import {
+	clearAvailabilitySharingRefusal,
+	refuseAvailabilitySharing
+} from '../suggestions/sharing.js';
+import {
+	AVAILABILITY_DOMAIN,
+	type ConsentLevel,
+	type ConsentSource,
+	type WaitReason
+} from './consent.js';
 
 export async function hasConsent(
 	tx: Tx,
@@ -15,7 +24,8 @@ export async function hasConsent(
 }
 
 // Resolves to whether the owner had not allowed it yet: a consent already given keeps when and how
-// it was given
+// it was given. Letting the assistant share their availability with colleagues, which the harness
+// asks about like any application, erases the refusal they may have kept of that question.
 export async function grantConsent(
 	tx: Tx,
 	owner: string,
@@ -27,6 +37,7 @@ export async function grantConsent(
 		insert into consents (owner, domain, level, granted_by)
 		values (${owner}, ${domain}, ${level}, ${source})
 		on conflict do nothing`;
+	if (domain === AVAILABILITY_DOMAIN) await clearAvailabilitySharingRefusal(tx, owner);
 	return result.count === 1;
 }
 
@@ -70,7 +81,9 @@ export interface Withdrawal {
 // still wait for the owner's answer, or that the owner allowed and that have not run yet, close
 // with it, as an older question closes when a newer one is asked, and what they would have sent is
 // erased, with the digest of what the owner was shown: nothing runs there after the withdrawal
-// unless the owner allows it again.
+// unless the owner allows it again. Taking back the sharing of their availability with colleagues
+// keeps their refusal of it: the harness asks them nothing more, and they grant it again on the
+// agreements page.
 export async function withdrawConsents(
 	tx: Tx,
 	owner: string,
@@ -87,6 +100,9 @@ export async function withdrawConsents(
 		where owner = ${owner} and domain = ${domain} and level in ${tx.sql([...levels])}
 			and (status = 'open' or (status = 'approved' and replayed_at is null))
 		returning id, domain, level, reasons`;
+	if (domain === AVAILABILITY_DOMAIN && withdrawn.length > 0) {
+		await refuseAvailabilitySharing(tx, owner);
+	}
 	return {
 		levels: withdrawn.map((row) => row.level).sort(),
 		superseded: closedRequests(superseded)
@@ -340,15 +356,25 @@ export async function decidePendingCall(
 	decision: 'approved' | 'refused',
 	answerEventId: string
 ): Promise<boolean> {
-	const result = await tx.sql`
+	const result = await tx.sql<{ domain: string }[]>`
 		update pending_calls set status = ${decision}, decided_at = coalesce(decided_at, now()),
 			answer_event_id = ${answerEventId},
 			arguments = case when ${decision} = 'refused' then null else arguments end,
 			request_text = case when ${decision} = 'refused' then null else request_text end,
 			preview_digest = case when ${decision} = 'refused' then null else preview_digest end
 		where id = ${id} and owner = ${owner}
-			and (status = 'open' or (status = ${decision} and answer_event_id is null))`;
-	return result.count === 1;
+			and (status = 'open' or (status = ${decision} and answer_event_id is null))
+		returning domain`;
+	// A no to the question about sharing their availability is the refusal the harness keeps: it
+	// asks them nothing more, and they grant it again on the agreements page
+	if (
+		decision === 'refused' &&
+		result[0]?.domain === AVAILABILITY_DOMAIN &&
+		(await hasConsent(tx, owner, AVAILABILITY_DOMAIN, 'read')) === false
+	) {
+		await refuseAvailabilitySharing(tx, owner);
+	}
+	return result.length === 1;
 }
 
 // The owner's answer through the API to a call still waiting, recorded under an id of its own:
@@ -363,14 +389,23 @@ export async function answerPendingCall(
 	decision: 'approved' | 'refused',
 	answerId: string
 ): Promise<boolean> {
-	const result = await tx.sql`
+	const result = await tx.sql<{ domain: string }[]>`
 		update pending_calls set status = ${decision}, decided_at = now(),
 			answer_event_id = ${answerId},
 			arguments = case when ${decision} = 'refused' then null else arguments end,
 			request_text = case when ${decision} = 'refused' then null else request_text end,
 			preview_digest = case when ${decision} = 'refused' then null else preview_digest end
-		where id = ${id} and owner = ${owner} and status = 'open'`;
-	return result.count === 1;
+		where id = ${id} and owner = ${owner} and status = 'open'
+		returning domain`;
+	// As in the chat: a no to the question about sharing their availability keeps the refusal
+	if (
+		decision === 'refused' &&
+		result[0]?.domain === AVAILABILITY_DOMAIN &&
+		(await hasConsent(tx, owner, AVAILABILITY_DOMAIN, 'read')) === false
+	) {
+		await refuseAvailabilitySharing(tx, owner);
+	}
+	return result.length === 1;
 }
 
 // The event by which the owner answered a request already closed, kept so that, delivered again,

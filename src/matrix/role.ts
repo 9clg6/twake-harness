@@ -520,7 +520,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 
 	// Suggestions from the messages of the channels the listener is in
-	const suggestions = makeSuggestionIntake({ config, db, log });
+	const suggestions = makeSuggestionIntake({
+		config,
+		db,
+		log,
+		now: () => clock.now().getTime()
+	});
 
 	// The one visible user that reads the channels it is invited to (see Suggestions in the README)
 	const listener = makeChannelListener({
