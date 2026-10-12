@@ -7,7 +7,9 @@ import { isRecord } from '../matrix/json.js';
 // the share of it their assistant spends on its own, was spent, failed otherwise; capped when the
 // owner's hourly cap held it back, and for_brief when it called for no word at once, such as a task
 // they assigned themselves, both with no turn; quiet_hours when it reached them during their quiet
-// hours, until it wakes them as they end, woken then, unless their brief names it first
+// hours, until it wakes them as they end, woken then, unless their brief names it first; and, for an
+// availability request the invitee's assistant took without a turn, answered once it offered the
+// organizer candidate slots, not_shared once it offered none
 export type ActivityOutcome =
 	| 'woken'
 	| 'suggested'
@@ -17,13 +19,20 @@ export type ActivityOutcome =
 	| 'failed'
 	| 'capped'
 	| 'for_brief'
-	| 'quiet_hours';
+	| 'quiet_hours'
+	| 'answered'
+	| 'not_shared';
 
-// The outcomes the turn an activity woke ends on
+// The outcomes the turn an activity woke ends on, which never include those an availability request
+// leaves, noted without any turn of the invitee's own
 export type WokenTurnOutcome = Exclude<
 	ActivityOutcome,
-	'woken' | 'capped' | 'for_brief' | 'quiet_hours'
+	'woken' | 'capped' | 'for_brief' | 'quiet_hours' | 'answered' | 'not_shared'
 >;
+
+// The outcomes an availability request leaves in the invitee's journal, which their own assistant
+// notes without a turn
+export type AvailabilityJournalOutcome = 'answered' | 'not_shared';
 
 // Something as the model is shown it: what its source computed, apart from what people wrote,
 // which is data, never instructions
