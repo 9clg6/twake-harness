@@ -32,6 +32,7 @@ import {
 	answerAvailabilityRequest,
 	availabilityPayloadSchema,
 	findAvailabilityRequest,
+	findAvailabilityRequestFor,
 	NO_AVAILABILITY_ANSWER,
 	type AvailabilityPayload
 } from '../suggestions/availability.js';
@@ -585,10 +586,22 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			jobLog.info({ owner }, 'suggestion dropped: off');
 			return null;
 		}
-		const leftMs = payload.at + SUGGEST_MAX_AGE_MS - Date.now();
+		const leftMs = payload.at + SUGGEST_MAX_AGE_MS - clock.now().getTime();
+		// Past the window, a suggestion whose message already made an availability request still runs
+		// once: that is the pass that reads the invitee's answer, or their silence, and falls back on
+		// the owner's own calendar. Dropping it here would leave the owner with nothing, which is the
+		// silence this whole flow exists to avoid. Any other expired suggestion is dropped as before.
 		if (leftMs < 0) {
-			jobLog.info({ owner }, 'suggestion dropped: too old');
-			return null;
+			const armed =
+				payload.listened === true
+					? await withPrincipal(db, { id: owner }, (tx) =>
+							findAvailabilityRequestFor(tx, owner, roomId, payload.eventId)
+						)
+					: null;
+			if (armed === null) {
+				jobLog.info({ owner }, 'suggestion dropped: too old');
+				return null;
+			}
 		}
 		const skip = await withPrincipal(db, { id: owner }, (tx) =>
 			mayReceive(tx, owner, roomId, attempt)
