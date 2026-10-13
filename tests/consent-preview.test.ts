@@ -665,8 +665,10 @@ describe('my assistant shows me what the application says an action would do bef
 			const seen = requests().length;
 			const notAsked = r.saying('Not asked:').length;
 			await r.client.sendText(r.room, 'Send Paul the Q4 budget');
+			// Below the model's words, the harness says itself that the write was not done
 			const told: unknown = JSON.parse(
-				(await r.nextSaying('Not asked:', notAsked)).slice('Not asked: '.length)
+				(await r.nextSaying('Not asked:', notAsked)).slice('Not asked: '.length).split('\n\n')[0] ??
+					''
 			);
 			expect(told).toMatchObject({ error });
 			// Whatever it reads, the model is never told that the call was not made
@@ -678,7 +680,13 @@ describe('my assistant shows me what the application says an action would do bef
 		const [refused, unanswered] = r
 			.saying('Not asked:')
 			.slice(-2)
-			.map((m) => JSON.parse(m.body.slice('Not asked: '.length)) as Record<string, unknown>);
+			.map(
+				(m) =>
+					JSON.parse(m.body.slice('Not asked: '.length).split('\n\n')[0] ?? '') as Record<
+						string,
+						unknown
+					>
+			);
 		expect(refused).toMatchObject({ answer: { status: 503, body: { error: 'unavailable' } } });
 		expect(String(unanswered?.['hint'])).toContain('unknown');
 		// Its operator reads why, never what the application answered

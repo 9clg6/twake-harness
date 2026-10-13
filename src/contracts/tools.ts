@@ -199,7 +199,10 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			reasons.push('consent');
 		}
 		if (contract.level === 'write' && context.origin === 'event') reasons.push('event_turn');
-		if (contract.risk === 'high') reasons.push('high_risk');
+		// A write the harness is not sure its owner asked for is asked about like a high-risk one
+		if (contract.risk === 'high' || (contract.level === 'write' && context.askOwner === true)) {
+			reasons.push('high_risk');
+		}
 		return reasons;
 	}
 
@@ -310,6 +313,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		previewDigest: string | null,
 		locale: Locale
 	): Promise<ToolOutcome> {
+		if (context.unasked === true) return { result: { error: 'owner not asked' }, denied: true };
 		const application = labelOf(
 			deps.domains,
 			contract.domain,
@@ -369,6 +373,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 		context: ToolContext,
 		reasons: readonly WaitReason[]
 	): Promise<ToolOutcome> {
+		if (context.unasked === true) return { result: { error: 'owner not asked' }, denied: true };
 		const owner = context.principalId;
 		// The question names the application as the catalog does in its owner's language, and says
 		// what the level covers there

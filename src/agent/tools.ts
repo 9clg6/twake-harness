@@ -87,6 +87,12 @@ export interface ToolContext {
 	// For that call, when its contract showed them what it would do: the digest of that preview,
 	// which the call carries so that its contract refuses it should what it acts on have changed
 	readonly previewDigest?: string;
+	// A read the harness makes for itself, to check an answer: it asks its owner nothing, so a call
+	// that would wait for them does nothing instead
+	readonly unasked?: boolean;
+	// A write the harness is not sure its owner asked for: it waits for their yes, whatever they
+	// allowed before
+	readonly askOwner?: boolean;
 }
 
 export interface Tool {

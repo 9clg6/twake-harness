@@ -279,9 +279,12 @@ describe('my assistant acts on what arrives for me only on my yes, and asks me w
 		// assistant tells me how it went
 		const told = r.saying('Accepted:').length;
 		await r.client.react(r.room, request.eventId, '✅');
-		expect(await r.nextSaying('Accepted:', told)).toBe(
-			'Accepted: {"status":200,"body":{"event_id":"evt-free","uid":"uid-evt-free","partstat":"ACCEPTED"}}'
-		);
+		// Below the model's words, the harness says itself what was done, from the contract's answer
+		const said = await r.nextSaying('Accepted:', told);
+		expect(said.split('\n\nDone:\n- ')).toEqual([
+			'Accepted: {"status":200,"body":{"event_id":"evt-free","uid":"uid-evt-free","partstat":"ACCEPTED"}}',
+			expect.any(String)
+		]);
 		const accepted = r.h.apisix.contracts.calls.filter((c) => c.method === 'POST');
 		expect(accepted).toHaveLength(1);
 		expect(accepted[0]?.path).toBe('/contracts/v1/calendar/invitations/evt-free/accept');

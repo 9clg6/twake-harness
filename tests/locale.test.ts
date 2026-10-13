@@ -236,7 +236,9 @@ describe('a deployment that speaks French', () => {
 		);
 		expect(h.apisix.contracts.calls).toHaveLength(0);
 		await client.sendText(assistantRoom, 'oui');
-		await client.waitForMessage(assistantRoom, assistantId, (t) => t === 'Envoyé.');
+		await client.waitForMessage(assistantRoom, assistantId, (t) =>
+			t.startsWith('Envoyé.\n\nFait :\n- Twake Mail – envoyer et ranger tes mails')
+		);
 		expect(h.apisix.contracts.calls).toHaveLength(1);
 		// The next one asks again, for that mail alone
 		await client.sendText(assistantRoom, 'Envoie le budget à Anna');
@@ -328,7 +330,9 @@ describe('a deployment that speaks French', () => {
 		);
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(0);
 		await client.sendText(assistantRoom, 'oui');
-		await client.waitForMessage(assistantRoom, assistantId, (t) => t === 'Acceptée.');
+		await client.waitForMessage(assistantRoom, assistantId, (t) =>
+			t.startsWith('Acceptée.\n\nFait :\n- ')
+		);
 		expect(h.apisix.contracts.calls.filter((c) => c.method === 'POST')).toHaveLength(1);
 		// The next invitation's acceptance asks again, for that acceptance alone
 		const next = await invite('evt-fr-next');

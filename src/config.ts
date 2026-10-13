@@ -25,6 +25,11 @@ export interface Config {
 	};
 	readonly llm: {
 		readonly model: string;
+		// The model that checks an answer sentence by sentence: a fast one, since the owner waits
+		readonly checkModel: string;
+		// The decision model that sorts, in a fraction of a second, the answers worth that check;
+		// empty when the gateway serves none, and every such answer is checked
+		readonly sortModel: string;
 		readonly maxTokens: number;
 		readonly timeoutMs: number;
 	};
@@ -33,6 +38,8 @@ export interface Config {
 		readonly memoryNudgeInterval: number;
 		// The most characters of past conversation a turn shows the model
 		readonly historyMaxChars: number;
+		// Whether the model may plan a request in steps, which the harness then holds it to
+		readonly planning: boolean;
 	};
 	readonly curation: {
 		readonly intervalMs: number;
@@ -125,10 +132,13 @@ const envSchema = z.object({
 	APISIX_BASE_URL: z.url(),
 	APISIX_CONSUMER_KEY: z.string().min(1),
 	LLM_MODEL: z.string().min(1).default('qwen3.8'),
+	LLM_CHECK_MODEL: z.string().default(''),
+	LLM_SORT_MODEL: z.string().default(''),
 	// Reasoning models spend part of it deliberating before they write the answer
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
+	TURN_PLANNING: z.enum(['true', 'false']).default('true'),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
 	// 24,000 characters is about 6,000 to 8,000 tokens at 3 to 4 characters a token: in a 32K-token
 	// context it leaves room for the system prompt and its memory, the tool definitions, the turn's own
@@ -238,13 +248,16 @@ export function loadConfig(env: Env): Config {
 		},
 		llm: {
 			model: values.LLM_MODEL,
+			checkModel: values.LLM_CHECK_MODEL.length > 0 ? values.LLM_CHECK_MODEL : values.LLM_MODEL,
+			sortModel: values.LLM_SORT_MODEL,
 			maxTokens: values.LLM_MAX_TOKENS,
 			timeoutMs: values.LLM_TIMEOUT_MS
 		},
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
-			historyMaxChars: values.TURN_HISTORY_MAX_CHARS
+			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,
+			planning: values.TURN_PLANNING === 'true'
 		},
 		curation: {
 			intervalMs: values.CURATION_INTERVAL_MS

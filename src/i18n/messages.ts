@@ -55,6 +55,12 @@ export interface Messages {
 		// A turn that ran all the tool calls one message may, whose model then wrote no words for its
 		// owner: the actions it did, and how to have it carry on
 		callLimit(actions: number): string;
+		// The steps of its plan a turn left undone, as the model wrote them, below its answer
+		stepsUndone(steps: readonly string[]): string;
+		// What a turn did for its owner in an application, as the results of its calls tell it
+		stepsDone(steps: readonly string[]): string;
+		// Below an answer that says something was done, in a turn that did nothing in an application
+		readonly nothingDone: string;
 	};
 	// What the harness itself asks the owner when a contract call waits for them: never words
 	// of the model, so that nothing a third party wrote can phrase or answer it
@@ -193,7 +199,11 @@ const ENGLISH: Messages = {
 			'My identity is back from the escrow. Messages encrypted for my lost device stay unreadable until their keys are restored; everything from now on is fine.',
 		noEscrow: 'I found no escrow to recover from; my identity is new from here on.',
 		callLimit: (actions) =>
-			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`
+			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`,
+		stepsUndone: (steps) =>
+			`Not done, of what I had planned:\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		stepsDone: (steps) => `Done:\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		nothingDone: 'Nothing was done in your applications for this message.'
 	},
 	consent: {
 		firstRead: (application, covers, shown) =>
@@ -325,7 +335,11 @@ const FRENCH: Messages = {
 			"Je n'ai trouvé aucun séquestre d'où restaurer mon identité ; elle est nouvelle à partir de maintenant.",
 		// One action, or none, is singular in French
 		callLimit: (actions) =>
-			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`
+			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`,
+		stepsUndone: (steps) =>
+			`Pas fait, parmi ce que j'avais prévu :\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		stepsDone: (steps) => `Fait :\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		nothingDone: "Rien n'a été fait dans tes applications pour ce message."
 	},
 	consent: {
 		firstRead: (application, covers, shown) =>

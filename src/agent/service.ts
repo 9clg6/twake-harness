@@ -1,9 +1,11 @@
+import { Annotation, END, START, StateGraph } from '@langchain/langgraph';
 import type { FastifyBaseLogger } from 'fastify';
 
 import { localeOf } from '../assistants/locale.js';
 import { findAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
+import { labelOf } from '../contracts/domains.js';
 import { replayOutcome, type ConsentMetrics } from '../consents/metrics.js';
 import {
 	approvePendingCall,
@@ -15,7 +17,7 @@ import {
 } from '../consents/repository.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
 import { withPrincipal, type Db } from '../db/client.js';
-import { getMessages, type Messages } from '../i18n/messages.js';
+import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
 import { LlmError, makeLlmClient, type LlmClient, type LlmMessage } from '../llm/client.js';
 import { listMemory } from '../memory/repository.js';
@@ -33,7 +35,7 @@ import { describeMoment, SYSTEM_CLOCK, type Clock } from './clock.js';
 import { makeTurnGate, type TurnGate } from './gate.js';
 import { checkInvitation, isInvitationEvent, type ToolRunner } from './invitation.js';
 import { assistantPrompt, DEFAULT_SYSTEM_PROMPT, organizationPrompt } from './persona.js';
-import { buildSystemPrompt } from './prompt.js';
+import { buildSystemPrompt, type PromptInput } from './prompt.js';
 import { listSkills } from '../skills/repository.js';
 import {
 	clarifyTool,
@@ -61,12 +63,15 @@ import {
 } from './tools.js';
 
 export type { TurnOrigin } from './tools.js';
-import { runTurn, TurnError } from './turn.js';
+import { runTurn, TurnError, type TurnOutput } from './turn.js';
 
 export type SessionTarget =
 	| { readonly kind: 'new' }
 	| { readonly kind: 'id'; readonly id: string }
 	| { readonly kind: 'room'; readonly roomId: string };
+
+// The contract that lists the events the platform holds of an owner, as the catalog names it
+const OWNER_EVENTS_TOOL = 'list_events';
 
 // What a turn an event started may not do, whatever its owner may: change how the assistant speaks
 // to its owner, keep a note or a skill proposal that later turns would read as the assistant's own,
@@ -197,6 +202,42 @@ export type OwnerTurnResult =
 	| { readonly kind: 'decided' }
 	| { readonly kind: 'busy'; readonly reason: RefusalReason }
 	| { readonly kind: 'failed'; readonly error: string };
+
+// What the turn's first step settled: its session, the rights of its principal, the call its owner
+// allowed when it resumes from one, and the language its owner reads
+interface Opened {
+	readonly session: SessionRecord;
+	readonly actions: readonly string[];
+	readonly approved: ApprovedCall | null;
+	readonly locale: Locale;
+}
+
+// What every later step of a turn works with
+interface Ready {
+	readonly messages: Messages;
+	readonly memory: PromptInput['memory'];
+	readonly skills: NonNullable<PromptInput['skills']>;
+	readonly log: FastifyBaseLogger;
+	readonly context: ToolContext;
+}
+
+// What an admitted turn carries from one step of its graph to the next. A step reads only what the
+// steps before it left.
+const OwnerTurnState = Annotation.Root({
+	opened: Annotation<Opened>(),
+	ready: Annotation<Ready>(),
+	// What the model is told, or null when the turn goes on from its history
+	message: Annotation<string | null>(),
+	history: Annotation<readonly LlmMessage[]>(),
+	// The actions the turn did before the model spoke
+	actionsBefore: Annotation<number>(),
+	turn: Annotation<TurnOutput>(),
+	// What the turn answers its caller, once a step ended it
+	result: Annotation<OwnerTurnResult | null>()
+});
+
+type OwnerTurnStep = typeof OwnerTurnState.State;
+type OwnerTurnUpdate = typeof OwnerTurnState.Update;
 
 export interface AgentService {
 	readonly llm: LlmClient;
@@ -473,10 +514,15 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		}
 	}
 
+	// One admitted turn, as a graph the harness walks: its rights and its session are settled, what
+	// the model reads is gathered, an invitation is checked, the call its owner allowed is run as
+	// frozen, the model takes its turn, and the conversation is saved. Any step may end the turn
+	// with its result: a turn refused, a question or a notice of the harness to the owner.
 	async function runAdmittedTurn(input: OwnerTurnInput): Promise<OwnerTurnResult> {
 		const { principal, target } = input;
-		{
-			// A short transaction settles rights and the session; the model call runs outside it.
+
+		// A short transaction settles rights and the session; the model call runs outside it.
+		async function open(): Promise<OwnerTurnUpdate> {
 			const opened = await withPrincipal(db, principal, async (tx) => {
 				const record = await ensurePrincipal(tx, principal);
 				if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
@@ -509,18 +555,21 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					? { kind: 'missing' as const }
 					: { kind: 'ok' as const, session, actions: record.actions, approved, locale };
 			});
-			if (opened.kind !== 'ok') return opened;
-			const { session, approved, locale } = opened;
-			const messages = getMessages(locale);
+			return opened.kind === 'ok' ? { opened } : { result: opened };
+		}
+
+		// What the turn may do and what its model reads, beside the conversation
+		async function prepare(state: OwnerTurnStep): Promise<OwnerTurnUpdate> {
+			const { session, approved, locale } = state.opened;
 			// A resumed turn may do no more than the turn that froze its call. Resumed from a call that
 			// a turn an event started prepared, it is still that event's: the owner's yes runs that
 			// call alone, and any other write it prepares waits for them again.
 			const origin = approved?.origin ?? input.origin;
 			const withheld =
 				origin === 'event'
-					? opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
+					? state.opened.actions.filter((action) => WITHHELD_FROM_EVENT_TURNS.includes(action))
 					: [];
-			const actions = opened.actions.filter((action) => !withheld.includes(action));
+			const actions = state.opened.actions.filter((action) => !withheld.includes(action));
 			const memory = actions.includes('memory.read_own')
 				? await withPrincipal(db, principal, (tx) => listMemory(tx, principal.id))
 				: { memory: [], user: [] };
@@ -541,96 +590,152 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				sessionId: session.id,
 				log
 			};
+			return {
+				ready: { messages: getMessages(locale), memory, skills, log, context },
+				history: session.messages
+			};
+		}
+
+		// What the model is told, or the harness's question when a read made before it speaks waits
+		// for the owner
+		async function tell(state: OwnerTurnStep): Promise<OwnerTurnUpdate> {
+			const { session, approved } = state.opened;
+			const { messages, log, context } = state.ready;
 			// A resumed turn has no new message: it goes on from the call its owner allowed
 			const told: Told =
 				approved === null
 					? await messageFor(input, context, log, messages)
 					: { message: null, question: null };
 			log.info({ messageLength: told.message?.length ?? 0 }, 'turn started');
-			if (told.question !== null) {
-				// The conversation keeps what the model would have been told, for the turn the
-				// owner's answer resumes
-				const asked: LlmMessage[] = [
-					...session.messages,
-					{ role: 'user', content: told.message },
-					{ role: 'assistant', content: told.question.kept }
-				];
-				const saved = await withPrincipal(db, principal, (tx) =>
-					saveSessionMessages(tx, session.id, asked)
-				);
-				if (!saved) return { kind: 'missing' };
-				const { pendingCallId, request } = told.question;
-				log.info({ pendingCallId }, 'turn stopped on a question to the owner');
-				return {
+			if (told.question === null) return { message: told.message };
+			// The conversation keeps what the model would have been told, for the turn the
+			// owner's answer resumes
+			const asked: LlmMessage[] = [
+				...session.messages,
+				{ role: 'user', content: told.message },
+				{ role: 'assistant', content: told.question.kept }
+			];
+			const saved = await withPrincipal(db, principal, (tx) =>
+				saveSessionMessages(tx, session.id, asked)
+			);
+			if (!saved) return { result: { kind: 'missing' } };
+			const { pendingCallId, request } = told.question;
+			log.info({ pendingCallId }, 'turn stopped on a question to the owner');
+			return {
+				result: {
 					kind: 'ok',
 					sessionId: session.id,
 					answer: told.question.text,
 					model: llm.model,
 					pendingCallId,
 					...(request === null ? {} : { request })
-				};
-			}
-			// Read at the start of every turn, never kept: a session can span days
-			const moment = describeMoment(clock.now(), config.timeZone, locale);
-			let history: readonly LlmMessage[] = session.messages;
-			// The call its owner allowed counts among the actions of the turn it resumes
-			let actionsBefore = 0;
-			if (approved !== null && input.resume !== undefined) {
-				const { pendingCallId } = input.resume;
-				const replayed = await replay(approved, pendingCallId, context, log, messages.consent);
-				if (replayed.ran) actionsBefore = 1;
-				// A call that waits for its owner again ends the turn on the harness's new question,
-				// which the conversation keeps as the assistant's answer: the owner's next yes tries it
-				// once more, never the model
-				const newQuestion = replayed.question;
-				// A call that did not run as its owner allowed it ends the turn on the harness's own
-				// notice: the owner learns it from the harness, never from the model, which reads the
-				// call, its result and the notice in the conversation
-				const { notice } = replayed;
-				history = [
-					...history,
-					...replayed.messages,
-					...(newQuestion === null
-						? []
-						: [{ role: 'assistant' as const, content: newQuestion.kept }]),
-					...(notice === null ? [] : [{ role: 'assistant' as const, content: notice }])
-				];
-				// The conversation holds the call at once, whatever happens to the rest of the turn. A
-				// call that waits again is not stamped as run: the newer request supersedes the one
-				// answered.
-				const kept = history;
-				await withPrincipal(db, principal, async (tx) => {
-					await saveSessionMessages(tx, session.id, kept);
-					if (newQuestion === null) await markReplayed(tx, pendingCallId);
-					else await supersedeApprovedCall(tx, principal.id, pendingCallId);
-				});
-				if (newQuestion !== null) {
-					log.info(
-						{ pendingCallId: newQuestion.pendingCallId },
-						'turn stopped on a question to the owner'
-					);
-					return {
+				}
+			};
+		}
+
+		// Runs the call its owner allowed, which counts among the actions of the turn it resumes
+		async function replayAllowed(state: OwnerTurnStep): Promise<OwnerTurnUpdate> {
+			const { session, approved } = state.opened;
+			const { messages, log, context } = state.ready;
+			if (approved === null || input.resume === undefined) return {};
+			const { pendingCallId } = input.resume;
+			const replayed = await replay(approved, pendingCallId, context, log, messages.consent);
+			// A call that waits for its owner again ends the turn on the harness's new question,
+			// which the conversation keeps as the assistant's answer: the owner's next yes tries it
+			// once more, never the model
+			const newQuestion = replayed.question;
+			// A call that did not run as its owner allowed it ends the turn on the harness's own
+			// notice: the owner learns it from the harness, never from the model, which reads the
+			// call, its result and the notice in the conversation
+			const { notice } = replayed;
+			const history: LlmMessage[] = [
+				...state.history,
+				...replayed.messages,
+				...(newQuestion === null
+					? []
+					: [{ role: 'assistant' as const, content: newQuestion.kept }]),
+				...(notice === null ? [] : [{ role: 'assistant' as const, content: notice }])
+			];
+			// The conversation holds the call at once, whatever happens to the rest of the turn. A
+			// call that waits again is not stamped as run: the newer request supersedes the one
+			// answered.
+			await withPrincipal(db, principal, async (tx) => {
+				await saveSessionMessages(tx, session.id, history);
+				if (newQuestion === null) await markReplayed(tx, pendingCallId);
+				else await supersedeApprovedCall(tx, principal.id, pendingCallId);
+			});
+			const went: OwnerTurnUpdate = { history, actionsBefore: replayed.ran ? 1 : 0 };
+			if (newQuestion !== null) {
+				log.info(
+					{ pendingCallId: newQuestion.pendingCallId },
+					'turn stopped on a question to the owner'
+				);
+				return {
+					...went,
+					result: {
 						kind: 'ok',
 						sessionId: session.id,
 						answer: newQuestion.text,
 						model: llm.model,
 						pendingCallId: newQuestion.pendingCallId,
 						...(newQuestion.request === null ? {} : { request: newQuestion.request })
-					};
-				}
-				if (notice !== null) {
-					log.info({ pendingCallId }, 'turn stopped on a notice to the owner');
-					return { kind: 'ok', sessionId: session.id, answer: notice, model: llm.model };
-				}
+					}
+				};
 			}
+			if (notice !== null) {
+				log.info({ pendingCallId }, 'turn stopped on a notice to the owner');
+				return {
+					...went,
+					result: { kind: 'ok', sessionId: session.id, answer: notice, model: llm.model }
+				};
+			}
+			return went;
+		}
+
+		// The model's own turn, a graph of its own
+		async function model(state: OwnerTurnStep): Promise<OwnerTurnUpdate> {
+			const { locale } = state.opened;
+			const { messages, memory, skills, log, context } = state.ready;
+			// Read at the start of every turn, never kept: a session can span days
+			const moment = describeMoment(clock.now(), config.timeZone, locale);
+			let turn: TurnOutput;
 			try {
-				const turn = await runTurn(
+				turn = await runTurn(
 					{
 						llm,
 						tools,
 						log,
 						maxToolCalls: config.turn.maxToolCalls,
-						historyMaxChars: config.turn.historyMaxChars
+						historyMaxChars: config.turn.historyMaxChars,
+						planning: config.turn.planning,
+						checkModel: config.llm.checkModel,
+						sortModel: config.llm.sortModel,
+						capabilities: () =>
+							[...contracts.contracts]
+								.sort((a, b) => Number(a.level === 'write') - Number(b.level === 'write'))
+								.map((contract) => ({
+									name: contract.toolName,
+									description: contract.description,
+									acts: contract.level === 'write'
+								})),
+						action: (name) => {
+							const contract = contracts.contracts.find(
+								(c) => c.toolName === name && c.level === 'write'
+							);
+							if (contract === undefined) return null;
+							// In the owner's language when the catalog says what writing there covers, and else
+							// in the contract's own words
+							const label = labelOf(
+								contracts.domains,
+								contract.domain,
+								'write',
+								locale,
+								config.locale
+							);
+							return label.covers === null
+								? contract.description
+								: `${label.name} – ${label.covers}`;
+						}
 					},
 					{
 						systemPrompt: buildSystemPrompt({
@@ -652,38 +757,96 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 							moment: messages.now(moment.words, moment.iso, moment.timeZone),
 							memory,
 							skills,
-							history,
+							history: state.history,
 							nudgeInterval: config.turn.memoryNudgeInterval
 						}),
-						history,
-						message: told.message,
+						history: state.history,
+						message: state.message,
 						context,
-						actionsBefore,
-						limitNotice: (actions) => messages.notices.callLimit(actions)
+						locale,
+						timeZone: config.timeZone,
+						actionsBefore: state.actionsBefore,
+						limitNotice: (actions) => messages.notices.callLimit(actions),
+						stepsNotice: (steps) => messages.notices.stepsUndone(steps),
+						doneNotice: (steps) => messages.notices.stepsDone(steps),
+						nothingDoneNotice: () => messages.notices.nothingDone,
+						// A read of the harness's own, which asks the owner nothing: without their consent
+						// already given, or the platform's permission, it reads nothing
+						ownerEvents: async () => {
+							const tool = tools.find(OWNER_EVENTS_TOOL);
+							if (tool === null) return null;
+							const outcome = await runTool(tool, {}, { ...context, unasked: true });
+							log.info(
+								{ tool: OWNER_EVENTS_TOOL, status: toolCallStatus(outcome) },
+								'events read for a check'
+							);
+							return toolCallStatus(outcome) !== 'ok'
+								? null
+								: {
+										role: 'tool',
+										name: OWNER_EVENTS_TOOL,
+										content: JSON.stringify(outcome.result)
+									};
+						}
 					}
 				);
-				const saved = await withPrincipal(db, principal, (tx) =>
-					saveSessionMessages(tx, session.id, turn.messages)
-				);
-				if (!saved) return { kind: 'missing' };
-				await admission.recordUsage(principal.id, turn.tokens);
-				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
-				return {
+			} catch (err: unknown) {
+				if (err instanceof TurnError || err instanceof LlmError) {
+					log.error({ err }, 'turn failed');
+					return { result: { kind: 'failed', error: err.message } };
+				}
+				throw err;
+			}
+			return { turn };
+		}
+
+		async function save(state: OwnerTurnStep): Promise<OwnerTurnUpdate> {
+			const { session } = state.opened;
+			const { log } = state.ready;
+			const { turn } = state;
+			const saved = await withPrincipal(db, principal, (tx) =>
+				saveSessionMessages(tx, session.id, turn.messages)
+			);
+			if (!saved) return { result: { kind: 'missing' } };
+			await admission.recordUsage(principal.id, turn.tokens);
+			log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');
+			return {
+				result: {
 					kind: 'ok',
 					sessionId: session.id,
 					answer: turn.answer,
 					model: llm.model,
 					...(turn.pendingCallId === undefined ? {} : { pendingCallId: turn.pendingCallId }),
 					...(turn.request === undefined ? {} : { request: turn.request })
-				};
-			} catch (err: unknown) {
-				if (err instanceof TurnError || err instanceof LlmError) {
-					log.error({ err }, 'turn failed');
-					return { kind: 'failed', error: err.message };
 				}
-				throw err;
-			}
+			};
 		}
+
+		// A step that ended the turn left its result: nothing runs after it
+		const unlessEnded =
+			<Next extends string>(next: Next) =>
+			(state: OwnerTurnStep): Next | typeof END =>
+				state.result === null ? next : END;
+
+		const graph = new StateGraph(OwnerTurnState)
+			.addNode('open', open)
+			.addNode('prepare', prepare)
+			.addNode('tell', tell)
+			.addNode('replay', replayAllowed)
+			.addNode('model', model)
+			.addNode('save', save)
+			.addEdge(START, 'open')
+			.addConditionalEdges('open', unlessEnded('prepare'), ['prepare', END])
+			.addEdge('prepare', 'tell')
+			.addConditionalEdges('tell', unlessEnded('replay'), ['replay', END])
+			.addConditionalEdges('replay', unlessEnded('model'), ['model', END])
+			.addConditionalEdges('model', unlessEnded('save'), ['save', END])
+			.addEdge('save', END)
+			.compile();
+
+		const end = await graph.invoke({ actionsBefore: 0, result: null });
+		if (end.result === null) throw new Error('the turn ended without a result');
+		return end.result;
 	}
 
 	return { llm, tools, gate, contracts, admission, runOwnerTurn, runAllowedCall };

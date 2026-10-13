@@ -201,7 +201,10 @@ describe('my assistant asks again before it first writes in an application', () 
 		const res = await r.h.api.post<{ answer: string }>('erin@test.local', '/v1/chat', {
 			message: 'Accept the budget review'
 		});
-		expect(res.body.answer).toBe('Told: {"error":"access denied"}');
+		// The harness says itself, below the model's words, that the write was not done
+		expect(res.body.answer).toMatch(
+			/^Told: \{"error":"access denied"\}\n\nNot done, of what I had planned:\n- /
+		);
 		expect(r.h.apisix.contracts.calls).toHaveLength(0);
 	});
 
