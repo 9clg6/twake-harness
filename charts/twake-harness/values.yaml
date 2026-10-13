@@ -40,6 +40,10 @@ config:
   # The APISIX address the harness calls for everything: llm, matrix, openbao, contracts, audit
   apisixBaseUrl: ''
   llmModel: qwen3.8
+  # The model that checks an answer sentence by sentence, a fast one; empty means llmModel
+  llmCheckModel: ''
+  # The decision model (Jev) that sorts the answers worth that check; empty checks them all
+  llmSortModel: ''
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
   logLevel: info
@@ -66,6 +70,8 @@ config:
   turnHistoryMaxChars: ''
   # The most tool calls one turn may make before it stops. Empty means the harness default, 6
   turnMaxToolCalls: ''
+  # Whether a turn plans its steps and is held to them; false runs the model without a plan
+  turnPlanning: true
   # The organization agent, a bot of the harness answering the organization's members, named by
   # their Matrix identifiers (comma separated); its localpart lives in the assistants' namespace
   orgAgentEnabled: false

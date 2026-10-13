@@ -73,6 +73,14 @@ spec:
               value: {{ .Values.config.apisixBaseUrl | quote }}
             - name: LLM_MODEL
               value: {{ .Values.config.llmModel | quote }}
+            {{- with .Values.config.llmCheckModel }}
+            - name: LLM_CHECK_MODEL
+              value: {{ . | quote }}
+            {{- end }}
+            {{- with .Values.config.llmSortModel }}
+            - name: LLM_SORT_MODEL
+              value: {{ . | quote }}
+            {{- end }}
             {{- with .Values.config.llmMaxTokens }}
             - name: LLM_MAX_TOKENS
               value: {{ . | quote }}
@@ -107,6 +115,8 @@ spec:
             - name: TURN_MAX_TOOL_CALLS
               value: {{ . | int64 | quote }}
             {{- end }}
+            - name: TURN_PLANNING
+              value: {{ .Values.config.turnPlanning | quote }}
             - name: ORG_AGENT_ENABLED
               value: {{ .Values.config.orgAgentEnabled | quote }}
             - name: ORG_AGENT_LOCALPART
