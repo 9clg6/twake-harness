@@ -75,18 +75,38 @@ export function readProbabilities(reply: string | null): ReadonlyMap<string, num
 	return given;
 }
 
-// The capabilities a message asks for, in the order they were given, or null when the reply is
-// not what was asked for: the turn then goes on as it would without a decision model
-export function readRoute(
-	reply: string | null,
+// Where a turn goes once its message is sorted: each is a way of its own for the model to think,
+// with the tools that way needs and no other
+export type Lane = 'discuss' | 'consult' | 'act' | 'unsure';
+
+export interface Routed {
+	readonly lane: Lane;
+	// The capabilities the message asks for, reads before writes
+	readonly named: readonly Capability[];
+}
+
+// The lane of a message, from the probability the decision model gave each capability. A message
+// that names nothing is talked over; one that names only reads is looked up; one that names a
+// write is acted on. A write the message may ask for, neither named nor ruled out, makes the turn
+// unsure: the model then has every tool, and each write waits for the owner's yes.
+export function laneOf(
+	given: ReadonlyMap<string, number>,
 	capabilities: readonly Capability[]
-): readonly Capability[] | null {
-	const given = readProbabilities(reply);
-	if (given === null) return null;
-	return capabilities
-		.filter(
-			(capability) =>
-				(given.get(capability.name) ?? 0) >= (capability.acts ? WRITE_THRESHOLD : READ_THRESHOLD)
-		)
+): Routed {
+	const of = (capability: Capability): number => given.get(capability.name) ?? 0;
+	const named = capabilities
+		.filter((capability) => of(capability) >= (capability.acts ? WRITE_THRESHOLD : READ_THRESHOLD))
 		.slice(0, MAX_PLAN_STEPS);
+	const unsure = capabilities.some(
+		(capability) =>
+			capability.acts && of(capability) >= REFUSE_THRESHOLD && of(capability) < WRITE_THRESHOLD
+	);
+	const lane: Lane = unsure
+		? 'unsure'
+		: named.some((capability) => capability.acts)
+			? 'act'
+			: named.length > 0
+				? 'consult'
+				: 'discuss';
+	return { lane, named };
 }

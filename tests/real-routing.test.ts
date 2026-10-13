@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+	laneOf,
 	READ_THRESHOLD,
 	readProbabilities,
 	routeRequest,
@@ -78,6 +79,19 @@ describe.skipIf(upstream === undefined || key === undefined || model === undefin
 					}
 				}
 			}
+			// The lane each message is sent into, against the one its capabilities call for
+			const lanes = { right: 0, unsure: 0, wrong: [] as string[] };
+			for (const { message, asks, given } of sorted) {
+				const wanted = asks.some((name) => ROUTING_CAPABILITIES.find((c) => c.name === name)?.acts)
+					? 'act'
+					: asks.length > 0
+						? 'consult'
+						: 'discuss';
+				const { lane } = laneOf(given, ROUTING_CAPABILITIES);
+				if (lane === wanted) lanes.right += 1;
+				else if (lane === 'unsure') lanes.unsure += 1;
+				else lanes.wrong.push(`${wanted} sent to ${lane} | ${message}`);
+			}
 			const times = sorted.map((one) => one.ms).sort((a, b) => a - b);
 			const report = {
 				messages: sorted.length,
@@ -95,12 +109,15 @@ describe.skipIf(upstream === undefined || key === undefined || model === undefin
 					precision: share(count.read.hit, count.read.hit + count.read.extra),
 					recall: share(count.read.hit, count.read.hit + count.read.miss)
 				},
+				lanes,
 				msMedian: times[Math.floor(times.length / 2)],
 				msMax: times.at(-1),
 				mistakes
 			};
 			process.stdout.write(`${JSON.stringify(report, null, 2)}\n`);
 			expect(report.accuracy).toBeGreaterThanOrEqual(0.9);
+			// A message sent into a lane that cannot do what it asks is the mistake that costs
+			expect(lanes.wrong.length / sorted.length).toBeLessThanOrEqual(0.05);
 		});
 	}
 );

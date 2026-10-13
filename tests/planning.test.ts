@@ -426,6 +426,60 @@ describe('a deployment whose gateway serves a decision model to sort answers', (
 		h.apisix.llm.sortProbability = 1;
 	});
 
+	it('gives the model the tools of its lane, and no other of the applications', async () => {
+		const offered = async (
+			message: string,
+			probabilities: Record<string, number>
+		): Promise<string[]> => {
+			h.apisix.llm.routeProbabilities = probabilities;
+			h.apisix.llm.calls.length = 0;
+			h.apisix.llm.script = () => ({ content: 'Fine.' });
+			await chat(h, message);
+			const tools = (h.apisix.llm.calls[0]?.request.tools ?? []) as {
+				function: { name: string };
+			}[];
+			return tools
+				.map((tool) => tool.function.name)
+				.filter((name) =>
+					['read_event', 'read_freebusy', 'accept_invitation', 'plan'].includes(name)
+				)
+				.sort();
+		};
+		h.apisix.llm.sortProbability = 0.01;
+		// Nothing asked: it talks, with none of the applications' tools
+		expect(await offered('Hello', {})).toEqual([]);
+		// A read asked: it has that read, and no write
+		expect(await offered('Am I free?', { read_freebusy: 0.9 })).toEqual(['read_freebusy']);
+		// A write asked, with the read before it: it has both
+		expect(
+			await offered('Accept if I am free', { read_freebusy: 0.8, accept_invitation: 0.9 })
+		).toEqual(['accept_invitation', 'read_freebusy']);
+		// A write that may be asked: it has every tool, and never the plan, which is not its own
+		expect(await offered('That invitation, hm', { accept_invitation: 0.4 })).toEqual([
+			'accept_invitation',
+			'read_event',
+			'read_freebusy'
+		]);
+		h.apisix.llm.routeProbabilities = {};
+		h.apisix.llm.sortProbability = 1;
+	});
+
+	it('runs no call to a tool its lane does not give, should the model make one', async () => {
+		h.apisix.llm.sortProbability = 0.01;
+		h.apisix.llm.routeProbabilities = { read_freebusy: 0.9 };
+		h.apisix.llm.calls.length = 0;
+		h.apisix.contracts.calls.length = 0;
+		h.apisix.llm.script = (request) =>
+			request.messages.at(-1)?.name === 'read_event'
+				? { content: 'Seen.' }
+				: { toolCalls: [call('read_1', 'read_event', { event_id: 'evt-9' })] };
+		await chat(h, 'Am I free tomorrow?');
+		expect(h.apisix.llm.calls[1]?.request.messages.at(-1)?.content).toMatch(/not_asked/);
+		expect(h.apisix.contracts.calls).toHaveLength(0);
+		h.apisix.llm.routeProbabilities = {};
+		h.apisix.llm.sortProbability = 1;
+	});
+
 	it('has the other answers checked, by the model set for that', async () => {
 		h.apisix.llm.sortProbability = 0.9;
 		h.apisix.llm.checks.length = 0;

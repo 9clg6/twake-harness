@@ -24,12 +24,13 @@ import {
 	withoutSentences
 } from './verify.js';
 import {
+	laneOf,
 	readProbabilities,
-	readRoute,
 	REFUSE_THRESHOLD,
 	routeRequest,
 	WRITE_THRESHOLD,
-	type Capability
+	type Capability,
+	type Lane
 } from './route.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
@@ -293,6 +294,11 @@ const TurnState = Annotation.Root({
 	// How likely the owner's message asks for each thing the assistant can do, as a decision model
 	// read it, or null when none read it
 	asked: Annotation<Readonly<Record<string, number>> | null>(),
+	// Where the decision model sent the turn, or null when none sorted its message: the model then
+	// has every tool and plans by itself
+	lane: Annotation<Lane | null>(),
+	// The capabilities the turn may use in its lane, by their names
+	named: Annotation<readonly string[]>(),
 	// Whether the answer says something was done for the owner, in a turn that did nothing
 	unfounded: Annotation<boolean>(),
 	// What the model answered without a call, before the harness checked it against the plan
@@ -334,7 +340,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			input.systemPrompt,
 			...(state.plan !== null
 				? [planInstruction(state.plan, state.nudged)]
-				: deps.planning
+				: deps.planning && state.lane === null
 					? [PLAN_GUIDANCE]
 					: []),
 			...(more === undefined ? [] : [more])
@@ -362,27 +368,29 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			const sorted = await deps.llm.complete(routeRequest(capabilities, past, input.message), [], {
 				model: deps.sortModel
 			});
-			const asked = readRoute(sorted.content, capabilities);
-			deps.log.info(
-				{
-					tools: asked?.map((capability) => capability.name) ?? null,
-					durationMs: Math.round(performance.now() - started)
-				},
-				'message routed'
-			);
 			const tokens = usedTokens(sorted);
-			const likely = Object.fromEntries(readProbabilities(sorted.content) ?? []);
-			if (asked === null || asked.length === 0) {
-				return { tokens, ...(asked === null ? {} : { asked: likely }) };
+			const given = readProbabilities(sorted.content);
+			const durationMs = Math.round(performance.now() - started);
+			if (given === null) {
+				deps.log.info({ lane: null, durationMs }, 'message routed');
+				return { tokens };
 			}
-			const steps = asked.map((capability) => ({
+			const { lane, named } = laneOf(given, capabilities);
+			const sent = {
+				tokens,
+				lane,
+				named: named.map((capability) => capability.name),
+				asked: Object.fromEntries(given)
+			};
+			deps.log.info({ lane, tools: sent.named, durationMs }, 'message routed');
+			if (named.length === 0) return sent;
+			const steps = named.map((capability) => ({
 				what: deps.action(capability.name) ?? capability.description,
 				tool: capability.name
 			}));
 			const id = `route_${input.history.length}`;
 			return {
-				tokens,
-				asked: likely,
+				...sent,
 				plan: steps.map((step) => ({ ...step, done: false })),
 				messages: [
 					{
@@ -433,12 +441,38 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		};
 	}
 
+	// A turn no decision model sorted: the model has every tool, and plans by itself
 	const model = (state: TurnStep): Promise<TurnUpdate> =>
 		answer(
 			state,
 			systemFor(state),
 			deps.planning ? [...deps.tools.definitions, planDefinition] : deps.tools.definitions
 		);
+
+	const capabilityNames = new Set(deps.capabilities().map((capability) => capability.name));
+	// The tools of a lane: the assistant's own always, and of what it can do in the applications,
+	// what the lane needs. A model cannot call what it is not given.
+	const toolsOf = (state: TurnStep): readonly LlmToolDefinition[] =>
+		deps.tools.definitions.filter(
+			(tool) =>
+				state.lane === 'unsure' ||
+				!capabilityNames.has(tool.function.name) ||
+				state.named.includes(tool.function.name)
+		);
+	const inLane =
+		(note?: string) =>
+		(state: TurnStep): Promise<TurnUpdate> =>
+			answer(state, systemFor(state, note), toolsOf(state));
+	// The message asks for nothing in the applications: the model talks, with none of their tools
+	const discuss = inLane();
+	// It asks for something to be read: the model has those reads, and no write
+	const consult = inLane();
+	// It asks for something to be done: the model has what the plan names, and is held to it
+	const act = inLane();
+	// It may ask for something to be done: the model has every tool, and a write waits for a yes
+	const unsure = inLane(
+		'The user may be asking you to do something in their applications, or not. If you judge that they are, do it: they will be asked to confirm. If not, answer them.'
+	);
 
 	// Runs the calls of the model's last answer, in their order, up to the limit of the message
 	async function tools(state: TurnStep): Promise<TurnUpdate> {
@@ -493,7 +527,13 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				state.asked !== null && catalog.isAction(call.function.name)
 					? (state.asked[call.function.name] ?? 0)
 					: 1;
-			if (likely < REFUSE_THRESHOLD) {
+			// Nor does a call to what the lane does not give the model, should it make one all the same
+			const outOfLane =
+				state.lane !== null &&
+				state.lane !== 'unsure' &&
+				capabilityNames.has(call.function.name) &&
+				!state.named.includes(call.function.name);
+			if (outOfLane || likely < REFUSE_THRESHOLD) {
 				deps.log.info({ tool: call.function.name, status: 'not_asked' }, 'tool called');
 				messages.push(...skippedAnswers([call], NOT_ASKED));
 				continue;
@@ -713,10 +753,17 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 
 	const afterAnswer = (state: TurnStep): 'tools' | 'check' =>
 		state.draft === null ? 'tools' : 'check';
+	// The step where the model thinks, in this turn
+	const THINKERS = ['model', 'discuss', 'consult', 'act', 'unsure'] as const;
+	const thinker = (state: TurnStep): (typeof THINKERS)[number] => state.lane ?? 'model';
 
 	const graph = new StateGraph(TurnState)
 		.addNode('route', route)
 		.addNode('model', model)
+		.addNode('discuss', discuss)
+		.addNode('consult', consult)
+		.addNode('act', act)
+		.addNode('unsure', unsure)
 		.addNode('tools', tools)
 		.addNode('check', check)
 		.addNode('verify', verify)
@@ -735,15 +782,21 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					: 'model',
 			['route', 'model']
 		)
-		.addEdge('route', 'model')
+		// The decision model sends the turn into its lane; one it did not sort goes to the model
+		.addConditionalEdges('route', thinker, [...THINKERS])
 		.addConditionalEdges('model', afterAnswer, ['tools', 'check'])
+		.addConditionalEdges('discuss', afterAnswer, ['tools', 'check'])
+		.addConditionalEdges('consult', afterAnswer, ['tools', 'check'])
+		.addConditionalEdges('act', afterAnswer, ['tools', 'check'])
+		.addConditionalEdges('unsure', afterAnswer, ['tools', 'check'])
+		// What a call answered, and an answer sent back to its plan, return to the turn's own lane
 		.addConditionalEdges(
 			'tools',
-			(state) => (state.answer !== null ? END : state.notRun > 0 ? 'wrapUp' : 'model'),
-			['model', 'wrapUp', END]
+			(state) => (state.answer !== null ? END : state.notRun > 0 ? 'wrapUp' : thinker(state)),
+			[...THINKERS, 'wrapUp', END]
 		)
-		.addConditionalEdges('check', (state) => (state.answer === null ? 'model' : 'verify'), [
-			'model',
+		.addConditionalEdges('check', (state) => (state.answer === null ? thinker(state) : 'verify'), [
+			...THINKERS,
 			'verify'
 		])
 		.addEdge('verify', 'report')
@@ -751,6 +804,9 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		.addEdge('report', END)
 		.compile();
 
+	// A turn its owner's answer resumes goes on with the plan it had, and in the lane of that plan
+	const resumed =
+		deps.planning && input.message === null ? planFromHistory(input.history, catalog) : null;
 	const end = await graph.invoke(
 		{
 			messages: input.message === null ? [] : [{ role: 'user', content: input.message }],
@@ -758,9 +814,9 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			actions: input.actionsBefore,
 			iteration: 0,
 			notRun: 0,
-			// A turn its owner's answer resumes goes on with the plan it had
-			plan:
-				deps.planning && input.message === null ? planFromHistory(input.history, catalog) : null,
+			plan: resumed,
+			lane: resumed !== null && deps.sortModel.length > 0 ? 'act' : null,
+			named: (resumed ?? []).map((step) => step.tool),
 			nudged: false,
 			asked: null,
 			unfounded: false,
