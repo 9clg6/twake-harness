@@ -50,14 +50,18 @@ export interface Config {
 	};
 	readonly llm: {
 		readonly model: string;
-		// The decision model that tells the messages arranging a meeting; empty when the gateway
-		// serves none
+		// The model that checks an answer sentence by sentence: a fast one, since the owner waits
+		readonly checkModel: string;
+		// The decision model that tells what a message asks for and sorts the answers worth that
+		// check; empty when the gateway serves none
 		readonly decisionModel: string;
 		readonly maxTokens: number;
 		readonly timeoutMs: number;
 	};
 	readonly turn: {
 		readonly maxToolCalls: number;
+		// Whether a turn plans its steps, which the harness then holds it to
+		readonly planning: boolean;
 		// The tokens one turn may spend, the prompts and answers of all its model calls summed: once
 		// they are spent, the turn ends on a last call, without tools
 		readonly maxTokens: number;
@@ -212,8 +216,10 @@ const envSchema = z.object({
 	// Reasoning models spend part of it deliberating before they write the answer
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
-	LLM_DECISION_MODEL: z.string().default(''),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
+	TURN_PLANNING: z.enum(['true', 'false']).default('true'),
+	LLM_CHECK_MODEL: z.string().default(''),
+	LLM_DECISION_MODEL: z.string().default(''),
 	// About a dozen model calls, which can each read some 20,000 tokens
 	TURN_MAX_TOKENS: z.coerce.number().int().min(1).default(250_000),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
@@ -462,12 +468,14 @@ export function loadConfig(env: Env): Config {
 		},
 		llm: {
 			model: values.LLM_MODEL,
+			checkModel: values.LLM_CHECK_MODEL.length > 0 ? values.LLM_CHECK_MODEL : values.LLM_MODEL,
 			decisionModel: values.LLM_DECISION_MODEL,
 			maxTokens: values.LLM_MAX_TOKENS,
 			timeoutMs: values.LLM_TIMEOUT_MS
 		},
 		turn: {
 			maxToolCalls: values.TURN_MAX_TOOL_CALLS,
+			planning: values.TURN_PLANNING === 'true',
 			maxTokens: values.TURN_MAX_TOKENS,
 			memoryNudgeInterval: values.MEMORY_NUDGE_INTERVAL,
 			historyMaxChars: values.TURN_HISTORY_MAX_CHARS,

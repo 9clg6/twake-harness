@@ -3,8 +3,8 @@
 // <tool_call>, or the call itself in JSON. None of it is meant for the owner.
 
 // A block of those tags, which runs to the end of the text when the model left it open
-const CALL_TAGS = /<(tool_calls?|function_calls?)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi;
-const STRAY_CLOSING_TAGS = /<\/(?:tool_calls?|function_calls?)\s*>/gi;
+const CALL_TAGS = /<(tools?_calls?|function_calls?)\b[^>]*>[\s\S]*?(?:<\/\1\s*>|$)/gi;
+const STRAY_CLOSING_TAGS = /<\/(?:tools?_calls?|function_calls?)\s*>/gi;
 // A fenced block, its body apart
 const FENCED = /```[^\n`]*\n?([\s\S]*?)```/g;
 

@@ -531,9 +531,11 @@ describe('the assistant proposes from the messages of channels', () => {
 		const calls = h.apisix.llm.calls.slice(asked);
 		const own = calls.find((c) => c.request.messages.at(-1)?.content === 'Prépare un point lundi');
 		const resumed = calls.find((c) => (c.request.messages.at(-1)?.content ?? '').includes('m-5'));
+		// Beside them, a turn of the owner's own may plan its steps
+		const offered = [...every, 'plan'].sort();
 		expect([toolsOf(own?.request).sort(), toolsOf(resumed?.request).sort()]).toEqual([
-			every,
-			every
+			offered,
+			offered
 		]);
 		// ...and what the owner keeps for them
 		expect(own?.request.messages[0]?.content).toContain('Bob garde ses vendredis');

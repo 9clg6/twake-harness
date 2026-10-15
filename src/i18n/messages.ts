@@ -95,6 +95,12 @@ export interface Messages {
 		// A turn that reached one of its limits, whose model then wrote no words for its owner: the
 		// actions it did, and how to have it carry on
 		turnLimit(actions: number): string;
+		// The steps of its plan a turn left undone, below its answer
+		stepsUndone(steps: readonly string[]): string;
+		// What a turn did for its owner in an application, as the results of its calls tell it
+		stepsDone(steps: readonly string[]): string;
+		// Below an answer that said something was done, in a turn that did nothing in an application
+		readonly nothingDone: string;
 		// The owner's permission for their assistant to act for them expires within days: on what
 		// date and at what time, and where to renew it. No question: nothing waits for an answer
 		delegationExpiring(date: string, time: string, link: string): string;
@@ -729,6 +735,10 @@ const ENGLISH: Messages = {
 			'For now I work only in a private conversation with the person I assist, so I am leaving this room.',
 		turnLimit: (actions) =>
 			`I did ${actions} ${actions === 1 ? 'action' : 'actions'} for your request, then reached my limit for this message. Say “continue” and I will carry on.`,
+		stepsUndone: (steps) =>
+			`Not done, of what I had planned:\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		stepsDone: (steps) => `Done:\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		nothingDone: 'Nothing was done in your applications for this message.',
 		delegationExpiring: (date, time, link) =>
 			`The permission to act on your behalf that you gave me expires on ${date} at ${time}. Renew it before then so that I can keep acting for you: ${link}`
 	},
@@ -1151,6 +1161,10 @@ const FRENCH: Messages = {
 		// One action, or none, is singular in French
 		turnLimit: (actions) =>
 			`J'ai fait ${actions} ${actions <= 1 ? 'action' : 'actions'} pour ta demande, puis j'ai atteint ma limite pour ce message. Dis « continue » pour que je poursuive.`,
+		stepsUndone: (steps) =>
+			`Pas fait, parmi ce que j'avais prévu :\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		stepsDone: (steps) => `Fait :\n${steps.map((step) => `- ${step}`).join('\n')}`,
+		nothingDone: "Rien n'a été fait dans tes applications pour ce message.",
 		delegationExpiring: (date, time, link) =>
 			`L'autorisation d'agir en ton nom que tu m'as donnée expire le ${date} à ${time}. Renouvelle-la d'ici là pour que je continue à agir pour toi : ${link}`
 	},

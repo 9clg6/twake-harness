@@ -630,9 +630,11 @@ describe('a new invitation in Calendar wakes the invitee’s assistant', () => {
 			// invitation's id, and her assistant tells her how it went
 			const told = r.saying('Accepted:').length;
 			await r.client.react(r.room, request.eventId, '✅');
-			expect(await r.nextSaying('Accepted:', told)).toBe(
-				'Accepted: {"status":200,"body":{"uid":"uid-accept","partstat":"ACCEPTED"}}'
-			);
+			// Below the model's words, the harness says itself what was done, from the contract's answer
+			expect((await r.nextSaying('Accepted:', told)).split('\n\nDone:\n- ')).toEqual([
+				'Accepted: {"status":200,"body":{"uid":"uid-accept","partstat":"ACCEPTED"}}',
+				expect.any(String)
+			]);
 			const accepted = writes();
 			expect(accepted).toHaveLength(1);
 			expect(accepted[0]?.method).toBe('POST');
