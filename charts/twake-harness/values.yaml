@@ -50,7 +50,10 @@ config:
   contractsBasePath: ''
   contractsOpenapiPath: ''
   llmModel: qwen3.8
-  # The decision model (Nox) that tells the messages arranging a meeting; empty leaves it to words
+  # The model that checks an answer sentence by sentence, a fast one; empty means llmModel
+  llmCheckModel: ''
+  # The decision model (Nox) that tells what a message asks for and sorts the answers worth that
+  # check; empty leaves the model to plan by itself, and every such answer is checked
   llmDecisionModel: ''
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
@@ -96,6 +99,8 @@ config:
   turnHistoryMaxChars: ''
   # The most tool calls one turn may make before it stops. Empty means the harness default, 6
   turnMaxToolCalls: ''
+  # Whether a turn plans its steps and is held to them; false runs the model without a plan
+  turnPlanning: true
   # The most tokens one turn may spend, the prompts and answers of its model calls summed, before
   # it stops. Empty means the harness default, 250000
   turnMaxTokens: ''

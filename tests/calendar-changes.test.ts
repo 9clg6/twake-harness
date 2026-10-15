@@ -599,9 +599,11 @@ describe('a meeting I am invited to moves', () => {
 		// Her ✅ sends that very answer, by the meeting's UID, and her assistant tells her how it went
 		const answered = r.saying('Answered:').length;
 		await r.client.react(r.room, request.eventId, '✅');
-		expect(await r.nextSaying('Answered:', answered)).toBe(
-			`Answered: {"status":200,"body":{"uid":"${uid}","partstat":"ACCEPTED"}}`
-		);
+		// Below the model's words, the harness says itself what was done, from the contract's answer
+		expect((await r.nextSaying('Answered:', answered)).split('\n\nDone:\n- ')).toEqual([
+			`Answered: {"status":200,"body":{"uid":"${uid}","partstat":"ACCEPTED"}}`,
+			expect.any(String)
+		]);
 		expect(writes().at(-1)).toMatchObject({
 			method: 'POST',
 			path: '/contracts/v1/calendar/invitations/accept',
@@ -843,9 +845,11 @@ describe('a meeting I am invited to moves', () => {
 		expect(request.body).toBe(asked(EVENT_WRITE, { body: { uid } }, said));
 		const answered = r.saying('Answered:').length;
 		await r.client.react(r.room, request.eventId, '✅');
-		expect(await r.nextSaying('Answered:', answered)).toBe(
-			`Answered: {"status":200,"body":{"uid":"${uid}","partstat":"DECLINED"}}`
-		);
+		// Below the model's words, the harness says itself what was done, from the contract's answer
+		expect((await r.nextSaying('Answered:', answered)).split('\n\nDone:\n- ')).toEqual([
+			`Answered: {"status":200,"body":{"uid":"${uid}","partstat":"DECLINED"}}`,
+			expect.any(String)
+		]);
 		expect(writes().at(-1)).toMatchObject({
 			method: 'POST',
 			path: '/contracts/v1/calendar/invitations/decline',
