@@ -112,6 +112,13 @@ export interface FakeApisix {
 		// with the probability a test sets for it by its name, none for the others
 		sorts: RecordedCall[];
 		probabilities: Record<string, number>;
+		// Whether an answer is worth a check, as the decision model answers it: worth one unless a
+		// test says otherwise
+		checkProbability: number;
+		// The calls by which the harness has an answer checked, kept apart from the turns' own: a
+		// model that names no sentence answers them unless a test says otherwise
+		checks: RecordedCall[];
+		checkScript: LlmScript;
 	};
 	// The contract catalog APISIX serves, the contracts' behaviour, and the audit route. Like the
 	// gateway, it forwards only what matches an operation of the catalog: its server path plus its
@@ -639,7 +646,10 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 		calls: [],
 		script: echoScript,
 		sorts: [],
-		probabilities: {}
+		probabilities: {},
+		checkProbability: 1,
+		checks: [],
+		checkScript: () => ({ content: '{"claims":[]}' })
 	};
 	const fake = {
 		matrixUpstream: null as string | null,
@@ -851,7 +861,8 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const callSeq = ++seq;
 			const request = (await readJson(req)) as ChatRequest;
 			const isSort = (request.messages.at(-1)?.content ?? '').startsWith('{"state"');
-			const recorded = isSort ? llm.sorts : llm.calls;
+			const isCheck = (request.messages[0]?.content ?? '').startsWith('You check the answer');
+			const recorded = isSort ? llm.sorts : isCheck ? llm.checks : llm.calls;
 			const reply: ScriptedReply = isSort
 				? {
 						content: JSON.stringify({
@@ -861,12 +872,18 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 										.questions
 								).map((question) => [
 									question,
-									{ type: 'noul', noul: llm.probabilities[question] ?? 0 }
+									{
+										type: 'noul',
+										noul:
+											question === 'concerns'
+												? llm.checkProbability
+												: (llm.probabilities[question] ?? 0)
+									}
 								])
 							)
 						})
 					}
-				: llm.script(request, recorded.length);
+				: (isCheck ? llm.checkScript : llm.script)(request, recorded.length);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
 			if (reply.hold !== undefined) await reply.hold;
 			recorded.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
