@@ -50,6 +50,7 @@ import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
 import type { SpaceNotifications } from '../suggestions/space.js';
 import { proposalSentence } from '../suggestions/text.js';
 import type { AgentService, OwnerTurnResult } from './service.js';
+import type { SuggestionFailure } from './suggestion.js';
 
 const turnPayload = z.object({
 	owner: z.string().min(1),
@@ -181,6 +182,17 @@ export interface TurnWorkerOptions {
 	// The present the worker reads for the windows of a suggestion and of the question about sharing
 	// an invitee's availability, set by a test instead of the system clock
 	readonly clock?: Clock;
+}
+
+// What its owner reads for each way a suggestion fails: the words of Messages.suggestions
+const FAILURE_NOTICES: Readonly<Record<SuggestionFailure, 'failed' | 'calendarFailed'>> = {
+	model_failed: 'failed',
+	calendar_failed: 'calendarFailed',
+	job_failed: 'failed'
+};
+
+function isSuggestionFailure(reason: string): reason is SuggestionFailure {
+	return Object.hasOwn(FAILURE_NOTICES, reason);
 }
 
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
@@ -615,12 +627,16 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			jobLog.info({ owner, pendingCallId: result.pendingCallId }, 'suggestion asks for consent');
 			await sendSuggestionQuestion(owner, result);
 		}
-		if (
-			result.kind === 'asked' ||
-			result.kind === 'waiting' ||
-			result.kind === 'availability' ||
-			result.kind === 'retry'
-		) {
+		if (result.kind === 'retry') {
+			// The model failed: another try goes ahead only if it still starts inside the window, as a
+			// pass past it is dropped. The last failure in the window is the owner's to hear of.
+			const leftNow = payload.at + SUGGEST_MAX_AGE_MS - clock.now().getTime();
+			if (leftNow > SUGGEST_RECHECK_MS) return { retryInMs: SUGGEST_RECHECK_MS };
+			jobLog.info({ owner, outcome: 'none', reason: 'model_failed' }, 'suggestion decided');
+			await noticeSuggestionFailed(payload, 'model_failed', jobLog);
+			return null;
+		}
+		if (result.kind === 'asked' || result.kind === 'waiting' || result.kind === 'availability') {
 			return { retryInMs: Math.min(SUGGEST_RECHECK_MS, leftMs) };
 		}
 		if (result.kind !== 'proposed') {
@@ -632,6 +648,9 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				},
 				'suggestion decided'
 			);
+			if (result.kind === 'none' && isSuggestionFailure(result.reason)) {
+				await noticeSuggestionFailed(payload, result.reason, jobLog);
+			}
 			return null;
 		}
 		const { pendingCallId, proposal } = result;
@@ -690,6 +709,40 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return null;
 	}
 
+	// Tells the owner, in their assistant's room, that a message got no proposal because something
+	// failed, so that a failure is never silence: once per message, with no word of the message
+	async function noticeSuggestionFailed(
+		payload: SuggestPayload,
+		reason: SuggestionFailure,
+		jobLog: FastifyBaseLogger
+	): Promise<void> {
+		const { owner } = payload;
+		const assistant = await findLiveAssistant(owner);
+		if (assistant === null) return;
+		const { suggestions } = await fetchOwnerMessages(db, owner, locale);
+		const queued = await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId: assistant.roomId,
+				text: suggestions[FAILURE_NOTICES[reason]]
+			} satisfies SendPayload,
+			dedupKey: `send:suggest-failed:${payload.eventId}:${owner}`,
+			groupKey: `send:${assistant.roomId}`
+		});
+		if (queued) jobLog.info({ owner, reason }, 'suggestion failure notice queued');
+	}
+
+	// The owner's assistant and its room, or null while it has none or was deleted
+	async function findLiveAssistant(
+		owner: string
+	): Promise<{ readonly userId: string; readonly roomId: string } | null> {
+		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
+		if (assistant === null || assistant.roomId === null || assistant.deletedAt !== null)
+			return null;
+		return { userId: assistant.userId, roomId: assistant.roomId };
+	}
+
 	// The harness's request about the call a suggestion froze, in the owner's assistant room
 	async function sendSuggestionQuestion(
 		owner: string,
@@ -697,8 +750,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		sentence?: string
 	): Promise<void> {
 		const { pendingCallId } = result;
-		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
-		if (assistant?.roomId === null || assistant === null) return;
+		const assistant = await findLiveAssistant(owner);
+		if (assistant === null) return;
 		const call = await withPrincipal(db, { id: owner }, (tx) =>
 			findPendingCall(tx, owner, pendingCallId)
 		);
@@ -884,6 +937,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 					log.warn(
 						{ job: job.id, reason: err instanceof Error ? err.name : 'error' },
 						'suggestion failed'
+					);
+					await noticeSuggestionFailed(quoted.data, 'job_failed', log).catch(
+						(noticeErr: unknown) => {
+							log.warn({ job: job.id, err: noticeErr }, 'suggestion failure notice not queued');
+						}
 					);
 				}
 				return null;

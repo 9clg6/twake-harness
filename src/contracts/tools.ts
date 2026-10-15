@@ -139,6 +139,10 @@ type Sending =
 	| { readonly kind: 'action'; readonly previewDigest: string | null }
 	| { readonly kind: 'preview'; readonly locale: Locale };
 
+// How the error of a call that never reached its contract begins, so that a caller tells it from
+// a call the harness refused to make
+export const CONTRACT_UNREACHED = 'the contract could not be called';
+
 // What a contract answered: its status, 0 when it could not be called, the preview header it
 // carries back, if any, and its body; what the model reads of it; and the refusal to act for the
 // owner until they give what it lacks, the broker's or the contract's, when the gateway relayed one
@@ -319,7 +323,7 @@ export function makeContractTool(contract: ContractDefinition, deps: ContractToo
 			delegation = readDelegationRefusal(status, body);
 		} catch (err: unknown) {
 			result = {
-				error: `the contract could not be called: ${err instanceof Error ? err.message : String(err)}`
+				error: `${CONTRACT_UNREACHED}: ${err instanceof Error ? err.message : String(err)}`
 			};
 		}
 		log.info(
