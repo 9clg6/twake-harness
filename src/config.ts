@@ -50,8 +50,10 @@ export interface Config {
 	};
 	readonly llm: {
 		readonly model: string;
-		// The decision model that tells the messages arranging a meeting; empty when the gateway
-		// serves none
+		// The model that checks an answer sentence by sentence: a fast one, since the owner waits
+		readonly checkModel: string;
+		// The decision model that tells what a message asks for and sorts the answers worth that
+		// check; empty when the gateway serves none
 		readonly decisionModel: string;
 		readonly maxTokens: number;
 		readonly timeoutMs: number;
@@ -212,8 +214,9 @@ const envSchema = z.object({
 	// Reasoning models spend part of it deliberating before they write the answer
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
 	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
-	LLM_DECISION_MODEL: z.string().default(''),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
+	LLM_CHECK_MODEL: z.string().default(''),
+	LLM_DECISION_MODEL: z.string().default(''),
 	// About a dozen model calls, which can each read some 20,000 tokens
 	TURN_MAX_TOKENS: z.coerce.number().int().min(1).default(250_000),
 	MEMORY_NUDGE_INTERVAL: z.coerce.number().int().min(0).default(10),
@@ -389,6 +392,14 @@ export function loadConfig(env: Env): Config {
 		throw new Error(`invalid configuration: ${issues.join('; ')}`);
 	}
 	const values = parsed.data;
+	// LangGraph traces a graph to LangSmith once one of these is on: the whole state of a turn, the
+	// owner's decrypted words and what the applications answered, would leave the platform
+	const tracing = ['LANGSMITH_TRACING', 'LANGCHAIN_TRACING_V2', 'LANGCHAIN_TRACING'].filter(
+		(name) => (env[name] ?? '') !== '' && env[name] !== 'false'
+	);
+	if (tracing.length > 0) {
+		throw new Error(`invalid configuration: ${tracing.join(', ')} must stay unset`);
+	}
 	if (
 		values.HARNESS_ROLE === 'matrix' &&
 		(values.MATRIX_SERVER_NAME === '' || values.MATRIX_HS_TOKEN === '')
@@ -462,6 +473,7 @@ export function loadConfig(env: Env): Config {
 		},
 		llm: {
 			model: values.LLM_MODEL,
+			checkModel: values.LLM_CHECK_MODEL.length > 0 ? values.LLM_CHECK_MODEL : values.LLM_MODEL,
 			decisionModel: values.LLM_DECISION_MODEL,
 			maxTokens: values.LLM_MAX_TOKENS,
 			timeoutMs: values.LLM_TIMEOUT_MS

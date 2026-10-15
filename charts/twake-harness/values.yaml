@@ -50,7 +50,11 @@ config:
   contractsBasePath: ''
   contractsOpenapiPath: ''
   llmModel: qwen3.8
-  # The decision model (Nox) that tells the messages arranging a meeting; empty leaves it to words
+  # The model that checks an answer sentence by sentence, a fast one; empty means llmModel
+  llmCheckModel: ''
+  # The decision model (Nox) that tells the channel messages arranging a meeting, and what an
+  # owner's message asks for, which then holds the turn to a plan and has its answer checked; empty
+  # leaves the words to sort the channels and a turn with every tool, unchecked
   llmDecisionModel: ''
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
