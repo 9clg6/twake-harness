@@ -41,6 +41,8 @@ export interface LlmCompletion {
 // What one call may change from the client's defaults
 export interface LlmCallOptions {
 	readonly maxTokens?: number;
+	// Another model of the gateway than the client's own, such as a faster one for a short check
+	readonly model?: string;
 }
 
 export interface LlmClient {
@@ -80,6 +82,8 @@ const completionSchema = z.object({
 				message: z.object({
 					content: z.string().nullable().optional(),
 					reasoning_content: z.string().nullable().optional(),
+					// How Ollama names the same field
+					reasoning: z.string().nullable().optional(),
 					tool_calls: z.array(toolCallSchema).optional()
 				}),
 				finish_reason: z.string().nullable().optional()
@@ -118,7 +122,7 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 		maxTokens: options.maxTokens,
 		async complete(messages, tools, callOptions) {
 			const body: Record<string, unknown> = {
-				model: options.model,
+				model: callOptions?.model ?? options.model,
 				messages,
 				max_tokens: callOptions?.maxTokens ?? options.maxTokens
 			};
@@ -150,7 +154,7 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 			if (choice === undefined) throw new LlmError('model answered without a choice');
 			const { content, reasoning } = splitReasoning(
 				choice.message.content ?? null,
-				choice.message.reasoning_content ?? null
+				choice.message.reasoning_content ?? choice.message.reasoning ?? null
 			);
 			const usage = parsed.data.usage;
 			return {

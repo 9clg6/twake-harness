@@ -74,6 +74,7 @@ import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
 import { readersOf } from './receipts.js';
 import { makeAppserviceStorage } from './storage.js';
+import { makeLlmClient } from '../llm/client.js';
 import { makeSuggestionIntake } from '../suggestions/intake.js';
 import { listenerUserId, makeChannelListener } from '../suggestions/listener.js';
 
@@ -524,6 +525,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		config,
 		db,
 		log,
+		llm: makeLlmClient({
+			baseUrl: config.apisix.baseUrl,
+			consumerKey: config.apisix.consumerKey,
+			model: config.llm.model,
+			maxTokens: config.llm.maxTokens,
+			timeoutMs: config.llm.timeoutMs
+		}),
 		now: () => clock.now().getTime()
 	});
 

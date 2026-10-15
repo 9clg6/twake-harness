@@ -152,3 +152,6 @@ vite.config.ts.timestamp-*
 dist/
 test-results/
 dev-results/
+
+# Real exchanges are never versioned: they live outside the repository
+datasets/
