@@ -2811,6 +2811,79 @@ describe('the assistant proposes from the messages of channels', () => {
 				for (const client of clients) await client.stop();
 			}
 		});
+
+		it('asks no yes of a bot, by its id or by the commands it announces, and stays when one comes in', async () => {
+			const tag = Math.random().toString(36).slice(2, 7);
+			const owner = await becomeAssistantOwner(`k${tag}`);
+			const person = await h.synapse.registerUser(`j${tag}`);
+			const hermes = await h.synapse.registerUser(`hermes_${tag}`);
+			const announcer = await h.synapse.registerUser(`w${tag}`);
+			const lateBot = await h.synapse.registerUser(`bot_${tag}`);
+			const clients = await Promise.all(
+				[owner, person].map((user) => startE2eeClient(h.synapse.url, user))
+			);
+			const [ownerClient, personClient] = clients as [E2eeClient, E2eeClient];
+			try {
+				const room = await ownerClient.client.createRoom({
+					preset: 'private_chat',
+					name: 'channel with bots',
+					invite: [person.userId, hermes.userId, announcer.userId],
+					initial_state: [ENCRYPTION],
+					// As Twake Chat opens a channel: every member may answer, and a bot announce its commands
+					power_level_content_override: {
+						events: {
+							'app.twake.chat.assistant_consent': 0,
+							'org.matrix.msc4332.commands': 0
+						}
+					}
+				});
+				await personClient.joinRoom(room);
+				await h.synapse.joinRoom(hermes, room);
+				await h.synapse.joinRoom(announcer, room);
+				const announced = await h.synapse.request(
+					announcer,
+					'PUT',
+					`/_matrix/client/v3/rooms/${encodeURIComponent(room)}/state/org.matrix.msc4332.commands/${encodeURIComponent(announcer.userId)}`,
+					{ commands: [{ syntax: 'help', description: { 'm.text': [{ body: 'Help' }] } }] }
+				);
+				expect(announced.status).toBe(200);
+				const principal = `k${tag}@test.local`;
+				const rows = await withPrincipal(
+					h.db,
+					{ id: principal },
+					(tx) => tx.sql<{ user_id: string }[]>`
+						select user_id from assistants where owner = ${principal}`
+				);
+				const assistant = rows[0]?.user_id ?? '';
+				const listened = async (): Promise<number> =>
+					(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`).length;
+
+				// The one person said yes, neither bot said anything: it comes and stays
+				await ownerClient.client.sendStateEvent(
+					room,
+					'app.twake.chat.assistant_request',
+					owner.userId,
+					{ assistant_id: assistant, requested: true, ts: Date.now() }
+				);
+				await personClient.client.sendStateEvent(
+					room,
+					'app.twake.chat.assistant_consent',
+					person.userId,
+					{ assistant_id: assistant, accepted: true, ts: Date.now() }
+				);
+				await ownerClient.client.inviteUser(assistant, room);
+				await until(async () => ((await listened()) === 1 ? true : null));
+
+				// Another bot is invited and joins: it stays
+				await ownerClient.client.inviteUser(lateBot.userId, room);
+				await h.synapse.joinRoom(lateBot, room);
+				await sleep(3000);
+				expect(await listened()).toBe(1);
+				expect(await isJoined(owner, room, assistant)).toBe(true);
+			} finally {
+				for (const client of clients) await client.stop();
+			}
+		});
 	});
 });
 
