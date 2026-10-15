@@ -2811,6 +2811,20 @@ describe('the assistant proposes from the messages of channels', () => {
 				for (const client of clients) await client.stop();
 			}
 		});
+
+		it('takes no yes given before the request', async () => {
+			const c = await encryptedConversation();
+			try {
+				await c.answer(true);
+				await sleep(1100);
+				await c.ask();
+				await c.ownerClient.client.inviteUser(c.assistant, c.room);
+				expect(await leftRoom(c.owner, c.room, c.assistant)).toBe(true);
+				expect(await c.listened()).toBe(0);
+			} finally {
+				await c.stop();
+			}
+		});
 	});
 });
 
