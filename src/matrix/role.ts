@@ -15,6 +15,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import { SYSTEM_CLOCK, type Clock } from '../agent/clock.js';
+import { makeTurnGate } from '../agent/gate.js';
 import { fetchOwnerMessages, localeOf } from '../assistants/locale.js';
 import { requestNaming } from '../assistants/naming.js';
 import { readIdentity } from '../assistants/provisioning.js';
@@ -917,12 +918,22 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.warn({ roomId, invited, err }, 'room members not read');
 		}
 		if (!direct && config.suggestions.enabled) {
-			let verdict: ListenVerdict = 'not_encrypted';
-			try {
-				verdict = await checkListenedRoom(intent, roomId, inviter, invited);
-			} catch (err: unknown) {
-				log.warn({ roomId, invited, err }, 'room not read');
-			}
+			// Checked and recorded in one go: whoever comes in meanwhile is checked against the row
+			const verdict = await roomChecks.run(roomId, async (): Promise<ListenVerdict> => {
+				let checked: ListenVerdict = 'not_encrypted';
+				try {
+					checked = await checkListenedRoom(intent, roomId, inviter, invited);
+				} catch (err: unknown) {
+					log.warn({ roomId, invited, err }, 'room not read');
+				}
+				if (checked === 'ok') {
+					await db.sql`
+						insert into assistant_listened_rooms (room_id, owner, user_id)
+						values (${roomId}, ${owner}, ${invited})
+						on conflict (room_id, user_id) do nothing`;
+				}
+				return checked;
+			});
 			if (verdict === 'not_everyone_accepted') {
 				// The other person said no, or was never asked: it leaves without a word
 				log.info({ roomId, invited, reason: 'no_consent' }, 'assistant declined an invite');
@@ -936,10 +947,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			if (verdict === 'ok') {
 				// Invited by its owner, warned, into their encrypted room with people who all accepted
 				// it: it reads it for its owner's suggestions, says nothing there, greets no one
-				await db.sql`
-					insert into assistant_listened_rooms (room_id, owner, user_id)
-					values (${roomId}, ${owner}, ${invited})
-					on conflict (room_id, user_id) do nothing`;
 				log.info({ roomId, owner, userId: invited }, 'assistant listens for its owner');
 				return;
 			}
@@ -1047,6 +1054,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			select owner, user_id from assistant_listened_rooms where room_id = ${roomId}`;
 		return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
 	}
+
+	// The checks of a listened conversation run one at a time, each on what the one before left,
+	// and a message of the room reads its rows after the checks registered before it: the SDK emits
+	// a transaction's events without awaiting their listeners, so the words of a newcomer could be
+	// read while their coming was being checked. A check registers before its first wait.
+	const roomChecks = makeTurnGate();
 
 	// The people of a room, joined or invited, whose yes counts: neither an assistant nor the listener
 	function isPerson(userId: string): boolean {
@@ -1511,47 +1524,49 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				const consent =
 					event.type === ASSISTANT_REQUEST_TYPE || event.type === ASSISTANT_CONSENT_TYPE;
 				if (event.type !== 'm.room.member' && !consent) return;
-				const membership = event.content?.['membership'];
-				for (const listened of await listenedRooms(roomId)) {
-					const forget = async (reason: string): Promise<void> => {
-						await db.sql`
-							delete from assistant_listened_rooms
-							where room_id = ${roomId} and user_id = ${listened.userId}`;
-						suggestions.forget(roomId, listened.owner);
-						log.info({ roomId, owner: listened.owner, reason }, 'assistant stopped listening');
-					};
-					const intent = appservice.getIntentForUserId(listened.userId);
-					const leave = async (reason: string): Promise<void> => {
+				return roomChecks.run(roomId, async () => {
+					const membership = event.content?.['membership'];
+					for (const listened of await listenedRooms(roomId)) {
+						const forget = async (reason: string): Promise<void> => {
+							await db.sql`
+								delete from assistant_listened_rooms
+								where room_id = ${roomId} and user_id = ${listened.userId}`;
+							suggestions.forget(roomId, listened.owner);
+							log.info({ roomId, owner: listened.owner, reason }, 'assistant stopped listening');
+						};
+						const intent = appservice.getIntentForUserId(listened.userId);
+						const leave = async (reason: string): Promise<void> => {
+							try {
+								await forget(reason);
+							} catch (err: unknown) {
+								log.warn({ roomId, err }, 'listened room not forgotten');
+							}
+							try {
+								await intent.leaveRoom(roomId);
+							} catch (err: unknown) {
+								log.warn({ roomId, err }, 'listened room not left');
+							}
+						};
 						try {
-							await forget(reason);
+							if (!consent && event.state_key === listened.userId) {
+								if (membership === 'leave' || membership === 'ban') await forget('removed');
+								continue;
+							}
+							// An assistant coming in or going asks no one's yes
+							if (!consent && !isPerson(event.state_key ?? '')) continue;
+							const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
+							// A newcomer who has not said yes, the owner or the last other person gone, a
+							// withdrawn request or a no: it leaves without a word
+							const verdict = await checkListenedRoom(intent, roomId, ownerUserId, listened.userId);
+							if (verdict === 'ok') continue;
+							await leave(consent ? 'no_consent' : verdict);
 						} catch (err: unknown) {
-							log.warn({ roomId, err }, 'listened room not forgotten');
+							// A check that cannot complete fails closed, and the others' go on
+							log.warn({ roomId, owner: listened.owner, err }, 'listened room not checked');
+							await leave('check_failed');
 						}
-						try {
-							await intent.leaveRoom(roomId);
-						} catch (err: unknown) {
-							log.warn({ roomId, err }, 'listened room not left');
-						}
-					};
-					try {
-						if (!consent && event.state_key === listened.userId) {
-							if (membership === 'leave' || membership === 'ban') await forget('removed');
-							continue;
-						}
-						// An assistant coming in or going asks no one's yes
-						if (!consent && !isPerson(event.state_key ?? '')) continue;
-						const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
-						// A newcomer who has not said yes, the owner or the last other person gone, a
-						// withdrawn request or a no: it leaves without a word
-						const verdict = await checkListenedRoom(intent, roomId, ownerUserId, listened.userId);
-						if (verdict === 'ok') continue;
-						await leave(consent ? 'no_consent' : verdict);
-					} catch (err: unknown) {
-						// A check that cannot complete fails closed, and the others' go on
-						log.warn({ roomId, owner: listened.owner, err }, 'listened room not checked');
-						await leave('check_failed');
 					}
-				}
+				});
 			},
 			(roomId: string, event: RoomEvent) => ({ roomId, eventId: event.event_id })
 		)
@@ -1584,7 +1599,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		// Null for a message without words, as an image or a file, which only the creator reads
 		const text = textOf(raw);
-		const listened = await listenedRooms(roomId);
+		// Whoever came in before this message is checked first: a room left meanwhile is read no more
+		const listened = await roomChecks.run(roomId, () => listenedRooms(roomId));
 		if (listened.length > 0) {
 			// Never a turn there: what one of its assistants reads proposes to that owner alone. The
 			// pair's other member is read in the room, whether they wrote the message or not, so a
