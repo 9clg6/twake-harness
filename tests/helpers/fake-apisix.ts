@@ -108,6 +108,23 @@ export interface FakeApisix {
 	readonly llm: {
 		calls: RecordedCall[];
 		script: LlmScript;
+		// The calls by which the harness has an answer checked, kept apart from the turns' own: a
+		// model that names no sentence answers them unless a test says otherwise
+		checks: RecordedCall[];
+		checkScript: LlmScript;
+		// The calls a decision model answers: it sorts the answers worth a check, with the
+		// probability that an exchange has to do with an action, and tells what a message asks for,
+		// with a probability for each capability by its name, none for those left out
+		sorts: RecordedCall[];
+		sortProbability: number;
+		routeProbabilities: Record<string, number>;
+		// The chat completions endpoint of a real model, which then answers instead of the scripts
+		forward?: string;
+		// The key that endpoint asks for, and those of the models that have one of their own
+		forwardKey?: string;
+		forwardKeys?: Record<string, string>;
+		// Whether the real model also answers the turns, or only checks and sorts what a script says
+		forwardTurns?: boolean;
 	};
 	// The contract catalog APISIX serves, the contracts' behaviour, and the audit route. Like the
 	// gateway, it forwards only what matches an operation of the catalog: its server path plus its
@@ -631,7 +648,15 @@ export const INVITATION_CANCELLED: ContractReply = {
 
 export async function startFakeApisix(): Promise<FakeApisix> {
 	const consumerKey = 'test-consumer-key';
-	const llm: FakeApisix['llm'] = { calls: [], script: echoScript };
+	const llm: FakeApisix['llm'] = {
+		calls: [],
+		script: echoScript,
+		checks: [],
+		checkScript: () => ({ content: '{"claims":[]}' }),
+		sorts: [],
+		sortProbability: 1,
+		routeProbabilities: {}
+	};
 	const fake = {
 		matrixUpstream: null as string | null,
 		matrixAsToken: null as string | null,
@@ -841,10 +866,51 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 			const startedAt = Date.now();
 			const callSeq = ++seq;
 			const request = (await readJson(req)) as ChatRequest;
-			const reply = llm.script(request, llm.calls.length);
+			const isCheck = (request.messages[0]?.content ?? '').startsWith('You check the answer');
+			const isSort = (request.messages.at(-1)?.content ?? '').startsWith('{"state"');
+			const recorded = isSort ? llm.sorts : isCheck ? llm.checks : llm.calls;
+			if (llm.forward !== undefined && (isCheck || isSort || llm.forwardTurns !== false)) {
+				// The model's own answer goes back as it came: its shape is part of what is tested
+				const forwardKey = llm.forwardKeys?.[request.model] ?? llm.forwardKey;
+				const upstream = await fetch(llm.forward, {
+					method: 'POST',
+					headers: {
+						'content-type': 'application/json',
+						...(forwardKey === undefined ? {} : { authorization: `Bearer ${forwardKey}` })
+					},
+					body: JSON.stringify(request)
+				});
+				const answer = await upstream.text();
+				recorded.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
+				res.statusCode = upstream.status;
+				res.setHeader('content-type', 'application/json');
+				res.end(answer);
+				return;
+			}
+			const reply: ScriptedReply = isSort
+				? {
+						content: JSON.stringify({
+							answers: Object.fromEntries(
+								Object.keys(
+									(JSON.parse(request.messages.at(-1)?.content ?? '{}') as { questions: object })
+										.questions
+								).map((question) => [
+									question,
+									{
+										type: 'noul',
+										noul:
+											question === 'concerns'
+												? llm.sortProbability
+												: (llm.routeProbabilities[question] ?? 0)
+									}
+								])
+							)
+						})
+					}
+				: (isCheck ? llm.checkScript : llm.script)(request, recorded.length);
 			if (reply.delayMs !== undefined) await sleep(reply.delayMs);
 			if (reply.hold !== undefined) await reply.hold;
-			llm.calls.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
+			recorded.push({ seq: callSeq, startedAt, finishedAt: Date.now(), apiKey, request });
 			if (reply.failWith !== undefined) {
 				sendJson(res, reply.failWith, { error: 'the model failed' });
 				return;
@@ -860,7 +926,7 @@ export async function startFakeApisix(): Promise<FakeApisix> {
 				reply.usage?.completionTokens ??
 				(reply.finishReason === 'length' ? (request.max_tokens ?? 5) : 5);
 			sendJson(res, 200, {
-				id: `chatcmpl-${llm.calls.length}`,
+				id: `chatcmpl-${recorded.length}`,
 				object: 'chat.completion',
 				model: request.model,
 				choices: [

@@ -6,7 +6,9 @@ import { withPrincipal, type Db } from '../db/client.js';
 import { enqueueJob } from '../jobs/queue.js';
 import { principalOfMatrixUser } from '../principals/identity.js';
 import { suggestGroup, type Quoted, type SuggestPayload } from './job.js';
-import { mayArrangeMeeting } from './prefilter.js';
+import { LlmError, type LlmClient } from '../llm/client.js';
+import { MAX_LENGTH, mayArrangeMeeting } from './prefilter.js';
+import { MEETING_THRESHOLD, meetingRequest, readMeeting } from './sort.js';
 import { readSettings } from './repository.js';
 
 // A message stays context for the next one for this long; it lives in this process's memory only,
@@ -49,6 +51,9 @@ export interface IntakeDeps {
 	readonly db: Db;
 	readonly log: FastifyBaseLogger;
 	readonly now?: () => number;
+	// The client of the gateway's models: with a decision model set, it tells the messages that
+	// arrange a meeting, in place of the words the harness looks for without one
+	readonly llm?: LlmClient;
 }
 
 // The messages of the channels the listener was invited to come to the matrix role, and of no
@@ -86,6 +91,35 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 		return (await withPrincipal(db, { id: owner }, (tx) => readSettings(tx, owner))).enabled;
 	}
 
+	const sorts = deps.llm !== undefined && config.llm.decisionModel.length > 0;
+
+	// Whether a decision model takes the messages to arrange a meeting. It is a net, as the words
+	// are: the model that then reads them decides what to propose. A sorting that fails falls back
+	// on the words.
+	async function arranges(
+		quoted: readonly Quoted[],
+		text: string,
+		roomId: string
+	): Promise<boolean> {
+		if (deps.llm === undefined) return mayArrangeMeeting(text);
+		try {
+			const started = performance.now();
+			const sorted = await deps.llm.complete(meetingRequest(quoted), [], {
+				model: config.llm.decisionModel
+			});
+			const probability = readMeeting(sorted.content);
+			log.info(
+				{ roomId, probability, durationMs: Math.round(performance.now() - started) },
+				'channel sorted'
+			);
+			return probability === null ? mayArrangeMeeting(text) : probability >= MEETING_THRESHOLD;
+		} catch (err: unknown) {
+			if (!(err instanceof LlmError)) throw err;
+			log.warn({ roomId, err }, 'channel not sorted');
+			return mayArrangeMeeting(text);
+		}
+	}
+
 	async function hasAssistant(owner: string): Promise<boolean> {
 		const assistant = await withPrincipal(db, { id: owner }, (tx) => findAssistant(tx, owner));
 		return assistant !== null && assistant.deletedAt === null;
@@ -119,7 +153,9 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			const key = keyOf(roomId, onlyFor);
 			const previous = recent.get(key);
 			remember(key, current);
-			if (!mayArrangeMeeting(message.text)) return;
+			// Without a decision model, the words decide at once, before anything else is read. With
+			// one, it decides further down: no model reads the message of whoever turned suggestions off
+			if (sorts ? message.text.length > MAX_LENGTH : !mayArrangeMeeting(message.text)) return;
 			// Whoever turned suggestions off is not read: not as the message that starts one, nor as its context
 			if (!(await enabled(sender))) {
 				log.info({ roomId, eventId: message.eventId, reason: 'opted_out' }, 'channel ignored');
@@ -137,6 +173,7 @@ export function makeSuggestionIntake(deps: IntakeDeps): SuggestionIntake {
 			const quoted: Quoted[] = [context, current]
 				.filter((item): item is Remembered => item !== null)
 				.map(({ author, email, text }) => ({ author, email, text }));
+			if (sorts && !(await arranges(quoted, message.text, roomId))) return;
 			// The conversation pair: whoever wrote the message and whoever wrote the one before; the
 			// owner alone where they invited their assistant, the other member having asked nothing
 			const owners = onlyFor === undefined ? [...new Set(quoted.map((q) => q.email))] : [onlyFor];

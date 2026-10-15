@@ -16,6 +16,7 @@
 		"lint": "prettier --check . && eslint .",
 		"format": "prettier --write .",
 		"test": "vitest run",
+		"test:real": "vitest run tests/real-dataset.test.ts",
 		"test:ci": "vitest run --reporter=default --reporter=json --outputFile=test-results/vitest.json",
 		"db:migrate": "tsx src/db/migrate-cli.ts",
 		"matrix:registration": "tsx src/matrix/registration-cli.ts",
