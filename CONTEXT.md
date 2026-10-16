@@ -36,6 +36,10 @@ _Avoid_: recommendation, hint
 
 ## Hearing of the owner's activity
 
+**Source**:
+A Twake application whose activity an assistant hears for its owner only while the owner has it listen there: Calendar, Tasks, Mail, Drive, Chat or Space.
+_Avoid_: app, channel, integration
+
 **Activity**:
 What a Twake application publishes about one of its objects for the people it names, such as a task assigned to someone or a meeting moved.
 _Avoid_: event (the message that carries it), notification
