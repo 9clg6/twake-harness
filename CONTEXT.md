@@ -1,6 +1,6 @@
 # Twake Space assistants
 
-Each user of a Twake Workplace platform has a personal assistant that acts for them in the Twake applications. This glossary names the people, assistants and conversations involved, and how an assistant arranges a meeting from a conversation it listens to.
+Each user of a Twake Workplace platform has a personal assistant that acts for them in the Twake applications. This glossary names the people, assistants and conversations involved, how an assistant hears of what happens for its owner in the Twake applications, and how an assistant arranges a meeting from a conversation it listens to.
 
 ## People and assistants
 
@@ -33,6 +33,36 @@ _Avoid_: listened room, assistant channel
 **Suggestion**:
 An action an assistant offers its owner, unasked, from what was said in a conversation its owner takes part in.
 _Avoid_: recommendation, hint
+
+## Hearing of the owner's activity
+
+**Source**:
+A Twake application whose activity an assistant hears for its owner only while the owner has it listen there: Calendar, Tasks, Mail, Drive, Chat or Space.
+_Avoid_: app, channel, integration
+
+**Activity**:
+What a Twake application publishes about one of its objects for the people it names, such as a task assigned to someone or a meeting moved.
+_Avoid_: event (the message that carries it), notification
+
+**Wake-up**:
+An assistant's message to its owner about an activity that names them and expects something of them, sent without waiting for their brief: a task assigned to them, an invitation, a meeting of theirs moved or cancelled, something shared with them, or a mention, which in Twake Chat waits until they have left it unread for ten minutes.
+_Avoid_: notification, alert, ping
+
+**Mention**:
+A message, comment or post that names the owner explicitly, as the pill of their name does in Twake Chat, rather than by a word of its text. `@room` mentions no one.
+_Avoid_: ping, tag, highlight
+
+**Listener**:
+The harness's one account in the clear rooms of Twake Chat, `@twake-assistant`, which reads what is said there for the owners in them and never writes.
+_Avoid_: channel bot, listening bot
+
+**Brief**:
+The message an assistant sends its owner on the days and at the time they chose, with their day ahead and every activity that waited for it rather than a wake-up.
+_Avoid_: digest, daily summary, morning report
+
+**Feed**:
+A space's stream in Twake Space: its members' posts and their reactions, and a card for each object of the space's applications, such as a task, a team mail or a folder.
+_Avoid_: timeline, wall, message thread
 
 ## Arranging a meeting
 
