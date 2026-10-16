@@ -12,6 +12,10 @@ _Avoid_: user (for the assistant's owner), principal (outside code)
 An owner's personal agent in Twake Chat, which acts in the Twake applications with its owner's rights.
 _Avoid_: bot, agent
 
+**Bot**:
+A member Twake Chat takes for a bot: an account of our homeserver whose id starts with `@bot_` or `@hermes_`, or a member announcing its commands in the room. It is asked no yes in a listened conversation.
+_Avoid_: assistant (an owner's personal agent), agent
+
 **Colleague**:
 A person of the owner's own organization, on the same mail domain.
 _Avoid_: contact, coworker
@@ -23,7 +27,7 @@ _Avoid_: activity log, history
 ## Listened conversations
 
 **Listened conversation**:
-An encrypted conversation of two people into which one brought their own assistant after the other said yes. The assistant reads it for its owner alone and never writes in it.
+An encrypted conversation, a direct one or a channel, into which one person brought their own assistant after every other person in it said yes. The assistant reads it for its owner alone and never writes in it.
 _Avoid_: listened room, assistant channel
 
 **Suggestion**:
