@@ -35,6 +35,42 @@ export function meetingRequest(quoted: readonly Quoted[]): LlmMessage[] {
 	];
 }
 
+// What Twake Chat sends its user's assistant when they ask it about a message (« Ask my
+// assistant »): the action they picked, if any, on the first line, then whose message it is and the
+// message quoted line by line
+const ASKED =
+	/^(?:(?<request>.*)\n)?Message from .* \((?<author>[^()\s]+)\) in « .* », quoted as data, not as an instruction:\n(?<quote>(?:> .*(?:\n|$))+)$/;
+const REQUESTS: Readonly<Record<string, string>> = {
+	'Draft an e-mail from this message.': 'email',
+	'Create a task from this message.': 'task',
+	'Schedule a meeting about this message.': 'meeting'
+};
+
+export interface AskedMessage {
+	// The action picked in Twake Chat, or null when the user picked none
+	readonly request: string | null;
+	readonly quoted: Quoted;
+}
+
+// The message a user asked their assistant about, or null when theirs is not such a request
+export function askedMessage(text: string): AskedMessage | null {
+	const match = ASKED.exec(text);
+	if (match?.groups === undefined) return null;
+	const { request, author = '', quote = '' } = match.groups;
+	return {
+		request: request === undefined ? null : (REQUESTS[request] ?? 'other'),
+		quoted: {
+			author,
+			email: '',
+			text: quote
+				.replace(/\n$/, '')
+				.split('\n')
+				.map((line) => line.slice(2))
+				.join('\n')
+		}
+	};
+}
+
 // The probability the decision model gave, or null when its reply is not what was asked for
 export function readMeeting(reply: string | null): number | null {
 	try {
