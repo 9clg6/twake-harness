@@ -932,6 +932,67 @@ describe('the assistant proposes from the messages of channels', () => {
 			return c;
 		}
 
+		// A channel anyone may join, encrypted, of an owner and one other person who both said yes, with
+		// the owner's assistant listening, and a newcomer not in it yet
+		async function listenedChannel(): Promise<{
+			owner: MatrixUser;
+			newcomerClient: E2eeClient;
+			room: string;
+			assistant: string;
+			listened(): Promise<number>;
+			stop(): Promise<void>;
+		}> {
+			const tag = Math.random().toString(36).slice(2, 7);
+			const owner = await becomeAssistantOwner(`r${tag}`);
+			const other = await h.synapse.registerUser(`q${tag}`);
+			const newcomer = await h.synapse.registerUser(`n${tag}`);
+			const ownerClient = await startE2eeClient(h.synapse.url, owner);
+			const otherClient = await startE2eeClient(h.synapse.url, other);
+			const newcomerClient = await startE2eeClient(h.synapse.url, newcomer);
+			const room = await ownerClient.client.createRoom({
+				preset: 'public_chat',
+				name: 'open secret channel',
+				invite: [other.userId],
+				initial_state: [ENCRYPTION],
+				power_level_content_override: { events: { 'app.twake.chat.assistant_consent': 0 } }
+			});
+			await otherClient.joinRoom(room);
+			const principal = `r${tag}@test.local`;
+			const rows = await withPrincipal(
+				h.db,
+				{ id: principal },
+				(tx) => tx.sql<{ user_id: string }[]>`
+					select user_id from assistants where owner = ${principal}`
+			);
+			const assistant = rows[0]?.user_id ?? '';
+			const listened = async (): Promise<number> =>
+				(await h.db.sql`select 1 from assistant_listened_rooms where room_id = ${room}`).length;
+			await ownerClient.client.sendStateEvent(
+				room,
+				'app.twake.chat.assistant_request',
+				owner.userId,
+				{ assistant_id: assistant, requested: true, ts: Date.now() }
+			);
+			await otherClient.client.sendStateEvent(
+				room,
+				'app.twake.chat.assistant_consent',
+				other.userId,
+				{ assistant_id: assistant, accepted: true, ts: Date.now() }
+			);
+			await ownerClient.client.inviteUser(assistant, room);
+			await until(async () => ((await listened()) === 1 ? true : null));
+			return {
+				owner,
+				newcomerClient,
+				room,
+				assistant,
+				listened,
+				stop: async () => {
+					for (const client of [ownerClient, otherClient, newcomerClient]) await client.stop();
+				}
+			};
+		}
+
 		// Once something made it go: the room forgotten, the assistant out of it, without a word
 		async function goneWithoutAWord(c: Conversation, viewer: MatrixUser): Promise<void> {
 			await until(async () => ((await c.listened()) === 0 ? true : null));
@@ -2809,6 +2870,50 @@ describe('the assistant proposes from the messages of channels', () => {
 				);
 			} finally {
 				for (const client of clients) await client.stop();
+			}
+		});
+
+		it('takes no yes given before the request', async () => {
+			const c = await encryptedConversation();
+			try {
+				await c.answer(true);
+				await sleep(1100);
+				await c.ask();
+				await c.ownerClient.client.inviteUser(c.assistant, c.room);
+				expect(await leftRoom(c.owner, c.room, c.assistant)).toBe(true);
+				expect(await c.listened()).toBe(0);
+			} finally {
+				await c.stop();
+			}
+		});
+
+		it('reads nothing of a newcomer who joins a listened channel uninvited and writes at once', async () => {
+			const c = await listenedChannel();
+			try {
+				// The homeserver is slow to tell who is in the room: the newcomer's words come meanwhile
+				h.apisix.matrixHold = (call) =>
+					call.method === 'GET' &&
+					(decodeURIComponent(call.path).split('?')[0] ?? '').endsWith(`/rooms/${c.room}/state`)
+						? sleep(4000)
+						: null;
+				const before = space.calls.length;
+				await c.newcomerClient.joinRoom(c.room);
+				const eventId = await c.newcomerClient.sendText(c.room, 'ok on parle lundi à 10h');
+				await until(async () => ((await c.listened()) === 0 ? true : null));
+				expect(await leftRoom(c.owner, c.room, c.assistant)).toBe(true);
+				// The message did reach the role, which waited for the check of the newcomer
+				await until(() =>
+					h
+						.logLines()
+						.some((line) => line['msg'] === 'message received' && line['eventId'] === eventId)
+				);
+				await sleep(3000);
+				expect(
+					space.calls.slice(before).filter((made) => made.body['matrixRoomId'] === c.room)
+				).toHaveLength(0);
+			} finally {
+				h.apisix.matrixHold = null;
+				await c.stop();
 			}
 		});
 	});
