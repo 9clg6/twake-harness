@@ -3,6 +3,14 @@
 	"version": "0.1.0",
 	"private": true,
 	"description": "Twake Space agent harness",
+	"homepage": "https://github.com/linagora/twake-harness#readme",
+	"bugs": {
+		"url": "https://github.com/linagora/twake-harness/issues"
+	},
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/linagora/twake-harness.git"
+	},
 	"license": "AGPL-3.0-only",
 	"type": "module",
 	"engines": {
