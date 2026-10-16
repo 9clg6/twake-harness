@@ -11,6 +11,13 @@ import {
 	type LlmToolDefinition
 } from '../llm/client.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
+import { mayArrangeMeeting } from '../suggestions/prefilter.js';
+import {
+	askedMessage,
+	MEETING_THRESHOLD,
+	meetingRequest,
+	readMeeting
+} from '../suggestions/sort.js';
 import { withoutCallMarkup } from './call-markup.js';
 import type { TimeZone } from './clock.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
@@ -510,6 +517,38 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// reads it: the lane of the turn, and the capabilities it names. A sorting that fails leaves
 	// the turn to the model.
 	async function route(state: TurnStep): Promise<TurnUpdate> {
+		const [sent] = await Promise.all([sort(state), scoreAsked(state)]);
+		return sent;
+	}
+
+	// The message a user asked their assistant about from Twake Chat, as the channels' sorting
+	// would have read it: whether a suggestion would have been made from it. Measured, never acted
+	// on: the log line says what the sorting misses, with no word of the message.
+	let asked = null as { request: string | null; caught: boolean | null } | null;
+	async function scoreAsked(state: TurnStep): Promise<void> {
+		const message = input.message === null ? null : askedMessage(input.message);
+		if (message === null) return;
+		let probability: number | null = null;
+		try {
+			const sorted = await deps.llm.complete(meetingRequest([message.quoted]), [], {
+				model: decisionModel
+			});
+			spend(deps.log, state.iteration, sorted, spent);
+			probability = readMeeting(sorted.content);
+		} catch (err: unknown) {
+			if (!(err instanceof LlmError)) throw err;
+		}
+		asked = {
+			request: message.request,
+			caught: probability === null ? null : probability >= MEETING_THRESHOLD
+		};
+		deps.log.info(
+			{ ...asked, probability, words: mayArrangeMeeting(message.quoted.text) },
+			'asked message sorted'
+		);
+	}
+
+	async function sort(state: TurnStep): Promise<TurnUpdate> {
 		if (capabilities.length === 0 || input.message === null) return {};
 		try {
 			const started = performance.now();
@@ -1026,6 +1065,20 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		// and of the report
 		{ recursionLimit: 2 * deps.maxToolCalls + 16 }
 	);
+	if (asked !== null) {
+		// What came of it, to put beside whether the sorting caught it: the writes done, and the one
+		// that waits for the owner, whose yes or no the consent's own line tells
+		deps.log.info(
+			{
+				...asked,
+				done: (end.steps ?? [])
+					.filter((step) => step.done && actionOf(step.tool) !== null)
+					.map((step) => step.tool),
+				pendingCallId: end.pendingCallId ?? null
+			},
+			'asked message answered'
+		);
+	}
 	if (end.silent)
 		return { answer: '', messages: input.history, tokens: spent.tokens, silent: true };
 	if (end.answer === null) throw new TurnError('the turn ended without an answer');
