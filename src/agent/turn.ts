@@ -11,6 +11,14 @@ import {
 	type LlmToolDefinition
 } from '../llm/client.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
+import { MAX_LENGTH, mayArrangeMeeting } from '../suggestions/prefilter.js';
+import {
+	askedMessage,
+	DECISION_MAX_TOKENS,
+	MEETING_THRESHOLD,
+	meetingRequest,
+	readMeeting
+} from '../suggestions/sort.js';
 import { withoutCallMarkup } from './call-markup.js';
 import type { TimeZone } from './clock.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
@@ -497,6 +505,48 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	// reads it: the lane of the turn, and the capabilities it names. A sorting that fails leaves
 	// the turn to the model.
 	async function route(state: TurnStep): Promise<TurnUpdate> {
+		// The measure never fails the turn, and is over before the turn goes on
+		const [sent] = await Promise.allSettled([sort(state), scoreAsked()]);
+		if (sent.status === 'rejected') throw sent.reason;
+		return sent.value;
+	}
+
+	// The message a user asked their assistant about from Twake Chat (« Ask my assistant »), put to
+	// the decision model as a channel's message is: whether a suggestion could have come of it.
+	// Measured, never acted on, and spent on no one's tokens: it reads the message alone, without
+	// the one before it that a channel gives, and from a conversation the listener may never read,
+	// so a miss counted here is one of the decision model on a lone message. The log lines hold no
+	// word of it.
+	const fromChat: { readonly request: string | null; readonly caught: boolean | null }[] = [];
+	async function scoreAsked(): Promise<void> {
+		const message = input.message === null ? null : askedMessage(input.message);
+		if (message === null) return;
+		const words = mayArrangeMeeting(message.quoted.text);
+		// A channel never sorts a message this long: it was missed whatever the model says
+		if (message.quoted.text.length > MAX_LENGTH) {
+			fromChat.push({ request: message.request, caught: false });
+			deps.log.info(
+				{ request: message.request, probability: null, caught: false, words, reason: 'too_long' },
+				'asked message sorted'
+			);
+			return;
+		}
+		let probability: number | null = null;
+		try {
+			const sorted = await deps.llm.complete(meetingRequest([message.quoted]), [], {
+				model: decisionModel,
+				maxTokens: DECISION_MAX_TOKENS
+			});
+			probability = readMeeting(sorted.content);
+		} catch (err: unknown) {
+			deps.log.warn({ err }, 'asked message not sorted');
+		}
+		const caught = probability === null ? null : probability >= MEETING_THRESHOLD;
+		fromChat.push({ request: message.request, caught });
+		deps.log.info({ request: message.request, probability, caught, words }, 'asked message sorted');
+	}
+
+	async function sort(state: TurnStep): Promise<TurnUpdate> {
 		if (capabilities.length === 0 || input.message === null) return {};
 		try {
 			const started = performance.now();
@@ -959,7 +1009,13 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 	const resuming =
 		guard !== undefined && input.message === null && !comesFromOthers(input.context.origin);
 	const resumed = resuming ? planFromHistory(input.history, catalog) : null;
-	const end = await graph.invoke(
+	// What came of a message asked about from Chat, to put beside whether the sorting caught it: the
+	// writes done, and the one that waits for the owner, whose yes or no the consent's own line tells
+	const answered = (fields: Record<string, unknown>): void => {
+		for (const scored of fromChat)
+			deps.log.info({ ...scored, ...fields }, 'asked message answered');
+	};
+	const walked = graph.invoke(
 		{
 			messages: input.message === null ? [] : [{ role: 'user', content: input.message }],
 			toolCalls: 0,
@@ -993,6 +1049,16 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		// the limit, its check and the report
 		{ recursionLimit: 2 * deps.maxToolCalls + 16 }
 	);
+	const end = await walked.catch((err: unknown) => {
+		answered({ failed: true });
+		throw err;
+	});
+	answered({
+		done: (end.steps ?? [])
+			.filter((step) => step.done && actionOf(step.tool) !== null)
+			.map((step) => step.tool),
+		pendingCallId: end.pendingCallId ?? null
+	});
 	if (end.silent)
 		return { answer: '', messages: input.history, tokens: spent.tokens, silent: true };
 	if (end.answer === null) throw new TurnError('the turn ended without an answer');
