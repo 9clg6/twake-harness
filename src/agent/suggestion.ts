@@ -6,6 +6,7 @@ import { findAssistant, isActiveAssistant } from '../assistants/repository.js';
 import type { Config } from '../config.js';
 import type { ContractCatalog } from '../contracts/catalog.js';
 import type { ContractDefinition } from '../contracts/openapi.js';
+import { CONTRACT_UNREACHED } from '../contracts/tools.js';
 import { AVAILABILITY_DOMAIN } from '../consents/consent.js';
 import type { ConsentMetrics } from '../consents/metrics.js';
 import {
@@ -113,6 +114,9 @@ export interface SuggestionInput {
 	readonly log: FastifyBaseLogger;
 }
 
+// The ways a suggestion fails, which its owner is told: the model, the calendar, or the job itself
+export type SuggestionFailure = 'model_failed' | 'calendar_failed' | 'job_failed';
+
 export type SuggestionResult =
 	| { readonly kind: 'none'; readonly reason: string }
 	| { readonly kind: 'busy' }
@@ -127,9 +131,9 @@ export type SuggestionResult =
 	// That question still waits for the owner
 	| { readonly kind: 'waiting' }
 	// The model could not be reached this pass, on a listened conversation whose window is still open:
-	// the handler tries the suggestion again within the window, and says nothing once it closes. A
-	// first pass that failed wrote nothing, so the try that follows reaches the model again and, if it
-	// answers, settles the message as any first pass would.
+	// the handler tries the suggestion again within the window, and tells the owner when no other try
+	// fits in it. A first pass that failed wrote nothing, so the try that follows reaches the model
+	// again and, if it answers, settles the message as any first pass would.
 	| { readonly kind: 'retry' }
 	// A listened conversation whose invitee may be a colleague: the harness wrote an availability
 	// request for their assistant and queued the job that answers it, and now waits for that answer,
@@ -299,12 +303,16 @@ export function slotsRefusal(args: unknown, allowed: ReadonlySet<string>): ToolR
 }
 
 // The two contracts held to what a suggestion may do: what a guard refuses never runs
-function guardSlots(tool: Tool, allowed: ReadonlySet<string>): Tool {
+function guardSlots(tool: Tool, allowed: ReadonlySet<string>, onCalendar?: OnCalendar): Tool {
 	return {
 		...tool,
 		run: async (args, context) => {
 			const refused = slotsRefusal(args, allowed);
-			return refused === null ? tool.run(args, context) : { result: refused };
+			if (refused !== null) return { result: refused };
+			const outcome = await tool.run(args, context);
+			const answered = calendarAnswered(outcome);
+			if (answered !== null) onCalendar?.(answered);
+			return outcome;
 		}
 	};
 }
@@ -329,7 +337,8 @@ export function makeSuggestionTools(
 	contracts: ContractCatalog,
 	owner: string,
 	people: readonly string[],
-	declined: string | null
+	declined: string | null,
+	onCalendar?: OnCalendar
 ): ToolRegistry {
 	const invited = new Set(
 		people.map((p) => p.toLowerCase()).filter((p) => p !== owner.toLowerCase())
@@ -341,9 +350,28 @@ export function makeSuggestionTools(
 			.map((t) =>
 				t.definition.function.name === CREATE_MEETING
 					? guardMeeting(t, invited, declined)
-					: guardSlots(t, searched)
+					: guardSlots(t, searched, onCalendar)
 			)
 	);
+}
+
+// Told each time a read of the calendar ended: true when it answered, false when it did not
+export type OnCalendar = (answered: boolean) => void;
+
+// Whether the calendar answered a read: true for a 2xx, false when the call never reached it or it
+// failed on its side (5xx), null for what says nothing of the calendar, such as the 4xx it answers a
+// question it refuses with, or a call the harness refused to make
+function calendarAnswered(outcome: ToolOutcome): boolean | null {
+	const status = answeredStatus(outcome);
+	if (status !== null) {
+		if (status >= 500) return false;
+		return status >= 200 && status < 300 ? true : null;
+	}
+	const error: unknown =
+		typeof outcome.result === 'object' && outcome.result !== null
+			? Reflect.get(outcome.result, 'error')
+			: undefined;
+	return typeof error === 'string' && error.startsWith(CONTRACT_UNREACHED) ? false : null;
 }
 
 // The status of a contract's answer, or null for one that never reached it
@@ -382,17 +410,16 @@ function makeOwnerReaders(
 	owner: string,
 	timeZone: string,
 	durationMs: number,
-	// Told each time a read actually reached the calendar, so that a caller can tell a calendar it
-	// read and found free nowhere from one it could not read at all
-	onRead?: () => void
+	// Told how each read ended, so that a caller can tell a calendar it read and found free nowhere
+	// from one that did not answer
+	onCalendar?: OnCalendar
 ): SlotReaders {
 	const bodyOf = async (name: string, args: Record<string, unknown>): Promise<unknown> => {
 		const outcome = await run(name, args);
 		if (outcome === null) return undefined;
-		const status = answeredStatus(outcome);
-		if (status === null || status < 200 || status >= 300) return undefined;
-		onRead?.();
-		return answeredBody(outcome);
+		const answered = calendarAnswered(outcome);
+		if (answered !== null) onCalendar?.(answered);
+		return answered === true ? answeredBody(outcome) : undefined;
 	};
 	return {
 		async ownerFree(window) {
@@ -589,8 +616,8 @@ export function makeAvailabilityAnswerer(deps: AvailabilityDeps): AvailabilityRu
 			invitee,
 			timeZone,
 			request.durationMs,
-			() => {
-				read = true;
+			(answered) => {
+				read ||= answered;
 			}
 		);
 		const asked: Asked = {
@@ -675,7 +702,8 @@ async function proposeListenedMeeting(
 	timeZone: string,
 	now: Date,
 	request: ListenedRequest,
-	context: ToolContext
+	context: ToolContext,
+	onCalendar?: OnCalendar
 ): Promise<ToolOutcome> {
 	const reads = makeToolRegistry([], () =>
 		contracts.tools
@@ -690,7 +718,7 @@ async function proposeListenedMeeting(
 		const tool = reads.find(name);
 		return tool === null ? null : runTool(tool, callArgs, context);
 	};
-	const readers = makeOwnerReaders(run, owner, timeZone, request.asked.durationMs);
+	const readers = makeOwnerReaders(run, owner, timeZone, request.asked.durationMs, onCalendar);
 	const slot = firstCandidate(
 		await candidateSlots(request.asked, now, timeZone, readers, declined)
 	);
@@ -720,9 +748,13 @@ export function makeListenedTools(
 	declined: string | null,
 	timeZone: string,
 	now: Date,
-	// What the model asked for, read from its one tool: the period, the asked time and the length,
-	// which the organizer's assistant writes into the availability request it makes of the invitee
-	onAsked?: (asked: Asked) => void
+	on: {
+		// What the model asked for, read from its one tool: the period, the asked time and the
+		// length, which the organizer's assistant writes into the availability request it makes of
+		// the invitee
+		readonly onAsked?: (asked: Asked) => void;
+		readonly onCalendar?: OnCalendar;
+	} = {}
 ): ToolRegistry {
 	const propose: Tool = {
 		definition: {
@@ -752,7 +784,7 @@ export function makeListenedTools(
 		run: async (args, context) => {
 			const request = readListenedRequest(args);
 			if ('error' in request) return { result: request };
-			onAsked?.(request.asked);
+			on.onAsked?.(request.asked);
 			return proposeListenedMeeting(
 				contracts,
 				owner,
@@ -761,7 +793,8 @@ export function makeListenedTools(
 				timeZone,
 				now,
 				request,
-				context
+				context,
+				on.onCalendar
 			);
 		}
 	};
@@ -853,20 +886,25 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 		// What the model asked for, captured from its one tool for the request the organizer's
 		// assistant makes of the invitee
 		let askedFor: Asked | null = null;
+		// Whether the calendar's last word was silence: a search that got no answer and was not read
+		// again since leaves nothing proposed as a failure the owner is told, not as a full calendar
+		let unreadable = false;
+		const onCalendar: OnCalendar = (answered) => {
+			unreadable = !answered;
+		};
+		const noSlot = (otherwise: string): SuggestionResult => {
+			const failed: SuggestionFailure = 'calendar_failed';
+			return { kind: 'none', reason: unreadable ? failed : otherwise };
+		};
 		const colleague = matrixLocalpartOfPrincipal(config, other) !== null;
 		const registry = listened
-			? makeListenedTools(
-					contracts,
-					owner,
-					other,
-					payload.retry?.start ?? null,
-					timeZone,
-					now,
-					(a) => {
+			? makeListenedTools(contracts, owner, other, payload.retry?.start ?? null, timeZone, now, {
+					onAsked: (a) => {
 						askedFor = a;
-					}
-				)
-			: makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null);
+					},
+					onCalendar
+				})
+			: makeSuggestionTools(contracts, owner, others, payload.retry?.start ?? null, onCalendar);
 		const moment = describeMoment(now, timeZone, locale);
 		const messages = getMessages(locale);
 		// A suggestion spends its owner's day, and never the share of it that the turns activities wake
@@ -915,10 +953,11 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 								db,
 								correlationId: `suggest-${eventId}`,
 								log: retryLog
-							}
+							},
+							onCalendar
 						);
 						const fallbackCallId = outcome.pendingCallId;
-						if (fallbackCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
+						if (fallbackCallId === undefined) return noSlot('nothing_proposed');
 						const body = await readFrozenMeeting(db, owner, fallbackCallId);
 						if (body === null) return { kind: 'none', reason: 'not_a_meeting' };
 						// The invitee is not a colleague: no request crosses to another mail domain, and the
@@ -1034,7 +1073,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						},
 						owner,
 						timeZone,
-						existing.durationMs
+						existing.durationMs,
+						onCalendar
 					);
 					let chosen: Window | null = null;
 					for (const window of windows) {
@@ -1049,7 +1089,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 					}
 					if (chosen === null) {
 						await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
-						return { kind: 'none', reason: 'no_common_slot' };
+						return noSlot('no_common_slot');
 					}
 					const { start, end } = slotArguments(chosen, timeZone);
 					await withPrincipal(db, principal, async (tx) => {
@@ -1148,7 +1188,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 							},
 							owner,
 							timeZone,
-							armed.durationMs
+							armed.durationMs,
+							onCalendar
 						);
 						let chosen: Window | null = null;
 						for (const window of candidates) {
@@ -1159,7 +1200,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						}
 						if (chosen === null) {
 							await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, armed.id));
-							return { kind: 'none', reason: 'no_common_slot' };
+							return noSlot('no_common_slot');
 						}
 						const { start, end } = slotArguments(chosen, timeZone);
 						await withPrincipal(db, principal, async (tx) => {
@@ -1218,17 +1259,18 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 						turnLog.warn({ reason: err.name }, 'suggestion failed');
 						// A listened suggestion whose window is still open tries again rather than
 						// abandoning: nothing was written this pass, so the try that follows runs the model
-						// again and settles the message if it answers. Past the window it says nothing, as
-						// any suggestion that reached the model and got nowhere.
+						// again and settles the message if it answers. The handler tells the owner when no
+						// other try fits in the window.
 						if (listened && clock.now().getTime() - payload.at <= SUGGEST_MAX_AGE_MS) {
 							return { kind: 'retry' };
 						}
-						return { kind: 'none', reason: 'model_failed' };
+						const failed: SuggestionFailure = 'model_failed';
+						return { kind: 'none', reason: failed };
 					}
 					throw err;
 				}
 				await admission.recordUsage(owner, turn.tokens, 'suggestion');
-				if (turn.pendingCallId === undefined) return { kind: 'none', reason: 'nothing_proposed' };
+				if (turn.pendingCallId === undefined) return noSlot('nothing_proposed');
 				const pendingCallId = turn.pendingCallId;
 				const call = await withPrincipal(
 					db,
@@ -1342,7 +1384,8 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 					},
 					owner,
 					timeZone,
-					existing.durationMs
+					existing.durationMs,
+					onCalendar
 				);
 				let chosen: Window | null = null;
 				for (const window of windows) {
@@ -1353,7 +1396,7 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 				}
 				if (chosen === null) {
 					await withPrincipal(db, principal, (tx) => clearAvailabilityRequest(tx, existing.id));
-					return { kind: 'none', reason: 'no_common_slot' };
+					return noSlot('no_common_slot');
 				}
 				const { start, end } = slotArguments(chosen, timeZone);
 				await withPrincipal(db, principal, async (tx) => {

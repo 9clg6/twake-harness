@@ -340,6 +340,10 @@ export interface Messages {
 		// The line a proposal adds when the invitee's assistant answered that they are free at the
 		// proposed time: the invitee named as the harness computed their address
 		inviteeFree(invitee: string): string;
+		// What the owner reads in their assistant's room when a meeting arranged in a conversation
+		// got no proposal because something failed: the model or the job, or their calendar
+		readonly failed: string;
+		readonly calendarFailed: string;
 		// What the harness asks an invitee, in their own room, the first time a colleague's assistant
 		// asks for their availability, and what it tells them once no answer came or they took the
 		// sharing back
@@ -965,6 +969,10 @@ const ENGLISH: Messages = {
 			'Thank you. I will propose time slots for the messages that arrange a meeting with you.',
 		inviteeNotSeen: (invitee) => `I could not see the availability of ${invitee}.`,
 		inviteeFree: (invitee) => `${invitee} is free at that time.`,
+		failed:
+			'I could not propose a time slot for a meeting arranged in a conversation: something went wrong on my side.',
+		calendarFailed:
+			'I could not propose a time slot for a meeting arranged in a conversation: your calendar did not answer.',
 		availabilitySharing: {
 			question: (organizer, period) =>
 				`${organizer} is asking me for your availability ${period}. May I share it with colleagues? I would share your free slots only, never what fills them. This holds for every colleague, and you can take it back any time on the agreements page.`,
@@ -1397,6 +1405,10 @@ const FRENCH: Messages = {
 			'Merci. Je te proposerai des créneaux pour les messages qui fixent un rendez-vous avec toi.',
 		inviteeNotSeen: (invitee) => `Je n'ai pas pu voir les disponibilités de ${invitee}.`,
 		inviteeFree: (invitee) => `${invitee} est libre à cette heure-là.`,
+		failed:
+			"Je n'ai pas pu te proposer de créneau pour un rendez-vous fixé dans une conversation : quelque chose s'est mal passé de mon côté.",
+		calendarFailed:
+			"Je n'ai pas pu te proposer de créneau pour un rendez-vous fixé dans une conversation : ton agenda n'a pas répondu.",
 		availabilitySharing: {
 			question: (organizer, period) =>
 				`${organizer} me demande tes disponibilités ${period}. Puis-je les partager avec tes collègues ? Je ne partagerais que tes créneaux libres, jamais ce qui les remplit. Cela vaut pour tous tes collègues, et tu peux le retirer à tout moment sur la page des accords.`,

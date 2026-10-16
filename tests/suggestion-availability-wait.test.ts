@@ -287,19 +287,24 @@ describe('a listened suggestion that waits for an availability answer', () => {
 		}
 	});
 
-	it('says nothing, and freezes nothing, once the model fails and the window is spent', async () => {
+	it('tells the owner once, and freezes nothing, when the model still fails on the last try of the window', async () => {
 		const dave = await ownerNamed('dave');
 		h.apisix.llm.script = failingModel;
 		try {
 			const message = await suggestListened(dave);
+			// The first failure inside the window is tried again, and tells the owner nothing yet
 			expect(await pass(message)).toBe('deferred');
-			// The gateway stays down until the window closes: the harness moves its own present ten
-			// minutes on, and the suggestion decides nothing rather than freezing a call nobody asked for
-			moment = new Date(Date.now() + SUGGEST_MAX_AGE_MS);
+			expect(await written(dave)).toEqual([]);
+			// The gateway stays down until a second before the window closes: no other try fits in it,
+			// so this pass tells the owner, instead of leaving a retry for a pass that would be dropped
+			moment = new Date(message.at + SUGGEST_MAX_AGE_MS - 1_000);
 			expect(await pass(message)).toBe('done');
 			expect(await waitingCalls(dave)).toEqual([]);
 			expect(await requests(dave)).toEqual([]);
-			expect(await written(dave)).toEqual([]);
+			const notices = await written(dave);
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain('something went wrong on my side');
+			expect(notices[0]).not.toContain(QUOTE);
 		} finally {
 			h.apisix.llm.script = proposingModel;
 			moment = null;
@@ -307,7 +312,8 @@ describe('a listened suggestion that waits for an availability answer', () => {
 	});
 
 	// The drop this flow must still make. A suggestion that never made an availability request is
-	// dropped the moment its window closes, as before, and reaches neither the model nor the owner.
+	// dropped the moment its window closes, as before, and reaches neither the model nor the owner:
+	// a job that comes back past the window, as after the worker was down, is no retry inside it.
 	// This is the case the window's own length makes load-bearing: the job's window and the request's
 	// are the same ten minutes, so the pass that reads the invitee's silence is the one the age check
 	// would otherwise delete. Only a suggestion already carrying a request is let through.
@@ -330,5 +336,69 @@ describe('a listened suggestion that waits for an availability answer', () => {
 			h.apisix.llm.script = proposingModel;
 			moment = null;
 		}
+	});
+	// What the owner is told when nothing could be proposed, by how the calendar took the searches
+	describe('when the harness could not propose a slot', () => {
+		const busy = { status: 200, body: { start: '', end: '', free: false, busy: [] } };
+		const fullCalendar = (call: { path: string }) =>
+			call.path.endsWith('/freebusy') ? busy : { status: 200, body: { slots: [] } };
+
+		// Runs one suggestion of a fresh owner against a calendar that answers as given, and returns
+		// what the owner was written
+		async function writtenWhen(
+			name: string,
+			handler: typeof h.apisix.contracts.handler,
+			listened = true
+		): Promise<string[]> {
+			const owner = await ownerNamed(name);
+			const before = h.apisix.contracts.handler;
+			h.apisix.contracts.handler = handler;
+			try {
+				const message = await suggestListened(owner);
+				const quoted = listened ? message : { ...message, listened: undefined, other: undefined };
+				expect(await pass(quoted)).toBe('done');
+				return await written(owner);
+			} finally {
+				h.apisix.contracts.handler = before;
+			}
+		}
+
+		it('tells the owner their calendar did not answer when it fails on its side', async () => {
+			const notices = await writtenWhen('gina', () => ({ status: 503, body: {} }));
+			expect(notices).toHaveLength(1);
+			expect(notices[0]).toContain('your calendar did not answer');
+			expect(notices[0]).not.toContain(QUOTE);
+		});
+
+		it('says nothing when the calendar answers a refusal of the question', async () => {
+			expect(
+				await writtenWhen('hugo', () => ({ status: 404, body: { error: 'person_not_found' } }))
+			).toEqual([]);
+			expect(
+				await writtenWhen('ines', () => ({ status: 400, body: { error: 'bad_period' } }))
+			).toEqual([]);
+		});
+
+		it('says nothing for a full calendar, even when a search failed before it answered', async () => {
+			let calls = 0;
+			expect(
+				await writtenWhen('jade', (call) => {
+					calls += 1;
+					return calls === 1 ? { status: 503, body: {} } : fullCalendar(call);
+				})
+			).toEqual([]);
+			expect(calls).toBeGreaterThan(1);
+		});
+
+		it('tells the owner when the model fails in a conversation that is not listened', async () => {
+			h.apisix.llm.script = failingModel;
+			try {
+				const notices = await writtenWhen('kim', fullCalendar, false);
+				expect(notices).toHaveLength(1);
+				expect(notices[0]).toContain('something went wrong on my side');
+			} finally {
+				h.apisix.llm.script = proposingModel;
+			}
+		});
 	});
 });

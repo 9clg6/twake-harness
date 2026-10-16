@@ -1141,6 +1141,24 @@ describe('the assistant proposes from the messages of channels', () => {
 			});
 		});
 
+		it("tells the owner, in their assistant's room alone, when their calendar does not answer", async () => {
+			const c = await listenedConversation();
+			const dm = await ownerRoom(c);
+			h.apisix.contracts.handler = () => ({ status: 503, body: { error: 'unavailable' } });
+			const spaceBefore = space.calls.length;
+			await c.otherClient.sendText(c.room, 'on se fait une réunion lundi à 8h ?');
+
+			const notice = await c.ownerClient.waitForMessage(dm, c.assistant, (t) =>
+				t.includes('your calendar did not answer')
+			);
+			// No word of the message, nothing in Space, nothing in the conversation
+			expect(notice).not.toContain('réunion');
+			expect(
+				space.calls.slice(spaceBefore).filter((call) => call.body['matrixRoomId'] === c.room)
+			).toHaveLength(0);
+			expect(c.written()).toHaveLength(0);
+		});
+
 		it('proposes another time without the model, at the nearest free slot, and never the refused one', async () => {
 			const c = await listenedConversation();
 			const dm = await ownerRoom(c);
