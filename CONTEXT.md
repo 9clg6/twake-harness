@@ -27,7 +27,7 @@ _Avoid_: activity log, history
 ## Listened conversations
 
 **Listened conversation**:
-An encrypted conversation of two people into which one brought their own assistant after the other said yes. The assistant reads it for its owner alone and never writes in it.
+An encrypted conversation, a direct one or a channel, into which one person brought their own assistant after every other person in it said yes. The assistant reads it for its owner alone and never writes in it.
 _Avoid_: listened room, assistant channel
 
 **Suggestion**:

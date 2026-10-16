@@ -9,14 +9,12 @@ export function makeTurnGate(): TurnGate {
 		async run<T>(key: string, task: () => Promise<T>): Promise<T> {
 			const previous = tails.get(key) ?? Promise.resolve();
 			const current = previous.then(task, task);
-			tails.set(
-				key,
-				current.catch(() => undefined)
-			);
+			const tail = current.catch(() => undefined);
+			tails.set(key, tail);
 			try {
 				return await current;
 			} finally {
-				if (tails.get(key) === current.catch(() => undefined)) tails.delete(key);
+				if (tails.get(key) === tail) tails.delete(key);
 			}
 		}
 	};
