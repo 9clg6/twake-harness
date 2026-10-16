@@ -1,6 +1,6 @@
 # Twake Space assistants
 
-Each user of a Twake Workplace platform has a personal assistant that acts for them in the Twake applications. This glossary names the people, assistants and conversations involved, and how an assistant arranges a meeting from a conversation it listens to.
+Each user of a Twake Workplace platform has a personal assistant that acts for them in the Twake applications. This glossary names the people, assistants and conversations involved, how an assistant hears of what happens for its owner in the Twake applications, and how an assistant arranges a meeting from a conversation it listens to.
 
 ## People and assistants
 
@@ -33,6 +33,24 @@ _Avoid_: listened room, assistant channel
 **Suggestion**:
 An action an assistant offers its owner, unasked, from what was said in a conversation its owner takes part in.
 _Avoid_: recommendation, hint
+
+## Hearing of the owner's activity
+
+**Activity**:
+What a Twake application publishes about one of its objects for the people it names, such as a task assigned to someone or a meeting moved.
+_Avoid_: event (the message that carries it), notification
+
+**Wake-up**:
+An assistant's message to its owner, sent at once, about an activity that names them and expects something of them: a task assigned to them, a mention, an invitation, a meeting of theirs moved or cancelled.
+_Avoid_: notification, alert, ping
+
+**Brief**:
+The message an assistant sends its owner on the days and at the time they chose, with their day ahead and every activity that waited for it rather than a wake-up.
+_Avoid_: digest, daily summary, morning report
+
+**Feed**:
+A space's stream in Twake Space: its members' posts and their reactions, and a card for each object of the space's applications, such as a task, a team mail or a folder.
+_Avoid_: timeline, wall, message thread
 
 ## Arranging a meeting
 
