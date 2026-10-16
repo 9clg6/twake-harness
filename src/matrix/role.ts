@@ -46,7 +46,12 @@ import { getMessages, type Messages } from '../i18n/messages.js';
 import { ORGANIZATION_PRINCIPAL } from '../principals/principal.js';
 import { matrixUserIdOfPrincipal, principalOfMatrixUser } from '../principals/identity.js';
 import { makeMatrixAdmin } from './admin.js';
-import { announceCommands, announceCreatorCommands, commandOf } from './commands.js';
+import {
+	announceCommands,
+	announceCreatorCommands,
+	COMMANDS_EVENT_TYPE,
+	commandOf
+} from './commands.js';
 import { makeOpenBaoEscrow } from '../escrow/openbao.js';
 import { makeEnsureEncryption, routeEncryptionSetups } from './encryption.js';
 import { backupRoomKeys, ensureEscrow, recoverFromEscrow, type EscrowDeps } from './escrow.js';
@@ -118,6 +123,10 @@ export interface MatrixRole {
 // member's answer (D132 there)
 const ASSISTANT_REQUEST_TYPE = 'app.twake.chat.assistant_request';
 const ASSISTANT_CONSENT_TYPE = 'app.twake.chat.assistant_consent';
+// What Twake Chat takes for a bot: an id that says so, or a member announcing its commands in the
+// room (MSC4332, under its unstable and stable names)
+const BOT_ID_PATTERN = /^@(bot_|hermes_)/;
+const BOT_COMMANDS_TYPES = [COMMANDS_EVENT_TYPE, 'm.bot.commands'];
 
 interface RoomEvent {
 	readonly type?: string;
@@ -125,6 +134,24 @@ interface RoomEvent {
 	readonly state_key?: string;
 	readonly event_id?: string;
 	readonly content?: Record<string, unknown>;
+}
+
+// The bots of a room, asked no yes: the ids that say so on our homeserver only (anyone chooses
+// their own localpart on another), and the members announcing their commands, each keyed by
+// itself, which the homeserver enforces
+export function botsOf(state: readonly RoomEvent[], serverName: string): Set<string> {
+	const bots = new Set<string>();
+	for (const event of state) {
+		const id = event.state_key ?? '';
+		if (BOT_COMMANDS_TYPES.includes(event.type ?? '') && id === event.sender) bots.add(id);
+		else if (
+			event.type === 'm.room.member' &&
+			BOT_ID_PATTERN.test(id) &&
+			id.endsWith(`:${serverName}`)
+		)
+			bots.add(id);
+	}
+	return bots;
 }
 
 // A message that reached an assistant encrypted, with the encrypted event as it arrived, null when
@@ -1061,15 +1088,35 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	// read while their coming was being checked. A check registers before its first wait.
 	const roomChecks = makeTurnGate();
 
-	// The people of a room, joined or invited, whose yes counts: neither an assistant nor the listener
-	function isPerson(userId: string): boolean {
-		return !isAssistantUserId(config, userId) && userId !== listenerUserId(config);
+	// An assistant or the listener: neither is asked for a yes, whatever it does in a room
+	function isPlatformAccount(userId: string): boolean {
+		return isAssistantUserId(config, userId) || userId === listenerUserId(config);
 	}
 
-	// The room's other member, read in the room whatever they wrote, as their platform address: the
-	// one member left once the assistant and its owner are taken out. Null when the room holds none,
-	// or when their identifier maps to no address, as a member of another server's does, and then
-	// nothing is proposed.
+	// The members of a room, joined or invited, other than its owner, an assistant and the listener,
+	// told apart as the people whose yes counts and the bots
+	function othersOf(
+		state: readonly RoomEvent[],
+		ownerUserId: string
+	): { people: RoomEvent[]; bots: RoomEvent[] } {
+		const botIds = botsOf(state, config.matrix.serverName);
+		const others = state.filter(
+			(event) =>
+				event.type === 'm.room.member' &&
+				['join', 'invite'].includes(String(event.content?.['membership'])) &&
+				event.state_key !== ownerUserId &&
+				!isPlatformAccount(event.state_key ?? '')
+		);
+		return {
+			people: others.filter((event) => !botIds.has(event.state_key ?? '')),
+			bots: others.filter((event) => botIds.has(event.state_key ?? ''))
+		};
+	}
+
+	// The room's other person, read in the room whatever they wrote, as their platform address: the
+	// one person left once the assistant, its owner and the bots are taken out. Null when the room
+	// holds none, or when their identifier maps to no address, as a member of another server's does,
+	// and then nothing is proposed.
 	async function otherMemberPrincipal(
 		roomId: string,
 		assistantUserId: string,
@@ -1077,16 +1124,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	): Promise<string | null> {
 		const ownerUserId = matrixUserIdOfPrincipal(config, owner);
 		if (ownerUserId === null) return null;
-		const members = await appservice
+		const state = (await appservice
 			.getIntentForUserId(assistantUserId)
-			.underlyingClient.getRoomMembers(roomId, undefined, ['join', 'invite']);
-		const other = members.find(
-			(member) =>
-				member.membershipFor !== assistantUserId &&
-				member.membershipFor !== ownerUserId &&
-				!isAssistantUserId(config, member.membershipFor)
-		);
-		return other === undefined ? null : principalOfMatrixUser(config, other.membershipFor);
+			.underlyingClient.getRoomState(roomId)) as RoomEvent[];
+		const other = othersOf(state, ownerUserId).people[0];
+		return other?.state_key === undefined ? null : principalOfMatrixUser(config, other.state_key);
 	}
 
 	// What a room the owner invited their assistant into is worth to it: an encrypted room of the
@@ -1111,10 +1153,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		);
 		const owner = joinedOrInvited.find((event) => event.state_key === ownerUserId);
 		if (owner?.content?.['membership'] !== 'join') return 'owner_left';
-		const others = joinedOrInvited.filter(
-			(event) => event.state_key !== ownerUserId && isPerson(event.state_key ?? '')
-		);
-		if (others.length === 0) return 'no_other_person';
+		const { people: others, bots } = othersOf(state, ownerUserId);
+		// Bots alone are no one to ask, and the assistant is not wanted there either
+		if (others.length === 0) return bots.length === 0 ? 'no_other_person' : 'not_everyone_accepted';
 		const ts = (event: { origin_server_ts?: number }): number => event.origin_server_ts ?? 0;
 		// When each person's stay began: a profile change, or an invite turned join, keeps it, so
 		// that it never asks their yes again; their member events are walked back by `replaces_state`
@@ -1553,7 +1594,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 								continue;
 							}
 							// An assistant coming in or going asks no one's yes
-							if (!consent && !isPerson(event.state_key ?? '')) continue;
+							if (!consent && isPlatformAccount(event.state_key ?? '')) continue;
 							const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
 							// A newcomer who has not said yes, the owner or the last other person gone, a
 							// withdrawn request or a no: it leaves without a word
