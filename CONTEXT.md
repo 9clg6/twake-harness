@@ -41,8 +41,16 @@ What a Twake application publishes about one of its objects for the people it na
 _Avoid_: event (the message that carries it), notification
 
 **Wake-up**:
-An assistant's message to its owner, sent at once, about an activity that names them and expects something of them: a task assigned to them, a mention, an invitation, a meeting of theirs moved or cancelled.
+An assistant's message to its owner about an activity that names them and expects something of them, sent without waiting for their brief: a task assigned to them, an invitation, a meeting of theirs moved or cancelled, or a mention they left unread for ten minutes.
 _Avoid_: notification, alert, ping
+
+**Mention**:
+A message, comment or post that names the owner explicitly, as the pill of their name does in Twake Chat, rather than by a word of its text. `@room` mentions no one.
+_Avoid_: ping, tag, highlight
+
+**Listener**:
+The harness's one account in the clear rooms of Twake Chat, `@twake-assistant`, which reads what is said there for the owners in them and never writes.
+_Avoid_: channel bot, listening bot
 
 **Brief**:
 The message an assistant sends its owner on the days and at the time they chose, with their day ahead and every activity that waited for it rather than a wake-up.
