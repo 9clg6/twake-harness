@@ -2,7 +2,7 @@ import type { FastifyBaseLogger } from 'fastify';
 import { z } from 'zod';
 
 import type { Config } from '../config.js';
-import { withPrincipal, type Db, type Tx } from '../db/client.js';
+import { readJsonColumn, withPrincipal, type Db, type Tx } from '../db/client.js';
 import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
@@ -23,9 +23,10 @@ import { requestHtml, type OwnerRequest } from '../consents/request.js';
 import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
 import type { BriefMarker } from '../matrix/brief.js';
-import type { YesNoQuestion } from '../matrix/questions.js';
+import type { MeetingContext, YesNoQuestion } from '../matrix/questions.js';
 import { spentForTheDay, type Refusal, type RefusalReason } from './admission.js';
 import { SYSTEM_CLOCK, type Clock } from './clock.js';
+import { readMeeting } from './suggestion.js';
 import { invitationSchema } from './invitation.js';
 import { matrixUserIdOfPrincipal } from '../principals/identity.js';
 import {
@@ -46,9 +47,14 @@ import {
 	SUGGEST_RECHECK_MS,
 	type SuggestPayload
 } from '../suggestions/job.js';
-import { mayReceive, recordSuggestion } from '../suggestions/repository.js';
+import {
+	findSuggestion,
+	mayReceive,
+	readCallArguments,
+	recordSuggestion
+} from '../suggestions/repository.js';
 import type { SpaceNotifications } from '../suggestions/space.js';
-import { proposalSentence } from '../suggestions/text.js';
+import { makeMeetingContext, proposalSentence } from '../suggestions/text.js';
 import type { AgentService, OwnerTurnResult } from './service.js';
 import type { SuggestionFailure } from './suggestion.js';
 
@@ -409,7 +415,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			const state = reopened ? 'open' : newer ? 'superseded' : 'expired';
 			if (state !== 'open') await closeHeldRequest(tx, owner, pendingCallId, state);
 			const call = reopened ? await findPendingCall(tx, owner, pendingCallId) : null;
-			const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+			const question = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+			const meeting =
+				question === null ? null : await meetingOfSuggestion(tx, owner, pendingCallId);
+			const questionMarker =
+				question === null || meeting === null ? question : { ...question, meeting };
 			const asked: PendingQuestion = { pendingCallId, owner, again: true };
 			await enqueueJob(tx, {
 				kind: 'send',
@@ -705,7 +715,10 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			});
 			jobLog.info({ owner, pendingCallId, outcome }, 'suggestion sent to Space');
 		}
-		await sendSuggestionQuestion(owner, result, sentence);
+		await sendSuggestionQuestion(owner, result, {
+			sentence,
+			meeting: makeMeetingContext(settings.config, owner, roomId, proposal)
+		});
 		return null;
 	}
 
@@ -743,19 +756,38 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return { userId: assistant.userId, roomId: assistant.roomId };
 	}
 
+	// The meeting a suggestion's frozen call holds, as its question carries it, or null for a call
+	// that is not a suggestion's
+	async function meetingOfSuggestion(
+		tx: Tx,
+		owner: string,
+		pendingCallId: string
+	): Promise<MeetingContext | null> {
+		const settings = options.suggestions;
+		const suggestion =
+			settings === undefined ? null : await findSuggestion(tx, owner, pendingCallId);
+		const meeting = readMeeting(readJsonColumn(await readCallArguments(tx, owner, pendingCallId)));
+		return settings === undefined || suggestion === null || meeting === null
+			? null
+			: makeMeetingContext(settings.config, owner, suggestion.roomId, meeting);
+	}
+
 	// The harness's request about the call a suggestion froze, in the owner's assistant room
 	async function sendSuggestionQuestion(
 		owner: string,
 		result: { pendingCallId: string; answer: string; request: OwnerRequest | null },
-		sentence?: string
+		proposed?: { sentence: string; meeting: MeetingContext }
 	): Promise<void> {
+		const sentence = proposed?.sentence;
 		const { pendingCallId } = result;
 		const assistant = await findLiveAssistant(owner);
 		if (assistant === null) return;
 		const call = await withPrincipal(db, { id: owner }, (tx) =>
 			findPendingCall(tx, owner, pendingCallId)
 		);
-		const questionMarker = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+		const asked = call === null ? null : toYesNoQuestion(call, requestLifetimeMs);
+		const questionMarker =
+			asked === null || proposed === undefined ? asked : { ...asked, meeting: proposed.meeting };
 		// A listened conversation's proposal is the harness's own sentence, ahead of the request's own
 		// words: the owner reads what was proposed and that the invitee's availability was not seen
 		const text = sentence === undefined ? result.answer : `${sentence}\n\n${result.answer}`;

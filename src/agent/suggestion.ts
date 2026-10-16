@@ -210,7 +210,10 @@ function quotedBlock(payload: SuggestPayload): string {
 	].join('\n');
 }
 
-const instant = z.string().refine((value) => !Number.isNaN(Date.parse(value)));
+// An RFC 3339 instant, its offset included: one without is read in the server's zone, not the owner's
+const instant = z
+	.string()
+	.refine((value) => !Number.isNaN(Date.parse(value)) && /T.*(Z|[+-]\d{2}:?\d{2})$/i.test(value));
 
 // The meeting a suggestion prepares, as the arguments of create_meeting give it. What the schema
 // does not name is left out, a description or a place among them: the owner approves what their
