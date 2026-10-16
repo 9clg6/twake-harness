@@ -64,7 +64,7 @@ function escaped(text: string): string {
 		.replace(/[\\`*~[\]<>&]|(?<![\p{L}\p{N}])_|_(?![\p{L}\p{N}])/gu, (markup) => `\\${markup}`);
 }
 
-// An entry holds what the README says and nothing else: a key it does not know, such as a
+// An entry holds what docs/consent.md says and nothing else: a key it does not know, such as a
 // misspelt level or a language the harness does not speak, is a mistake to warn about rather
 // than words to drop in silence
 const nameSchema = z.partialRecord(z.enum(LOCALES), plainWords(64));

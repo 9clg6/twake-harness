@@ -977,7 +977,7 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			);
 
 			// Whether the assistant may read the owner's messages in channels and offer them actions
-			// (see Suggestions in the README), and the channels it leaves alone
+			// (see docs/suggestions.md), and the channels it leaves alone
 			scope.get('/suggestions/settings', async (request) => {
 				const principal = principalOf(request);
 				await loadPrincipal(principal);

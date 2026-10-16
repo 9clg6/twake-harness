@@ -63,7 +63,7 @@ config:
   # that permission expires; an https URL, empty for none, and then the worker reminds nobody
   brokerConsentUrl: ''
   # Whether the assistants propose actions from the messages of channels that are not encrypted
-  # (see Suggestions in the README). Off, the channel listener declines its invites and leaves the
+  # (see docs/suggestions.md). Off, the channel listener declines its invites and leaves the
   # rooms it is in. On, Synapse must have loaded a registration whose users namespace holds it
   suggestionsEnabled: false
   # The localpart of the channel listener, the visible user room admins invite to channels they

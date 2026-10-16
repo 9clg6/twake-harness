@@ -1,0 +1,21 @@
+name: Feature request
+description: Something an owner, an administrator or a client needs from the harness
+labels: [enhancement]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Need
+      description: Who needs what, and why. An owner and their assistant, an administrator, or a client such as Twake Chat.
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposal
+      description: What the harness could do, as the person would see it, in the words of [CONTEXT.md](https://github.com/linagora/twake-harness/blob/main/CONTEXT.md).
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives
+      description: Other ways you considered, and why they fall short.

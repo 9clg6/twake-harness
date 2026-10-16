@@ -1,0 +1,61 @@
+name: Bug report
+description: Something the harness or its chart does wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: >-
+        A security vulnerability goes through the
+        [private reporting form](https://github.com/linagora/twake-harness/security/advisories/new),
+        never an issue. Leave out tokens, keys, passwords, personal data and message contents.
+  - type: input
+    id: version
+    attributes:
+      label: Version
+      description: The image tag (`sha-<commit>`), the chart version (`0.1.0-sha-<commit>`) or the commit.
+      placeholder: sha-1234abc
+    validations:
+      required: true
+  - type: dropdown
+    id: role
+    attributes:
+      label: Role
+      description: The role where it happens, if you know it.
+      options:
+        - api
+        - matrix
+        - worker
+        - the Helm chart
+        - I do not know
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      description: What the owner, the administrator or the client did, in order.
+      placeholder: |
+        1. Send /newbot to the creator
+        2. ...
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected
+      description: What should have happened.
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual
+      description: What happened instead, with the harness's own words if it answered.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: The harness's log lines around it, at `info`, redacted. Never paste `debug` lines, which hold conversations.
+      render: shell

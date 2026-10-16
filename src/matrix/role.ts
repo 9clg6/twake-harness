@@ -555,7 +555,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		now: () => clock.now().getTime()
 	});
 
-	// The one visible user that reads the channels it is invited to (see Suggestions in the README)
+	// The one visible user that reads the channels it is invited to (see docs/suggestions.md)
 	const listener = makeChannelListener({
 		config,
 		admin,

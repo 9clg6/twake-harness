@@ -55,7 +55,7 @@ export interface ChannelListener {
 	decline(roomId: string): Promise<void>;
 }
 
-// The one visible user that reads channels (see Suggestions in the README). It is a member of the
+// The one visible user that reads channels (see docs/suggestions.md). It is a member of the
 // rooms it was invited to, Synapse pushes those rooms and no other, and it never writes in them.
 export function makeChannelListener(deps: ChannelListenerDeps): ChannelListener {
 	const { config, admin, intent, log } = deps;
