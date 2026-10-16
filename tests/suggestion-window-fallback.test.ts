@@ -139,5 +139,12 @@ describe('a listened suggestion whose window is already spent when its job runs'
 		expect(texts).toHaveLength(1);
 		expect(texts[0]).toContain(BOB);
 		expect(texts[0]).toContain('could not see the availability');
+		// The question carries the meeting it proposes, from the channel it was listened in
+		const marked = sends
+			.map((r) => payloadOf<{ roomId: string; questionMarker?: unknown }>(r))
+			.find((p) => p.roomId === roomOf(owner));
+		expect(marked?.questionMarker).toMatchObject({
+			meeting: { roomId: ROOM, invitees: ['@bob:test.local'], title: 'Point lundi' }
+		});
 	});
 });

@@ -1,4 +1,8 @@
+import type { Config } from '../config.js';
 import type { Locale } from '../i18n/messages.js';
+import { participantsOf } from '../briefs/mails.js';
+import { matrixUserIdOfPrincipal } from '../principals/identity.js';
+import type { MeetingContext } from '../matrix/questions.js';
 
 const MAX_TITLE = 80;
 const MAX_LISTED = 5;
@@ -19,6 +23,26 @@ export interface Proposal {
 	readonly end: string;
 	readonly attendees: readonly string[];
 	readonly timeZone: string;
+}
+
+// What the marker of a proposal's question carries: the people invited whose Matrix id the homeserver
+// can name (the others cannot be named there, and the owner is no one else), the slot and the title.
+// The id is the address mapped to the homeserver, not checked to belong to an account.
+export function makeMeetingContext(
+	config: Config,
+	owner: string,
+	roomId: string,
+	proposal: Pick<Proposal, 'title' | 'start' | 'end' | 'attendees'>
+): MeetingContext {
+	return {
+		roomId,
+		invitees: participantsOf(proposal.attendees, owner)
+			.map((address) => matrixUserIdOfPrincipal(config, address))
+			.filter((id): id is string => id !== null),
+		startTs: new Date(proposal.start).getTime(),
+		endTs: new Date(proposal.end).getTime(),
+		title: plain(proposal.title, MAX_TITLE)
+	};
 }
 
 function format(locale: Locale, timeZone: string, date: Date, options: Intl.DateTimeFormatOptions) {
