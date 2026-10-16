@@ -45,7 +45,7 @@ What a Twake application publishes about one of its objects for the people it na
 _Avoid_: event (the message that carries it), notification
 
 **Wake-up**:
-An assistant's message to its owner about an activity that names them and expects something of them, sent without waiting for their brief: a task assigned to them, an invitation, a meeting of theirs moved or cancelled, or a mention they left unread for ten minutes.
+An assistant's message to its owner about an activity that names them and expects something of them, sent without waiting for their brief: a task assigned to them, an invitation, a meeting of theirs moved or cancelled, something shared with them, or a mention, which in Twake Chat waits until they have left it unread for ten minutes.
 _Avoid_: notification, alert, ping
 
 **Mention**:
