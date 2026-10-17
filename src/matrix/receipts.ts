@@ -5,21 +5,42 @@ import { isRecord } from './json.js';
 // it counts nowhere, even where an older Synapse still pushes it.
 const READ_RECEIPT = 'm.read';
 
-// The room of a read receipt Synapse pushes, and the users it says read there publicly, whatever
-// event each one read: null for any other ephemeral event
-export function readersOf(
-	event: Record<string, unknown>
-): { readonly roomId: string; readonly userIds: ReadonlySet<string> } | null {
+// A public read receipt the matrix role read: who read a room up to which message
+export interface ReadReceipt {
+	readonly roomId: string;
+	// Who read, by their Matrix id
+	readonly userId: string;
+	// The message they read up to
+	readonly eventId: string;
+	// The thread it covers, its root or main, when it names one: null for a receipt that names none,
+	// as Synapse pushes them
+	readonly thread: string | null;
+	// When the matrix role received it, by its own clock, whatever time the receipt carries
+	readonly receivedAt: Date;
+}
+
+// The public read receipts of a receipt event Synapse pushes, one per user and message, received
+// at the instant given: none for any other ephemeral event
+export function receiptsOf(event: Record<string, unknown>, receivedAt: Date): ReadReceipt[] {
 	const roomId = event['room_id'];
 	const content = event['content'];
 	if (event['type'] !== 'm.receipt' || typeof roomId !== 'string' || !isRecord(content)) {
-		return null;
+		return [];
 	}
-	const userIds = new Set<string>();
-	for (const receipts of Object.values(content)) {
-		if (!isRecord(receipts)) continue;
-		const users = receipts[READ_RECEIPT];
-		if (isRecord(users)) for (const userId of Object.keys(users)) userIds.add(userId);
+	const receipts: ReadReceipt[] = [];
+	for (const [eventId, byType] of Object.entries(content)) {
+		const users = isRecord(byType) ? byType[READ_RECEIPT] : undefined;
+		if (!isRecord(users)) continue;
+		for (const [userId, receipt] of Object.entries(users)) {
+			const thread = isRecord(receipt) ? receipt['thread_id'] : undefined;
+			receipts.push({
+				roomId,
+				userId,
+				eventId,
+				thread: typeof thread === 'string' ? thread : null,
+				receivedAt
+			});
+		}
 	}
-	return { roomId, userIds };
+	return receipts;
 }
