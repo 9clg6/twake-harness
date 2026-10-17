@@ -362,4 +362,39 @@ describe('my brief cites the answers to my invitations and the tasks I assigned 
 		);
 		expect(String(sent.content['formatted_body'])).toContain('<li>3. Relire le plan (WEB-15)</li>');
 	});
+
+	it('tells a task that names me for a reason that expects nothing of me among what arrived, never among the tasks I assigned myself', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		brief = { content: WRITTEN };
+		// Wednesday afternoon, the offsite names her as a member of its project: her listener kept it
+		// for her brief, with that reason
+		await note('member-offsite', TASK_ASSIGNED_EVENT_TYPE, '2026-10-14T14:00:00Z', 'for_brief', {
+			ids: {
+				computed: { object: { type: 'task', id: 'task-offsite', key: 'WEB-17' }, reason: 'member' },
+				untrusted: {}
+			},
+			names: { computed: {}, untrusted: { title: "Organiser l'offsite" } }
+		});
+		// Thursday 15 October at eight
+		await pass('2026-10-15T06:00:00Z');
+		await nextBrief(seen);
+		const data = dataOf(toldSince(calls)) as Record<string, unknown>;
+		expect(data).not.toHaveProperty('self_assigned');
+		expect(data).toMatchObject({
+			since_last_brief: {
+				activities: [
+					{
+						key: 'WEB-17',
+						source: TASKS_SOURCE,
+						type: TASK_ASSIGNED_EVENT_TYPE,
+						outcome: 'for_brief',
+						object: { type: 'task', id: 'task-offsite', key: 'WEB-17' },
+						reason: 'member',
+						untrusted: { title: "Organiser l'offsite" }
+					}
+				]
+			}
+		});
+	});
 });

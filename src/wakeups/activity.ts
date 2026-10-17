@@ -24,6 +24,10 @@ const MAX_RECIPIENTS = 100;
 // message or a file is called
 const TITLED_OBJECTS: readonly string[] = ['task', 'event'];
 
+// The reasons an activity names someone for that expect something of them, for which it wakes their
+// assistant: for any other, such as member or recipient, their journal keeps it for their brief
+const WAKING_REASONS: readonly string[] = ['assigned', 'mentioned', 'invited'];
+
 // Text people wrote, cut rather than refused
 function untrustedText(max: number) {
 	return z.string().transform((text) => cut(text, max));
@@ -140,9 +144,10 @@ interface SkippedRecipient {
 	readonly fields: readonly string[];
 }
 
-// One wake-up per recipient. What the application computed (its ids, key, link and time, and who
-// acted) is shown apart from what people wrote (the title, the board's name and the preview), as
-// the contracts return it under untrusted.
+// One wake-up per recipient, kept for their brief when their reason expects nothing of them. What
+// the application computed (its ids, key, link and time, and who acted) is shown apart from what
+// people wrote (the title, the board's name and the preview), as the contracts return it under
+// untrusted.
 function wakeupsOf(event: ActivityEvent): {
 	readonly wakeups: Wakeup[];
 	readonly skipped: SkippedRecipient[];
@@ -190,6 +195,7 @@ function wakeupsOf(event: ActivityEvent): {
 			return;
 		}
 		const recipient = parsed.data;
+		const waking = WAKING_REASONS.includes(recipient.reason);
 		wakeups.push({
 			source: event.source,
 			id: event.id,
@@ -212,11 +218,26 @@ function wakeupsOf(event: ActivityEvent): {
 				},
 				untrusted
 			},
-			noted
+			// For a reason that expects nothing of them, their journal keeps it for their brief, with
+			// that reason
+			...(waking
+				? { noted }
+				: {
+						noted: {
+							...noted,
+							ids: { ...noted.ids, computed: { ...noted.ids.computed, reason: recipient.reason } }
+						},
+						forBrief: true as const
+					})
 		});
 	});
 	return {
-		wakeups,
+		// Those that wake first, so that someone it names twice is woken by the reason that expects
+		// something of them, and not kept for their brief by the other
+		wakeups: [
+			...wakeups.filter((wakeup) => wakeup.forBrief !== true),
+			...wakeups.filter((wakeup) => wakeup.forBrief === true)
+		],
 		skipped,
 		ignored: Math.max(0, recipients.length - MAX_RECIPIENTS)
 	};

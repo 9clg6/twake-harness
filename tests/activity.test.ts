@@ -16,6 +16,7 @@ import {
 	startActivityBroker,
 	toldOf,
 	turnCalls,
+	until,
 	whenListening,
 	type ActivityEvent
 } from './helpers/activity.js';
@@ -167,6 +168,13 @@ describe('an assignment published on the activity exchange wakes the assignee’
 	// What Alice's assistant told her of an event, in her room
 	function answerTo(event: ActivityEvent): Promise<string> {
 		return r.client.waitForMessage(r.room, r.assistantId, (t) => t.includes(`(${event.id})`));
+	}
+
+	// The lines the worker wrote once done with an event
+	function handled(event: ActivityEvent): Record<string, unknown>[] {
+		return workerLogs
+			.lines()
+			.filter((line) => line['msg'] === 'event handled' && line['eventId'] === event.id);
 	}
 
 	it('tells me in our room of a task assigned to me, with its title, key and board', async () => {
@@ -324,6 +332,39 @@ describe('an assignment published on the activity exchange wakes the assignee’
 		const logged = JSON.stringify(workerLogs.lines());
 		expect(logged).not.toContain('alice-at-test.local');
 		expect(logged).not.toContain('carol-uuid');
+	});
+
+	it('wakes each recipient whose reason expects something of them, and keeps the activity for the brief of the others', async () => {
+		await withCarol();
+		// Carol is the task's assignee, and I am a member of its project
+		const event = activityEvent({
+			recipients: [
+				{ ...ALICE, reason: 'member' },
+				{ uuid: CAROL_UUID, email: 'Carol@Test.Local', reason: 'assigned' }
+			]
+		});
+		await publish(event);
+		const [turn] = await toldOf(r.h.apisix, event.id, 1);
+		expect(turn?.request.messages[0]?.content).toContain('"Friday"');
+		await until('the event was handled', () => handled(event).length > 0);
+		expect(handled(event)).toEqual([
+			expect.objectContaining({ outcome: 'woken', outcomes: { for_brief: 1, woken: 1 } })
+		]);
+		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(1);
+	});
+
+	it('wakes me for an activity that names me twice, for a reason that expects something of me and for one that does not', async () => {
+		// I am the task's assignee, and a member of its project
+		const event = activityEvent({ recipients: [{ ...ALICE, reason: 'member' }, ALICE] });
+		await publish(event);
+		await until('the event was handled', () => handled(event).length > 0);
+		expect(handled(event)).toEqual([
+			expect.objectContaining({ outcome: 'woken', outcomes: { duplicate: 1, woken: 1 } })
+		]);
+		expect(await answerTo(event)).toBe(
+			`Task ROAD-12 "Write the quarterly report" on Roadmap, from bob@test.local (${event.id})`
+		);
+		expect(turnCalls(r.h.apisix.llm.calls, event.id)).toHaveLength(1);
 	});
 
 	it('cuts the over-long text other people wrote instead of refusing the event', async () => {

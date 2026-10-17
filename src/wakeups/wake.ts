@@ -212,8 +212,9 @@ async function queueTurn(
 // deployment allows. An activity of an application their assistant does not listen to, as they
 // chose or by its default, wakes nothing and leaves nothing. Their listening journal notes each
 // event they are woken for or their cap holds back, and for their brief, with no turn, a task they
-// assigned themselves or an activity its source keeps for it, such as a meeting's new title, none
-// of which wakes them twice; a brief, which the scheduler tries again, it never notes.
+// assigned themselves or an activity its source keeps for it, such as a meeting's new title or one
+// that names them for a reason that expects nothing of them, none of which wakes them twice; a
+// brief, which the scheduler tries again, it never notes.
 export async function wake(
 	deps: WakeDeps,
 	wakeup: Wakeup,
