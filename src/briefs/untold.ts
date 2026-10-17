@@ -134,9 +134,14 @@ function taskOf(activity: Activity): Task | null {
 }
 
 // Whether an activity is a task the owner assigned themselves, which their journal kept for their
-// brief: a task assigned to them by someone else is kept so only when it had no turn
+// brief: one someone else assigned them is never kept so, and one that names them for a reason that
+// expects nothing of them is kept with that reason
 function selfAssigned(activity: Activity): boolean {
-	return activity.type === TASK_ASSIGNED_EVENT_TYPE && activity.outcome === 'for_brief';
+	return (
+		activity.type === TASK_ASSIGNED_EVENT_TYPE &&
+		activity.outcome === 'for_brief' &&
+		activity.ids.computed['reason'] === undefined
+	);
 }
 
 // The answers to the owner's invitations in the order the brief tells them, in the order they

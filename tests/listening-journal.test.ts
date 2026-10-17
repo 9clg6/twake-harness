@@ -75,14 +75,15 @@ function budgetReview(uid: string): Record<string, unknown> {
 
 let serial = 0;
 
-// A task Bob assigns Alice, as Twake Tasks publishes it on the activity exchange: ROAD-12 of the
-// Roadmap board unless told otherwise
-function assignment(object?: Record<string, unknown>): ActivityEvent {
+// A task Bob assigns, as Twake Tasks publishes it on the activity exchange: ROAD-12 of the Roadmap
+// board unless told otherwise, naming Alice as its assignee unless told another reason
+function assignment(object?: Record<string, unknown>, reason?: string): ActivityEvent {
 	serial += 1;
 	return activityEvent({
 		id: `0199b6f3-${String(serial).padStart(4, '0')}-7c3e-8a1f-6d2b4e8c9a07`,
 		recipient: ALICE,
-		...(object === undefined ? {} : { object })
+		...(object === undefined ? {} : { object }),
+		...(reason === undefined ? {} : { reason })
 	});
 }
 
@@ -153,6 +154,8 @@ interface Listening {
 	ask(): Promise<Journal>;
 	// The lines saying what came of an activity, from either role
 	noted(id: string): Record<string, unknown>[];
+	// The lines the worker role wrote once done with an event
+	handled(id: string): Record<string, unknown>[];
 	close(): Promise<void>;
 }
 
@@ -202,6 +205,8 @@ async function startListening(
 			[...logs.lines(), ...r.h.logLines()].filter(
 				(line) => line['msg'] === 'activity noted' && line['eventId'] === id
 			),
+		handled: (id) =>
+			logs.lines().filter((line) => line['msg'] === 'event handled' && line['eventId'] === id),
 		close: () => r.close()
 	};
 }
@@ -373,8 +378,6 @@ describe('what my assistant saw today', () => {
 
 	it('keeps a task I assign myself for my brief, which my journal tells me, and nothing of my other actions', async () => {
 		const said = l.r.saying('').length;
-		const handled = (id: string): Record<string, unknown>[] =>
-			l.logs.lines().filter((line) => line['msg'] === 'event handled' && line['eventId'] === id);
 		// I assign myself ROAD-16, which comes twice, then send myself a mail
 		const mine = {
 			...assignment({ type: 'task', id: 'task-16', key: 'ROAD-16', title: 'Renew my badge' }),
@@ -384,9 +387,9 @@ describe('what my assistant saw today', () => {
 		await l.publish(mine);
 		await l.publish(mine);
 		await l.publish(myMail);
-		await until('my mail was handled', () => handled(myMail.id).length > 0);
-		expect(handled(mine.id).map((line) => line['outcome'])).toEqual(['for_brief', 'duplicate']);
-		expect(handled(myMail.id).map((line) => line['outcome'])).toEqual(['ignored']);
+		await until('my mail was handled', () => l.handled(myMail.id).length > 0);
+		expect(l.handled(mine.id).map((line) => line['outcome'])).toEqual(['for_brief', 'duplicate']);
+		expect(l.handled(myMail.id).map((line) => line['outcome'])).toEqual(['ignored']);
 		expect(l.noted(mine.id)).toEqual([
 			expect.objectContaining({
 				level: 30,
@@ -407,6 +410,41 @@ describe('what my assistant saw today', () => {
 			})
 		);
 		expect(activities.filter((activity) => activity['source'] === 'twake://mail')).toEqual([]);
+		// Nothing reached my room but the answer to my question
+		expect(l.r.saying('').slice(said)).toEqual([
+			expect.objectContaining({ body: expect.stringMatching(/^Saw: /) })
+		]);
+	});
+
+	it('keeps for my brief an activity that names me for a reason that expects nothing of me, which my journal tells me with that reason', async () => {
+		const said = l.r.saying('').length;
+		// ROAD-17 names me as a member of its project, not as its assignee
+		const asMember = assignment(
+			{ type: 'task', id: 'task-17', key: 'ROAD-17', title: 'Plan the offsite' },
+			'member'
+		);
+		await l.publish(asMember);
+		await until('the activity was handled', () => l.handled(asMember.id).length > 0);
+		expect(l.handled(asMember.id).map((line) => line['outcome'])).toEqual(['for_brief']);
+		expect(l.noted(asMember.id)).toEqual([
+			expect.objectContaining({
+				level: 30,
+				source: 'twake://tasks',
+				type: ASSIGNED,
+				owner: ALICE,
+				outcome: 'for_brief'
+			})
+		]);
+		expect(turnCalls(l.r.h.apisix.llm.calls, asMember.id)).toHaveLength(0);
+		const { activities } = await l.ask();
+		expect(activities).toContainEqual(
+			expect.objectContaining({
+				object: { type: 'task', id: 'task-17', key: 'ROAD-17' },
+				reason: 'member',
+				outcome: 'for_brief',
+				untrusted: { title: 'Plan the offsite' }
+			})
+		);
 		// Nothing reached my room but the answer to my question
 		expect(l.r.saying('').slice(said)).toEqual([
 			expect.objectContaining({ body: expect.stringMatching(/^Saw: /) })

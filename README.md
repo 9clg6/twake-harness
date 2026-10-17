@@ -62,7 +62,7 @@ The assistant tells its owner, in their room and in a few words, of what arrives
 - **A meeting cancelled**: who cancelled which meeting, in one sentence, asking nothing.
 - **A counter-proposal** to a meeting they organize: which invitee proposes which time, and whether they are free then.
 
-A meeting's new title, and the invitees' answers to a meeting they organize, wake nobody: their brief tells them. An owner chooses what their assistant listens to: Calendar and Tasks by default, Mail from their yes to their first brief's question, and Drive once they ask. Mail and Drive publish nothing the harness takes yet, so listening there only puts them in the brief.
+A meeting's new title, the invitees' answers to a meeting they organize, and an activity that names them without expecting anything of them, as a member or a recipient rather than as an assignee, someone mentioned or an invitee, wake nobody: their brief tells them. An owner chooses what their assistant listens to: Calendar and Tasks by default, Mail from their yes to their first brief's question, and Drive once they ask. Mail and Drive publish nothing the harness takes yet, so listening there only puts them in the brief.
 
 Events wake an assistant 20 times in a rolling hour at most, by default. The owner's _listening journal_ notes each activity of an application their assistant listens to that woke it, that this cap or their quiet hours held back, or that waits for their brief, with what came of it; their assistant reads it to them when they ask what arrived today.
 
