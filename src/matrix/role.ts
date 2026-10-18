@@ -78,8 +78,10 @@ import { ensureOrgAgent, isOrgMember, orgAgentUserId, orgGreeting } from './org.
 import { makeOwnerDeviceGate, type CheckedEvent, type OwnerWords } from './owner-devices.js';
 import { makePushedAppservice, PUSH_DEADLINE_MS } from './pushes.js';
 import { isYesNoQuestion, markQuestion, type YesNoQuestion } from './questions.js';
-import { readersOf } from './receipts.js';
+import { messageOf, textOf, type ReadMessage, type RoomEvent } from './messages.js';
+import { receiptsOf } from './receipts.js';
 import { makeAppserviceStorage } from './storage.js';
+import type { ReadingAssistant, Subscriber } from './subscribers.js';
 import { makeSuggestionIntake } from '../suggestions/intake.js';
 import { listenerUserId, makeChannelListener } from '../suggestions/listener.js';
 
@@ -110,6 +112,8 @@ export interface MatrixRoleOptions {
 	// The present as the creator and the check of the owner's devices read it; the system clock
 	// unless a test sets its own
 	readonly clock?: Clock;
+	// What else reads the messages and the read receipts the role reads, after its own: a test's
+	readonly subscribers?: readonly Subscriber[];
 }
 
 export interface MatrixRole {
@@ -127,14 +131,6 @@ const ASSISTANT_CONSENT_TYPE = 'app.twake.chat.assistant_consent';
 // room (MSC4332, under its unstable and stable names)
 const BOT_ID_PATTERN = /^@(bot_|hermes_)/;
 const BOT_COMMANDS_TYPES = [COMMANDS_EVENT_TYPE, 'm.bot.commands'];
-
-interface RoomEvent {
-	readonly type?: string;
-	readonly sender?: string;
-	readonly state_key?: string;
-	readonly event_id?: string;
-	readonly content?: Record<string, unknown>;
-}
 
 // The bots of a room, asked no yes: the ids that say so on our homeserver only (anyone chooses
 // their own localpart on another), and the members announcing their commands, each keyed by
@@ -312,13 +308,6 @@ function turnOf(job: SendJob): TurnRef | null {
 	return job.replyTo === undefined
 		? null
 		: { assistantUserId: job.asUserId, roomId: job.roomId, eventId: job.replyTo };
-}
-
-function textOf(event: RoomEvent): string | null {
-	const content = event.content ?? {};
-	return content['msgtype'] === 'm.text' && typeof content['body'] === 'string'
-		? content['body']
-		: null;
 }
 
 // What an assistant knows of the encryption of one of its rooms
@@ -564,15 +553,26 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		forget: (roomId) => suggestions.forget(roomId)
 	});
 
-	// The to-device events Synapse pushes, mostly the owners' key shares: which device they target
-	appservice.on('ephemeral.event', (event: Record<string, unknown>) => {
-		if (event['type'] !== 'm.room.encrypted') return;
-		log.info(
-			{ toUser: event['to_user_id'], toDevice: event['to_device_id'], sender: event['sender'] },
-			'to-device received'
-		);
-	});
-
+	// The suggestions read the messages with words: in a listened conversation, for its owner alone,
+	// with the room's other person, read in the room whether they wrote the message or not, so a
+	// silent member is still the one invited; a member of another server has no address and nothing
+	// is proposed
+	const suggesting: Subscriber = {
+		name: 'suggestions',
+		message: async (message, assistant) => {
+			if (message.text === null) return;
+			const { sender, eventId, text } = message;
+			const channelMessage = { sender, eventId, text };
+			if (assistant === null) {
+				await suggestions.onMessage(message.roomId, channelMessage);
+				return;
+			}
+			const other = await otherMemberPrincipal(message.roomId, assistant.userId, assistant.owner);
+			if (other !== null) {
+				await suggestions.onMessage(message.roomId, channelMessage, assistant.owner, other);
+			}
+		}
+	};
 	// The owner was seen in their assistant's room: a message of theirs there, or a read receipt.
 	// Only the instant the role received it is kept, and only for the room their brief goes to. A
 	// failure costs their brief a sighting of them, and their message nothing.
@@ -584,20 +584,68 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 	}
 
-	// The public read receipts Synapse pushes: the owner's in their assistant's room count as seeing
-	// them there, anyone else's, and any of another room, count for nothing
+	// The owner's public read receipts in their assistant's room count as seeing them there: anyone
+	// else's, and any of another room, count for nothing
+	const seeing: Subscriber = {
+		name: 'seen',
+		receipt: async (receipt) => {
+			const room = await assistantRoom(receipt.roomId);
+			if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
+			if (matrixUserIdOfPrincipal(config, room.owner) !== receipt.userId) return;
+			await ownerSeen(room.owner, receipt.roomId);
+		}
+	};
+
+	const subscribers = [suggesting, seeing, ...(options.subscribers ?? [])];
+	// Hands what the role read to each of its subscribers in turn. One that fails keeps it from none
+	// of the others, and is logged as the role logs a failure of its own, by what it was handling,
+	// with the subscriber's name and the ids of what it was handed, never its content.
+	async function toEachSubscriber(
+		handling: 'room message' | 'read receipt',
+		ids: Readonly<Record<string, string>>,
+		hand: (subscriber: Subscriber) => Promise<void> | undefined
+	): Promise<void> {
+		for (const subscriber of subscribers) {
+			try {
+				await hand(subscriber);
+			} catch (err: unknown) {
+				log.error({ ...ids, subscriber: subscriber.name, err }, `${handling} failed`);
+			}
+		}
+	}
+	async function handMessage(
+		message: ReadMessage | null,
+		assistant: ReadingAssistant | null
+	): Promise<void> {
+		if (message === null) return;
+		const { roomId, eventId, sender } = message;
+		await toEachSubscriber('room message', { roomId, eventId, sender }, (subscriber) =>
+			subscriber.message?.(message, assistant)
+		);
+	}
+
+	// The to-device events Synapse pushes, mostly the owners' key shares: which device they target
+	appservice.on('ephemeral.event', (event: Record<string, unknown>) => {
+		if (event['type'] !== 'm.room.encrypted') return;
+		log.info(
+			{ toUser: event['to_user_id'], toDevice: event['to_device_id'], sender: event['sender'] },
+			'to-device received'
+		);
+	});
+
+	// The public read receipts Synapse pushes, of any room an account of the harness is in, handed to
+	// each subscriber in turn
 	appservice.on(
 		'ephemeral.event',
 		guard(
 			'read receipt',
 			async (event: Record<string, unknown>) => {
-				const receipt = readersOf(event);
-				if (receipt === null) return;
-				const room = await assistantRoom(receipt.roomId);
-				if (room === null || room.owner === ORGANIZATION_PRINCIPAL) return;
-				const ownerUserId = matrixUserIdOfPrincipal(config, room.owner);
-				if (ownerUserId === null || !receipt.userIds.has(ownerUserId)) return;
-				await ownerSeen(room.owner, receipt.roomId);
+				for (const receipt of receiptsOf(event, clock.now())) {
+					const { roomId, eventId } = receipt;
+					await toEachSubscriber('read receipt', { roomId, eventId }, (subscriber) =>
+						subscriber.receipt?.(receipt)
+					);
+				}
 			},
 			(event: Record<string, unknown>) => ({ roomId: event['room_id'] })
 		)
@@ -1076,7 +1124,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	}
 
 	// An encrypted room (a conversation or a channel) its owner invited the assistant into, which it only reads
-	async function listenedRooms(roomId: string): Promise<{ owner: string; userId: string }[]> {
+	async function listenedRooms(roomId: string): Promise<ReadingAssistant[]> {
 		const rows = await db.sql<{ owner: string; user_id: string }[]>`
 			select owner, user_id from assistant_listened_rooms where room_id = ${roomId}`;
 		return rows.map((row) => ({ owner: row.owner, userId: row.user_id }));
@@ -1636,6 +1684,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 	): Promise<void> {
 		const raw = event as RoomEvent;
 		const sender = raw.sender ?? '';
+		const receivedAt = clock.now();
 		log.info({ roomId, sender, eventId: raw.event_id }, 'message received');
 		if (sender === creator || isAssistantUserId(config, sender)) return;
 		// Null for a message without words, as an image or a file, which only the creator reads
@@ -1643,23 +1692,9 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// Whoever came in before this message is checked first: a room left meanwhile is read no more
 		const listened = await roomChecks.run(roomId, () => listenedRooms(roomId));
 		if (listened.length > 0) {
-			// Never a turn there: what one of its assistants reads proposes to that owner alone. The
-			// pair's other member is read in the room, whether they wrote the message or not, so a
-			// silent member is still the one invited; a member of another server has no address and
-			// nothing is proposed.
-			for (const { owner, userId } of listened) {
-				if (raw.event_id !== undefined && text !== null) {
-					const other = await otherMemberPrincipal(roomId, userId, owner);
-					if (other !== null) {
-						await suggestions.onMessage(
-							roomId,
-							{ sender, eventId: raw.event_id, text },
-							owner,
-							other
-						);
-					}
-				}
-			}
+			// Never a turn there: what one of its assistants reads is for that owner alone
+			const message = messageOf(roomId, raw, receivedAt);
+			for (const assistant of listened) await handMessage(message, assistant);
 			return;
 		}
 		const room = await assistantRoom(roomId);
@@ -1769,10 +1804,7 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		}
 		if (listener.has(roomId)) {
 			// A channel the listener was invited to: no assistant is in it, and none joins
-			// A message without words proposes nothing
-			if (raw.event_id !== undefined && text !== null) {
-				await suggestions.onMessage(roomId, { sender, eventId: raw.event_id, text });
-			}
+			await handMessage(messageOf(roomId, raw, receivedAt), null);
 			return;
 		}
 		if (!(await creatorIsInRoom(roomId))) return;

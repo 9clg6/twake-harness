@@ -14,6 +14,7 @@ import { makeDb, type Db } from '../../src/db/client.js';
 import { spaceFromConfig } from '../../src/suggestions/space.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
+import type { Subscriber } from '../../src/matrix/subscribers.js';
 import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
@@ -70,6 +71,8 @@ export interface MatrixStartOptions {
 	// The present the agent, the creator and the check of the owner's devices read, set by the test
 	// instead of the system clock
 	readonly clock?: Clock;
+	// What else reads the messages and the read receipts the matrix role reads
+	readonly subscribers?: readonly Subscriber[];
 }
 
 // The lines by which the matrix role tells what it made of a message of an assistant's room
@@ -179,7 +182,8 @@ export async function startMatrixHarness(
 			...(options.pushDeadlineMs === undefined ? {} : { pushDeadlineMs: options.pushDeadlineMs }),
 			...(options.statusMaxMs === undefined ? {} : { statusMaxMs: options.statusMaxMs }),
 			...(options.retryDelaysMs === undefined ? {} : { retryDelaysMs: options.retryDelaysMs }),
-			...(options.clock === undefined ? {} : { clock: options.clock })
+			...(options.clock === undefined ? {} : { clock: options.clock }),
+			...(options.subscribers === undefined ? {} : { subscribers: options.subscribers })
 		});
 	await reserved.release();
 	let role = await startRole();
