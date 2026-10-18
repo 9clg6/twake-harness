@@ -24,6 +24,7 @@ import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { settleActivity, type WokenTurnOutcome } from '../journal/repository.js';
 import type { BriefMarker } from '../matrix/brief.js';
 import type { MeetingContext, YesNoQuestion } from '../matrix/questions.js';
+import { SOURCE_OFFER } from '../sources/offers.js';
 import { spentForTheDay, type Refusal, type RefusalReason } from './admission.js';
 import { SYSTEM_CLOCK, type Clock } from './clock.js';
 import { readMeeting } from './suggestion.js';
@@ -506,7 +507,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				text: result.text,
 				html: result.html,
 				brief: { date: result.date },
-				outcome: 'answered'
+				outcome: 'answered',
+				...(result.pendingCallId === undefined ? {} : await asking(owner, result.pendingCallId))
 			};
 		} else if (result.kind === 'question') {
 			reply = {
@@ -537,8 +539,43 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		return null;
 	}
 
+	// The owner's yes to the source offer a brief made after it, which the harness answers itself: their
+	// assistant listens there from then on, and says so, answering their yes, starting no turn
+	async function resumeOffer(
+		request: ResumeRequest,
+		assistant: AssistantRecord,
+		turnLog: FastifyBaseLogger
+	): Promise<null> {
+		const { owner, roomId, pendingCallId, through } = request;
+		const result = await agent.acceptSourceOffer({
+			principal: { id: owner },
+			pendingCallId,
+			through,
+			log: turnLog
+		});
+		if (result.kind === 'missing') {
+			turnLog.info({ pendingCallId }, 'resume dropped: the call is no longer waiting');
+			return null;
+		}
+		await enqueueJob(db, {
+			kind: 'send',
+			payload: {
+				asUserId: assistant.userId,
+				roomId,
+				text: result.text,
+				outcome: 'answered',
+				// The owner's yes, which the matrix role marks as answered
+				...(request.replyTo === undefined ? {} : { replyTo: request.replyTo })
+			} satisfies SendPayload,
+			dedupKey: `send:resume:${pendingCallId}`,
+			groupKey: `send:${roomId}`
+		});
+		return null;
+	}
+
 	// Runs the call its owner allowed, then the rest of the turn, and sends the answer. The call a
-	// brief's read froze, which the brief waits for, resumes that brief.
+	// brief's read froze, which the brief waits for, resumes that brief, and the source offer a brief
+	// made after it is answered by the harness alone.
 	async function resume(job: Job, request: ResumeRequest): Promise<Deferral | null> {
 		const { owner, roomId, pendingCallId, through } = request;
 		const assistant = await roomAssistant(owner, roomId);
@@ -548,15 +585,14 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 		}
 		const turnLog = log.child({ reqId: `resume:${pendingCallId}`, roomId });
 		// The question of the owner's first brief, the one that waits for their answer or an older
-		// one, is the brief's own, which no turn could run
-		const brief = await withPrincipal(
-			db,
-			{ id: owner },
-			async (tx) =>
-				(await findBriefWait(tx, owner))?.pendingCallId === pendingCallId ||
-				(await findPendingCall(tx, owner, pendingCallId))?.tool === BRIEF_QUESTION
-		);
-		if (brief) return resumeBrief(job, request, assistant, turnLog);
+		// one, is the brief's own, which no turn could run, as is the source offer a brief made after it
+		const resumes = await withPrincipal(db, { id: owner }, async (tx) => {
+			if ((await findBriefWait(tx, owner))?.pendingCallId === pendingCallId) return 'brief';
+			const { tool } = (await findPendingCall(tx, owner, pendingCallId)) ?? {};
+			return tool === BRIEF_QUESTION ? 'brief' : tool === SOURCE_OFFER ? 'offer' : 'turn';
+		});
+		if (resumes === 'brief') return resumeBrief(job, request, assistant, turnLog);
+		if (resumes === 'offer') return resumeOffer(request, assistant, turnLog);
 		const actionsDone =
 			request.replyTo === undefined
 				? null
@@ -895,12 +931,13 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	}
 
 	// The brief of the owner's working day, which the worker role's scheduler asked for, goes out as
-	// a message of its own, marked as the brief of its date, or the question it gave way to, about
-	// their permission or the reads of their first brief, marked as a question, or what it says once
-	// it stops by itself, its question unanswered or its owner not seen. Refused by admission for
-	// rate or room, it waits as a turn an event woke does, and the line that says so says why.
-	// Refused for a spent day, it goes out laid out by the harness, and once the share of the day the
-	// assistant spends on its own was spent, the assistant tells its owner so, once a day.
+	// a message of its own, marked as the brief of its date, and as a question too when it makes a
+	// source offer after it, or the question it gave way to, about their permission or the reads of
+	// their first brief, marked as a question, or what it says once it stops by itself, its question
+	// unanswered or its owner not seen. Refused by admission for rate or room, it waits as a turn an
+	// event woke does, and the line that says so says why. Refused for a spent day, it goes out laid
+	// out by the harness, and once the share of the day the assistant spends on its own was spent,
+	// the assistant tells its owner so, once a day.
 	async function sendBrief(
 		job: Job,
 		payload: TurnPayload,
@@ -926,17 +963,16 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 			turnLog.warn({ result: result.kind }, 'brief dropped');
 			return null;
 		}
+		// The source offer a brief makes after it, if any, is a question its message asks
+		const pendingCallId = result.kind === 'notice' ? undefined : result.pendingCallId;
 		await enqueueJob(db, {
 			kind: 'send',
 			payload: {
 				asUserId: assistant.userId,
 				roomId,
 				text: result.text,
-				...(result.kind === 'ok'
-					? { html: result.html, brief: { date: brief.date } }
-					: result.kind === 'question'
-						? await asking(owner, result.pendingCallId)
-						: {})
+				...(result.kind === 'ok' ? { html: result.html, brief: { date: brief.date } } : {}),
+				...(pendingCallId === undefined ? {} : await asking(owner, pendingCallId))
 			} satisfies SendPayload,
 			dedupKey: `send:${eventId}`,
 			groupKey: `send:${roomId}`

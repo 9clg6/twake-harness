@@ -6,6 +6,7 @@ import { BRIEF_NOW_TOOL, makeBriefNowTool } from '../briefs/now.js';
 import { BRIEF_SETTINGS_TOOL, makeBriefSettingsTool } from '../briefs/tool.js';
 import type { Config } from '../config.js';
 import { makeContractCatalog, type ContractCatalog } from '../contracts/catalog.js';
+import type { DomainDescriptions } from '../contracts/domains.js';
 import { replayOutcome, type ConsentMetrics, type ReplayOutcome } from '../consents/metrics.js';
 import {
 	approvePendingCall,
@@ -35,6 +36,8 @@ import {
 	type SessionRecord
 } from '../sessions/repository.js';
 import { fetchOwnerTimeZone } from '../settings/time-zone.js';
+import { acceptSourceOffer, type OfferAccepted, type OfferAnswer } from '../sources/offers.js';
+import { SOURCE_REGISTRY, type SourceRegistry } from '../sources/sources.js';
 import { LISTENING_TOOLS, makeListeningTools } from '../sources/tools.js';
 import {
 	CANCELLED_EVENT_TYPE,
@@ -332,6 +335,8 @@ export interface AgentService {
 	runBrief(input: BriefInput): Promise<BriefResult>;
 	// The owner's yes to the question a brief gave way to: that day's brief
 	resumeBrief(input: BriefResumeInput): Promise<BriefResult>;
+	// The owner's yes to the source offer a brief made after it, with no model and no quota
+	acceptSourceOffer(input: OfferAnswer): Promise<OfferAccepted>;
 }
 
 // A call a direct tool call through the API froze, which its owner allows through the API
@@ -356,6 +361,9 @@ export interface AgentServiceDeps {
 	readonly clock?: Clock;
 	// Where its role counts the calls it freezes and those it replays
 	readonly consentMetrics: ConsentMetrics;
+	// The sources as the harness knows them, set by a test whose brief makes a source offer; the
+	// harness's registry otherwise
+	readonly sources?: SourceRegistry;
 }
 
 export function makeAgentService(deps: AgentServiceDeps): AgentService {
@@ -998,7 +1006,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 	});
 
 	// The brief of the owner's working day, which the worker role's scheduler asks for, or the owner
-	// in their turn: the assistant speaks as in its owner's turns, given no tool
+	// in their turn: the assistant speaks as in its owner's turns, given no tool. It may make a source
+	// offer after it, which the owner's yes answers.
+	const sources = deps.sources ?? SOURCE_REGISTRY;
+	const domains = (): DomainDescriptions => contracts.domainDescriptions;
 	const briefs = makeBriefRunner({
 		config,
 		db,
@@ -1008,6 +1019,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		gate,
 		clock,
 		consentMetrics,
+		sources,
+		domains,
 		persona: (assistantName, messages) =>
 			withLanguage(
 				assistantName === undefined ? defaultPrompt([]) : assistantPrompt(assistantName, []),
@@ -1027,6 +1040,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		runSuggestion: suggestions.run,
 		runAvailability: availability.run,
 		runBrief: briefs.run,
-		resumeBrief: briefs.resume
+		resumeBrief: briefs.resume,
+		acceptSourceOffer: (input) => acceptSourceOffer({ config, db, domains }, input)
 	};
 }

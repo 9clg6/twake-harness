@@ -58,6 +58,8 @@ import { principalOfMatrixUser } from './principals/identity.js';
 import type { Principal } from './principals/principal.js';
 import { ensurePrincipal, type PrincipalRecord } from './principals/repository.js';
 import { findSession, listSessionIds } from './sessions/repository.js';
+import { refuseSourceOffer } from './sources/offers.js';
+import type { SourceRegistry } from './sources/sources.js';
 import { suggestGroup, type SuggestPayload } from './suggestions/job.js';
 import {
 	findSuggestion,
@@ -103,6 +105,9 @@ export interface AppOptions {
 	// What the role adds to its health check, such as whether it listens to the broker: never a
 	// reason for the check to fail, which would restart the role
 	readonly health?: () => Readonly<Record<string, unknown>>;
+	// The sources as the agent knows them, set by a test whose brief makes a source offer; the
+	// harness's registry otherwise
+	readonly sources?: SourceRegistry;
 }
 
 const assistantBodySchema = z.object({ name: z.string().min(1).max(64) }).strict();
@@ -374,7 +379,8 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 			log: app.log,
 			consentMetrics,
 			...(options.llm === undefined ? {} : { llm: options.llm }),
-			...(options.clock === undefined ? {} : { clock: options.clock })
+			...(options.clock === undefined ? {} : { clock: options.clock }),
+			...(options.sources === undefined ? {} : { sources: options.sources })
 		});
 	app.decorate('agent', agent);
 	const tools = agent.tools;
@@ -1063,8 +1069,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							await muteRoomFor(tx, principal.id, suggestion.roomId, NOT_USEFUL_MUTE_MS);
 						}
 						if (!(await answerPendingCall(tx, principal.id, id, 'refused', answerId))) return false;
-						// A no to the question of the owner's first brief stops their brief, as in the chat
+						// A no to the question of the owner's first brief stops their brief, as in the chat,
+						// and a no to the source offer a brief made is their choice not to listen there
 						await refuseBriefQuestion(tx, principal.id, id);
+						await refuseSourceOffer(tx, principal.id, id);
 						if (notice !== null) await enqueueJob(tx, notice);
 						// Another time is tried once: the second suggestion is not offered a third
 						if (

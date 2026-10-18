@@ -15,6 +15,7 @@ import { spaceFromConfig } from '../../src/suggestions/space.js';
 import { buildRegistrationFile } from '../../src/matrix/registration.js';
 import { startMatrixRole, type MatrixRole } from '../../src/matrix/role.js';
 import type { Subscriber } from '../../src/matrix/subscribers.js';
+import type { SourceRegistry } from '../../src/sources/sources.js';
 import { ensureAppRole, resetDatabase, TEST_DATABASE_URL, TEST_REPLICAS } from './app.js';
 import { makeClient, type TestClient } from './client.js';
 import { startFakeApisix, type FakeApisix } from './fake-apisix.js';
@@ -73,6 +74,9 @@ export interface MatrixStartOptions {
 	readonly clock?: Clock;
 	// What else reads the messages and the read receipts the matrix role reads
 	readonly subscribers?: readonly Subscriber[];
+	// The sources as the agent knows them, set by a test whose brief makes a source offer, as no
+	// source of the harness's registry has one yet
+	readonly sources?: SourceRegistry;
 }
 
 // The lines by which the matrix role tells what it made of a message of an assistant's room
@@ -141,7 +145,8 @@ export async function startMatrixHarness(
 			config,
 			db,
 			logStream,
-			...(options.clock === undefined ? {} : { clock: options.clock })
+			...(options.clock === undefined ? {} : { clock: options.clock }),
+			...(options.sources === undefined ? {} : { sources: options.sources })
 		});
 		await replica.ready();
 		apps.push(replica);

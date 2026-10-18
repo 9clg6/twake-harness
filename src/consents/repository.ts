@@ -584,6 +584,25 @@ export async function hasNewerRequest(
 	return rows.length > 0;
 }
 
+// Whether a request of the room other than those given still waits, within its lifetime, for the
+// owner's answer, its question gone out or about to, or, answered yes, to run, as admission may keep
+// it waiting: a question asked there would supersede it
+export async function isRequestWaiting(
+	tx: Tx,
+	owner: string,
+	roomId: string,
+	lifetimeMs: number,
+	except: readonly string[]
+): Promise<boolean> {
+	const rows = await tx.sql<{ id: string }[]>`
+		select p.id from pending_calls p left join sessions s on s.id = p.session_id
+		where p.owner = ${owner}
+			and (p.status = 'open' or (p.status = 'approved' and p.replayed_at is null))
+			and coalesce(p.room_id, s.room_id) = ${roomId}
+			and p.created_at > now() - make_interval(secs => ${lifetimeMs / 1000})`;
+	return rows.some(({ id }) => !except.includes(id));
+}
+
 // The call its owner allowed, which admission kept from running, is closed: expired past the end
 // of its request, or superseded by a newer request of its room. What it would have sent is erased,
 // with the question and the digest of what its owner was shown. Their yes stays recorded, so that,
