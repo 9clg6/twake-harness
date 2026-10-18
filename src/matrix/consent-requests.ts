@@ -18,6 +18,7 @@ import {
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import type { Messages } from '../i18n/messages.js';
 import { enqueueJob } from '../jobs/queue.js';
+import { refuseSourceOffer } from '../sources/offers.js';
 
 // An assistant's room, where the harness asks its owner and the owner answers
 export interface RequestRoom {
@@ -118,7 +119,8 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 	// A yes approves the call at once, so that no later answer nor newer request undoes it, and
 	// queues the turn that runs it with the owner's turns. A no refuses it, and the harness says so
 	// itself, without the model: a no to the question of the owner's first brief stops their brief,
-	// in the same transaction, and the harness says how to resume it.
+	// in the same transaction, and the harness says how to resume it, and a no to the source offer a
+	// brief made after it is their choice for their assistant not to listen there.
 	async function decide(
 		room: RequestRoom,
 		request: FoundRequest,
@@ -142,10 +144,11 @@ export function makeConsentRequests(options: ConsentRequestsOptions): ConsentReq
 				answer.says === 'yes' ? 'approved' : 'refused',
 				answer.eventId
 			);
+			const refused = done && answer.says === 'no';
+			if (refused) await refuseSourceOffer(tx, owner, pendingCallId);
 			return {
 				decided: done,
-				briefStopped:
-					done && answer.says === 'no' && (await refuseBriefQuestion(tx, owner, pendingCallId))
+				briefStopped: refused && (await refuseBriefQuestion(tx, owner, pendingCallId))
 			};
 		});
 		log.info(

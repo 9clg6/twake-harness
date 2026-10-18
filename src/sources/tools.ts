@@ -23,8 +23,9 @@ import {
 	isListenable,
 	isSource,
 	LISTENABLE,
+	listeningSaid,
+	readDomainOf,
 	SOURCES,
-	wakesAssistant,
 	type Source
 } from './sources.js';
 
@@ -100,29 +101,24 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 		context.log.info({ source, listening }, 'listened source set');
 		const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 		const { name } = labelOf(deps.domains(), source, 'read', locale, config.locale);
-		const { sources } = getMessages(locale);
-		// What reaches them in an application that wakes no assistant, such as Mail or Drive, only their
-		// brief tells them of
-		const said = wakesAssistant(source)
-			? { on: sources.listening(name), off: sources.notListening(name) }
-			: { on: sources.listeningForBrief(name), off: sources.notListeningForBrief(name) };
 		return {
 			result: { success: true, source, listening },
-			final: listening ? said.on : said.off
+			final: listeningSaid(getMessages(locale), source, name, listening)
 		};
 	}
 
 	// Listening to an application whose data the owner has not let their assistant read asks them
-	// first, with the question of a first read there, and freezes the call until they answer:
-	// listening starts on their yes, which also lets it read there, as any first read's does
-	async function ask(context: ToolContext, source: Source): Promise<ToolOutcome> {
+	// first, with the question of a first read of the application it reads, and freezes the call until
+	// they answer: listening starts on their yes, which also lets it read there, as any first read's
+	// does
+	async function ask(context: ToolContext, source: Source, reads: string): Promise<ToolOutcome> {
 		const owner = context.principalId;
 		const locale = await fetchOwnerLocale(context.db, owner, config.locale);
 		const values = { source };
 		const request = makeOwnerRequest(
 			{
 				tool: LISTEN_TOOL,
-				application: labelOf(deps.domains(), source, 'read', locale, config.locale),
+				application: labelOf(deps.domains(), reads, 'read', locale, config.locale),
 				level: 'read',
 				reasons: ['consent'],
 				arguments: values,
@@ -137,7 +133,7 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			owner,
 			tool: LISTEN_TOOL,
 			contract: LISTEN_CALL,
-			domain: source,
+			domain: reads,
 			level: 'read',
 			reasons: ['consent'],
 			arguments: values,
@@ -155,14 +151,14 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 				pendingCallId,
 				reasons: call.reasons,
 				tool: LISTEN_TOOL,
-				domain: source,
+				domain: reads,
 				// pino writes the line's own level under `level`
 				consentLevel: 'read'
 			},
 			'listening waits for its owner'
 		);
 		return {
-			result: { status: 'awaiting_owner', reasons: call.reasons, domain: source, level: 'read' },
+			result: { status: 'awaiting_owner', reasons: call.reasons, domain: reads, level: 'read' },
 			final: requestText(request),
 			pendingCallId,
 			request
@@ -190,18 +186,21 @@ export function makeListeningTools(deps: ListeningToolsDeps): Tool[] {
 			const named = namedSource(args);
 			if (!isListenable(named)) return notListenable(named);
 			const owner = context.principalId;
+			// Listening that reads nothing through a contract asks nothing first
+			const reads = readDomainOf(named);
+			if (reads === null) return keep(context, named, true);
 			// The call its owner allowed runs as it was frozen: their yes let their assistant read there
 			const mayRead =
 				context.answeredReasons?.includes('consent') === true ||
 				(await withPrincipal(context.db, { id: owner }, (tx) =>
-					hasConsent(tx, owner, named, 'read')
+					hasConsent(tx, owner, reads, 'read')
 				));
 			if (mayRead) return keep(context, named, true);
 			// Nobody attends a turn that would ask, such as the brief's: nothing waits
 			if (context.unattended === true) {
 				return { result: { status: 'not_asked', reasons: ['consent'] } };
 			}
-			return ask(context, named);
+			return ask(context, named, reads);
 		}
 	};
 

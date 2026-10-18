@@ -60,6 +60,10 @@ _Avoid_: channel bot, listening bot
 The message an assistant sends its owner on the days and at the time they chose, with their day ahead and every activity that waited for it rather than a wake-up.
 _Avoid_: digest, daily summary, morning report
 
+**Source offer**:
+The question a brief asks its owner once, after it, of having their assistant listen to a source they never chose for.
+_Avoid_: proposal (the meeting a suggestion puts to the organizer), suggestion, offer (alone)
+
 **Feed**:
 A space's stream in Twake Space: its members' posts and their reactions, and a card for each object of the space's applications, such as a task, a team mail or a folder.
 _Avoid_: timeline, wall, message thread

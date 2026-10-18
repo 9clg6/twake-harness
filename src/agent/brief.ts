@@ -71,12 +71,14 @@ import {
 	approvePendingCall,
 	grantConsent,
 	insertPendingCall,
+	isRequestWaiting,
 	markReplayed,
 	supersedeApprovedCall,
 	type ApprovedCall,
 	type ClosedRequest,
 	type PendingCallInput
 } from '../consents/repository.js';
+import { labelOf, type DomainDescriptions } from '../contracts/domains.js';
 import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, type Locale, type Messages } from '../i18n/messages.js';
 import { eraseActivityNames, listUntoldActivities } from '../journal/repository.js';
@@ -99,8 +101,9 @@ import {
 	saveBriefMailsReadAt,
 	saveBriefSharesReadAt
 } from '../settings/repository.js';
+import { nextOffer, noteOffer, SOURCE_OFFER } from '../sources/offers.js';
 import { listenUnlessChosen, listListened } from '../sources/repository.js';
-import { publishedUnder, type Source } from '../sources/sources.js';
+import { publishedUnder, type Source, type SourceRegistry } from '../sources/sources.js';
 import { eraseHeldActivities } from '../wakeups/held.js';
 import { takeBriefWakeup } from '../wakeups/wake.js';
 import { spentForTheDay, type Admission, type Refusal, type SpentReason } from './admission.js';
@@ -351,7 +354,8 @@ export type BriefResult =
 	// wrote nothing, its HTML, which the harness lays out either way, and what its numbers, its
 	// tasks' keys and its emails name, when it shows any. Refused by admission once the owner's day,
 	// or the share of it their assistant spends on its own, was spent, the harness lays it out with
-	// no model call, and says why.
+	// no model call, and says why. The source offer it makes after it, if any, is a question whose call
+	// waits for their answer.
 	| {
 			readonly kind: 'ok';
 			readonly text: string;
@@ -359,6 +363,7 @@ export type BriefResult =
 			readonly date: string;
 			readonly references: References | null;
 			readonly refusedFor?: SpentReason;
+			readonly pendingCallId?: string;
 	  }
 	// The broker refused the day's read for want of the owner's permission, or the owner's first
 	// brief lacks reads they did not allow: the brief gives way to the harness's question about it,
@@ -383,8 +388,14 @@ export interface BriefRunnerDeps {
 	readonly admission: Admission;
 	readonly gate: TurnGate;
 	readonly clock: Clock;
-	// Where the role counts the requests a brief that goes out closes unanswered
+	// Where the role counts the requests a brief that goes out closes unanswered, and the source
+	// offers it makes after it
 	readonly consentMetrics: ConsentMetrics;
+	// The sources as the harness knows them, of which a brief offers one at most after it
+	readonly sources: SourceRegistry;
+	// How the catalog names the applications to their owners, as it last loaded, which a source offer
+	// names its application by
+	readonly domains: () => DomainDescriptions;
 	// The assistant's persona, as its owner's turns give it, in its owner's language
 	persona(assistantName: string | undefined, messages: Messages): string;
 	// Runs a call its owner allowed as it was frozen, as their yes runs any
@@ -424,6 +435,17 @@ interface Writing {
 	// Whether it tells the rest of their day, as the brief they asked for does, whether in their turn
 	// or on their yes to the question it gave way to: their meetings not over yet
 	readonly restOfDay: boolean;
+	// The room where it may make a source offer after it, and what links that source offer's call in
+	// the audit: none for the brief they ask for in their turn, which answers them there
+	readonly mayOffer: { readonly roomId: string; readonly correlationId: string } | null;
+}
+
+// The source offer a brief makes after it: the source, its question, and its call, which waits for
+// the owner's answer
+interface SourceOffer {
+	readonly source: Source;
+	readonly text: string;
+	readonly call: PendingCallInput;
 }
 
 // The wall time of a time the calendar gave in its day's zone, with that zone's offset: 09:00
@@ -1246,14 +1268,54 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		return { kind: 'question', ...question };
 	}
 
+	// The source offer the brief makes after it, if any: to have the owner's assistant listen to the
+	// first source of the registry they may be offered, in their language, the application named as
+	// the catalog names it, unless another request of the room waits for their answer, or, answered
+	// yes, to run, which its question would supersede. The question of their first brief and the one
+	// it waits for close with it.
+	async function offerOf(tx: Tx, writing: Writing): Promise<SourceOffer | null> {
+		const { principal, session, locale, mayOffer } = writing;
+		if (mayOffer === null) return null;
+		const owner = principal.id;
+		const entry = await nextOffer(tx, owner, deps.sources);
+		if (entry === null) return null;
+		const closing = [await findBriefQuestion(tx, owner), await findBriefWait(tx, owner)].flatMap(
+			(request) => (request === null ? [] : [request.pendingCallId])
+		);
+		const lifetimeMs = config.consent.requestLifetimeMs;
+		if (await isRequestWaiting(tx, owner, mayOffer.roomId, lifetimeMs, closing)) return null;
+		const { source } = entry;
+		const { name } = labelOf(deps.domains(), source, 'read', locale, config.locale);
+		const text = entry.offer(getMessages(locale), name);
+		return {
+			source,
+			text,
+			call: {
+				owner,
+				tool: SOURCE_OFFER,
+				contract: SOURCE_OFFER,
+				domain: source,
+				level: 'read',
+				reasons: ['consent'],
+				arguments: { source },
+				previewDigest: null,
+				correlationId: mayOffer.correlationId,
+				origin: 'event',
+				sessionId: session.id,
+				request: text
+			}
+		};
+	}
+
 	// The brief of its date, written from its reads in their zone, by the model unless admission
 	// refused it for a spent day, which the conversation keeps as the assistant's answer, in the same
 	// transaction as the instant it read the owner's mail at, when it did, the erasure of what showed
 	// the activities it named, what else ends with it, and its reads settled: the owner's brief asks
 	// them no more for its reads, and the question of their first brief closes, should it still wait.
-	// The first brief without a read the owner took back says so after it, in a line of its own. A
-	// request that closed unanswered with it expired, as one past its lifetime does, and counts the
-	// same.
+	// The first brief without a read the owner took back says so after it, in a line of its own, and
+	// so does the source offer it makes, last, whose call waits for their answer from then on, noted
+	// so that no brief makes it again. A request that closed unanswered with it expired, as one past
+	// its lifetime does, and counts the same.
 	async function writeBrief(
 		writing: Writing,
 		reads: Reads,
@@ -1298,7 +1360,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			const lines = withdrawn
 				.filter((domain) => !said.includes(domain))
 				.map((domain) => line(messages.brief.withdrawn(domain)));
-			const brief = [laid, ...lines];
+			const offer = await offerOf(tx, writing);
+			const brief = [laid, ...lines, ...(offer === null ? [] : [line(offer.text)])];
 			const text = brief.map((part) => part.text).join('\n\n');
 			const stored = await keep(tx, writing, kept, text, session.messages.map(withoutReferences));
 			if (!stored) return null;
@@ -1313,14 +1376,24 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			// What the owner's quiet hours held, the brief named: no release wakes them for it
 			await eraseHeldActivities(tx, principal.id, named);
 			await settleBriefReads(tx, principal.id, withdrawn);
-			return {
-				text,
-				html: brief.map((part) => part.html).join('\n'),
-				closed: [await ending(tx), await endBriefQuestion(tx, principal.id)]
-			};
+			const closed = [await ending(tx), await endBriefQuestion(tx, principal.id)];
+			const offered =
+				offer === null
+					? null
+					: { ...offer, pendingCallId: await insertPendingCall(tx, offer.call) };
+			if (offered !== null) await noteOffer(tx, principal.id, offered.source);
+			return { text, html: brief.map((part) => part.html).join('\n'), closed, offered };
 		});
 		if (saved === null) return { kind: 'missing' };
 		for (const closed of saved.closed) closedUnanswered(principal.id, closed, log);
+		const { offered } = saved;
+		if (offered !== null) {
+			consentMetrics.requested(offered.call);
+			log.info(
+				{ pendingCallId: offered.pendingCallId, source: offered.source },
+				'brief offered a source'
+			);
+		}
 		// The brief the owner asked for in their turn spends their day as their words do, any other the
 		// share of it their assistant spends on its own
 		if (model.tokens > 0) {
@@ -1350,7 +1423,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			html: saved.html,
 			date,
 			references,
-			...(refusedFor === null ? {} : { refusedFor })
+			...(refusedFor === null ? {} : { refusedFor }),
+			...(offered === null ? {} : { pendingCallId: offered.pendingCallId })
 		};
 	}
 
@@ -1484,7 +1558,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			log,
 			refusedFor,
 			inTurn: false,
-			restOfDay: false
+			restOfDay: false,
+			mayOffer: { roomId, correlationId: input.correlationId }
 		};
 		if (idle) {
 			log.info({ seenAt: seenAt.toISOString() }, 'brief stopped: its owner was not seen');
@@ -1575,7 +1650,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			log,
 			refusedFor,
 			inTurn: false,
-			restOfDay
+			restOfDay,
+			mayOffer: { roomId, correlationId: id }
 		};
 		const context: ToolContext = {
 			principalId: principal.id,
@@ -1679,7 +1755,8 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 			log,
 			refusedFor: null,
 			inTurn: true,
-			restOfDay: true
+			restOfDay: true,
+			mayOffer: null
 		};
 		if (missing.length > 0) return ask(writing, context.correlationId ?? id, missing, asked);
 		return goOut(writing, context, null, () => Promise.resolve(null));

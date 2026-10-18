@@ -9,7 +9,8 @@ import { markAssistantDeleted, type AssistantRecord } from './repository.js';
 // assistant and of what they told it: their conversations, its memory, their skills, the
 // permissions they gave it, the calls that wait for their answer, the suggestions it made them, the
 // brief that waits for their answer, the question of their first brief and where their brief stands
-// with its reads, when they were last seen in its room, what they chose of their brief and the zone
+// with its reads, the source offers their briefs made them, when they were last seen in its room,
+// what they chose of their brief and the zone
 // of their calendar, the activities their quiet hours hold, the reminders of their delegation, what
 // it told them of their sessions, the question it asked them about their identity with their
 // answer, and the jobs that would still run for it. Its record stays, marked deleted, with the
@@ -58,6 +59,8 @@ export async function eraseAssistant(
 	await clearAvailabilitySharingRefusal(tx, owner);
 	await tx.sql`delete from brief_delegation_waits where owner = ${owner}`;
 	await tx.sql`delete from brief_questions where owner = ${owner}`;
+	// The next assistant's brief offers them again what this one's did
+	await tx.sql`delete from source_offers where owner = ${owner}`;
 	// What the owner's quiet hours hold would wake it as they end, as a job would
 	await tx.sql`delete from held_activities where owner = ${owner}`;
 	await tx.sql`delete from consents where owner = ${owner}`;
