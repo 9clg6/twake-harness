@@ -947,10 +947,11 @@ function dataOf(date: string, { sections, untold, timeZone }: Reads): Record<str
 	return Object.keys(notRead).length === 0 ? data : { ...data, not_read: notRead };
 }
 
-// The line that says the brief goes without a section's read, and why
+// The line that says the brief goes without a section's read, and why: a warning when the read
+// failed, so that a section a failing read cost the brief shows among the warnings
 function logSkipped(name: keyof Sections, read: Read<unknown>, log: FastifyBaseLogger): void {
 	if (read.ok) return;
-	log.info(
+	log[read.reason === 'failed' ? 'warn' : 'info'](
 		{
 			domain: DOMAINS[name],
 			section: name,
