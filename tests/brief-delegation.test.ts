@@ -225,6 +225,18 @@ describe('my brief gives way to the question about my permission when the platfo
 		await sleep(1000);
 		expect(said().slice(seen)).toEqual([question]);
 		expect(briefCalls().slice(calls)).toHaveLength(0);
+		// The line that says why is no warning: her answer is what the brief waits for
+		expect(
+			r.h.logLines().filter((line) => line['msg'] === 'brief application skipped')
+		).toContainEqual(
+			expect.objectContaining({
+				level: 30,
+				domain: 'calendar',
+				section: 'calendar',
+				reason: 'delegation',
+				principal: ALICE
+			})
+		);
 		// At three in the afternoon, past the hours of the briefs, she gives the platform her
 		// permission, then says yes
 		clock.set('2026-10-12T13:00:00Z');
