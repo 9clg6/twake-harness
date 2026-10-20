@@ -75,7 +75,8 @@ describe('a suggestion whose owner never let their assistant read their calendar
 		h = await startTestHarness({ env: { SUGGESTIONS_ENABLED: 'true' } });
 		api = makeClient(h);
 		h.apisix.contracts.spec = MEETING_CATALOG;
-		expect(await h.app.agent.contracts.load()).toBe(6);
+		// On every replica: the client sends each call to the next one
+		for (const app of h.apps) expect(await app.agent.contracts.load()).toBe(6);
 		h.apisix.llm.script = proposeMonday;
 		worker = startTurnWorker({
 			db: h.db,
