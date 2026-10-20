@@ -856,9 +856,40 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		for (const section of ['calendar', 'invitations']) {
 			expect(logged('brief application skipped')).toContainEqual(
 				expect.objectContaining({
+					level: 30,
 					domain: 'calendar',
 					section,
 					reason: 'consent',
+					principal: ALICE
+				})
+			);
+		}
+	});
+
+	it('goes without my calendar when its read fails, which it logs as a warning, with the status of the answer', async () => {
+		const seen = briefs().length;
+		const calls = briefCalls().length;
+		const answer = answering(clock);
+		r.h.apisix.contracts.handler = (call) =>
+			call.path === LIST_EVENTS ? { status: 502, body: {} } : answer(call);
+		// Friday 13 November
+		await pass('2026-11-13T07:00:00Z');
+		const brief = await nextBrief(seen);
+		expect(dateOf(brief)).toBe('2026-11-13');
+		// The model is told what was not read, and, given no tool, nothing of calling one again
+		const call = briefCalls().slice(calls).at(0);
+		expect(dataOf(lastUser(call))).toMatchObject({
+			not_read: { calendar: 'failed', invitations: 'failed' }
+		});
+		expect(call?.messages[0]?.content).not.toContain('call it again');
+		for (const section of ['calendar', 'invitations']) {
+			expect(logged('brief application skipped')).toContainEqual(
+				expect.objectContaining({
+					level: 40,
+					domain: 'calendar',
+					section,
+					reason: 'failed',
+					status: 502,
 					principal: ALICE
 				})
 			);
@@ -905,6 +936,7 @@ describe('every working day at eight, the brief of my meetings arrives in my roo
 		expect(await r.callsTo('tasks')).toHaveLength(pending);
 		expect(logged('brief application skipped')).toContainEqual(
 			expect.objectContaining({
+				level: 30,
 				domain: 'tasks',
 				section: 'tasks',
 				reason: 'consent',
