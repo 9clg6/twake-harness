@@ -261,6 +261,7 @@ describe('my brief tells only of the applications my assistant listens to', () =
 		expect(tuesday).not.toHaveProperty('not_read');
 		expect(logged('brief application skipped')).toContainEqual(
 			expect.objectContaining({
+				level: 30,
 				domain: 'mail',
 				section: 'mails',
 				reason: 'not_listened',
