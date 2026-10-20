@@ -68,10 +68,15 @@ describe('the tracing of a turn', () => {
 			APISIX_BASE_URL: 'http://apisix.test',
 			APISIX_CONSUMER_KEY: 'k'
 		};
-		expect(() => loadConfig({ ...base, LANGSMITH_TRACING: 'true' })).toThrow(/LANGSMITH_TRACING/);
-		expect(() => loadConfig({ ...base, LANGCHAIN_TRACING_V2: 'true' })).toThrow(
-			/LANGCHAIN_TRACING_V2/
-		);
+		// Every variable @langchain/core reads to turn tracing on
+		for (const name of [
+			'LANGSMITH_TRACING',
+			'LANGSMITH_TRACING_V2',
+			'LANGCHAIN_TRACING',
+			'LANGCHAIN_TRACING_V2'
+		]) {
+			expect(() => loadConfig({ ...base, [name]: 'true' })).toThrow(new RegExp(`\\b${name}\\b`));
+		}
 		expect(() => loadConfig({ ...base, LANGSMITH_TRACING: 'false' })).not.toThrow();
 	});
 });

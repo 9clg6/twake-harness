@@ -394,9 +394,12 @@ export function loadConfig(env: Env): Config {
 	const values = parsed.data;
 	// LangGraph traces a graph to LangSmith once one of these is on: the whole state of a turn, the
 	// owner's decrypted words and what the applications answered, would leave the platform
-	const tracing = ['LANGSMITH_TRACING', 'LANGCHAIN_TRACING_V2', 'LANGCHAIN_TRACING'].filter(
-		(name) => (env[name] ?? '') !== '' && env[name] !== 'false'
-	);
+	const tracing = [
+		'LANGSMITH_TRACING',
+		'LANGSMITH_TRACING_V2',
+		'LANGCHAIN_TRACING',
+		'LANGCHAIN_TRACING_V2'
+	].filter((name) => (env[name] ?? '') !== '' && env[name] !== 'false');
 	if (tracing.length > 0) {
 		throw new Error(`invalid configuration: ${tracing.join(', ')} must stay unset`);
 	}
