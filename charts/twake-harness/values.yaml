@@ -58,6 +58,9 @@ config:
   llmDecisionModel: ''
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
+  # How long one model call may take, in milliseconds, 300000 at most; empty, and 0 as well, means
+  # the harness default, 120000
+  llmTimeoutMs: ''
   logLevel: info
   # The language of the assistants' and the creator's fixed texts: en or fr; empty means en
   assistantLocale: ''
