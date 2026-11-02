@@ -1191,7 +1191,10 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 							return reply.code(429).send({ error: 'busy', reason: result.reason });
 						}
 						if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
-						if (result.kind === 'missing') return reply.code(404).send(RESOURCE_UNAVAILABLE);
+						// A turn through the API runs on no job, so none is lost
+						if (result.kind === 'missing' || result.kind === 'lost') {
+							return reply.code(404).send(RESOURCE_UNAVAILABLE);
+						}
 						answered();
 						if (result.kind === 'failed') {
 							return reply.code(502).send({ error: 'execution failed' });
@@ -1287,8 +1290,9 @@ export async function buildApp(options: AppOptions): Promise<FastifyInstance> {
 					correlationId: request.id
 				});
 				if (result.kind === 'forbidden') return reply.code(403).send(FORBIDDEN);
-				// A turn of a new message resumes no call, so none was decided before it
-				if (result.kind === 'missing' || result.kind === 'decided') {
+				// A turn of a new message resumes no call, so none was decided before it; one through
+				// the API runs on no job, so none is lost
+				if (result.kind === 'missing' || result.kind === 'decided' || result.kind === 'lost') {
 					return reply.code(404).send(RESOURCE_UNAVAILABLE);
 				}
 				if (result.kind === 'busy')
