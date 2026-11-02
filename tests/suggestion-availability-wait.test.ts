@@ -164,6 +164,7 @@ describe('a listened suggestion that waits for an availability answer', () => {
 			id: Number(found.id),
 			kind: found.kind as Job['kind'],
 			payload,
+			holder: 'test',
 			attempts: found.attempts,
 			deferrals: found.deferrals,
 			deferredForMs: 0
