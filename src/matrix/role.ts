@@ -290,12 +290,7 @@ function turnOf(job: SendJob): TurnRef | null {
 type RoomEncryption = 'encrypted' | 'clear' | 'unreadable';
 // What a check of a room concludes, or that it could not complete, which says nothing of the room
 type ListenVerdict =
-	| 'ok'
-	| 'not_encrypted'
-	| 'owner_left'
-	| 'no_other_person'
-	| 'not_everyone_accepted'
-	| 'check_failed';
+	'ok' | 'owner_left' | 'no_other_person' | 'not_everyone_accepted' | 'check_failed';
 
 // The Matrix error code of a failed request, which the SDK carries on what it throws
 function errcodeOf(err: unknown): string | null {
@@ -1014,9 +1009,10 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			log.warn({ roomId, invited, err }, 'join failed');
 			return;
 		}
-		// For now an assistant works in a direct room only, its owner and itself: everyone else in the
-		// room would read what it writes its owner. Its members are read once it is in; a room it cannot
-		// read them in is taken for one with others.
+		// An assistant answers its owner in a direct room only, its owner and itself: everyone else in
+		// the room would read what it writes its owner. In a room with others it only reads, under the
+		// checks below. Its members are read once it is in; a room it cannot read them in is taken for
+		// one with others.
 		let direct = false;
 		try {
 			direct = !(await hasOthers(intent, roomId, [
@@ -1058,12 +1054,14 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 				return;
 			}
 			if (verdict === 'ok') {
-				// Invited by its owner, warned, into their encrypted room with people who all accepted
-				// it: it reads it for its owner's suggestions, says nothing there, greets no one
+				// Invited by its owner, warned, into their group in the clear, or their encrypted room or
+				// conversation where everyone accepted it: it reads it for its owner's suggestions, says
+				// nothing there, greets no one
 				log.info({ roomId, owner, userId: invited }, 'assistant listens for its owner');
 				return;
 			}
 		}
+		// Its owner gone or alone with it and bots, or suggestions off: nothing to read the room for
 		if (!direct) {
 			log.info(
 				{ roomId, invited, sender: inviter, reason: 'not_direct' },
@@ -1161,7 +1159,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			: { owner: row.owner, userId: row.user_id, welcome: row.welcome };
 	}
 
-	// An encrypted room (a conversation or a channel) its owner invited the assistant into, which it only reads
+	// A room (a conversation or a channel, encrypted or a group in the clear) its owner invited the
+	// assistant into, which it only reads
 	async function listenedRooms(roomId: string): Promise<ReadingAssistant[]> {
 		const rows = await db.sql<{ owner: string; user_id: string }[]>`
 			select owner, user_id from assistant_listened_rooms where room_id = ${roomId}`;
@@ -1215,11 +1214,13 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		return other?.state_key === undefined ? null : principalOfMatrixUser(config, other.state_key);
 	}
 
-	// What a room the owner invited their assistant into is worth to it: an encrypted room of the
-	// owner, still in it, with other people (a direct conversation or a channel) who all said yes
-	// since they came: there it reads, for its owner alone, and never writes. Twake Chat's request
-	// and answers (D132 there) are each keyed by their sender, which the homeserver enforces for a
-	// key that is a user id, and hold the assistant in `assistant_id`; the people are read once.
+	// What a room the owner invited their assistant into is worth to it: a room of the owner, still
+	// in it, with other people, where it reads, for its owner alone, and never writes. A group in
+	// the clear (two other people or more) is the owner's to bring it into, warned, no one asked
+	// (Twake Chat's D367); an encrypted room, or a conversation of two, in the clear or not, needs
+	// the yes of every other person since they came (D128, D132 there). Twake Chat's request and
+	// answers are each keyed by their sender, which the homeserver enforces for a key that is a user
+	// id, and hold the assistant in `assistant_id`; the people are read once.
 	async function checkListenedRoom(
 		intent: Intent,
 		roomId: string,
@@ -1230,7 +1231,6 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// An encryption the homeserver failed to tell says nothing of the room, as a failed read of its
 		// state does: only the homeserver's word that it has none makes the room one that is not encrypted
 		if (encryption === 'unreadable') return 'check_failed';
-		if (encryption !== 'encrypted') return 'not_encrypted';
 		const state = (await intent.underlyingClient.getRoomState(roomId)) as (RoomEvent & {
 			origin_server_ts?: number;
 		})[];
@@ -1244,6 +1244,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		const { people: others, bots } = othersOf(state, ownerUserId);
 		// Bots alone are no one to ask, and the assistant is not wanted there either
 		if (others.length === 0) return bots.length === 0 ? 'no_other_person' : 'not_everyone_accepted';
+		// A group in the clear: what is said there is in the clear for every member already, and the
+		// listener reads such a room when its admins invite it; the owner's assistant reads nothing
+		// more than the listener would, and writes nothing. A conversation of two is private
+		// whatever its encryption: the other person says yes first, as in an encrypted room.
+		if (encryption === 'clear' && others.length > 1) return 'ok';
 		const ts = (event: { origin_server_ts?: number }): number => event.origin_server_ts ?? 0;
 		// When each person's stay began: a profile change, or an invite turned join, keeps it, so
 		// that it never asks their yes again; their member events are walked back by `replaces_state`
@@ -1644,7 +1649,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 
 	// A room an assistant reads for its owner: it is forgotten once the assistant leaves or is
 	// removed, and left, without a word, once a newcomer who has not said yes comes in, or its owner
-	// or the last other person goes
+	// or the last other person goes, or a group in the clear turns encrypted, where everyone's yes
+	// is needed
 	appservice.on(
 		'room.event',
 		guard(
@@ -1652,7 +1658,8 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			async (roomId: string, event: RoomEvent) => {
 				const consent =
 					event.type === ASSISTANT_REQUEST_TYPE || event.type === ASSISTANT_CONSENT_TYPE;
-				if (event.type !== 'm.room.member' && !consent) return;
+				const encryption = event.type === 'm.room.encryption';
+				if (event.type !== 'm.room.member' && !consent && !encryption) return;
 				return roomChecks.run(roomId, async () => {
 					const membership = event.content?.['membership'];
 					for (const listened of await listenedRooms(roomId)) {
@@ -1677,12 +1684,16 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 							}
 						};
 						try {
-							if (!consent && event.state_key === listened.userId) {
+							if (event.type === 'm.room.member' && event.state_key === listened.userId) {
 								if (membership === 'leave' || membership === 'ban') await forget('removed');
 								continue;
 							}
 							// An assistant coming in or going asks no one's yes
-							if (!consent && isPlatformAccount(config, event.state_key ?? '')) continue;
+							if (
+								event.type === 'm.room.member' &&
+								isPlatformAccount(config, event.state_key ?? '')
+							)
+								continue;
 							const ownerUserId = matrixUserIdOfPrincipal(config, listened.owner) ?? '';
 							// A newcomer who has not said yes, the owner or the last other person gone, a
 							// withdrawn request or a no: it leaves without a word
@@ -1735,7 +1746,11 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 		// it never holds the room's next message, nor its next check
 		const begun = await roomChecks.run(roomId, async () => {
 			const assistants = await listenedRooms(roomId);
-			if (assistants.length === 0) return null;
+			// A room in the clear the listener is in: it reads every message for whoever wrote it and
+			// whoever wrote before, the owners of the assistants in the room among them, so their
+			// assistants read nothing of it meanwhile, or each person would be proposed the same twice.
+			// Their rows stay: the listener removed, each assistant reads the room for its owner again.
+			if (assistants.length === 0 || listener.has(roomId)) return null;
 			// Never a turn there: what one of its assistants reads is for that owner alone
 			const message = messageOf(roomId, raw, receivedAt);
 			return { assistants, message, intakes: await beginSuggestions(message, assistants) };
