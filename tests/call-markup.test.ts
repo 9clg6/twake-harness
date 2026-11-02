@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import { withoutCallMarkup } from '../src/agent/call-markup.js';
+import { withoutAnyCallMarkup, withoutCallMarkup } from '../src/agent/call-markup.js';
 
 const CALL = '{"name": "consents_list", "arguments": {}}';
 const BLOCK = `<tool_call>\n${CALL}\n</tool_call>`;
@@ -56,8 +56,24 @@ describe('the words of a text that ends on a call written in it', () => {
 		}
 	});
 
+	it('are found in one pass from the end, whatever the number of calls', () => {
+		// Read block after block from the start, 8000 of them took seconds
+		const long = `Words first.\n${Array.from({ length: 8000 }, () => BLOCK).join('\n')}`;
+		const started = performance.now();
+		expect(withoutCallMarkup(long)).toBe('Words first.');
+		expect(performance.now() - started).toBeLessThan(1000);
+	});
+
 	it('are the whole text when it holds no call', () => {
 		expect(withoutCallMarkup('  Plain words.\n')).toBe('Plain words.');
 		expect(withoutCallMarkup('')).toBe('');
+	});
+});
+
+describe('the words of a text that may hold no call at all, as a brief', () => {
+	it('are what stands outside every block of tags, wherever it stands', () => {
+		expect(withoutAnyCallMarkup(`First.\n${BLOCK}\nLast.\n${BLOCK}`)).toBe('First.\n\nLast.');
+		const many = `First.\n${Array.from({ length: 5000 }, () => BLOCK).join('\n')}\nLast.`;
+		expect(withoutAnyCallMarkup(many)).toBe('First.\n\nLast.');
 	});
 });

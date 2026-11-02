@@ -648,7 +648,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			if (words.length > 0) return { iteration, draft: words, answer: words };
 			// A call written in the text and nothing else: the model is asked once more for words,
 			// without tools, so that what the turn did for its owner is kept and told
-			if ((completion.content ?? '').length > 0) return { iteration, markup: true };
+			if ((completion.content ?? '').trim().length > 0) return { iteration, markup: true };
 			throw new TurnError('the model answered nothing');
 		}
 		const said = wordsOf(completion);
