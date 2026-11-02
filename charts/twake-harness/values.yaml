@@ -58,8 +58,10 @@ config:
   llmDecisionModel: ''
   # Token budget of one model call; empty means the harness default, 8192
   llmMaxTokens: ''
-  # How long one model call may take, in milliseconds, 300000 at most; empty, and 0 as well, means
-  # the harness default, 120000
+  # How long one model call may take, in milliseconds, 300000 at most; empty, and the integer 0 as
+  # well, means the harness default, 120000 (the string "0" is refused at startup). The APISIX of dev
+  # and ng reads the model's answer for 130 s (apisix-contracts values): past that the call gets a
+  # 504, not a longer wait
   llmTimeoutMs: ''
   logLevel: info
   # The language of the assistants' and the creator's fixed texts: en or fr; empty means en

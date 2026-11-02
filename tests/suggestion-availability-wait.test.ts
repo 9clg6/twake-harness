@@ -273,6 +273,16 @@ describe('a listened suggestion that waits for an availability answer', () => {
 			// than deciding nothing, and writes no call of its own meanwhile
 			expect(await pass(message)).toBe('deferred');
 			expect(await waitingCalls(carol)).toEqual([]);
+			// The failure is logged with the kind and the time of the model call behind it
+			expect(
+				h
+					.logLines()
+					.filter((line) => line['msg'] === 'suggestion failed')
+					.at(-1)
+			).toMatchObject({
+				reason: 'LlmError',
+				err: { kind: 'http', status: 503, durationMs: expect.any(Number) }
+			});
 			// The gateway is back. The try that follows reaches the model, which settles the message
 			// as any first pass would: a request for the invitee's assistant, and one frozen call
 			h.apisix.llm.script = proposingModel;
