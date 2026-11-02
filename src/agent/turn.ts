@@ -212,7 +212,7 @@ const LIMITS: Readonly<
 	},
 	markup: {
 		instruction: () =>
-			'Your last message was a tool call written as text, which ran nothing, and no tool is available now. Answer the user in words: tell them what you did and what remains to be done.',
+			'You answered the last message with a tool call written as text, which ran nothing and reached no one, and no tool is available now. Answer the user in words: tell them what you did and what remains to be done.',
 		notice: 'call markup notice'
 	}
 };
@@ -1022,7 +1022,12 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			[...THINKERS, 'wrapUp', END]
 		)
 		.addEdge('verify', 'report')
-		.addEdge('wrapUp', 'report')
+		// The words asked for after a call written in the text are an answer like any other, and
+		// are checked as one; an account at a limit is the model's own, and is reported as it is
+		.addConditionalEdges('wrapUp', (state) => (state.markup ? 'verify' : 'report'), [
+			'verify',
+			'report'
+		])
 		.addEdge('report', END)
 		.compile();
 

@@ -38,6 +38,12 @@ describe('the words of a text that ends on a call written in it', () => {
 		expect(withoutCallMarkup(explained)).toBe(explained);
 		const shown = `A call looks like this:\n\`\`\`json\n${CALL}\n\`\`\``;
 		expect(withoutCallMarkup(shown)).toBe(shown);
+		expect(withoutCallMarkup(`I use <tool_call> tags. Done.\n${BLOCK}`)).toBe(
+			'I use <tool_call> tags. Done.'
+		);
+		expect(
+			withoutCallMarkup('I use <tool_call> tags. Done.\n<tool_call>\n{"name": "consents_li')
+		).toBe('I use <tool_call> tags. Done.');
 		const data = 'Your contacts:\n{"name":"Alice","parameters":{"age":3}}\nand that is all.';
 		expect(withoutCallMarkup(data)).toBe(data);
 		const between = `First.\n${BLOCK}\nThen more words.`;

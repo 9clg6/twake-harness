@@ -5,11 +5,15 @@
 // words, as when it explains them or shows one, is left as it is.
 
 const TAG = '(?:tool_calls?|function_calls?)';
-// A block of tags that ends the text
-const TRAILING_BLOCK = new RegExp(`<${TAG}\\b[^>]*>[\\s\\S]*?<\\/${TAG}\\s*>$`, 'i');
-// A block the model left open at the end, which holds what a call starts with and no end of tag
+// A block of tags that ends the text, from the last tag that opens one: a tag the model speaks of
+// among its words opens nothing
+const TRAILING_BLOCK = new RegExp(
+	`<${TAG}\\b[^>]*>(?:(?!<${TAG}\\b)[\\s\\S])*?<\\/${TAG}\\s*>$`,
+	'i'
+);
+// A block the model left open at the end, which holds what a call starts with and no tag
 const TRAILING_OPEN_BLOCK = new RegExp(
-	`<${TAG}\\b[^>]*>\\s*[[{](?:(?!<\\/${TAG}\\s*>)[\\s\\S])*$`,
+	`<${TAG}\\b[^>]*>\\s*[[{](?:(?!<\\/?${TAG}\\b)[\\s\\S])*$`,
 	'i'
 );
 // A fenced block
