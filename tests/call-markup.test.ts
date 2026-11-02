@@ -44,6 +44,12 @@ describe('the words of a text that ends on a call written in it', () => {
 		expect(withoutCallMarkup(between)).toBe(between);
 	});
 
+	it('keep what ends the text but is no call', () => {
+		for (const tail of ['[]', '{"arguments": {}}', '{"function": "x"}', '{not json}', '{}']) {
+			expect(withoutCallMarkup(`Done.\n${tail}`)).toBe(`Done.\n${tail}`);
+		}
+	});
+
 	it('are the whole text when it holds no call', () => {
 		expect(withoutCallMarkup('  Plain words.\n')).toBe('Plain words.');
 		expect(withoutCallMarkup('')).toBe('');
