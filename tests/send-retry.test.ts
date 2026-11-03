@@ -26,7 +26,8 @@ describe('a send job that fails after its message went out', () => {
 	let room: ConsentRoom;
 	let admin: Db;
 	beforeAll(async () => {
-		room = await startConsentRoom({}, { retryDelaysMs: { send: [100, 100] } });
+		// The next try waits long enough for the test to give the right back before it
+		room = await startConsentRoom({}, { retryDelaysMs: { send: [2000, 2000] } });
 		admin = makeDb(ADMIN_DATABASE_URL);
 	});
 	afterAll(async () => {
