@@ -110,6 +110,48 @@ describe('a chat turn with the scripted model', () => {
 		expect(text).not.toContain('hidden deliberation');
 	});
 
+	// The latency of the model is read from the logs, call by call, without pairing lines: at least
+	// the model's delay, at most the turn
+	it('logs how long the model took to answer', async () => {
+		h.apisix.llm.script = () => ({ content: 'Slowly.', delayMs: 50 });
+		const started = performance.now();
+		const { body } = await chat('erin', { message: 'question' }, 'turn-timed');
+		const elapsedMs = performance.now() - started;
+		expect(body.answer).toBe('Slowly.');
+		const modelLine = h
+			.logLines()
+			.find((line) => line['reqId'] === 'turn-timed' && line['msg'] === 'model answered');
+		expect(modelLine?.['durationMs']).toBeGreaterThanOrEqual(40);
+		expect(modelLine?.['durationMs']).toBeLessThanOrEqual(Math.ceil(elapsedMs));
+	});
+
+	// The calls that failed count against those that answered, with their kind and how long they
+	// took: the share of calls that timed out is what tells a model too slow from a flaky one
+	it('fails the turn when the gateway answers an error, and logs the failed call with its kind', async () => {
+		h.apisix.llm.script = () => ({ failWith: 503 });
+		const { status, body } = await chat('frank', { message: 'question' }, 'turn-http-failed');
+		expect(status).toBe(502);
+		expect(body.error).toBe('execution failed');
+		const lines = h.logLines();
+		expect(lines).toContainEqual(
+			expect.objectContaining({
+				msg: 'model call failed',
+				model: 'qwen3.8',
+				kind: 'http',
+				status: 503,
+				durationMs: expect.any(Number)
+			})
+		);
+		const failed = lines.find(
+			(line) => line['reqId'] === 'turn-http-failed' && line['msg'] === 'turn failed'
+		);
+		expect(failed?.['err']).toMatchObject({
+			kind: 'http',
+			status: 503,
+			durationMs: expect.any(Number)
+		});
+	});
+
 	it('runs a tool call from the model and logs its outcome, ending the turn on a clarification', async () => {
 		h.apisix.llm.script = (_request, index) =>
 			index === 0
@@ -471,5 +513,39 @@ describe('the notice of a turn past its limit in a deployment that speaks French
 			.logLines()
 			.find((line) => line['reqId'] === 'notice-fr-tokens' && line['msg'] === 'token limit notice');
 		expect(noticed).toMatchObject({ level: 30, actions: 1, reason: 'markup' });
+	});
+});
+
+describe('a chat turn whose model call times out', () => {
+	let h: TestHarness;
+	beforeAll(async () => {
+		h = await startTestHarness({ env: { LLM_TIMEOUT_MS: '1000' } });
+	});
+	afterAll(async () => {
+		await h.close();
+	});
+
+	it('fails as a model that failed, and logs the call as timed out with how long it waited', async () => {
+		h.apisix.llm.script = () => ({ content: 'Too late.', delayMs: 1500 });
+		const res = await h.app.inject({
+			method: 'POST',
+			url: '/v1/chat',
+			headers: {
+				authorization: `Bearer ${await h.issuer.mint({ sub: 'alice' })}`,
+				'x-request-id': 'turn-timed-out'
+			},
+			payload: { message: 'question' }
+		});
+		expect(res.statusCode).toBe(502);
+		expect((res.json() as { error?: string }).error).toBe('execution failed');
+		const lines = h.logLines();
+		const call = lines.find((line) => line['msg'] === 'model call failed');
+		expect(call).toMatchObject({ kind: 'timeout', model: 'qwen3.8' });
+		expect(call?.['durationMs']).toBeGreaterThanOrEqual(990);
+		expect(call?.['durationMs']).toBeLessThan(1500);
+		const failed = lines.find(
+			(line) => line['reqId'] === 'turn-timed-out' && line['msg'] === 'turn failed'
+		);
+		expect(failed?.['err']).toMatchObject({ kind: 'timeout', durationMs: call?.['durationMs'] });
 	});
 });

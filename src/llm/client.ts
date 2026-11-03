@@ -36,6 +36,8 @@ export interface LlmCompletion {
 	readonly toolCalls: readonly LlmToolCall[];
 	readonly finishReason: string | null;
 	readonly usage: LlmUsage | null;
+	// How long the call took, from the request to its answer read
+	readonly durationMs: number;
 }
 
 // What one call may change from the client's defaults
@@ -63,18 +65,43 @@ export interface LlmClientOptions {
 	readonly maxTokens: number;
 	readonly timeoutMs: number;
 	readonly fetchImpl?: typeof fetch;
+	// Where every call that failed is logged, with its kind and how long it took: one line for
+	// every caller, so that the calls that timed out are counted against those that answered
+	readonly log?: { warn(fields: Record<string, unknown>, msg: string): void };
+}
+
+// What went wrong with a call: it ran past timeoutMs, the gateway answered an HTTP error, the
+// request never reached it, or its answer could not be read as a completion
+export type LlmFailureKind = 'timeout' | 'http' | 'network' | 'answer';
+
+export interface LlmFailure {
+	readonly kind: LlmFailureKind;
+	readonly durationMs: number;
+	readonly status?: number;
+	readonly cause?: unknown;
 }
 
 export class LlmError extends Error {
 	override readonly name = 'LlmError';
+	readonly kind: LlmFailureKind;
+	readonly durationMs: number;
+	readonly status: number | undefined;
+
+	constructor(message: string, failure: LlmFailure) {
+		super(message, failure.cause === undefined ? {} : { cause: failure.cause });
+		this.kind = failure.kind;
+		this.durationMs = failure.durationMs;
+		this.status = failure.status;
+	}
 }
 
-// A call that gave no answer, whatever went wrong between the harness and the model's reply: what
-// the callers that go on without a model that failed catch, so that they fail on a bug alone
-function failure(what: string, err: unknown): LlmError {
-	return new LlmError(`${what}: ${err instanceof Error ? err.message : String(err)}`, {
-		cause: err
-	});
+function messageOf(err: unknown): string {
+	return err instanceof Error ? err.message : String(err);
+}
+
+// A fetch that failed: as the signal of the call fired, or otherwise, as told by where it failed
+function kindOf(err: unknown, otherwise: LlmFailureKind): LlmFailureKind {
+	return err instanceof Error && err.name === 'TimeoutError' ? 'timeout' : otherwise;
 }
 
 const toolCallSchema = z.object({
@@ -83,19 +110,18 @@ const toolCallSchema = z.object({
 	function: z.object({ name: z.string(), arguments: z.string() })
 });
 
+const choiceSchema = z.object({
+	message: z.object({
+		content: z.string().nullable().optional(),
+		reasoning_content: z.string().nullable().optional(),
+		tool_calls: z.array(toolCallSchema).optional()
+	}),
+	finish_reason: z.string().nullable().optional()
+});
+
+// At least one choice: the first is the answer
 const completionSchema = z.object({
-	choices: z
-		.array(
-			z.object({
-				message: z.object({
-					content: z.string().nullable().optional(),
-					reasoning_content: z.string().nullable().optional(),
-					tool_calls: z.array(toolCallSchema).optional()
-				}),
-				finish_reason: z.string().nullable().optional()
-			})
-		)
-		.min(1),
+	choices: z.tuple([choiceSchema]).rest(choiceSchema),
 	usage: z.object({ prompt_tokens: z.number(), completion_tokens: z.number() }).partial().optional()
 });
 
@@ -127,12 +153,9 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 		model: options.model,
 		maxTokens: options.maxTokens,
 		async complete(messages, tools, callOptions) {
-			const body: Record<string, unknown> = {
-				model: callOptions?.model ?? options.model,
-				messages,
-				max_tokens: callOptions?.maxTokens ?? options.maxTokens
-			};
-			if (tools.length > 0) body['tools'] = tools;
+			const body = requestOf(options, messages, tools, callOptions);
+			const started = performance.now();
+			const failed = failureOf(options.log, body.model, started);
 			let response: Response;
 			try {
 				response = await fetchImpl(endpoint, {
@@ -142,10 +165,17 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 					signal: AbortSignal.timeout(options.timeoutMs)
 				});
 			} catch (err: unknown) {
-				throw failure('model call failed', err);
+				throw failed('model call failed', {
+					kind: kindOf(err, 'network'),
+					cause: err,
+					message: messageOf(err)
+				});
 			}
 			if (!response.ok) {
-				throw new LlmError(`model answered HTTP ${response.status}`);
+				throw failed(`model answered HTTP ${response.status}`, {
+					kind: 'http',
+					status: response.status
+				});
 			}
 			// The call keeps its time limit until its answer is read, and a proxy in front of the model
 			// may answer a page that is not JSON: a model that failed in either way is no bug
@@ -153,30 +183,80 @@ export function makeLlmClient(options: LlmClientOptions): LlmClient {
 			try {
 				answer = await response.json();
 			} catch (err: unknown) {
-				throw failure('model answer could not be read', err);
+				// A page that is not JSON is an answer that is none; a body cut short never came
+				throw failed('model answer could not be read', {
+					kind: err instanceof SyntaxError ? 'answer' : kindOf(err, 'network'),
+					cause: err,
+					message: messageOf(err)
+				});
 			}
-			const parsed = completionSchema.safeParse(answer);
-			if (!parsed.success) {
-				throw new LlmError('model answer has an unexpected shape');
-			}
-			const choice = parsed.data.choices[0];
-			if (choice === undefined) throw new LlmError('model answered without a choice');
-			const { content, reasoning } = splitReasoning(
-				choice.message.content ?? null,
-				choice.message.reasoning_content ?? null
-			);
-			const usage = parsed.data.usage;
-			return {
-				content,
-				reasoning,
-				toolCalls: choice.message.tool_calls ?? [],
-				finishReason: choice.finish_reason ?? null,
-				usage:
-					usage?.prompt_tokens === undefined || usage.completion_tokens === undefined
-						? null
-						: { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens }
-			};
+			const read = readCompletion(answer, Math.round(performance.now() - started));
+			if (typeof read === 'string') throw failed(read, { kind: 'answer' });
+			return read;
 		}
+	};
+}
+
+// What the gateway is asked: the call's own model and budget over the client's, the tools only
+// when there are some
+function requestOf(
+	options: LlmClientOptions,
+	messages: readonly LlmMessage[],
+	tools: readonly LlmToolDefinition[],
+	callOptions: LlmCallOptions | undefined
+): {
+	model: string;
+	messages: readonly LlmMessage[];
+	max_tokens: number;
+	tools?: readonly LlmToolDefinition[];
+} {
+	return {
+		model: callOptions?.model ?? options.model,
+		messages,
+		max_tokens: callOptions?.maxTokens ?? options.maxTokens,
+		...(tools.length > 0 ? { tools } : {})
+	};
+}
+
+// A call that gave no answer, whatever went wrong between the harness and the model's reply: what
+// the callers that go on without a model that failed catch, so that they fail on a bug alone.
+// Logged once for every caller, with how long the call took.
+function failureOf(
+	log: LlmClientOptions['log'],
+	model: unknown,
+	started: number
+): (what: string, failure: Omit<LlmFailure, 'durationMs'> & { message?: string }) => LlmError {
+	return (what, failure) => {
+		const durationMs = Math.round(performance.now() - started);
+		log?.warn(
+			{ model, kind: failure.kind, status: failure.status, durationMs },
+			'model call failed'
+		);
+		const detail = failure.message === undefined ? '' : `: ${failure.message}`;
+		return new LlmError(`${what}${detail}`, { ...failure, durationMs });
+	};
+}
+
+// What the gateway answered, read as a completion, or why it is none
+function readCompletion(answer: unknown, durationMs: number): LlmCompletion | string {
+	const parsed = completionSchema.safeParse(answer);
+	if (!parsed.success) return 'model answer has an unexpected shape';
+	const [choice] = parsed.data.choices;
+	const { content, reasoning } = splitReasoning(
+		choice.message.content ?? null,
+		choice.message.reasoning_content ?? null
+	);
+	const usage = parsed.data.usage;
+	return {
+		content,
+		reasoning,
+		toolCalls: choice.message.tool_calls ?? [],
+		finishReason: choice.finish_reason ?? null,
+		usage:
+			usage?.prompt_tokens === undefined || usage.completion_tokens === undefined
+				? null
+				: { promptTokens: usage.prompt_tokens, completionTokens: usage.completion_tokens },
+		durationMs
 	};
 }
 
