@@ -18,6 +18,9 @@ export interface Job {
 	readonly kind: JobKind;
 	readonly payload: unknown;
 	readonly attempts: number;
+	// The token of this claim of the job, which what ends the job gives back: a job taken over by
+	// another worker since, as one whose lease ran out, no longer answers to it
+	readonly holder: string;
 	// How many times its handler deferred it so far
 	readonly deferrals: number;
 	// How long ago its handler first deferred it, by the database's clock when it was claimed: 0
@@ -96,10 +99,10 @@ export async function enqueueJobDroppingFailed(
 export async function claimJob(
 	db: Db,
 	kinds: readonly JobKind[],
-	workerId: string
+	holder: string
 ): Promise<Job | null> {
 	const rows = await db.sql<JobRow[]>`
-		update jobs set status = 'running', locked_by = ${workerId}, locked_at = now(), attempts = attempts + 1
+		update jobs set status = 'running', locked_by = ${holder}, locked_at = now(), attempts = attempts + 1
 		where id = (
 			select j.id from jobs j
 			where j.kind in ${db.sql([...kinds])} and j.status = 'queued' and j.run_after <= now()
@@ -120,6 +123,7 @@ export async function claimJob(
 		kind: row.kind as JobKind,
 		payload: readJsonColumn(row.payload),
 		attempts: Number(row.attempts),
+		holder,
 		deferrals: Number(row.deferrals),
 		deferredForMs: Number(row.deferred_for_ms)
 	};
@@ -127,13 +131,14 @@ export async function claimJob(
 
 // A job its handler could not run yet waits out of its group's way until it is due, holding back
 // none of the jobs queued behind it. Its claim counts as no attempt, which only a failure is.
-export async function deferJob(db: Db, id: number, delayMs: number): Promise<void> {
-	await db.sql`
+export async function deferJob(db: Db, id: number, holder: string, delayMs: number): Promise<void> {
+	const result = await db.sql`
 		update jobs set status = 'deferred', locked_by = null, locked_at = null,
 			attempts = attempts - 1, deferrals = deferrals + 1,
 			first_deferred_at = coalesce(first_deferred_at, now()),
 			run_after = now() + make_interval(secs => ${delayMs / 1000})
-		where id = ${id}`;
+		where id = ${id} and (locked_by = ${holder} or locked_by is null)`;
+	if (result.count === 0) throw new JobNotHeldError(id);
 }
 
 // The deferred jobs that are due come back at the end of their group, as if queued now: a job of
@@ -182,10 +187,46 @@ export async function deleteJobsOf(tx: Tx, owner: string, userId: string): Promi
 			or (kind in ${tx.sql(ASSISTANT_JOBS)} and ${field('asUserId')} = ${userId})`;
 }
 
-// A job done is deleted, its dedup key free again: within a transaction, a handler can finish its
-// job with what it wrote, before its worker does
-export async function completeJob(db: Db | Tx, id: number): Promise<void> {
-	await db.sql`delete from jobs where id = ${id}`;
+// The job is held by another worker than the one of the token given, which took it over since, as
+// one whose lease ran out: what this one did with it is not to count. Thrown inside a transaction,
+// it rolls back what the transaction wrote beside the job's end. A job nobody holds, as one let go
+// of and not taken yet, or one a test passes through a worker without claiming it, answers to any.
+export class JobNotHeldError extends Error {
+	override readonly name = 'JobNotHeldError';
+	constructor(readonly jobId: number) {
+		super(`job ${jobId} is no longer held`);
+	}
+}
+
+// A job done is deleted, its dedup key free again, by the worker that holds it alone: within a
+// transaction, a handler can finish its job with what it wrote, before its worker does, whose
+// completion then finds nothing left and changes nothing
+export async function completeJob(db: Db | Tx, id: number, holder: string): Promise<void> {
+	const result = await db.sql`
+		delete from jobs where id = ${id} and (locked_by = ${holder} or locked_by is null)`;
+	if (result.count === 1) return;
+	const held = await db.sql`select 1 from jobs where id = ${id}`;
+	if (held.length > 0) throw new JobNotHeldError(id);
+}
+
+// Whether a job still answers to the claim given, in a transaction about to keep what the job
+// did: held under it, or held by nobody, as one let go of and not taken yet. The row is written,
+// its claim renewed, so that it is locked until the transaction ends: a requeue or a claim in
+// between waits for it, and finds the claim renewed.
+export async function isJobHeld(db: Db | Tx, id: number, holder: string): Promise<boolean> {
+	const rows = await db.sql`
+		update jobs set locked_at = now()
+		where id = ${id} and (locked_by = ${holder} or locked_by is null)
+		returning 1`;
+	return rows.length > 0;
+}
+
+// Renews the claim of a job its holder still runs, so that its lease never runs out while it
+// works: only a holder that is gone, or one that renewed it for as long as it may, stops
+export async function renewLease(db: Db, id: number, holder: string): Promise<void> {
+	await db.sql`
+		update jobs set locked_at = now()
+		where id = ${id} and locked_by = ${holder} and status = 'running'`;
 }
 
 // How long a job that failed waits before each of its next tries, in milliseconds: it fails for
@@ -211,18 +252,23 @@ export function retryDelaysOf(kind: JobKind): RetryDelays {
 export async function failJob(
 	db: Db,
 	id: number,
+	holder: string,
 	attempts: number,
 	error: string,
 	delaysMs: RetryDelays
 ): Promise<boolean> {
 	const delayMs = delaysMs[attempts - 1];
 	if (delayMs === undefined) {
-		await db.sql`update jobs set status = 'failed', last_error = ${error}, finished_at = now() where id = ${id}`;
+		const result = await db.sql`
+			update jobs set status = 'failed', last_error = ${error}, finished_at = now()
+			where id = ${id} and (locked_by = ${holder} or locked_by is null)`;
+		if (result.count === 0) throw new JobNotHeldError(id);
 		return true;
 	}
-	await db.sql`
+	const result = await db.sql`
 		update jobs set status = 'queued', locked_by = null, locked_at = null, last_error = ${error},
 			run_after = now() + make_interval(secs => ${delayMs / 1000})
-		where id = ${id}`;
+		where id = ${id} and (locked_by = ${holder} or locked_by is null)`;
+	if (result.count === 0) throw new JobNotHeldError(id);
 	return false;
 }

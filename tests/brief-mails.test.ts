@@ -276,9 +276,16 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		const mailboxes = mailboxReads().length;
 		const emails = mailReads().length;
 		inbox = { mails: [CLAIRE_ASKS, NEWSLETTER, PHOTOS], more: false };
+		// A model that takes its time, so that the time logged is told from none
+		r.h.apisix.llm.script = (request) =>
+			lastUser(request).startsWith('[brief]')
+				? { content: WRITTEN, delayMs: 50 }
+				: { content: `echo: ${lastUser(request)}` };
 		// Monday 12 October at eight in Paris
+		const started = performance.now();
 		await pass('2026-10-12T06:00:00Z');
 		const brief = await nextBrief(seen);
+		const elapsedMs = performance.now() - started;
 		expect(brief.body).toBe(WRITTEN);
 		// Her mailboxes, to find her inbox, then its unread mail since Friday at eight, for Alice,
 		// under the brief's own correlation id
@@ -314,6 +321,11 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		expect(logged('brief written')).toContainEqual(
 			expect.objectContaining({ principal: ALICE, by: 'model', mails: 2 })
 		);
+		// The brief's own model call, with how long it took, nothing else logs it: at least the
+		// model's delay, at most the pass
+		const answered = logged('brief model answered').find((line) => line['principal'] === ALICE);
+		expect(answered?.['durationMs']).toBeGreaterThanOrEqual(40);
+		expect(answered?.['durationMs']).toBeLessThanOrEqual(Math.ceil(elapsedMs));
 	});
 
 	it('reads my mail since my last brief, and on a Monday since Friday’s', async () => {
@@ -342,8 +354,16 @@ describe('my brief keeps the mails that matter, since my last brief', () => {
 		modelFails();
 		inbox = { mails: MORNING, more: false };
 		// Tuesday 20 October at eight
+		const failures = logged('brief model failed').length;
 		await pass('2026-10-20T06:00:00Z');
 		const tuesday = await nextBrief(seen);
+		// The call that failed is logged with its kind and how long it took, as one that answered is
+		expect(logged('brief model failed').slice(failures)).toContainEqual(
+			expect.objectContaining({
+				principal: ALICE,
+				err: expect.objectContaining({ kind: 'http', status: 502, durationMs: expect.any(Number) })
+			})
+		);
 		expect(tuesday.body).toBe(
 			[
 				'Tes réunions du jour, mardi 20 octobre 2026 :',

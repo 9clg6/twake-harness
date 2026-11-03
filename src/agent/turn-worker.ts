@@ -3,7 +3,7 @@ import { z } from 'zod';
 
 import type { Config } from '../config.js';
 import { readJsonColumn, withPrincipal, type Db, type Tx } from '../db/client.js';
-import { completeJob, enqueueJob, type Job } from '../jobs/queue.js';
+import { completeJob, enqueueJob, isJobHeld, type Job } from '../jobs/queue.js';
 import { startJobWorker, type Deferral, type JobWorker } from '../jobs/worker.js';
 import { fetchOwnerMessages } from '../assistants/locale.js';
 import { findAssistant, type AssistantRecord } from '../assistants/repository.js';
@@ -186,6 +186,12 @@ export interface TurnWorkerOptions {
 	readonly pollIntervalMs?: number;
 	// How many turns this replica runs at once
 	readonly concurrency?: number;
+	// The lease of a turn, and how long this replica renews it at most; without the latter, the
+	// bound of a turn, from the timeouts of the model and of the contracts
+	readonly leaseMs?: number;
+	readonly leaseRenewMaxMs?: number;
+	readonly llmTimeoutMs?: number;
+	readonly contractsTimeoutMs?: number;
 	// The present the worker reads for the windows of a suggestion and of the question about sharing
 	// an invitee's availability, set by a test instead of the system clock
 	readonly clock?: Clock;
@@ -203,8 +209,25 @@ function isSuggestionFailure(reason: string): reason is SuggestionFailure {
 }
 
 // Turns queued by the matrix role: the owner's message becomes an answer queued back for sending.
+// A bound on how long a turn can take, past which a replica stops renewing its claim on one: each
+// of its model calls, one more than its tool calls, the one that wraps it up, and the three of a
+// guarded turn that route the message, sort the answer and check it, may run out of budget once
+// and be made again within the model's timeout, and each tool call may take the contracts' timeout
+function turnLeaseBoundMs(
+	turn: Config['turn'],
+	llmTimeoutMs: number,
+	contractsTimeoutMs: number
+): number {
+	return (turn.maxToolCalls + 5) * 2 * llmTimeoutMs + turn.maxToolCalls * contractsTimeoutMs;
+}
+
 export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 	const { db, agent, log, locale, turn, requestLifetimeMs } = options;
+	const leaseRenewMaxMs =
+		options.leaseRenewMaxMs ??
+		(options.llmTimeoutMs === undefined || options.contractsTimeoutMs === undefined
+			? undefined
+			: turnLeaseBoundMs(turn, options.llmTimeoutMs, options.contractsTimeoutMs));
 	const clock = options.clock ?? SYSTEM_CLOCK;
 
 	// A turn nobody can send again waits out admission refusing it: the owner asked for no event's
@@ -435,7 +458,7 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				} satisfies SendPayload,
 				groupKey: `send:${roomId}`
 			});
-			await completeJob(tx, job.id);
+			await completeJob(tx, job.id, job.holder);
 			return { settled: true, state };
 		});
 		if (!settlement.settled) {
@@ -992,6 +1015,8 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				: ['turn', 'resume', 'suggest', 'availability'],
 		...(options.pollIntervalMs === undefined ? {} : { pollIntervalMs: options.pollIntervalMs }),
 		...(options.concurrency === undefined ? {} : { concurrency: options.concurrency }),
+		...(options.leaseMs === undefined ? {} : { leaseMs: options.leaseMs }),
+		...(leaseRenewMaxMs === undefined ? {} : { leaseRenewMaxMs }),
 		handler: async (job) => {
 			if (job.kind === 'suggest') {
 				const quoted = suggestPayloadSchema.safeParse(job.payload);
@@ -1064,8 +1089,11 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				origin,
 				assistantName: assistant.name,
 				...(parsed.data.event === undefined ? {} : { event: parsed.data.event }),
-				...(actionsDone === null ? {} : { actionsDone })
+				...(actionsDone === null ? {} : { actionsDone }),
+				held: (tx) => isJobHeld(tx, job.id, job.holder)
 			});
+			// Taken over by another replica while it ran: that replica answers, settles and ends the job
+			if (result.kind === 'lost') return null;
 			if (result.kind === 'busy' && origin === 'event') {
 				// Refused for a spent day, the activity waits for its owner's brief rather than for room,
 				// and once the share of the day their assistant spends on its own was spent, the assistant
@@ -1100,7 +1128,14 @@ export function startTurnWorker(options: TurnWorkerOptions): JobWorker {
 				groupKey: `send:${roomId}`
 			};
 			if (origin !== 'event') {
-				await enqueueJob(db, send);
+				// The answer goes out with the end of the job, or not at all: a job that ends after its
+				// answer is queued, and fails or is lost in between, would run the turn a second time
+				// and answer the message twice; and a run whose job another worker took over meanwhile,
+				// as one frozen past its lease, queues no answer beside that worker's
+				await db.sql.begin(async (sql) => {
+					await enqueueJob({ sql }, send);
+					await completeJob({ sql }, job.id, job.holder);
+				});
 				return null;
 			}
 			// What came of the activity is settled with what tells its owner of it, or not at all

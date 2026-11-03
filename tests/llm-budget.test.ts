@@ -58,14 +58,27 @@ describe('the token budget of a model call', () => {
 
 	it('is doubled once when the model ran out while thinking, and the owner gets the answer', async () => {
 		h.apisix.llm.script = (_request, callIndex) =>
-			callIndex === 0 ? THINKS_TOO_LONG : { content: 'Nous sommes mardi.' };
+			callIndex === 0
+				? { ...THINKS_TOO_LONG, delayMs: 200 }
+				: { content: 'Nous sommes mardi.', delayMs: 50 };
+		const started = performance.now();
 		const { status, body } = await chat(h, 'alice', 'Quel jour sommes-nous ?', 'budget-retry');
+		const elapsedMs = performance.now() - started;
 		expect(status).toBe(200);
 		expect(body.answer).toBe('Nous sommes mardi.');
 		const [first, second] = h.apisix.llm.calls;
 		expect(h.apisix.llm.calls).toHaveLength(2);
 		expect(second?.request.max_tokens).toBe(2 * (first?.request.max_tokens ?? 0));
 		expect(second?.request.messages).toEqual(first?.request.messages);
+		// Each call is timed on its own: the second's time holds its own delay, not the first's
+		const answered = h
+			.logLines()
+			.filter((line) => line['reqId'] === 'budget-retry' && line['msg'] === 'model answered');
+		expect(answered).toHaveLength(2);
+		expect(answered[0]?.['durationMs']).toBeGreaterThanOrEqual(190);
+		expect(answered[1]?.['durationMs']).toBeGreaterThanOrEqual(40);
+		expect(answered[1]?.['durationMs']).toBeLessThan(200);
+		expect(answered[1]?.['durationMs']).toBeLessThanOrEqual(Math.ceil(elapsedMs));
 		const retry = h
 			.logLines()
 			.find(

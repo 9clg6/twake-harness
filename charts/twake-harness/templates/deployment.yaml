@@ -98,6 +98,10 @@ spec:
             - name: LLM_MAX_TOKENS
               value: {{ . | quote }}
             {{- end }}
+            {{- with .Values.config.llmTimeoutMs }}
+            - name: LLM_TIMEOUT_MS
+              value: {{ . | int64 | quote }}
+            {{- end }}
             - name: LOG_LEVEL
               value: {{ .Values.config.logLevel | quote }}
             {{- with .Values.config.assistantLocale }}
