@@ -1160,6 +1160,15 @@ export function makeBriefRunner(deps: BriefRunnerDeps): BriefRunner {
 		);
 		try {
 			const completion = await llm.complete(prompt, []);
+			// With how long the model took: a brief's call is the one no turn logs
+			log.info(
+				{
+					durationMs: completion.durationMs,
+					usage: completion.usage,
+					finishReason: completion.finishReason
+				},
+				'brief model answered'
+			);
 			// The brief has no tool: a call written anywhere in it is for nobody
 			const text = withTrueWeekdays(
 				withoutAnyCallMarkup(completion.content ?? '').trim(),

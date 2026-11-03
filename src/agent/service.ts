@@ -18,7 +18,7 @@ import {
 	type ApprovedCall
 } from '../consents/repository.js';
 import { conversationText, type OwnerRequest } from '../consents/request.js';
-import { withPrincipal, type Db } from '../db/client.js';
+import { withPrincipal, type Db, type Tx } from '../db/client.js';
 import { getMessages, type Messages } from '../i18n/messages.js';
 import { DEFAULT_LEASE_MS } from '../jobs/worker.js';
 import { listActivitiesSince, type Activity } from '../journal/repository.js';
@@ -288,6 +288,10 @@ export interface OwnerTurnInput {
 	readonly resume?: ResumeInput;
 	// Told, after each action that does not end the turn, the actions it has done so far
 	readonly actionsDone?: (actions: number) => void;
+	// Whether the job that runs the turn is still this run's, read in the transaction that keeps
+	// the turn: a run whose job another replica took over meanwhile keeps nothing, counts nothing
+	// and answers nobody
+	readonly held?: (tx: Tx) => Promise<boolean>;
 }
 
 // How the owner allowed the call a turn resumes, which the consent it grants records: in the chat,
@@ -320,6 +324,8 @@ export type OwnerTurnResult =
 	  }
 	| { readonly kind: 'forbidden' }
 	| { readonly kind: 'missing' }
+	// The job of the turn was taken over by another replica while it ran: nothing of it is kept
+	| { readonly kind: 'lost' }
 	// The call to resume no longer waited: another answer came first
 	| { readonly kind: 'decided' }
 	// Admission refused the turn; for a user whose day is spent, until the next one starts
@@ -390,7 +396,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			consumerKey: config.apisix.consumerKey,
 			model: config.llm.model,
 			maxTokens: config.llm.maxTokens,
-			timeoutMs: config.llm.timeoutMs
+			timeoutMs: config.llm.timeoutMs,
+			log: deps.log
 		});
 	const decisionLlm = makeDecisionClient(config.apisix, config.llm.decisionModel);
 	const { consentMetrics } = deps;
@@ -725,6 +732,9 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 		{
 			// A short transaction settles rights and the session; the model call runs outside it.
 			const opened = await withPrincipal(db, principal, async (tx) => {
+				// Admission may have kept the turn waiting past the claim of its job: one taken over
+				// meanwhile calls no model
+				if (input.held !== undefined && !(await input.held(tx))) return { kind: 'lost' as const };
 				const record = await ensurePrincipal(tx, principal);
 				if (!record.actions.includes('chat')) return { kind: 'forbidden' as const };
 				// A turn of a room opens nothing once its assistant no longer answers there, as when the
@@ -766,6 +776,7 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 					? { kind: 'missing' as const }
 					: { kind: 'ok' as const, session, actions: record.actions, approved, locale };
 			});
+			if (opened.kind === 'lost') input.log.info('turn lost before its model call');
 			if (opened.kind !== 'ok') return opened;
 			const { session, approved, locale } = opened;
 			const messages = getMessages(locale);
@@ -1033,15 +1044,20 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 				);
 				// A turn that ended on the brief its owner asked for takes what the earlier briefs named
 				// out of the conversation, as a newer brief does
-				const saved = await withPrincipal(db, principal, (tx) =>
-					saveSessionMessages(
+				const saved = await withPrincipal(db, principal, async (tx) => {
+					if (input.held !== undefined && !(await input.held(tx))) return 'lost';
+					return saveSessionMessages(
 						tx,
 						session.id,
 						turn.brief === undefined
 							? turn.messages
 							: withBriefAskedFor(turn.messages, history.length)
-					)
-				);
+					);
+				});
+				if (saved === 'lost') {
+					log.info({ tokens: turn.tokens }, 'turn lost');
+					return { kind: 'lost' };
+				}
 				if (!saved) return { kind: 'missing' };
 				await admission.recordUsage(principal.id, turn.tokens, input.origin ?? 'owner');
 				log.info({ answerLength: turn.answer.length, tokens: turn.tokens }, 'turn finished');

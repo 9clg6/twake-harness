@@ -121,6 +121,7 @@ describe('a listened suggestion whose window is already spent when its job runs'
 			id: Number(rows[0]?.id),
 			kind: 'suggest',
 			payload,
+			holder: 'test',
 			attempts: rows[0]?.attempts ?? 0,
 			deferrals: rows[0]?.deferrals ?? 0,
 			deferredForMs: 0

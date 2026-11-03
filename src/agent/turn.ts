@@ -231,11 +231,13 @@ function ranOutOfBudget(completion: LlmCompletion): boolean {
 	);
 }
 
-// Logging only: the metadata at info, the conversation itself at debug
+// Logging only: the metadata at info, with how long the model took, the conversation itself at
+// debug
 function logAnswer(log: FastifyBaseLogger, iteration: number, completion: LlmCompletion): void {
 	log.info(
 		{
 			iteration,
+			durationMs: completion.durationMs,
 			finishReason: completion.finishReason,
 			usage: completion.usage,
 			toolNames: completion.toolCalls.map((call) => call.function.name),
@@ -881,7 +883,10 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			);
 			spend(deps.log, state.iteration, checked, spent);
 			const claims = readClaims(checked.content, sentences.length);
-			deps.log.info({ sentences: sentences.length, claims: claims.length }, 'answer checked');
+			deps.log.info(
+				{ sentences: sentences.length, claims: claims.length, durationMs: checked.durationMs },
+				'answer checked'
+			);
 			if (claims.length === 0) return {};
 			// The words stay as the model wrote them: a check can be wrong, and the harness's own
 			// word below them is what counts

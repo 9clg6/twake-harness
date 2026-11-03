@@ -350,6 +350,17 @@ describe('a turn whose request is planned in steps by a decision model', () => {
 		expect(check?.messages[1]?.content).toMatch(
 			/1\. The review was moved to Friday\.\n2\. Your meeting is scheduled for tomorrow\./
 		);
+		// The check is a model call like the others, logged with how long it took
+		expect(
+			h
+				.logLines()
+				.filter((line) => line['msg'] === 'answer checked')
+				.at(-1)
+		).toMatchObject({
+			sentences: 2,
+			claims: 1,
+			durationMs: expect.any(Number)
+		});
 	});
 
 	it('leaves an answer as it is when the check names no sentence, or answers anything else', async () => {

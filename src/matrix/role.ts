@@ -280,6 +280,31 @@ function withoutClearRelation(encrypted: Record<string, unknown>): Record<string
 	return { ...encrypted, content: sealed };
 }
 
+// Sends a message under a transaction id of its own, encrypted when the room is, as the SDK's
+// sendEvent does under an id it makes up at each call: made again under the same id, by a try of
+// the job that failed after its message went out, the send answers with the event the homeserver
+// already has, and the owner reads the message once
+async function sendUnder(
+	intent: Intent,
+	roomId: string,
+	content: object,
+	txnId: string
+): Promise<string> {
+	const client = intent.underlyingClient;
+	const encrypted = (await client.crypto?.isRoomEncrypted(roomId)) === true;
+	const type = encrypted ? 'm.room.encrypted' : 'm.room.message';
+	const body = encrypted
+		? await client.crypto.encryptRoomEvent(roomId, 'm.room.message', content)
+		: content;
+	const sent = (await client.doRequest(
+		'PUT',
+		`/_matrix/client/v3/rooms/${encodeURIComponent(roomId)}/send/${encodeURIComponent(type)}/${encodeURIComponent(txnId)}`,
+		null,
+		body
+	)) as { event_id: string };
+	return sent.event_id;
+}
+
 function turnOf(job: SendJob): TurnRef | null {
 	return job.replyTo === undefined
 		? null
@@ -2048,9 +2073,12 @@ export async function startMatrixRole(options: MatrixRoleOptions): Promise<Matri
 			}
 			const { text, html, questionMarker, identityQuestion, brief } = job.payload;
 			const content = html === undefined ? makeRichText(text) : makeLaidOutText(text, html);
-			const sent = await intent.sendEvent(
+			// Under the id of the job: its tries are one message to the homeserver
+			const sent = await sendUnder(
+				intent,
 				job.payload.roomId,
-				markBrief(markQuestion(content, questionMarker), brief)
+				markBrief(markQuestion(content, questionMarker), brief),
+				`send:${job.id}`
 			);
 			log.info({ roomId: job.payload.roomId, asUserId: job.payload.asUserId }, 'answer sent');
 			if (request !== undefined) {

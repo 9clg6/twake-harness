@@ -1259,7 +1259,9 @@ export function makeSuggestionRunner(deps: SuggestionDeps): SuggestionRunner {
 					);
 				} catch (err: unknown) {
 					if (err instanceof TurnError || err instanceof LlmError) {
-						turnLog.warn({ reason: err.name }, 'suggestion failed');
+						// With the error, for the kind and the time of a model call that failed; the reason
+						// beside it, as the job's own line of the same name has it
+						turnLog.warn({ err, reason: err.name }, 'suggestion failed');
 						// A listened suggestion whose window is still open tries again rather than
 						// abandoning: nothing was written this pass, so the try that follows runs the model
 						// again and settles the message if it answers. The handler tells the owner when no
