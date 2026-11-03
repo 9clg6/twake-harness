@@ -396,7 +396,8 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 			consumerKey: config.apisix.consumerKey,
 			model: config.llm.model,
 			maxTokens: config.llm.maxTokens,
-			timeoutMs: config.llm.timeoutMs
+			timeoutMs: config.llm.timeoutMs,
+			log: deps.log
 		});
 	const decisionLlm = makeDecisionClient(config.apisix, config.llm.decisionModel);
 	const { consentMetrics } = deps;

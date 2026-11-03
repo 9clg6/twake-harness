@@ -219,7 +219,9 @@ const envSchema = z.object({
 	LLM_MODEL: z.string().min(1).default('qwen3.8'),
 	// Reasoning models spend part of it deliberating before they write the answer
 	LLM_MAX_TOKENS: z.coerce.number().int().min(1).default(8192),
-	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).default(120_000),
+	// At most five minutes: past them, fetch gives the call up itself, as the headers of the gateway
+	// did not come in time, whatever this says
+	LLM_TIMEOUT_MS: z.coerce.number().int().min(1000).max(300_000).default(120_000),
 	TURN_MAX_TOOL_CALLS: z.coerce.number().int().min(0).default(6),
 	LLM_CHECK_MODEL: z.string().default(''),
 	LLM_DECISION_MODEL: z.string().default(''),
