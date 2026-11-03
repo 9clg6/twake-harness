@@ -54,6 +54,8 @@ if (config.role === 'worker') {
 		locale: config.locale,
 		turn: config.turn,
 		requestLifetimeMs: config.consent.requestLifetimeMs,
+		llmTimeoutMs: config.llm.timeoutMs,
+		contractsTimeoutMs: config.contracts.timeoutMs,
 		suggestions: { config, space: spaceFromConfig(config, app.log) }
 	});
 	const shutdown = async (signal: string): Promise<void> => {

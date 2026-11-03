@@ -476,11 +476,11 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 			);
 			release();
 			await chat;
-			// What it would have answered my words as the assistant I deleted goes nowhere
-			await until('the answer to my words was dropped', () =>
+			// My words waited for a job the erasure took away: the turn calls no model, keeps nothing
+			// and answers nobody
+			await until('my words were dropped', () =>
 				since().some(
-					(line) =>
-						line['msg'] === 'send dropped: no assistant for this room' && line['roomId'] === room
+					(line) => line['msg'] === 'turn lost before its model call' && line['roomId'] === room
 				)
 			);
 		} finally {
@@ -545,17 +545,15 @@ describe('deleting my assistant erases what the harness keeps of it', () => {
 		} finally {
 			release();
 		}
+		// The turn ran on a job the erasure took away: it keeps nothing and answers nobody
 		await until('the turn ended', () =>
-			since().some((line) => line['msg'] === 'turn did not succeed' && line['roomId'] === room)
+			since().some((line) => line['msg'] === 'turn lost' && line['roomId'] === room)
 		);
 		expect(await myRoutes()).toEqual(NOTHING);
-		// What it would have answered as the assistant I deleted goes nowhere
-		await until('its answer was dropped', () =>
-			since().some(
-				(line) =>
-					line['msg'] === 'send dropped: no assistant for this room' && line['roomId'] === room
-			)
-		);
+		expect(
+			await r.h.db
+				.sql`select 1 from jobs where kind = 'send' and (payload #>> '{}')::jsonb ->> 'roomId' = ${room}`
+		).toEqual([]);
 		r.h.apisix.llm.script = literal;
 		// Nor does anything else reach the room it left or its new room, where it only greeted me
 		await new Promise((resolve) => setTimeout(resolve, 3000));
