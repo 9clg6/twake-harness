@@ -22,6 +22,7 @@ A step `ground` of the turn's graph, behind the switch `TURN_GROUNDING` (off by 
 - A hit costs a check, a rewrite and a second check, each resending the results of the turn, all counted in the owner's daily tokens.
 - Without `LLM_CHECK_MODEL`, the assistant's model checks itself (the dev deployment sets none); `verify` does not run without `LLM_DECISION_MODEL`, while `ground` does.
 - The prefix rule avoids the false positives of `J-1`, `UTC-5` or `ISO-9001`, which look like keys and name no task; telling the check model the zone and that results may be UTC avoids those of times shown in local time. A prefix the data shares with such a word, say an `ISO-8601` in a result, still flags the others: to measure.
+- The model check does not read the system prompt, which holds the owner's memory: a sentence drawn from that memory alone may be found unsupported and written again. To measure, or to give the check that memory, before the switch is turned on.
 
 - One more call of the check model on each turn that read something, and one more call of the assistant's model, with the same checks again, on each answer that fails.
 - Off by default until false positives are measured on real turns; no deployment turns it on before.
