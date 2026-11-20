@@ -86,6 +86,11 @@ config:
   # it offers them once to have their assistant listen there; set it on each role: the matrix role
   # refuses to start without suggestionsEnabled
   chatMentionsEnabled: false
+  # Whether the answer of an owner's turn is held to the data the turn was given: a task key it
+  # never saw, or a sentence the check model (llmCheckModel) finds unsupported by what the turn
+  # read, has the model write the answer again once (see docs/architecture.md). Off by default:
+  # it costs a call of the check model on each turn that read something
+  turnGrounding: false
   # Twake Space's API, where a suggestion is posted to the notifications of its user; empty means
   # a suggestion reaches the assistant's room alone. Its token, a tws_ API token with the scope
   # notifications:write, goes in secretEnv as SPACE_API_TOKEN. The harness reaches the outside

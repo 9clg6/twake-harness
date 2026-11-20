@@ -129,6 +129,10 @@ spec:
             - name: CHAT_MENTIONS_ENABLED
               value: "true"
             {{- end }}
+            {{- if .Values.config.turnGrounding }}
+            - name: TURN_GROUNDING
+              value: "true"
+            {{- end }}
             {{- with .Values.config.spaceApiUrl }}
             - name: SPACE_API_URL
               value: {{ . | quote }}
