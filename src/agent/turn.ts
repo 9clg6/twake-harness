@@ -21,6 +21,7 @@ import {
 import { withoutCallMarkup } from './call-markup.js';
 import type { TimeZone } from './clock.js';
 import { earlierData, groundPrompt, keysOf, rewriteInstruction, unfoundedKeys } from './ground.js';
+import { fenced } from '../llm/data.js';
 import { computeMessageSize, computeVisibleHistory } from './history.js';
 import {
 	describeCall,
@@ -116,6 +117,8 @@ export interface TurnInput {
 	// that reads it sentence by sentence, and the note below a rewrite that still cites what the data
 	// does not hold
 	readonly grounding?: {
+		// Whether a failed check only logs, or has the answer written again
+		readonly mode: 'measure' | 'on';
 		readonly checkModel: string;
 		readonly notice: string;
 		// The present with its offset and the owner's zone, which the check reads times against
@@ -918,7 +921,11 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		state: TurnStep,
 		grounding: NonNullable<TurnInput['grounding']>,
 		words: string
-	): Promise<{ keys: readonly string[]; claimed: readonly string[] }> {
+	): Promise<{
+		keys: readonly string[];
+		claimed: readonly number[];
+		sentences: readonly string[];
+	}> {
 		const started = performance.now();
 		const seen = [systemFor(state), ...past, ...state.messages];
 		// What the turn was given: the system prompt, the owner's words and the results, never the
@@ -932,7 +939,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		const results = withoutRoutePlans(state.messages)
 			.filter((said) => said.role === 'tool')
 			.map((said) => `[result of ${said.name ?? 'a tool'}] ${said.content ?? ''}`);
-		let claimed: readonly string[] = [];
+		let claimed: readonly number[] = [];
 		if (results.length > 0) {
 			const asked = seen.filter((said) => said.role === 'user').at(-1)?.content ?? '';
 			try {
@@ -949,7 +956,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 					{ model: grounding.checkModel }
 				);
 				spend(deps.log, state.iteration, checked, spent);
-				claimed = readClaims(checked.content, sentences.length).map((n) => sentences[n - 1] ?? '');
+				claimed = readClaims(checked.content, sentences.length);
 			} catch (err: unknown) {
 				if (!(err instanceof LlmError)) throw err;
 				deps.log.warn({ err }, 'answer not checked for grounding');
@@ -965,7 +972,7 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 			},
 			'answer grounded'
 		);
-		return { keys, claimed };
+		return { keys, claimed, sentences };
 	}
 
 	// The harness's check that an answer holds to the data the turn was given, before verify reads
@@ -986,6 +993,8 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 		}
 		const first = await groundCheck(state, grounding, state.answer ?? '');
 		if (first.keys.length === 0 && first.claimed.length === 0) return {};
+		// Measured only: what the check found is logged, and the draft goes out as it is
+		if (grounding.mode === 'measure') return {};
 		let words: string;
 		try {
 			const started = performance.now();
@@ -995,7 +1004,14 @@ export async function runTurn(deps: TurnDeps, input: TurnInput): Promise<TurnOut
 				[
 					systemFor(state, rewriteInstruction(first.keys, first.claimed)),
 					...past,
-					...state.messages
+					...state.messages,
+					{
+						role: 'user',
+						content: fenced(
+							'last-answer',
+							first.sentences.map((text, i) => ({ sentence: i + 1, text }))
+						)
+					}
 				],
 				[],
 				spent,

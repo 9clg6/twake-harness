@@ -1042,9 +1042,10 @@ export function makeAgentService(deps: AgentServiceDeps): AgentService {
 						...(config.llm.decisionModel.length > 0 && suggestion === null ? { guard } : {}),
 						// The answer of a turn of its owner's is held to the data it was given, when the
 						// deployment turns that on
-						...(config.turn.grounding && suggestion === null
+						...(config.turn.grounding !== 'off' && suggestion === null
 							? {
 									grounding: {
+										mode: config.turn.grounding,
 										checkModel: config.llm.checkModel,
 										notice: messages.notices.ungrounded,
 										now: `${moment.words} (${moment.iso})`,

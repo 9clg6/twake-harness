@@ -19,22 +19,25 @@ export function unfoundedKeys(answer: string, given: string): readonly string[] 
 	return keysOf(answer).filter((key) => !known.includes(key) && prefixes.has(prefixOf(key)));
 }
 
-// The most earlier messages a check reads, and the most characters of each: it sees what the
-// owner and the results held before this turn without paying for a whole conversation, while the
-// results of this turn stay whole
-const EARLIER_MESSAGES = 20;
-const EARLIER_CHARS = 3_000;
+// The most characters of the earlier turns a check reads, in all: it sees what the owner and the
+// results held before this turn, newest first, without paying for a whole conversation; the
+// results of this turn stay whole. A message is cut only when it alone exceeds what remains, so
+// an item far down one long earlier result still reaches the check while the budget lasts.
+const EARLIER_CHARS = 30_000;
 
 // What the data of the turns before this one says to a check: the owner's messages and the results
 // of their reads, the assistant's own words left out, as they are no data
 export function earlierData(past: readonly LlmMessage[]): readonly string[] {
-	return past
-		.filter((said) => said.role === 'user' || said.role === 'tool')
-		.slice(-EARLIER_MESSAGES)
-		.map((said) => {
-			const who = said.role === 'user' ? 'user' : `result of ${said.name ?? 'a tool'}`;
-			return `[earlier, ${who}] ${(said.content ?? '').slice(0, EARLIER_CHARS)}`;
-		});
+	let remaining = EARLIER_CHARS;
+	const lines: string[] = [];
+	for (const said of past.filter((m) => m.role === 'user' || m.role === 'tool').reverse()) {
+		if (remaining <= 0) break;
+		const who = said.role === 'user' ? 'user' : `result of ${said.name ?? 'a tool'}`;
+		const text = (said.content ?? '').slice(0, remaining);
+		remaining -= text.length;
+		lines.unshift(`[earlier, ${who}] ${text}`);
+	}
+	return lines;
 }
 
 export interface GroundQuestion {
@@ -72,19 +75,27 @@ Reply with JSON only: {"claims":[numbers of the unsupported sentences]}. No such
 	];
 }
 
-// What the model is told when it writes its answer again, from the data alone
+// "2", "2 and 4", "1, 2 and 3"
+const listed = (numbers: readonly number[]): string =>
+	numbers.length < 2
+		? numbers.join('')
+		: `${numbers.slice(0, -1).join(', ')} and ${numbers[numbers.length - 1]}`;
+
+// What the model is told when it writes its answer again, from the data alone: the sentences are
+// named by their numbers in its last answer, which it reads as data in a message of the user, and
+// never copied here, as the system prompt is no place for words a stranger may have written
 export function rewriteInstruction(
 	keys: readonly string[],
-	unsupported: readonly string[]
+	unsupported: readonly number[]
 ): string {
 	const parts = [
-		"Your last answer cited details that the data of this conversation does not hold, and it was not sent. Answer the user's last message again, with no tool: say only what the data above holds, and leave out or correct what it does not."
+		"Your last answer cited details that the data of this conversation does not hold, and it was not sent. Answer the user's last message again, with no tool: say only what the data above holds, and leave out or correct what it does not. Your last answer is given as data in the last message, its sentences numbered."
 	];
 	if (keys.length > 0)
 		parts.push(`Task keys it names that the data never names: ${keys.join(', ')}.`);
 	if (unsupported.length > 0) {
 		parts.push(
-			`Sentences the data does not support:\n${unsupported.map((sentence) => `- ${sentence}`).join('\n')}`
+			`The data does not support ${unsupported.length === 1 ? 'sentence' : 'sentences'} ${listed(unsupported)} of your last answer.`
 		);
 	}
 	return parts.join('\n');
